@@ -1,10 +1,25 @@
+# Python virtual environment
+.venv/
+
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
 
-runtime/generated/
-runtime/traces/
+# macOS
+.DS_Store
+
+# Logs
 runtime/logs/
-runtime/checkpoints/
-runtime/datasets/
+*.log
+
+# Runtime generated
+runtime/generated/
+runtime/cache/
+runtime/traces/
+
+# VSCode local settings
+.vscode/settings.json
+
+# Environment variables
+.env

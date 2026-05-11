@@ -383,3 +383,19 @@ Events stream to the chat area and workflow panel
 ```
 
 
+说明 VS Code 正在用 Homebrew 的 Python 3.14，而不是你安装依赖的环境。
+
+先在项目目录执行：
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -r requirements.txt
+
+然后 VS Code 里选择解释器：
+
+Cmd + Shift + P
+Python: Select Interpreter
+选择：
+./.venv/bin/python
+

@@ -1,0 +1,47 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "AI Core v6: main.py",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONUNBUFFERED": "1",
+        "AI_CORE_DEBUG": "1"
+      }
+    },
+    {
+      "name": "AI Core v6: uvicorn reload",
+      "type": "python",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": [
+        "apps.api.server:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+        "--reload",
+        "--log-level",
+        "debug"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONUNBUFFERED": "1",
+        "AI_CORE_DEBUG": "1"
+      }
+    },
+    {
+      "name": "AI Core v6: smoke_test",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/smoke_test.py",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}
