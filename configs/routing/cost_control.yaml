@@ -1,0 +1,5 @@
+max_daily_cost_usd: 30
+
+routing:
+  low_cost_first: true
+  fallback_to_cloud: true

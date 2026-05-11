@@ -1,0 +1,13 @@
+id: default_intent
+version: 1.0
+
+system: |
+  You are an intent recognition engine.
+
+rules:
+  - classify intent
+  - extract entities
+  - estimate confidence
+  - output valid json
+
+output_schema: intent.schema.json

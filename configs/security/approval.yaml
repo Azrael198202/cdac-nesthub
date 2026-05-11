@@ -1,0 +1,4 @@
+approval_rules:
+  shell_execution: true
+  delete_file: true
+  external_api_payment: true

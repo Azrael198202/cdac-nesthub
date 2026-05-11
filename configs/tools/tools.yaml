@@ -1,0 +1,17 @@
+web_search:
+  type: builtin
+  enabled: true
+
+rag_search:
+  type: builtin
+  enabled: true
+
+shell:
+  type: builtin
+  approval_required: true
+  enabled: true
+
+postgres:
+  type: mcp
+  server: postgres_mcp
+  enabled: true

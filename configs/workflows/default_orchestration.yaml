@@ -1,0 +1,43 @@
+workflow_id: default_orchestration
+name: Default AI Orchestration
+
+state:
+  type: langgraph
+
+nodes:
+  - id: intent_recognition
+    type: intent
+    prompt: intent/default_intent.yaml
+    model_group: intent_models
+    next: context_awareness
+
+  - id: context_awareness
+    type: context
+    prompt: context/default_context.yaml
+    memory:
+      short_term: true
+      long_term: true
+      conversation_history: true
+    next: workflow_planning
+
+  - id: workflow_planning
+    type: planner
+    prompt: workflow/workflow_planner.yaml
+    model_group: planning_models
+    next: execution
+
+  - id: execution
+    type: executor
+    tools:
+      - web_search
+      - rag_search
+      - shell
+    next: feedback_learning
+
+  - id: feedback_learning
+    type: feedback
+    self_learning: true
+    next: output
+
+  - id: output
+    type: output
