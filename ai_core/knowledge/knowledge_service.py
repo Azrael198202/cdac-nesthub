@@ -5,7 +5,6 @@ from datetime import datetime
 
 class KnowledgeService:
     def search(self, query: str) -> list[dict]:
-        # Minimal local knowledge lookup placeholder.
         return []
 
     def save_success_case(self, run_id: str, data: dict) -> None:

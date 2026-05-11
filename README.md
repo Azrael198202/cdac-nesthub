@@ -1,31 +1,19 @@
-# AI Core Full Runtime Self-Bootstrap v2
+# AI Core Full Runtime Self-Bootstrap v3
 
-完整工程版。
-
-## 核心原则
+新增能力：
 
 ```text
-ai_core = 通用执行引擎，不包含具体业务逻辑
-runtime = 运行时生成 configs / workflows / prompts / checkpoints / traces / knowledge
-apps = Web/API 交互
-tools = 可扩展工具层
+1. CLI 自动回答 auto_answers
+2. CLI 类型识别 command_profiles
+3. 自动追加安全参数，例如 winget --accept-source-agreements
+4. pseudo-terminal / PTY 支持
+5. Command Recovery: timeout / retry / recovery command
+6. stdout / stderr / PTY 输出实时 stream 到 UI
+7. 安装/下载/大处理显示百分比进度
+8. Workflow checkpoint / resume
+9. runtime 冷启动
+10. ai_core 不包含具体业务逻辑
 ```
-
-## 已实现
-
-- Runtime 冷启动
-- Provider / model 自检
-- 缺 Ollama / 模型时，通过审批自动安装 / 启动 / 下载
-- 命令 stdout / stderr 实时显示到页面
-- 大处理过程显示进度百分比
-- Workflow checkpoint / resume
-- Human Review: Approve / Reject
-- 中间对话区 stream 显示执行过程
-- 右侧 Execution Workflow stream
-- 输入框固定底部
-- 消息区和右侧事件区独立滚动
-- Approval 卡片 UI 修复，不再错位
-- 不包含固定业务逻辑
 
 ## 启动
 
@@ -40,19 +28,20 @@ python main.py
 http://127.0.0.1:8000
 ```
 
-## 说明
+## 运行时配置
 
-第一次运行时 `runtime/` 基本为空。系统运行后自动生成：
+第一次运行会自动生成：
 
 ```text
 runtime/configs/environment/providers.yaml
+runtime/configs/environment/auto_answers.yaml
+runtime/configs/environment/command_profiles.yaml
 runtime/configs/workflows/base_orchestration.yaml
 runtime/configs/models/model_routes.yaml
 runtime/configs/capabilities/task_capability_map.yaml
-runtime/checkpoints/
-runtime/traces/
-runtime/knowledge/
-runtime/datasets/
 ```
 
-软件安装、启动服务、下载模型等操作默认需要人工审批。
+## 说明
+
+安装软件、启动服务、下载模型等命令默认需要 Human Approval。
+Approve 后会真正 resume workflow，并继续执行命令。

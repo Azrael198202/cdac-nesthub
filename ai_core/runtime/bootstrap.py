@@ -33,6 +33,8 @@ class RuntimeBootstrap:
             d.mkdir(parents=True, exist_ok=True)
 
         self._ensure_provider_config()
+        self._ensure_auto_answers()
+        self._ensure_command_profiles()
         self._ensure_model_route_config()
         self._ensure_capability_config()
         self._ensure_workflow_config()
@@ -81,6 +83,111 @@ class RuntimeBootstrap:
                     "default_model": "gpt-4.1-mini"
                 }
             }
+        }
+        self.loader.save_yaml(p, data)
+
+    def _ensure_auto_answers(self) -> None:
+        p = RUNTIME_CONFIGS / "environment" / "auto_answers.yaml"
+        if p.exists():
+            return
+        data = {
+            "enabled": True,
+            "rules": [
+                {"match": "Do you agree", "answer": "Y"},
+                {"match": "agree to all", "answer": "Y"},
+                {"match": "source agreements", "answer": "Y"},
+                {"match": "terms of transaction", "answer": "Y"},
+                {"match": "[Y/n]", "answer": "Y"},
+                {"match": "[y/N]", "answer": "Y"},
+                {"match": "Continue?", "answer": "Y"},
+                {"match": "Proceed?", "answer": "Y"},
+                {"match": "Press ENTER", "answer": ""},
+                {"match": "license", "answer": "Y"},
+                {"match": "confirmation", "answer": "Y"}
+            ]
+        }
+        self.loader.save_yaml(p, data)
+
+    def _ensure_command_profiles(self) -> None:
+        p = RUNTIME_CONFIGS / "environment" / "command_profiles.yaml"
+        if p.exists():
+            return
+        data = {
+            "default": {
+                "timeout_seconds": 1200,
+                "retries": 1,
+                "use_pty": False,
+                "auto_answer": True
+            },
+            "profiles": [
+                {
+                    "name": "winget",
+                    "match_prefix": "winget",
+                    "use_pty": False,
+                    "timeout_seconds": 1800,
+                    "retries": 1,
+                    "append_args": [
+                        "--accept-source-agreements",
+                        "--accept-package-agreements"
+                    ],
+                    "recovery_commands": [
+                        "winget source update"
+                    ]
+                },
+                {
+                    "name": "apt",
+                    "match_prefix": "apt",
+                    "use_pty": True,
+                    "timeout_seconds": 1800,
+                    "retries": 1,
+                    "prepend_env": {"DEBIAN_FRONTEND": "noninteractive"},
+                    "append_args": ["-y"]
+                },
+                {
+                    "name": "dnf",
+                    "match_prefix": "dnf",
+                    "use_pty": True,
+                    "timeout_seconds": 1800,
+                    "retries": 1,
+                    "append_args": ["-y"]
+                },
+                {
+                    "name": "brew",
+                    "match_prefix": "brew",
+                    "use_pty": True,
+                    "timeout_seconds": 1800,
+                    "retries": 1
+                },
+                {
+                    "name": "pip",
+                    "match_contains": "pip install",
+                    "use_pty": False,
+                    "timeout_seconds": 1800,
+                    "retries": 2,
+                    "append_args": ["--disable-pip-version-check"]
+                },
+                {
+                    "name": "npm",
+                    "match_prefix": "npm",
+                    "use_pty": False,
+                    "timeout_seconds": 1800,
+                    "retries": 1
+                },
+                {
+                    "name": "playwright",
+                    "match_contains": "playwright install",
+                    "use_pty": False,
+                    "timeout_seconds": 1800,
+                    "retries": 1
+                },
+                {
+                    "name": "ollama",
+                    "match_prefix": "ollama",
+                    "use_pty": True,
+                    "timeout_seconds": 3600,
+                    "retries": 1
+                }
+            ]
         }
         self.loader.save_yaml(p, data)
 

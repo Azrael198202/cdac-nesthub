@@ -42,6 +42,7 @@ lxml>=5.2.1
 # Tooling / browser / shell / retry
 playwright>=1.44.0
 tenacity>=8.2.3
+pexpect>=4.9.0; platform_system != "Windows"
 
 # Monitoring / utils
 rich>=13.7.1
