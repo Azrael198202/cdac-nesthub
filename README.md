@@ -1,47 +1,233 @@
-# AI Core Full Runtime Self-Bootstrap v3
+# AI Core Dynamic Capability Runtime v1
 
-新增能力：
+## Overview
+
+AI Core Dynamic Capability Runtime v1 is a self-evolving orchestration runtime designed to execute complex AI workflows without hardcoding business logic, providers, or tools inside the core engine.
+
+Unlike traditional AI systems where:
 
 ```text
-1. CLI 自动回答 auto_answers
-2. CLI 类型识别 command_profiles
-3. 自动追加安全参数，例如 winget --accept-source-agreements
-4. pseudo-terminal / PTY 支持
-5. Command Recovery: timeout / retry / recovery command
-6. stdout / stderr / PTY 输出实时 stream 到 UI
-7. 安装/下载/大处理显示百分比进度
-8. Workflow checkpoint / resume
-9. runtime 冷启动
-10. ai_core 不包含具体业务逻辑
+Core knows Ollama
+Core knows Docker
+Core knows Playwright
+Core knows PostgreSQL
 ```
 
-## 启动
+this architecture introduces a **Dynamic Capability System**.
+
+The core runtime only understands:
+
+```text
+Capabilities
+Workflow Nodes
+Approvals
+Execution
+Learning
+```
+
+Everything else is dynamically generated, installed, verified, registered, and evolved at runtime.
+
+---
+
+# Core Design Philosophy
+
+## Traditional Architecture (Bad)
+
+```text
+Core
+ ├─ Ollama Logic
+ ├─ Docker Logic
+ ├─ Playwright Logic
+ ├─ Flight Logic
+ ├─ Weather Logic
+ └─ Business Logic
+```
+
+Problems:
+
+- Core becomes huge
+- Difficult to maintain
+- Impossible to scale dynamically
+- Every new feature requires core modification
+- Runtime cannot self-evolve
+
+---
+
+## Dynamic Capability Architecture (Correct)
+
+```text
+Core
+ ├─ Workflow Engine
+ ├─ Capability Resolver
+ ├─ Execution Runtime
+ ├─ Approval System
+ ├─ Learning Engine
+ └─ Memory System
+
+Runtime
+ ├─ Generated Capabilities
+ ├─ Generated Prompts
+ ├─ Generated Workflows
+ ├─ Generated Tools
+ ├─ Generated Registries
+ └─ Generated Knowledge
+```
+
+Core never changes.
+
+Runtime continuously evolves.
+
+---
+
+# High-Level Architecture
+
+```text
+User Input
+    ↓
+Input Parsing
+    ↓
+Intent Recognition
+    ↓
+Context Awareness
+    ↓
+Workflow Planning
+    ↓
+Capability Resolution
+    ↓
+Tool / Agent Execution
+    ↓
+Feedback Learning
+    ↓
+Output
+```
+
+---
+
+# Key Features
+
+## Dynamic Capability System
+
+The runtime can dynamically:
+
+- Generate new capabilities
+- Install missing environments
+- Detect missing dependencies
+- Register providers
+- Start services
+- Verify environments
+- Resume workflows
+
+---
+
+# Self-Healing Runtime
+
+The runtime automatically handles:
+
+```text
+Missing binary
+Missing environment
+Missing model
+Missing package
+Missing service
+Broken CLI
+Timeout
+Interactive prompts
+```
+
+---
+
+# CLI Automation Engine
+
+Supports:
+
+```text
+PTY
+Auto Answer
+Retry
+Recovery
+Timeout
+Streaming Console
+Progress Tracking
+```
+
+---
+
+# Human-in-the-Loop AI
+
+All critical actions support approval.
+
+---
+
+# Runtime Evolution
+
+```text
+Success Cases
+↓
+Knowledge Base
+↓
+Fine-tune Dataset
+↓
+Prompt Optimization
+↓
+Workflow Optimization
+↓
+Capability Expansion
+```
+
+---
+
+# Repository Structure
+
+```text
+project/
+│
+├─ ai_core/
+├─ runtime/
+├─ configs/
+├─ schema/
+├─ tools/
+├─ apps/
+└─ scripts/
+```
+
+---
+
+# Startup
+
+## Install
 
 ```bash
 pip install -r requirements.txt
+```
+
+## Run
+
+```bash
 python main.py
 ```
 
-打开：
+## Open UI
 
 ```text
 http://127.0.0.1:8000
 ```
 
-## 运行时配置
+---
 
-第一次运行会自动生成：
+# Final Philosophy
+
+This project is:
 
 ```text
-runtime/configs/environment/providers.yaml
-runtime/configs/environment/auto_answers.yaml
-runtime/configs/environment/command_profiles.yaml
-runtime/configs/workflows/base_orchestration.yaml
-runtime/configs/models/model_routes.yaml
-runtime/configs/capabilities/task_capability_map.yaml
+A Dynamic AI Runtime Operating System
 ```
 
-## 说明
+Where:
 
-安装软件、启动服务、下载模型等命令默认需要 Human Approval。
-Approve 后会真正 resume workflow，并继续执行命令。
+```text
+Core remains stable
+Runtime continuously evolves
+Capabilities continuously expand
+Knowledge continuously accumulates
+Humans remain part of the decision loop
+```
