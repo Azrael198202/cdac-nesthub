@@ -1,6 +1,244 @@
-<!doctype html><html><head><meta charset="utf-8"><title>AI Core Config-Driven Node Runtime v3</title><style>body{margin:0;background:#080d1d;color:#e5edff;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;height:100vh;overflow:hidden}.app{display:grid;grid-template-columns:1fr 410px;height:100vh}.main{padding:18px 22px 92px;overflow:hidden}.messages{height:100%;overflow:auto}.bubble{border:1px solid #25324a;border-radius:12px;padding:12px;margin:10px 0;max-width:78%;white-space:pre-wrap}.system{background:#111827;margin-right:auto}.user{background:#1d4ed8;margin-left:auto}.approval{background:#3a2a0a;border-color:#b45309}.result{background:#07111f}.spec,.json-editor{font-family:inherit;background:#020617;border:1px solid #334155;border-radius:8px;padding:8px;max-height:260px;overflow:auto;font-size:11px}.json-editor{width:100%;height:220px;color:#d1fae5}.inputbar{position:fixed;left:22px;right:430px;bottom:18px;display:flex;gap:10px;background:#0b1223;border:1px solid #334155;border-radius:14px;padding:10px}.inputbar input{flex:1;background:transparent;color:#e5edff;border:0;outline:none;font-family:inherit}button{background:#2563eb;color:white;border:0;border-radius:10px;padding:8px 12px}.reject{background:#991b1b}.modify{background:#166534}.side{border-left:1px solid #25324a;overflow:auto;padding:14px;background:#070b19}.event{border:1px solid #25324a;background:#0f172a;border-radius:10px;padding:10px;margin-bottom:8px}.type{color:#93c5fd}.title{font-weight:800}.progress-wrap{margin-top:8px;background:#111827;border:1px solid #334155;border-radius:999px;height:8px}.progress-bar{height:100%;background:#60a5fa}</style></head><body><div class="app"><main class="main"><div id="messages" class="messages"><div class="bubble system">Config-Driven Node Runtime v3: ai_core only loads node config and dispatches generic executors.</div></div><form id="form" class="inputbar"><input id="message" placeholder="Message AI Core..."/><button>Send</button></form></main><aside class="side"><h2>Execution Workflow</h2><div id="events"></div></aside></div><script>let currentRunId=null,source=null;const messages=document.getElementById("messages"),events=document.getElementById("events"),form=document.getElementById("form"),input=document.getElementById("message");function esc(t){return String(t??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")}function scroll(){messages.scrollTop=messages.scrollHeight}function bubble(t,c="system"){const d=document.createElement("div");d.className="bubble "+c;d.textContent=t;messages.appendChild(d);scroll();return d}function htmlBubble(h,c="system"){const d=document.createElement("div");d.className="bubble "+c;d.innerHTML=h;messages.appendChild(d);scroll();return d}function addEvent(ev){const d=document.createElement("div");d.className="event";d.innerHTML=`<div class="type">${esc(ev.type||"")}</div><div class="title">${esc(ev.title||"")}</div><div>${esc(ev.message||"")}</div>${ev.progress!==undefined?`<div class="progress-wrap"><div class="progress-bar" style="width:${Number(ev.progress)}%"></div></div>`:""}`;events.prepend(d)}function review(ev){const result=ev.result||ev.spec||{};const json=JSON.stringify(result,null,2);const d=document.createElement("div");d.className="bubble approval";d.innerHTML=`<b>[Human Review]</b>
-${esc(ev.message||"")}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width">
+<title>AI Core Config-Driven Node Runtime v6</title>
+<style>
+:root{--bg:#080d1d;--panel:#111827;--panel2:#0f172a;--line:#25324a;--text:#e5edff;--blue:#2563eb;--yellow:#3a2a0a;--yellowLine:#b45309;--red:#991b1b;--green:#166534}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;height:100vh;overflow:hidden;font-size:12px}
+.app{display:grid;grid-template-columns:minmax(0,1fr) 410px;height:100vh}
+.main{position:relative;height:100vh;padding:18px 22px 92px;overflow:hidden}
+.messages{height:100%;overflow-y:auto;padding-right:10px;scroll-behavior:smooth}
+.bubble{border:1px solid var(--line);border-radius:12px;padding:12px;margin:10px 0;max-width:78%;white-space:pre-wrap;line-height:1.35}
+.system{background:var(--panel);margin-right:auto}
+.user{background:#1d4ed8;border-color:#1d4ed8;margin-left:auto}
+.approval{background:var(--yellow);border-color:var(--yellowLine);max-width:86%;margin-right:auto}
+.result{background:#07111f}
+.error{background:#3b0b0b;border-color:#991b1b}
+.spec,.json-editor{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#020617;border:1px solid #334155;border-radius:8px;padding:8px;max-height:260px;overflow:auto;font-size:11px}
+.json-editor{width:100%;height:220px;color:#d1fae5;resize:vertical}
+.inputbar{position:fixed;left:22px;right:430px;bottom:18px;display:flex;gap:10px;background:#0b1223;border:1px solid #334155;border-radius:14px;padding:10px}
+.inputbar input{flex:1;border:0;outline:none;background:transparent;color:var(--text);font-size:12px;font-family:inherit}
+button{border:0;color:white;background:var(--blue);padding:8px 12px;border-radius:10px;cursor:pointer;font-weight:700;font-size:12px}
+button.reject{background:var(--red)}
+button.modify{background:var(--green)}
+button:disabled{opacity:.45}
+.side{border-left:1px solid var(--line);height:100vh;overflow-y:auto;padding:14px;background:#070b19}
+.side h2{font-size:15px;margin:0 0 12px}
+.event{border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:10px;margin-bottom:8px}
+.type{color:#93c5fd;font-size:11px}.title{font-weight:800;margin:3px 0}
+.progress-wrap{margin-top:8px;background:#111827;border:1px solid #334155;border-radius:999px;height:8px;overflow:hidden}
+.progress-bar{height:100%;background:linear-gradient(90deg,#2563eb,#60a5fa)}
+</style>
+</head>
+<body>
+<div class="app">
+  <main class="main">
+    <div id="messages" class="messages">
+      <div class="bubble system">Build version: v6 / JS syntax fixed / API returns run_id immediately.</div>
+      <div class="bubble system">Config-Driven Node Runtime: ai_core only loads runtime-generated node config and dispatches generic executors.</div>
+    </div>
+    <form id="form" class="inputbar">
+      <input id="message" placeholder="Message AI Core..." autocomplete="off" />
+      <button type="submit">Send</button>
+    </form>
+  </main>
+  <aside class="side">
+    <h2>Execution Workflow</h2>
+    <div id="events"></div>
+  </aside>
+</div>
 
-<div class="spec">${esc(json)}</div><textarea class="json-editor" style="display:none">${esc(json)}</textarea><textarea class="feedback" placeholder="Reject reason or modification note..." style="width:100%;height:70px;background:#020617;color:#e5edff;border:1px solid #334155;border-radius:8px;margin-top:8px;padding:8px;font-family:inherit;font-size:11px"></textarea><div style="display:flex;gap:8px;margin-top:8px"><button class="approve">Approve</button><button class="reject">Reject & Retry</button><button class="modify">Modify JSON & Continue</button><button class="edit">Edit JSON</button></div>`;messages.appendChild(d);scroll();const editor=d.querySelector(".json-editor"),spec=d.querySelector(".spec"),feedback=d.querySelector(".feedback");d.querySelector(".edit").onclick=()=>{editor.style.display=editor.style.display==="none"?"block":"none";spec.style.display=spec.style.display==="none"?"block":"none"};d.querySelector(".approve").onclick=()=>resume("approve",null,feedback.value);d.querySelector(".reject").onclick=()=>resume("reject",null,feedback.value||"Rejected by human.");d.querySelector(".modify").onclick=()=>{try{resume("modify",JSON.parse(editor.value),feedback.value)}catch(e){alert("Invalid JSON: "+e.message)}};async function resume(decision,modified,fb){for(const b of d.querySelectorAll("button"))b.disabled=true;bubble(decision.toUpperCase()+": resuming workflow...");await fetch("/api/resume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({run_id:ev.run_id||currentRunId,decision,modified_result:modified,feedback:fb})})}}function handle(ev){addEvent(ev);if(ev.type==="NODE_RESULT")htmlBubble(`<b>[${esc(ev.title)}]</b><div class="spec">${esc(JSON.stringify(ev.result||{},null,2))}</div>`,"result");else if(ev.type==="HUMAN_REVIEW")review(ev);else if(ev.type==="RUN_COMPLETED"){htmlBubble(`<b>[Final Output]</b>
-${esc(ev.message||"")}<div class="spec">${esc(JSON.stringify(ev.results||{},null,2))}</div>`);if(source)source.close()}else bubble("["+(ev.title||ev.type)+"]
-"+(ev.message||""))}function connect(id){if(source)source.close();source=new EventSource("/api/events/"+id);source.onmessage=m=>handle(JSON.parse(m.data));source.onerror=()=>{bubble("Stream closed.");if(source)source.close()}}form.onsubmit=async e=>{e.preventDefault();const text=input.value.trim();if(!text)return;bubble(text,"user");input.value="";const res=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:text})});const data=await res.json();currentRunId=data.run_id;bubble("[Run queued]\nrun_id="+currentRunId,"system");connect(currentRunId)}</script></body></html>
+<script>
+let currentRunId = null;
+let source = null;
+
+const messages = document.getElementById("messages");
+const events = document.getElementById("events");
+const form = document.getElementById("form");
+const input = document.getElementById("message");
+
+function esc(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function scrollMessages() {
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function bubble(text, cls = "system") {
+  const div = document.createElement("div");
+  div.className = "bubble " + cls;
+  div.textContent = text;
+  messages.appendChild(div);
+  scrollMessages();
+  return div;
+}
+
+function htmlBubble(html, cls = "system") {
+  const div = document.createElement("div");
+  div.className = "bubble " + cls;
+  div.innerHTML = html;
+  messages.appendChild(div);
+  scrollMessages();
+  return div;
+}
+
+function addEvent(ev) {
+  const div = document.createElement("div");
+  div.className = "event";
+  const progress = ev.progress !== undefined
+    ? `<div class="progress-wrap"><div class="progress-bar" style="width:${Number(ev.progress)}%"></div></div>`
+    : "";
+  div.innerHTML = `
+    <div class="type">${esc(ev.type || "")}</div>
+    <div class="title">${esc(ev.title || "")}</div>
+    <div>${esc(ev.message || "")}</div>
+    ${progress}
+  `;
+  events.prepend(div);
+}
+
+function review(ev) {
+  const result = ev.result || ev.spec || {};
+  const json = JSON.stringify(result, null, 2);
+  const div = document.createElement("div");
+  div.className = "bubble approval";
+  div.innerHTML = `
+    <b>[Human Review]</b>
+    <div>${esc(ev.message || "")}</div>
+    <div class="spec">${esc(json)}</div>
+    <textarea class="json-editor" style="display:none">${esc(json)}</textarea>
+    <textarea class="feedback" placeholder="Reject reason or modification note..." style="width:100%;height:70px;background:#020617;color:#e5edff;border:1px solid #334155;border-radius:8px;margin-top:8px;padding:8px;font-family:inherit;font-size:11px"></textarea>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="approve" type="button">Approve</button>
+      <button class="reject" type="button">Reject & Retry</button>
+      <button class="modify" type="button">Modify JSON & Continue</button>
+      <button class="edit" type="button">Edit JSON</button>
+    </div>
+  `;
+  messages.appendChild(div);
+  scrollMessages();
+
+  const editor = div.querySelector(".json-editor");
+  const spec = div.querySelector(".spec");
+  const feedback = div.querySelector(".feedback");
+
+  div.querySelector(".edit").onclick = () => {
+    const editing = editor.style.display === "none";
+    editor.style.display = editing ? "block" : "none";
+    spec.style.display = editing ? "none" : "block";
+  };
+
+  async function resume(decision, modifiedResult, feedbackText) {
+    for (const btn of div.querySelectorAll("button")) btn.disabled = true;
+    bubble(`${decision.toUpperCase()}: resuming workflow...`, "system");
+    const res = await fetch("/api/resume", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        run_id: ev.run_id || currentRunId,
+        decision: decision,
+        modified_result: modifiedResult,
+        feedback: feedbackText
+      })
+    });
+    if (!res.ok) {
+      bubble(`Resume failed: HTTP ${res.status}`, "error");
+    }
+  }
+
+  div.querySelector(".approve").onclick = () => resume("approve", null, feedback.value);
+  div.querySelector(".reject").onclick = () => resume("reject", null, feedback.value || "Rejected by human.");
+  div.querySelector(".modify").onclick = () => {
+    try {
+      resume("modify", JSON.parse(editor.value), feedback.value);
+    } catch (err) {
+      alert("Invalid JSON: " + err.message);
+    }
+  };
+}
+
+function handleEvent(ev) {
+  addEvent(ev);
+
+  if (ev.type === "NODE_RESULT") {
+    htmlBubble(`<b>[${esc(ev.title)}]</b><div class="spec">${esc(JSON.stringify(ev.result || {}, null, 2))}</div>`, "result");
+    return;
+  }
+
+  if (ev.type === "HUMAN_REVIEW") {
+    review(ev);
+    return;
+  }
+
+  if (ev.type === "RUN_COMPLETED") {
+    htmlBubble(`<b>[Final Output]</b><div>${esc(ev.message || "")}</div><div class="spec">${esc(JSON.stringify(ev.results || {}, null, 2))}</div>`, "system");
+    if (source) source.close();
+    return;
+  }
+
+  if (ev.type === "RUN_FAILED" || ev.type === "RUN_CANCELLED") {
+    bubble(`[${ev.title || ev.type}]\n${ev.message || ""}`, "error");
+    if (source) source.close();
+    return;
+  }
+
+  bubble(`[${ev.title || ev.type}]\n${ev.message || ""}`, "system");
+}
+
+function connect(runId) {
+  if (source) source.close();
+  source = new EventSource(`/api/events/${runId}`);
+  source.onopen = () => bubble(`[SSE connected]\nrun_id=${runId}`, "system");
+  source.onmessage = (msg) => {
+    try {
+      handleEvent(JSON.parse(msg.data));
+    } catch (err) {
+      bubble("Failed to parse SSE event: " + err.message, "error");
+    }
+  };
+  source.onerror = () => {
+    bubble("SSE stream closed or failed. Check server logs and DevTools Network tab.", "error");
+    if (source) source.close();
+  };
+}
+
+form.onsubmit = async (event) => {
+  event.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+
+  bubble(text, "user");
+  input.value = "";
+
+  try {
+    bubble("[Sending]\nPOST /api/chat", "system");
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({message: text})
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      bubble(`POST /api/chat failed: HTTP ${res.status}\n${body}`, "error");
+      return;
+    }
+
+    const data = await res.json();
+    currentRunId = data.run_id;
+    bubble(`[Run queued]\nrun_id=${currentRunId}`, "system");
+    connect(currentRunId);
+  } catch (err) {
+    bubble("POST /api/chat error: " + err.message, "error");
+  }
+};
+</script>
+</body>
+</html>

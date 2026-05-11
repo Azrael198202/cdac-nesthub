@@ -1,7 +1,0 @@
-{
-  "text_understanding": {
-    "status": "ready",
-    "type": "generic_capability",
-    "spec_path": "/mnt/data/test_v3/ai_core_config_driven_node_runtime_v3/runtime/configs/capabilities/text_understanding.yaml"
-  }
-}

@@ -1,4 +1,4 @@
-# AI Core Config-Driven Node Runtime v4
+# AI Core Config-Driven Node Runtime v6
 
 This version enforces the rule that `ai_core` must not contain business/domain/task-specific logic.
 
@@ -38,28 +38,18 @@ python scripts/smoke_test.py
 ```
 
 
-## v4 Fix
+## v6 Fix
 
-`/api/chat` now returns `run_id` immediately and starts workflow execution in the background.
+- Updated UI version label from v3 to v6.
+- Added `/api/version`.
+- Added no-cache headers for `/`.
+- This avoids confusion when the browser or an old server process displays stale UI text.
 
-Before:
 
-```text
-POST /api/chat waits until the workflow reaches a checkpoint
-↓
-UI cannot connect to SSE immediately
-↓
-Looks like no response
-```
+## v6 Fix
 
-Now:
-
-```text
-POST /api/chat returns run_id immediately
-↓
-UI connects to /api/events/{run_id}
-↓
-Workflow runs in background
-↓
-Events stream to the chat area and workflow panel
-```
+- Fixed JavaScript syntax errors in `apps/web/index.html`.
+- `/api/chat` now returns `run_id` immediately.
+- Workflow execution starts in a background task.
+- UI now displays `POST /api/chat` errors and SSE connection status.
+- Added `.vscode/launch.json` and `.vscode/tasks.json`.
