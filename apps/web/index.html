@@ -1,53 +1,52 @@
 <!doctype html>
-<html lang="zh-CN">
+<html>
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Runtime Visible AI Core</title>
+  <title>Verified AI Core</title>
   <style>
-    body { margin:0; font-family: Arial, sans-serif; background:#0f172a; color:#e5e7eb; }
-    .layout { display:grid; grid-template-columns: 1fr 420px; height:100vh; }
-    .chat { padding:24px; overflow:auto; }
-    .trace { border-left:1px solid #334155; background:#111827; padding:16px; overflow:auto; }
-    .msg { max-width:900px; padding:14px 16px; border-radius:14px; margin:10px 0; white-space:pre-wrap; }
-    .user { background:#1d4ed8; margin-left:auto; }
-    .assistant { background:#1f2937; }
-    .event { border:1px solid #334155; border-radius:12px; padding:10px; margin:8px 0; background:#020617; }
-    .event b { color:#93c5fd; }
-    .event pre { white-space:pre-wrap; font-size:12px; color:#cbd5e1; }
-    .bar { position:fixed; bottom:0; left:0; right:420px; display:flex; gap:8px; padding:16px; background:#020617; border-top:1px solid #334155; }
-    input { flex:1; padding:14px; border-radius:12px; border:1px solid #475569; background:#0f172a; color:white; }
-    button { padding:0 18px; border:0; border-radius:12px; background:#22c55e; color:#052e16; font-weight:bold; cursor:pointer; }
-    h2 { margin-top:0; }
-    .pill { display:inline-block; padding:2px 8px; border-radius:999px; background:#334155; font-size:12px; color:#dbeafe; }
+    body { margin: 0; font-family: Arial, sans-serif; background: #f6f7f9; }
+    .wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 20px; }
+    .card { background: white; border-radius: 12px; padding: 16px; box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+    textarea { width: 100%; height: 120px; }
+    input { width: 100%; padding: 8px; margin: 4px 0; }
+    button { padding: 10px 14px; border: 0; border-radius: 8px; background: #111827; color: white; cursor: pointer; }
+    pre { white-space: pre-wrap; background: #111827; color: #e5e7eb; padding: 12px; border-radius: 8px; max-height: 680px; overflow: auto; }
+    .step { padding: 8px; margin: 6px 0; border-left: 4px solid #4f46e5; background: #eef2ff; }
   </style>
 </head>
 <body>
-<div class="layout">
-  <main class="chat" id="chat">
-    <h2>AI Core Chat</h2>
-    <div class="msg assistant">输入示例：Please check the weather forecast for Tokyo tomorrow and then book a flight to Tokyo.</div>
-  </main>
-  <aside class="trace">
-    <h2>Execution Trace <span class="pill">ChatGPT / Codex-like</span></h2>
-    <div id="trace"></div>
-  </aside>
-</div>
-<div class="bar">
-  <input id="input" value="Please check the weather forecast for Tokyo tomorrow and then book a flight to Tokyo." />
-  <button onclick="send()">Run</button>
+<div class="wrap">
+  <div class="card">
+    <h2>Chat / Agent Task</h2>
+    <textarea id="msg">Please check the weather forecast for Tokyo tomorrow and then book a flight to Tokyo.</textarea>
+    <br/><br/>
+    <button onclick="send()">Run</button>
+    <h3>External API Key</h3>
+    <input id="provider" value="openai" />
+    <input id="key" placeholder="sk-..." type="password" />
+    <button onclick="saveKey()">Save Key to runtime/secrets</button>
+    <h3>Visible Process</h3>
+    <div id="steps"></div>
+  </div>
+  <div class="card">
+    <h2>Result / Trace</h2>
+    <pre id="out"></pre>
+  </div>
 </div>
 <script>
-function addChat(cls, text){ const d=document.createElement('div'); d.className='msg '+cls; d.textContent=text; document.getElementById('chat').appendChild(d); d.scrollIntoView(); }
-function addEvent(e){ const d=document.createElement('div'); d.className='event'; d.innerHTML=`<b>${e.type}</b> — ${e.title}<pre>${e.message||''}</pre>`; document.getElementById('trace').appendChild(d); d.scrollIntoView(); }
+const baseSteps = ['Input Parsing', 'Intent Recognition', 'Context Awareness', 'Workflow Planning', 'Execution', 'Feedback Learning', 'Output'];
+function renderRunning(){ document.getElementById('steps').innerHTML = baseSteps.map(s=>`<div class="step">⏳ ${s}</div>`).join(''); }
 async function send(){
-  const input=document.getElementById('input'); const text=input.value; addChat('user', text);
-  const res=await fetch('/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});
-  const reader=res.body.getReader(); const decoder=new TextDecoder(); let buf='';
-  while(true){ const {value,done}=await reader.read(); if(done) break; buf+=decoder.decode(value,{stream:true});
-    const parts=buf.split('\n\n'); buf=parts.pop();
-    for(const part of parts){ if(!part.startsWith('data: ')) continue; const e=JSON.parse(part.slice(6)); addEvent(e); if(e.type==='final') addChat('assistant', e.message); }
-  }
+  renderRunning();
+  const res = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({message: document.getElementById('msg').value})});
+  const data = await res.json();
+  document.getElementById('out').textContent = JSON.stringify(data, null, 2);
+  const events = data.state?.step_results || {};
+  document.getElementById('steps').innerHTML = baseSteps.map(s=>`<div class="step">✅ ${s}<br/><small>${s.toLowerCase().replaceAll(' ', '_') in events ? 'completed' : ''}</small></div>`).join('');
+}
+async function saveKey(){
+  const res = await fetch('/api/keys', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({provider:document.getElementById('provider').value, api_key:document.getElementById('key').value})});
+  alert(JSON.stringify(await res.json()));
 }
 </script>
 </body>

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["intent_type", "confidence", "tasks"],
+  "properties": {
+    "intent_type": {"type": "string"},
+    "confidence": {"type": "number"},
+    "tasks": {"type": "array"}
+  }
+}
