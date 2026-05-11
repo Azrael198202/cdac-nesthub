@@ -1,6 +1,6 @@
 from ai_core.config.paths import (
     RUNTIME_DIR, RUNTIME_CONFIGS, RUNTIME_LOGS, RUNTIME_CHECKPOINTS,
-    RUNTIME_TRACES, RUNTIME_KNOWLEDGE, RUNTIME_DATASETS, RUNTIME_GENERATED
+    RUNTIME_TRACES, RUNTIME_KNOWLEDGE, RUNTIME_DATASETS, RUNTIME_GENERATED, RUNTIME_REGISTRY
 )
 from ai_core.config.loader import ConfigLoader
 
@@ -29,6 +29,8 @@ class RuntimeBootstrap:
             RUNTIME_GENERATED / "workflows",
             RUNTIME_GENERATED / "prompts",
             RUNTIME_GENERATED / "schemas",
+            RUNTIME_GENERATED / "capabilities",
+            RUNTIME_REGISTRY,
         ]:
             d.mkdir(parents=True, exist_ok=True)
 
@@ -38,6 +40,9 @@ class RuntimeBootstrap:
         self._ensure_model_route_config()
         self._ensure_capability_config()
         self._ensure_workflow_config()
+        self._ensure_capability_routes()
+        self._ensure_base_capability_templates()
+        self._ensure_registry_files()
         self._ensure_dataset_files()
 
     def _ensure_provider_config(self) -> None:
@@ -248,6 +253,80 @@ class RuntimeBootstrap:
             ]
         }
         self.loader.save_yaml(p, data)
+
+
+    def _ensure_capability_routes(self) -> None:
+        p = RUNTIME_CONFIGS / "capabilities" / "capability_routes.yaml"
+        if p.exists():
+            return
+        self.loader.save_yaml(p, {
+            "default_route": ["local_model_service", "external_api_model"],
+            "node_capability_map": {
+                "input_parsing": ["local_model_service", "external_api_model"],
+                "intent_recognition": ["local_model_service", "external_api_model"],
+                "context_awareness": ["local_knowledge_store"],
+                "workflow_planning": ["local_model_service", "external_api_model"],
+                "execution": ["generic_tool_execution"],
+                "feedback_learning": ["local_knowledge_store"],
+                "output": ["local_model_service", "external_api_model"]
+            },
+            "policy": {
+                "generate_missing_capability_spec": True,
+                "human_review_generated_spec": True,
+                "approval_required_for_install": True,
+                "approval_required_for_start": True
+            }
+        })
+
+    def _ensure_base_capability_templates(self) -> None:
+        templates = {
+            "local_model_service.yaml": {
+                "capability_id": "local_model_service",
+                "type": "model_service",
+                "description": "A local LLM service. Candidate implementations can include Ollama, vLLM, LM Studio, or any generated local model service.",
+                "selection_policy": {"strategy": "first_available_or_generate", "candidates": ["ollama_runtime", "vllm_runtime", "lmstudio_runtime"]},
+                "security": {"approval_required": True, "risk_level": "medium"}
+            },
+            "external_api_model.yaml": {
+                "capability_id": "external_api_model",
+                "type": "external_api",
+                "description": "External API model provider. Runtime can register OpenAI, Claude, Gemini, or another provider through config.",
+                "detect": {"env_keys": ["OPENAI_API_KEY"]},
+                "verify": {"env_keys": ["OPENAI_API_KEY"]},
+                "runtime_register": {"provider_name": "external_api_model"},
+                "security": {"approval_required": False, "risk_level": "medium"}
+            },
+            "local_knowledge_store.yaml": {
+                "capability_id": "local_knowledge_store",
+                "type": "knowledge_store",
+                "description": "Local runtime knowledge directory and dataset files.",
+                "detect": {"paths": {"all": ["runtime/knowledge"]}},
+                "install": {"all": []},
+                "verify": {"paths": {"all": ["runtime/knowledge"]}},
+                "runtime_register": {"tool_name": "local_knowledge_store"},
+                "security": {"approval_required": False, "risk_level": "low"}
+            },
+            "generic_tool_execution.yaml": {
+                "capability_id": "generic_tool_execution",
+                "type": "tool_execution",
+                "description": "Generic tool execution capability. Specific tools are generated into runtime/generated/tools.",
+                "detect": {"paths": {"all": ["runtime/generated/tools"]}},
+                "install": {"all": []},
+                "verify": {"paths": {"all": ["runtime/generated/tools"]}},
+                "runtime_register": {"tool_name": "generic_tool_execution"},
+                "security": {"approval_required": True, "risk_level": "high"}
+            }
+        }
+        for name, data in templates.items():
+            p = RUNTIME_CONFIGS / "capabilities" / name
+            if not p.exists():
+                self.loader.save_yaml(p, data)
+
+    def _ensure_registry_files(self) -> None:
+        for name in ["installed_capabilities.json", "provider_registry.json", "tool_registry.json"]:
+            p = RUNTIME_REGISTRY / name
+            if not p.exists():
+                self.loader.save_json(p, {})
 
     def _ensure_dataset_files(self) -> None:
         for name in ["finetune.jsonl", "eval_cases.jsonl"]:
