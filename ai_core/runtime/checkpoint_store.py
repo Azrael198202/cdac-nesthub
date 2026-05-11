@@ -8,7 +8,7 @@ class CheckpointStore:
         RUNTIME_CHECKPOINTS.mkdir(parents=True, exist_ok=True)
         (RUNTIME_CHECKPOINTS / f"{run_id}.json").write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+            encoding="utf-8"
         )
 
     def load(self, run_id: str) -> Optional[Dict[str, Any]]:

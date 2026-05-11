@@ -1,8 +1,18 @@
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+AI_CORE_DIR = PROJECT_ROOT / "ai_core"
+CONFIGS_DIR = PROJECT_ROOT / "configs"
+SCHEMA_DIR = PROJECT_ROOT / "schema"
+APPS_DIR = PROJECT_ROOT / "apps"
+TOOLS_DIR = PROJECT_ROOT / "tools"
+
 RUNTIME_DIR = PROJECT_ROOT / "runtime"
 RUNTIME_CONFIGS = RUNTIME_DIR / "configs"
 RUNTIME_LOGS = RUNTIME_DIR / "logs"
 RUNTIME_CHECKPOINTS = RUNTIME_DIR / "checkpoints"
 RUNTIME_TRACES = RUNTIME_DIR / "traces"
+RUNTIME_KNOWLEDGE = RUNTIME_DIR / "knowledge"
+RUNTIME_DATASETS = RUNTIME_DIR / "datasets"
+RUNTIME_GENERATED = RUNTIME_DIR / "generated"

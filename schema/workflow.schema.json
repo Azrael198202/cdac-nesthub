@@ -1,8 +1,40 @@
 {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
+  "required": [
+    "workflow_id",
+    "nodes"
+  ],
   "properties": {
-    "workflow_id": { "type": "string" },
-    "nodes": { "type": "array" }
-  },
-  "required": ["workflow_id", "nodes"]
+    "workflow_id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "review_required": {
+            "type": "boolean"
+          },
+          "progress_weight": {
+            "type": "integer"
+          }
+        }
+      }
+    }
+  }
 }

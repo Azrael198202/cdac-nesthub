@@ -13,6 +13,7 @@ class EventBus:
         return self._queues[run_id]
 
     async def emit(self, run_id: str, event: Dict[str, Any]) -> None:
+        event.setdefault("run_id", run_id)
         await self.queue(run_id).put(event)
 
     async def stream(self, run_id: str) -> AsyncGenerator[str, None]:
@@ -20,7 +21,7 @@ class EventBus:
         while True:
             event = await q.get()
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-            if event.get("type") in {"RUN_COMPLETED", "RUN_FAILED"}:
+            if event.get("type") in {"RUN_COMPLETED", "RUN_FAILED", "RUN_CANCELLED"}:
                 break
 
 

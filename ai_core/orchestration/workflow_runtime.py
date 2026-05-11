@@ -1,22 +1,42 @@
 import uuid
-import yaml
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from ai_core.config.paths import RUNTIME_CONFIGS
+from ai_core.config.loader import ConfigLoader
 from ai_core.events.event_bus import event_bus
 from ai_core.runtime.bootstrap import RuntimeBootstrap
 from ai_core.runtime.checkpoint_store import CheckpointStore
+from ai_core.runtime.trace_writer import TraceWriter
 from ai_core.environment.provider_manager import ProviderManager
+from ai_core.llm.llm_client import LLMClient
+from ai_core.memory.memory_manager import MemoryManager
+from ai_core.knowledge.knowledge_service import KnowledgeService
+from ai_core.evolution.finetune_dataset_builder import FinetuneDatasetBuilder
 
 
 class WorkflowRuntime:
     def __init__(self) -> None:
         self.bootstrap = RuntimeBootstrap()
+        self.loader = ConfigLoader()
         self.checkpoints = CheckpointStore()
+        self.trace = TraceWriter()
         self.provider_manager = ProviderManager()
+        self.llm = LLMClient()
+        self.memory = MemoryManager()
+        self.knowledge = KnowledgeService()
+        self.dataset = FinetuneDatasetBuilder()
 
     def _load_workflow(self) -> Dict[str, Any]:
         p = RUNTIME_CONFIGS / "workflows" / "base_orchestration.yaml"
-        return yaml.safe_load(p.read_text(encoding="utf-8"))
+        return self.loader.load_yaml(p)
+
+    def _total_weight(self, workflow: dict) -> int:
+        return sum(int(n.get("progress_weight", 1)) for n in workflow.get("nodes", [])) or 1
+
+    def _progress_before(self, workflow: dict, node_index: int) -> int:
+        nodes = workflow.get("nodes", [])
+        total = self._total_weight(workflow)
+        done = sum(int(n.get("progress_weight", 1)) for n in nodes[:node_index])
+        return int(done / total * 100)
 
     async def start(self, message: str) -> str:
         self.bootstrap.ensure()
@@ -28,12 +48,13 @@ class WorkflowRuntime:
             "node_index": 0,
             "workflow": workflow,
             "results": {},
+            "progress": 0
         }
-        await event_bus.emit(run_id, {
+        await self._emit(run_id, {
             "type": "RUN_STARTED",
             "title": "Run started",
             "message": "Starting configurable orchestration.",
-            "run_id": run_id,
+            "progress": 0
         })
         await self._continue(state)
         return run_id
@@ -41,10 +62,10 @@ class WorkflowRuntime:
     async def resume(self, run_id: str, decision: str = "approve") -> None:
         state = self.checkpoints.load(run_id)
         if not state:
-            await event_bus.emit(run_id, {
+            await self._emit(run_id, {
                 "type": "RUN_FAILED",
                 "title": "Resume failed",
-                "message": "Checkpoint not found.",
+                "message": "Checkpoint not found."
             })
             return
 
@@ -52,30 +73,31 @@ class WorkflowRuntime:
         self.checkpoints.delete(run_id)
 
         if decision != "approve":
-            await event_bus.emit(run_id, {
-                "type": "RUN_FAILED",
+            await self._emit(run_id, {
+                "type": "RUN_CANCELLED",
                 "title": "Rejected",
-                "message": "Human rejected the pending action.",
+                "message": "Human rejected the pending action."
             })
             return
 
-        await event_bus.emit(run_id, {
+        await self._emit(run_id, {
             "type": "RESUMED",
             "title": "Run resumed",
             "message": f"Continuing from node index {state.get('node_index', 0)}.",
+            "progress": state.get("progress", 0)
         })
 
         if pending.get("kind") == "provider_fix":
             ok = await self.provider_manager.run_provider_fix(
                 run_id=run_id,
                 provider_name=pending["provider"],
-                commands=pending.get("commands", []),
+                commands=pending.get("commands", [])
             )
             if not ok:
-                await event_bus.emit(run_id, {
+                await self._emit(run_id, {
                     "type": "RUN_FAILED",
                     "title": "Provider repair failed",
-                    "message": "Could not repair provider.",
+                    "message": "Could not repair provider."
                 })
                 return
 
@@ -89,70 +111,98 @@ class WorkflowRuntime:
         while state["node_index"] < len(nodes):
             node = nodes[state["node_index"]]
             node_id = node["id"]
-            await event_bus.emit(run_id, {
+            node_type = node.get("type", "generic")
+            progress = self._progress_before(workflow, state["node_index"])
+            state["progress"] = progress
+
+            await self._emit(run_id, {
                 "type": "NODE_STARTED",
                 "title": node_id,
-                "message": "Executing node.",
+                "message": f"Executing node type: {node_type}",
                 "node_id": node_id,
+                "progress": progress
             })
 
-            ready, provider_result = await self.provider_manager.ensure_provider_ready(run_id, "ollama")
-            if not ready:
+            ok, provider_result = await self.provider_manager.ensure_any_provider_ready(run_id, node_id)
+            if not ok:
                 if provider_result.get("approval_required"):
                     state["pending_action"] = {
                         "kind": "provider_fix",
                         "provider": provider_result["provider"],
-                        "commands": provider_result.get("commands", []),
+                        "commands": provider_result.get("commands", [])
                     }
                     self.checkpoints.save(run_id, state)
-                    await event_bus.emit(run_id, {
+                    await self._emit(run_id, {
                         "type": "HUMAN_REVIEW",
                         "title": "Approval required",
                         "message": provider_result["message"],
                         "commands": provider_result.get("commands", []),
                         "run_id": run_id,
+                        "progress": progress
                     })
                     return
-                await event_bus.emit(run_id, {
+                await self._emit(run_id, {
                     "type": "PROVIDER_UNAVAILABLE",
                     "title": "Provider unavailable",
                     "message": provider_result.get("message", "Provider not ready."),
+                    "progress": progress
                 })
                 return
 
-            # No local-rule fake result. If provider is not really available, execution pauses/fails.
-            result = {
-                "node_id": node_id,
-                "status": "completed",
-                "provider": provider_result.get("provider", "ollama"),
-                "note": "Provider is ready. Node execution placeholder waits for configured prompt/tool implementation.",
+            payload = {
+                "input": state.get("input"),
+                "context": self.memory.build_context(state.get("input", "")),
+                "knowledge_hits": self.knowledge.search(state.get("input", "")),
+                "previous_results": state.get("results", {})
             }
+            result = await self.llm.generate_json(provider_result, prompt=node_id, payload=payload)
+            result.update({
+                "node_id": node_id,
+                "node_type": node_type,
+                "status": "completed"
+            })
             state["results"][node_id] = result
 
-            await event_bus.emit(run_id, {
+            node_done_progress = min(99, self._progress_before(workflow, state["node_index"] + 1))
+            await self._emit(run_id, {
                 "type": "NODE_RESULT",
                 "title": f"{node_id} result",
                 "message": "Node completed.",
                 "result": result,
+                "progress": node_done_progress
             })
 
             if node.get("review_required"):
                 state["node_index"] += 1
+                state["progress"] = node_done_progress
                 state["pending_action"] = {"kind": "node_review", "node_id": node_id}
                 self.checkpoints.save(run_id, state)
-                await event_bus.emit(run_id, {
+                await self._emit(run_id, {
                     "type": "HUMAN_REVIEW",
                     "title": "Human review required",
                     "message": f"Review result for node '{node_id}' before continuing.",
                     "run_id": run_id,
+                    "progress": node_done_progress
                 })
                 return
 
             state["node_index"] += 1
+            state["progress"] = node_done_progress
 
-        await event_bus.emit(run_id, {
+        self.knowledge.save_success_case(run_id, state.get("results", {}))
+        self.dataset.append_case(
+            input_text=state.get("input", ""),
+            output_text="Workflow completed.",
+            metadata={"run_id": run_id, "results": state.get("results", {})}
+        )
+        await self._emit(run_id, {
             "type": "RUN_COMPLETED",
             "title": "Final output",
-            "message": "Workflow completed. All approved nodes have been executed.",
+            "message": "Workflow completed. Results were saved to runtime knowledge and finetune dataset.",
             "results": state.get("results", {}),
+            "progress": 100
         })
+
+    async def _emit(self, run_id: str, event: dict) -> None:
+        self.trace.write(run_id, event)
+        await event_bus.emit(run_id, event)

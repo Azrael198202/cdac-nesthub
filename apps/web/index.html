@@ -12,7 +12,8 @@
   --text: #e5edff;
   --muted: #91a1bd;
   --blue: #2563eb;
-  --yellow: #4a3510;
+  --yellow: #3a2a0a;
+  --yellowLine: #b45309;
   --red: #991b1b;
   --green: #22c55e;
 }
@@ -27,7 +28,7 @@ body {
 }
 .app {
   display: grid;
-  grid-template-columns: 1fr 360px;
+  grid-template-columns: minmax(0, 1fr) 380px;
   height: 100vh;
 }
 .main {
@@ -48,18 +49,38 @@ body {
   border-radius: 14px;
   padding: 16px;
   margin: 12px 0;
-  max-width: 880px;
+  max-width: 920px;
   white-space: pre-wrap;
+  line-height: 1.5;
 }
 .system { border-style: dashed; }
 .info { background: #1d4ed8; border-color: #1d4ed8; }
-.approval { background: var(--yellow); border-color: #b45309; }
+.approval {
+  background: var(--yellow);
+  border-color: var(--yellowLine);
+  display: grid;
+  gap: 12px;
+  min-height: auto;
+}
+.approval-title {
+  font-weight: 800;
+  font-size: 16px;
+}
+.approval-message {
+  white-space: pre-wrap;
+}
+.approval-actions {
+  display: flex;
+  flex-direction: row;
+  gap: 10px;
+  align-items: center;
+}
 .console {
   background: #020617;
   border-color: #334155;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: #cbd5e1;
-  max-height: 220px;
+  max-height: 260px;
   overflow-y: auto;
 }
 .stderr { color: #fca5a5; }
@@ -67,7 +88,7 @@ body {
 .inputbar {
   position: fixed;
   left: 30px;
-  right: 390px;
+  right: 410px;
   bottom: 22px;
   z-index: 10;
   display: flex;
@@ -96,6 +117,7 @@ button {
   font-weight: 700;
 }
 button.reject { background: var(--red); }
+button:disabled { opacity: .5; cursor: not-allowed; }
 .side {
   border-left: 1px solid var(--line);
   height: 100vh;
@@ -140,6 +162,29 @@ button.reject { background: var(--red); }
   border-color: #2563eb;
   box-shadow: 0 0 0 1px rgba(37,99,235,.15);
 }
+.progress-wrap {
+  margin-top: 10px;
+  background: #111827;
+  border: 1px solid #334155;
+  border-radius: 999px;
+  height: 12px;
+  overflow: hidden;
+}
+.progress-bar {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #2563eb, #60a5fa);
+  transition: width .25s ease;
+}
+.progress-label {
+  color: #bfdbfe;
+  font-size: 12px;
+  margin-top: 6px;
+}
+.command-line {
+  word-break: break-all;
+  color: #e2e8f0;
+}
 </style>
 </head>
 <body>
@@ -165,11 +210,21 @@ button.reject { background: var(--red); }
 <script>
 let currentRunId = null;
 let source = null;
+let commandBox = null;
+let currentProgressBar = null;
+let currentProgressLabel = null;
 
 const messages = document.getElementById("messages");
 const events = document.getElementById("events");
 const form = document.getElementById("form");
 const input = document.getElementById("message");
+
+function esc(text) {
+  return String(text ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
 
 function scrollMessages() {
   messages.scrollTop = messages.scrollHeight;
@@ -193,27 +248,41 @@ function addHtmlCard(html, cls="card") {
   return div;
 }
 
+function updateProgress(percent) {
+  if (percent === undefined || percent === null) return;
+  const p = Math.max(0, Math.min(100, Number(percent)));
+  if (currentProgressBar) currentProgressBar.style.width = p + "%";
+  if (currentProgressLabel) currentProgressLabel.textContent = p + "%";
+}
+
 function addEvent(ev) {
   const div = document.createElement("div");
   div.className = "event";
   div.innerHTML = `
-    <div class="type">${ev.type || ""}</div>
-    <div class="title">${ev.title || ""}</div>
-    <div>${ev.message || ""}</div>
+    <div class="type">${esc(ev.type || "")}</div>
+    <div class="title">${esc(ev.title || "")}</div>
+    <div>${esc(ev.message || "")}</div>
+    ${ev.progress !== undefined ? `<div class="progress-wrap"><div class="progress-bar" style="width:${Number(ev.progress)}%"></div></div><div class="progress-label">${Number(ev.progress)}%</div>` : ""}
   `;
   events.prepend(div);
 }
 
-let commandBox = null;
-function ensureCommandBox() {
-  if (!commandBox) {
-    commandBox = addHtmlCard("<b><span class='spinner'></span>Console running...</b><div id='consoleLines'></div>", "card console running");
-  }
-  return commandBox.querySelector("#consoleLines");
+function addCommandBox(command, progress) {
+  commandBox = addHtmlCard(`
+    <div><span class="spinner"></span><b>[Command started]</b></div>
+    <div class="command-line">${esc(command)}</div>
+    <div class="progress-wrap"><div id="cmdProgress" class="progress-bar" style="width:${Number(progress || 0)}%"></div></div>
+    <div id="cmdProgressLabel" class="progress-label">${Number(progress || 0)}%</div>
+    <div id="consoleLines"></div>
+  `, "card console running");
+  currentProgressBar = commandBox.querySelector("#cmdProgress");
+  currentProgressLabel = commandBox.querySelector("#cmdProgressLabel");
 }
 
-function appendConsole(line, streamName) {
-  const box = ensureCommandBox();
+function appendConsole(line, streamName, progress) {
+  if (!commandBox) addCommandBox("running...", progress || 0);
+  updateProgress(progress);
+  const box = commandBox.querySelector("#consoleLines");
   const row = document.createElement("div");
   row.className = streamName === "stderr" ? "stderr" : "stdout";
   row.textContent = `[${streamName}] ${line}`;
@@ -223,20 +292,23 @@ function appendConsole(line, streamName) {
 }
 
 function approvalCard(ev) {
-  const commands = ev.commands && ev.commands.length ? "\\nCommands:\\n" + ev.commands.join("\\n") : "";
+  const commands = ev.commands && ev.commands.length
+    ? "Commands:\\n" + ev.commands.join("\\n")
+    : "";
   const div = document.createElement("div");
   div.className = "card approval";
   div.innerHTML = `
-    <b>[Approval required]</b><br/>
-    ${ev.message || ""}${commands.replaceAll("\\n","<br/>")}
-    <div style="margin-top:12px">
-      <button class="approve">Approve</button>
-      <button class="reject reject">Reject</button>
+    <div class="approval-title">[Approval required]</div>
+    <div class="approval-message">${esc(ev.message || "")}${commands ? "\\n\\n" + esc(commands) : ""}</div>
+    ${ev.progress !== undefined ? `<div class="progress-wrap"><div class="progress-bar" style="width:${Number(ev.progress)}%"></div></div><div class="progress-label">${Number(ev.progress)}%</div>` : ""}
+    <div class="approval-actions">
+      <button class="approve" type="button">Approve</button>
+      <button class="reject rejectBtn" type="button">Reject</button>
     </div>
   `;
   div.querySelector(".approve").onclick = async () => {
     div.querySelector(".approve").disabled = true;
-    div.querySelector(".reject").disabled = true;
+    div.querySelector(".rejectBtn").disabled = true;
     addCard("Approved. Resuming workflow...", "card system");
     await fetch("/api/resume", {
       method: "POST",
@@ -244,9 +316,9 @@ function approvalCard(ev) {
       body: JSON.stringify({run_id: ev.run_id || currentRunId, decision: "approve"})
     });
   };
-  div.querySelector(".reject").onclick = async () => {
+  div.querySelector(".rejectBtn").onclick = async () => {
     div.querySelector(".approve").disabled = true;
-    div.querySelector(".reject").disabled = true;
+    div.querySelector(".rejectBtn").disabled = true;
     addCard("Rejected. Workflow will stop.", "card system");
     await fetch("/api/resume", {
       method: "POST",
@@ -263,42 +335,50 @@ function handleEvent(ev) {
 
   switch(ev.type) {
     case "RUN_STARTED":
-      addCard("[Run started]\\n" + ev.message);
+      addCard("[Run started]\\n" + (ev.message || ""));
       break;
     case "NODE_STARTED":
-      addCard("[" + ev.title + "]\\n" + ev.message);
+      addCard("[" + (ev.title || "") + "]\\n" + (ev.message || ""));
       break;
     case "MODEL_ROUTE":
     case "PROVIDER_CHECK":
-      addCard("[" + ev.title + "]\\n" + ev.message);
+    case "PROVIDER_SKIPPED":
+    case "PROVIDER_UNAVAILABLE":
+      addCard("[" + (ev.title || "") + "]\\n" + (ev.message || ""));
       break;
     case "HUMAN_REVIEW":
       approvalCard(ev);
       break;
     case "COMMAND_STARTED":
-      commandBox = null;
-      addHtmlCard("<span class='spinner'></span><b>[Command started]</b><br/>" + ev.command, "card console running");
-      commandBox = messages.lastChild;
+      addCommandBox(ev.command || "", ev.progress || 0);
       break;
     case "COMMAND_OUTPUT":
-      appendConsole(ev.line, ev.stream);
+      appendConsole(ev.line || "", ev.stream || "stdout", ev.progress);
       break;
     case "COMMAND_FINISHED":
+      updateProgress(ev.progress || 100);
       if (commandBox) commandBox.classList.remove("running");
-      addCard("[Command finished]\\n" + ev.message);
+      addCard("[Command finished]\\n" + (ev.message || ""));
+      break;
+    case "PROVIDER_FIX_DONE":
+      addCard("[Provider fix completed]\\n" + (ev.message || ""));
+      break;
+    case "PROVIDER_FIX_FAILED":
+      addCard("[Provider fix failed]\\n" + (ev.message || ""));
       break;
     case "RESUMED":
-      addCard("[Run resumed]\\n" + ev.message);
+      addCard("[Run resumed]\\n" + (ev.message || ""));
       break;
     case "NODE_RESULT":
-      addCard("[" + ev.title + "]\\n" + JSON.stringify(ev.result, null, 2));
+      addCard("[" + (ev.title || "") + "]\\n" + JSON.stringify(ev.result || {}, null, 2));
       break;
     case "RUN_COMPLETED":
-      addCard("[Final output]\\n" + ev.message);
+      addCard("[Final output]\\n" + (ev.message || ""));
       if (source) source.close();
       break;
     case "RUN_FAILED":
-      addCard("[Run failed]\\n" + ev.message);
+    case "RUN_CANCELLED":
+      addCard("[" + (ev.title || "Run stopped") + "]\\n" + (ev.message || ""));
       if (source) source.close();
       break;
   }
@@ -313,7 +393,7 @@ function connect(runId) {
   };
   source.onerror = () => {
     addCard("Stream connection closed or failed.", "card system");
-    source.close();
+    if (source) source.close();
   };
 }
 
