@@ -36,7 +36,7 @@ class RuntimeBootstrapper:
             marker.write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
             created = True
         provider = os.getenv("AI_CORE_PROVIDER", "auto")
-        provider_ready = bool(os.getenv("OPENAI_API_KEY")) or provider == "ollama" or os.getenv("AI_CORE_ALLOW_LOCAL_RULES") == "1"
+        provider_ready = bool(os.getenv("OPENAI_API_KEY")) or bool(os.getenv("HF_TOKEN")) or provider == "ollama"
         message = "runtime initialized" if created else "runtime already initialized"
         return BootstrapStatus(created=created, provider_ready=provider_ready, provider=provider, message=message)
 
@@ -45,17 +45,17 @@ class RuntimeBootstrapper:
             RUNTIME_DIR / "configs/models/model_routes.yaml",
             {
                 "version": "1.0",
-                "selection_order": ["local_rules", "ollama", "openai"],
+                "selection_order": ["ollama", "huggingface", "openai"],
                 "providers": {
-                    "local_rules": {
-                        "enabled": True,
-                        "type": "builtin_validator",
-                        "purpose": "schema repair and safety checks only",
-                    },
                     "ollama": {
                         "enabled": True,
                         "base_url": "http://127.0.0.1:11434",
                         "model": os.getenv("AI_CORE_OLLAMA_MODEL", "qwen3:4b"),
+                    },
+                    "huggingface": {
+                        "enabled": False,
+                        "model": os.getenv("AI_CORE_HF_MODEL", ""),
+                        "api_key_env": "HF_TOKEN",
                     },
                     "openai": {
                         "enabled": True,
@@ -82,9 +82,9 @@ class RuntimeBootstrapper:
             },
         )
         prompts = {
-            "input_parsing.yaml": "Analyze the user input generically. Return JSON with language, cleaned_input, possible_entities, and ambiguity_notes. Do not invent facts.",
-            "intent_recognition.yaml": "Classify the user's request generically. Return JSON with intent_label, confidence, required_capabilities, required_tools, risks, and missing_information. Do not use hardcoded domain assumptions.",
-            "workflow_planning.yaml": "Create a generic execution plan from the recognized intent and context. Return JSON with steps, dependencies, required_tools, approval_points, and validation_rules. Do not fabricate external results.",
+            "input_parsing.yaml": "Analyze the user input generically. Return strict JSON with language, cleaned_input, possible_entities, ambiguity_notes, and missing_information. Do not invent facts. Do not execute the task.",
+            "intent_recognition.yaml": "Classify the user's request generically. Return strict JSON with intent_label, confidence, required_capabilities, required_tools, risks, and missing_information. Do not use hardcoded domain assumptions. Do not execute the task.",
+            "workflow_planning.yaml": "Create a generic execution plan from the recognized intent and context. Return strict JSON with steps, dependencies, required_tools, approval_points, validation_rules, and side_effects. Do not fabricate external results.",
             "external_review.yaml": "Review the previous result. Return JSON with pass, reason, recommended_action, and improved_result when possible. Recommended action must be one of: continue_local, use_local_model, find_hf_model, use_external_api, ask_human.",
         }
         for name, text in prompts.items():

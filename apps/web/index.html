@@ -45,11 +45,18 @@
         <select id="provider">
           <option value="auto">Auto</option>
           <option value="ollama">Ollama</option>
+          <option value="huggingface">HuggingFace API</option>
           <option value="openai">OpenAI API</option>
         </select>
       </label>
       <label>OpenAI API Key
         <input id="openaiKey" type="password" placeholder="sk-..." />
+      </label>
+      <label>HuggingFace Token
+        <input id="hfToken" type="password" placeholder="hf_..." />
+      </label>
+      <label>HuggingFace Model
+        <input id="hfModel" placeholder="Qwen/Qwen2.5-7B-Instruct" />
       </label>
       <label>OpenAI Model
         <input id="openaiModel" value="gpt-4o-mini" />
