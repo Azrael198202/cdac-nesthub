@@ -1,0 +1,25 @@
+workflow_id: base_orchestration
+description: Generic orchestration. Business-specific workflow is generated in runtime
+  after intent planning.
+nodes:
+- id: input_parsing
+  type: llm_step
+  review_required: true
+- id: intent_recognition
+  type: llm_step
+  review_required: true
+- id: context_awareness
+  type: memory_step
+  review_required: false
+- id: workflow_planning
+  type: llm_step
+  review_required: true
+- id: execution
+  type: dynamic_execution
+  review_required: true
+- id: feedback_learning
+  type: learning_step
+  review_required: false
+- id: output
+  type: output_step
+  review_required: false

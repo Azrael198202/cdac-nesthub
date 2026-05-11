@@ -1,0 +1,43 @@
+defaults:
+  approval_required_for_install: true
+  auto_install_enabled: true
+  auto_start_enabled: true
+  command_timeout_seconds: 1800
+providers:
+  ollama:
+    enabled: true
+    kind: local_llm_server
+    base_url: http://127.0.0.1:11434
+    health_url: http://127.0.0.1:11434/api/tags
+    binary: ollama
+    models:
+    - qwen3:4b
+    install:
+      linux:
+      - curl -fsSL https://ollama.com/install.sh | sh
+      mac:
+      - brew install ollama
+      windows:
+      - winget install Ollama.Ollama
+    start:
+      linux:
+      - nohup ollama serve > runtime/logs/ollama.log 2>&1 &
+      mac:
+      - nohup ollama serve > runtime/logs/ollama.log 2>&1 &
+      windows:
+      - ollama serve
+    model_install:
+    - ollama pull {model}
+  openai:
+    enabled: true
+    kind: external_llm_api
+    requires_key: true
+    env_keys:
+    - OPENAI_API_KEY
+    base_url: https://api.openai.com/v1
+    model: gpt-4o-mini
+  huggingface:
+    enabled: true
+    kind: model_repository
+    requires_key: false
+    note: Search/download logic can be plugged in through runtime generated adapters.

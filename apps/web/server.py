@@ -43,6 +43,30 @@ def create_app() -> FastAPI:
     async def decide(decision: ApprovalDecision):
         return JSONResponse(approval_service.decide(decision.approval_id, decision.approved, decision.comment))
 
+    @app.post("/api/workflow/resume/stream")
+    async def resume_stream(decision: ApprovalDecision):
+        # The approval decision is recorded first, then the same run resumes from checkpoint.
+        result = approval_service.decide(decision.approval_id, decision.approved, decision.comment)
+        payload = result.get("payload", {})
+        run_id = payload.get("run_id")
+        if not run_id:
+            # For environment approvals the run_id is injected into the event data and checkpoint,
+            # but the original approval payload may not include it. The frontend sends it via comment as fallback.
+            run_id = decision.comment if decision.comment.startswith("run_id:") else ""
+            run_id = run_id.replace("run_id:", "", 1)
+
+        engine = WorkflowEngine(approval_service)
+
+        async def events():
+            if not run_id:
+                from ai_core.utils.events import StreamEvent
+                yield StreamEvent("error", "Cannot resume", "Missing run_id for approval resume.").to_sse()
+                return
+            async for ev in engine.resume(run_id, decision.approved, decision.comment):
+                yield ev.to_sse()
+
+        return StreamingResponse(events(), media_type="text/event-stream")
+
     return app
 
 
@@ -106,8 +130,8 @@ function addBubble(cls, text, data=null) {
     div.className = 'bubble approval';
     const ok = document.createElement('button'); ok.textContent = 'Approve';
     const no = document.createElement('button'); no.textContent = 'Reject'; no.className='reject';
-    ok.onclick = () => decide(data.approval_id, true);
-    no.onclick = () => decide(data.approval_id, false);
+    ok.onclick = () => decide(data.approval_id, true, data.run_id || '');
+    no.onclick = () => decide(data.approval_id, false, data.run_id || '');
     div.appendChild(document.createElement('br'));
     div.appendChild(ok); div.appendChild(document.createTextNode(' ')); div.appendChild(no);
   }
@@ -123,18 +147,17 @@ function addCard(ev) {
   cards.scrollTop = cards.scrollHeight;
 }
 
-async function decide(id, approved) {
-  await fetch('/api/approval', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({approval_id:id, approved})});
-  addBubble('system', approved ? 'Approved. Please send/continue again to rerun from current design.' : 'Rejected. Add modification instructions and send again.');
+async function decide(id, approved, runId='') {
+  addBubble('system', approved ? 'Approved. Resuming workflow...' : 'Rejected. Stopping workflow.');
+  const resp = await fetch('/api/workflow/resume/stream', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({approval_id:id, approved, comment: runId ? ('run_id:' + runId) : ''})
+  });
+  await consumeStream(resp);
 }
 
-async function run() {
-  const text = input.value.trim();
-  if (!text) return;
-  input.value = '';
-  send.disabled = true;
-  addBubble('user', text);
-  const resp = await fetch('/api/chat/stream', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message:text})});
+async function consumeStream(resp) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -149,11 +172,21 @@ async function run() {
       if (!line.startsWith('data:')) continue;
       const ev = JSON.parse(line.slice(5));
       addCard(ev);
-      if (['node_started','model_route','provider_check','model_check','command','model_output','error','human_review','final'].includes(ev.type)) {
+      if (['run_started','run_resumed','node_started','model_route','provider_check','model_check','command','command_result','model_output','memory','execution','learning','error','human_review','final','run_completed','run_rejected'].includes(ev.type)) {
         addBubble(ev.type === 'human_review' ? 'approval' : (ev.type === 'error' ? 'system' : 'assistant'), `[${ev.title}]\n${ev.message || ''}`, ev.data);
       }
     }
   }
+}
+
+async function run() {
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  send.disabled = true;
+  addBubble('user', text);
+  const resp = await fetch('/api/chat/stream', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message:text})});
+  await consumeStream(resp);
   send.disabled = false;
 }
 

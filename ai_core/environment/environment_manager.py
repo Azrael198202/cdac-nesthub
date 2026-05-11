@@ -86,11 +86,12 @@ class EnvironmentManager:
         if not defaults.get("auto_install_enabled", True):
             yield StreamEvent("error", "Auto install disabled", provider_name)
             return
-        if defaults.get("approval_required_for_install", True):
+        payload = {"provider": provider_name, "commands": commands}
+        if defaults.get("approval_required_for_install", True) and not self.approval.is_approved("install_provider", payload):
             req = self.approval.create(
                 "install_provider",
                 f"Install provider '{provider_name}'? Commands: {commands}",
-                {"provider": provider_name, "commands": commands},
+                payload,
             )
             yield StreamEvent("human_review", "Approval required", req.message, {"approval_id": req.approval_id, "action": req.action})
             return
@@ -111,11 +112,12 @@ class EnvironmentManager:
         if not commands:
             yield StreamEvent("error", "No model install command", model)
             return
-        if defaults.get("approval_required_for_install", True):
+        payload = {"provider": provider_name, "model": model, "commands": commands}
+        if defaults.get("approval_required_for_install", True) and not self.approval.is_approved("install_model", payload):
             req = self.approval.create(
                 "install_model",
                 f"Install model '{model}' for provider '{provider_name}'? Commands: {commands}",
-                {"provider": provider_name, "model": model, "commands": commands},
+                payload,
             )
             yield StreamEvent("human_review", "Approval required", req.message, {"approval_id": req.approval_id, "action": req.action})
             return
