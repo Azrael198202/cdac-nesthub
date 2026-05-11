@@ -1,53 +1,72 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Verified AI Core</title>
-  <style>
-    body { margin: 0; font-family: Arial, sans-serif; background: #f6f7f9; }
-    .wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 20px; }
-    .card { background: white; border-radius: 12px; padding: 16px; box-shadow: 0 2px 12px rgba(0,0,0,.08); }
-    textarea { width: 100%; height: 120px; }
-    input { width: 100%; padding: 8px; margin: 4px 0; }
-    button { padding: 10px 14px; border: 0; border-radius: 8px; background: #111827; color: white; cursor: pointer; }
-    pre { white-space: pre-wrap; background: #111827; color: #e5e7eb; padding: 12px; border-radius: 8px; max-height: 680px; overflow: auto; }
-    .step { padding: 8px; margin: 6px 0; border-left: 4px solid #4f46e5; background: #eef2ff; }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pure Runtime AI Core</title>
+  <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
-<div class="wrap">
-  <div class="card">
-    <h2>Chat / Agent Task</h2>
-    <textarea id="msg">Please check the weather forecast for Tokyo tomorrow and then book a flight to Tokyo.</textarea>
-    <br/><br/>
-    <button onclick="send()">Run</button>
-    <h3>External API Key</h3>
-    <input id="provider" value="openai" />
-    <input id="key" placeholder="sk-..." type="password" />
-    <button onclick="saveKey()">Save Key to runtime/secrets</button>
-    <h3>Visible Process</h3>
-    <div id="steps"></div>
+  <div class="layout">
+    <aside class="sidebar">
+      <h1>AI Core</h1>
+      <p>Pure runtime orchestration</p>
+      <button id="settingsBtn">Settings</button>
+      <div class="status" id="status">Checking runtime...</div>
+      <div class="note">
+        <strong>Core rule</strong><br />
+        ai_core contains no business logic. Runtime configs are generated while running.
+      </div>
+    </aside>
+
+    <main class="main">
+      <section class="chat">
+        <div id="messages" class="messages"></div>
+        <form id="chatForm" class="composer">
+          <textarea id="messageInput" placeholder="Type a task or question. The workflow trace will appear on the right." rows="3"></textarea>
+          <button type="submit">Run</button>
+        </form>
+      </section>
+
+      <section class="tracePanel">
+        <div class="traceHeader">
+          <span>Execution Workflow</span>
+          <button id="clearTrace">Clear</button>
+        </div>
+        <div id="trace" class="trace"></div>
+      </section>
+    </main>
   </div>
-  <div class="card">
-    <h2>Result / Trace</h2>
-    <pre id="out"></pre>
-  </div>
-</div>
-<script>
-const baseSteps = ['Input Parsing', 'Intent Recognition', 'Context Awareness', 'Workflow Planning', 'Execution', 'Feedback Learning', 'Output'];
-function renderRunning(){ document.getElementById('steps').innerHTML = baseSteps.map(s=>`<div class="step">⏳ ${s}</div>`).join(''); }
-async function send(){
-  renderRunning();
-  const res = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({message: document.getElementById('msg').value})});
-  const data = await res.json();
-  document.getElementById('out').textContent = JSON.stringify(data, null, 2);
-  const events = data.state?.step_results || {};
-  document.getElementById('steps').innerHTML = baseSteps.map(s=>`<div class="step">✅ ${s}<br/><small>${s.toLowerCase().replaceAll(' ', '_') in events ? 'completed' : ''}</small></div>`).join('');
-}
-async function saveKey(){
-  const res = await fetch('/api/keys', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({provider:document.getElementById('provider').value, api_key:document.getElementById('key').value})});
-  alert(JSON.stringify(await res.json()));
-}
-</script>
+
+  <dialog id="settingsDialog">
+    <form method="dialog" class="settings">
+      <h2>Runtime Model Settings</h2>
+      <label>Provider
+        <select id="provider">
+          <option value="auto">Auto</option>
+          <option value="ollama">Ollama</option>
+          <option value="openai">OpenAI API</option>
+        </select>
+      </label>
+      <label>OpenAI API Key
+        <input id="openaiKey" type="password" placeholder="sk-..." />
+      </label>
+      <label>OpenAI Model
+        <input id="openaiModel" value="gpt-4o-mini" />
+      </label>
+      <label>Ollama Base URL
+        <input id="ollamaBase" value="http://127.0.0.1:11434" />
+      </label>
+      <label>Ollama Model
+        <input id="ollamaModel" value="qwen3:4b" />
+      </label>
+      <menu>
+        <button value="cancel">Cancel</button>
+        <button id="saveSettings" value="default">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script src="/static/script.js"></script>
 </body>
 </html>

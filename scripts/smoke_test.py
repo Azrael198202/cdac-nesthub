@@ -1,19 +1,17 @@
-from __future__ import annotations
-
 import asyncio
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from ai_core.orchestration.engine import VerifiedOrchestrationEngine
+from ai_core.orchestration.workflow_engine import WorkflowEngine
 
 async def main():
-    engine = VerifiedOrchestrationEngine()
-    result = await engine.run("Please check the weather forecast for Tokyo tomorrow and then book a flight to Tokyo.")
-    assert "Tokyo weather" in result["final_answer"]
-    assert "departure_city" in result["final_answer"]
-    print("SMOKE TEST OK")
-    print(result["final_answer"])
-    print(result["trace_file"])
+    engine = WorkflowEngine()
+    events = []
+    async for ev in engine.run("Create a short implementation plan for a new feature."):
+        events.append(ev.to_dict())
+    assert any(e["type"] == "bootstrap" for e in events)
+    assert any(e["type"] == "workflow" for e in events)
+    print("smoke test ok; events=", len(events))
 
 if __name__ == "__main__":
     asyncio.run(main())

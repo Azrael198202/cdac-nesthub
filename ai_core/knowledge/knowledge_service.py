@@ -1,44 +1,34 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
-from ai_core.config.io import append_jsonl, read_json, write_json
-from ai_core.config.paths import RUNTIME_DATASETS_DIR, RUNTIME_KNOWLEDGE_DIR
+from ai_core.runtime.paths import RUNTIME_DIR
+from ai_core.runtime.file_store import FileStore
 
 
 class KnowledgeService:
     def __init__(self) -> None:
-        self.methods_dir = RUNTIME_KNOWLEDGE_DIR / "methods"
-        self.success_dir = RUNTIME_KNOWLEDGE_DIR / "success_cases"
+        self.store = FileStore()
+        self.path = RUNTIME_DIR / "knowledge/cases/cases.jsonl"
 
-    def _key(self, text: str) -> str:
-        normalized = " ".join(text.lower().split())
-        return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
+    def search(self, text: str, limit: int = 5) -> list[dict[str, Any]]:
+        if not self.path.exists():
+            return []
+        terms = {t.lower() for t in text.split() if len(t) > 3}
+        scored = []
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            try:
+                item = json.loads(line)
+            except Exception:
+                continue
+            hay = json.dumps(item, ensure_ascii=False).lower()
+            score = sum(1 for t in terms if t in hay)
+            if score:
+                scored.append((score, item))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [x[1] for x in scored[:limit]]
 
-    def find_similar_method(self, user_text: str) -> dict[str, Any] | None:
-        # Minimal keyword retrieval. Replace later with vector DB through runtime config.
-        lower = user_text.lower()
-        for path in self.methods_dir.glob("*.json"):
-            data = read_json(path, {})
-            kws = data.get("keywords", [])
-            if any(k.lower() in lower for k in kws):
-                return data
-        return None
-
-    def save_method(self, name: str, data: dict[str, Any]) -> Path:
-        path = self.methods_dir / f"{name}.json"
-        write_json(path, data)
-        return path
-
-    def save_success_case(self, user_text: str, data: dict[str, Any]) -> Path:
-        path = self.success_dir / f"case_{self._key(user_text)}.json"
-        write_json(path, data)
-        append_jsonl(RUNTIME_DATASETS_DIR / "finetune.jsonl", {
-            "input": user_text,
-            "output": data.get("final_answer", ""),
-            "trace": data.get("trace_id"),
-        })
-        return path
+    def save_case(self, item: dict[str, Any]) -> None:
+        self.store.append_jsonl(self.path, item)

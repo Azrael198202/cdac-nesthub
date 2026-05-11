@@ -4,8 +4,13 @@ from typing import Any
 
 
 class ApprovalService:
-    def request_approval(self, step: str, payload: dict[str, Any], interactive: bool = False) -> dict[str, Any]:
-        if not interactive:
-            return {"approved": False, "mode": "non_interactive", "note": "Approval required; demo does not book real flights."}
-        answer = input(f"Approve step {step}? y/N: ").strip().lower()
-        return {"approved": answer == "y", "mode": "interactive"}
+    def requires_review(self, node: dict[str, Any], state: dict[str, Any]) -> bool:
+        return bool(node.get("human_review"))
+
+    def create_checkpoint(self, node: dict[str, Any], result: Any) -> dict[str, Any]:
+        return {
+            "node_id": node.get("id"),
+            "review_required": True,
+            "result_preview": result,
+            "message": "Please review the generated result before the next step.",
+        }

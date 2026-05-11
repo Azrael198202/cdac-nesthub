@@ -1,5 +1,5 @@
 __pycache__/
 *.pyc
-.venv/
-runtime/secrets/*.json
-runtime/logs/*.log
+.env
+runtime/**
+!runtime/.gitkeep

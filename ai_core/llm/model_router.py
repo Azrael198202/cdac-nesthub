@@ -1,65 +1,37 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
-from ai_core.config.io import read_yaml, write_yaml
-from ai_core.config.paths import RUNTIME_MODELS_DIR
-from ai_core.llm.huggingface_client import HuggingFaceClient
-from ai_core.llm.local_rule_client import LocalRuleClient
-from ai_core.llm.ollama_client import OllamaClient
-from ai_core.llm.openai_client import OpenAIClient
-
-
-@dataclass
-class RouteDecision:
-    provider: str
-    model: str
-    reason: str
+from ai_core.llm.providers import LocalRuleProvider, OllamaProvider, OpenAIProvider, LLMResult
+from ai_core.runtime.runtime_config import RuntimeConfig
 
 
 class ModelRouter:
     def __init__(self) -> None:
-        self.routes_file = RUNTIME_MODELS_DIR / "model_routes.yaml"
+        self.config = RuntimeConfig()
 
-    def ensure_default_routes(self) -> None:
-        if self.routes_file.exists():
-            return
-        write_yaml(self.routes_file, {
-            "routes": {
-                "input_parsing": [{"provider": "local", "model": "local-rule-v1"}, {"provider": "ollama", "model": "qwen3:4b"}, {"provider": "openai", "model": "gpt-4.1-mini"}],
-                "intent_recognition": [{"provider": "local", "model": "local-rule-v1"}, {"provider": "ollama", "model": "qwen3:4b"}, {"provider": "openai", "model": "gpt-4.1-mini"}],
-                "context_awareness": [{"provider": "local", "model": "local-rule-v1"}, {"provider": "openai", "model": "gpt-4.1-mini"}],
-                "workflow_planning": [{"provider": "local", "model": "local-rule-v1"}, {"provider": "ollama", "model": "qwen3:4b"}, {"provider": "openai", "model": "gpt-4.1-mini"}],
-                "execution": [{"provider": "local", "model": "local-rule-v1"}, {"provider": "openai", "model": "gpt-4.1-mini"}],
-                "feedback_learning": [{"provider": "local", "model": "local-rule-v1"}, {"provider": "openai", "model": "gpt-4.1-mini"}],
-                "review": [{"provider": "local", "model": "local-rule-v1"}, {"provider": "openai", "model": "gpt-4.1-mini"}],
-            },
-            "policy": {"local_first": True, "hf_second": True, "external_api_last": True, "human_review_required": True}
-        })
-
-    def get_candidates(self, step: str) -> list[dict[str, str]]:
-        self.ensure_default_routes()
-        data = read_yaml(self.routes_file, {})
-        return data.get("routes", {}).get(step, data.get("routes", {}).get("review", []))
-
-    def client_for(self, provider: str, model: str):
-        if provider == "local":
-            return LocalRuleClient(model)
-        if provider == "ollama":
-            return OllamaClient(model)
-        if provider == "huggingface":
-            return HuggingFaceClient(model)
-        if provider == "openai":
-            return OpenAIClient(model)
-        return LocalRuleClient("local-rule-v1")
-
-    async def generate_with_route(self, step: str, prompt: str, **kwargs: Any):
-        errors = []
-        for cand in self.get_candidates(step):
-            client = self.client_for(cand["provider"], cand["model"])
-            result = await client.generate(prompt, **kwargs)
-            if result.ok and result.text:
+    async def complete(self, prompt: str, user_input: str, context: dict[str, Any]) -> LLMResult:
+        routes = self.config.model_routes()
+        providers_cfg = routes.get("providers", {})
+        errors: list[str] = []
+        for provider_name in routes.get("selection_order", ["local_rules", "ollama", "openai"]):
+            cfg = providers_cfg.get(provider_name, {})
+            if cfg.get("enabled") is False:
+                continue
+            provider = self._make_provider(provider_name, cfg)
+            if provider is None:
+                continue
+            result = await provider.complete(prompt, user_input, context)
+            if result.ok and result.content.strip():
                 return result
-            errors.append({"provider": cand["provider"], "model": cand["model"], "meta": result.meta})
-        return LocalRuleClient().generate(prompt, **kwargs)
+            errors.append(f"{provider_name}: {result.error}")
+        return LLMResult(False, "none", "", " | ".join(errors) or "No provider available")
+
+    def _make_provider(self, name: str, cfg: dict[str, Any]):
+        if name == "local_rules":
+            return LocalRuleProvider()
+        if name == "ollama":
+            return OllamaProvider(cfg.get("base_url", "http://127.0.0.1:11434"), cfg.get("model", "qwen3:4b"))
+        if name == "openai":
+            return OpenAIProvider(cfg.get("model", "gpt-4o-mini"))
+        return None
