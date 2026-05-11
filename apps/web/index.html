@@ -1,0 +1,338 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>AI Core Runtime</title>
+<style>
+:root {
+  --bg: #080d1d;
+  --panel: #111827;
+  --panel2: #0f172a;
+  --line: #25324a;
+  --text: #e5edff;
+  --muted: #91a1bd;
+  --blue: #2563eb;
+  --yellow: #4a3510;
+  --red: #991b1b;
+  --green: #22c55e;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  height: 100vh;
+  overflow: hidden;
+}
+.app {
+  display: grid;
+  grid-template-columns: 1fr 360px;
+  height: 100vh;
+}
+.main {
+  position: relative;
+  height: 100vh;
+  padding: 28px 30px 108px;
+  overflow: hidden;
+}
+.messages {
+  height: 100%;
+  overflow-y: auto;
+  padding-right: 10px;
+  scroll-behavior: smooth;
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 16px;
+  margin: 12px 0;
+  max-width: 880px;
+  white-space: pre-wrap;
+}
+.system { border-style: dashed; }
+.info { background: #1d4ed8; border-color: #1d4ed8; }
+.approval { background: var(--yellow); border-color: #b45309; }
+.console {
+  background: #020617;
+  border-color: #334155;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #cbd5e1;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.stderr { color: #fca5a5; }
+.stdout { color: #bbf7d0; }
+.inputbar {
+  position: fixed;
+  left: 30px;
+  right: 390px;
+  bottom: 22px;
+  z-index: 10;
+  display: flex;
+  gap: 10px;
+  background: #0b1223;
+  border: 1px solid #334155;
+  border-radius: 16px;
+  padding: 12px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.35);
+}
+.inputbar input {
+  flex: 1;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 15px;
+}
+button {
+  border: 0;
+  color: white;
+  background: var(--blue);
+  padding: 10px 16px;
+  border-radius: 12px;
+  cursor: pointer;
+  font-weight: 700;
+}
+button.reject { background: var(--red); }
+.side {
+  border-left: 1px solid var(--line);
+  height: 100vh;
+  overflow-y: auto;
+  padding: 18px 14px;
+  background: #070b19;
+}
+.side h2 {
+  margin: 0 0 14px;
+  font-size: 18px;
+}
+.event {
+  border: 1px solid var(--line);
+  background: var(--panel2);
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+.event .type {
+  color: #93c5fd;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.event .title {
+  font-weight: 800;
+  margin-bottom: 4px;
+}
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin-right: 8px;
+  border: 2px solid #64748b;
+  border-top-color: #60a5fa;
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+  vertical-align: -2px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.running {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 1px rgba(37,99,235,.15);
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <main class="main">
+    <div id="messages" class="messages">
+      <div class="card system">Runtime starts with generic configs only. Provider/model installation requires approval.</div>
+      <div class="card system">Console output is streamed here when install/start/model commands run.</div>
+    </div>
+
+    <form id="form" class="inputbar">
+      <input id="message" placeholder="Message AI Core..." autocomplete="off" />
+      <button type="submit">Send</button>
+    </form>
+  </main>
+
+  <aside class="side">
+    <h2>Execution Workflow</h2>
+    <div id="events"></div>
+  </aside>
+</div>
+
+<script>
+let currentRunId = null;
+let source = null;
+
+const messages = document.getElementById("messages");
+const events = document.getElementById("events");
+const form = document.getElementById("form");
+const input = document.getElementById("message");
+
+function scrollMessages() {
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function addCard(text, cls="card") {
+  const div = document.createElement("div");
+  div.className = cls;
+  div.textContent = text;
+  messages.appendChild(div);
+  scrollMessages();
+  return div;
+}
+
+function addHtmlCard(html, cls="card") {
+  const div = document.createElement("div");
+  div.className = cls;
+  div.innerHTML = html;
+  messages.appendChild(div);
+  scrollMessages();
+  return div;
+}
+
+function addEvent(ev) {
+  const div = document.createElement("div");
+  div.className = "event";
+  div.innerHTML = `
+    <div class="type">${ev.type || ""}</div>
+    <div class="title">${ev.title || ""}</div>
+    <div>${ev.message || ""}</div>
+  `;
+  events.prepend(div);
+}
+
+let commandBox = null;
+function ensureCommandBox() {
+  if (!commandBox) {
+    commandBox = addHtmlCard("<b><span class='spinner'></span>Console running...</b><div id='consoleLines'></div>", "card console running");
+  }
+  return commandBox.querySelector("#consoleLines");
+}
+
+function appendConsole(line, streamName) {
+  const box = ensureCommandBox();
+  const row = document.createElement("div");
+  row.className = streamName === "stderr" ? "stderr" : "stdout";
+  row.textContent = `[${streamName}] ${line}`;
+  box.appendChild(row);
+  commandBox.scrollTop = commandBox.scrollHeight;
+  scrollMessages();
+}
+
+function approvalCard(ev) {
+  const commands = ev.commands && ev.commands.length ? "\\nCommands:\\n" + ev.commands.join("\\n") : "";
+  const div = document.createElement("div");
+  div.className = "card approval";
+  div.innerHTML = `
+    <b>[Approval required]</b><br/>
+    ${ev.message || ""}${commands.replaceAll("\\n","<br/>")}
+    <div style="margin-top:12px">
+      <button class="approve">Approve</button>
+      <button class="reject reject">Reject</button>
+    </div>
+  `;
+  div.querySelector(".approve").onclick = async () => {
+    div.querySelector(".approve").disabled = true;
+    div.querySelector(".reject").disabled = true;
+    addCard("Approved. Resuming workflow...", "card system");
+    await fetch("/api/resume", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({run_id: ev.run_id || currentRunId, decision: "approve"})
+    });
+  };
+  div.querySelector(".reject").onclick = async () => {
+    div.querySelector(".approve").disabled = true;
+    div.querySelector(".reject").disabled = true;
+    addCard("Rejected. Workflow will stop.", "card system");
+    await fetch("/api/resume", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({run_id: ev.run_id || currentRunId, decision: "reject"})
+    });
+  };
+  messages.appendChild(div);
+  scrollMessages();
+}
+
+function handleEvent(ev) {
+  addEvent(ev);
+
+  switch(ev.type) {
+    case "RUN_STARTED":
+      addCard("[Run started]\\n" + ev.message);
+      break;
+    case "NODE_STARTED":
+      addCard("[" + ev.title + "]\\n" + ev.message);
+      break;
+    case "MODEL_ROUTE":
+    case "PROVIDER_CHECK":
+      addCard("[" + ev.title + "]\\n" + ev.message);
+      break;
+    case "HUMAN_REVIEW":
+      approvalCard(ev);
+      break;
+    case "COMMAND_STARTED":
+      commandBox = null;
+      addHtmlCard("<span class='spinner'></span><b>[Command started]</b><br/>" + ev.command, "card console running");
+      commandBox = messages.lastChild;
+      break;
+    case "COMMAND_OUTPUT":
+      appendConsole(ev.line, ev.stream);
+      break;
+    case "COMMAND_FINISHED":
+      if (commandBox) commandBox.classList.remove("running");
+      addCard("[Command finished]\\n" + ev.message);
+      break;
+    case "RESUMED":
+      addCard("[Run resumed]\\n" + ev.message);
+      break;
+    case "NODE_RESULT":
+      addCard("[" + ev.title + "]\\n" + JSON.stringify(ev.result, null, 2));
+      break;
+    case "RUN_COMPLETED":
+      addCard("[Final output]\\n" + ev.message);
+      if (source) source.close();
+      break;
+    case "RUN_FAILED":
+      addCard("[Run failed]\\n" + ev.message);
+      if (source) source.close();
+      break;
+  }
+}
+
+function connect(runId) {
+  if (source) source.close();
+  source = new EventSource("/api/events/" + runId);
+  source.onmessage = (msg) => {
+    const ev = JSON.parse(msg.data);
+    handleEvent(ev);
+  };
+  source.onerror = () => {
+    addCard("Stream connection closed or failed.", "card system");
+    source.close();
+  };
+}
+
+form.onsubmit = async (e) => {
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+  addCard(text, "card info");
+  input.value = "";
+
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({message: text})
+  });
+  const data = await res.json();
+  currentRunId = data.run_id;
+  connect(currentRunId);
+};
+</script>
+</body>
+</html>

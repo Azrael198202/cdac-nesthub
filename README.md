@@ -1,14 +1,18 @@
-# Self-Bootstrapping AI Core
+# Self-Bootstrap AI Core Console Stream
 
-Config-driven AI runtime with environment self-healing.
+This version focuses on real workflow resume, provider self-healing, and visible console streaming.
 
-Principles:
+## Key points
 
-- `ai_core` has no business logic.
-- `runtime/` starts empty and is generated while running.
-- Provider/model/tool/environment rules are loaded from runtime configs.
-- Missing provider/model can trigger human approval and automated install/verification.
-- UI shows ChatGPT/Codex-like step streaming and human review checkpoints.
+- `ai_core` contains no business logic.
+- `runtime/` starts almost empty.
+- Provider install/start/model pull are driven by runtime config.
+- Human approval pauses the workflow.
+- Approval resumes the same run from checkpoint.
+- Long operations stream stdout/stderr to the UI.
+- Chat input is fixed at the bottom.
+- Message history scrolls independently.
+- Execution workflow panel also streams events.
 
 ## Run
 
@@ -23,12 +27,12 @@ Open:
 http://127.0.0.1:8000
 ```
 
-## Smoke test
-
-```bash
-python scripts/smoke_test.py
-```
-
 ## Important
 
-The system can prepare install commands, but dangerous operations require human approval by default.
+Provider installation uses shell commands from:
+
+```text
+runtime/configs/environment/providers.yaml
+```
+
+The default config is generated on first run. Dangerous operations require approval.

@@ -1,104 +1,83 @@
-from __future__ import annotations
-
-from ai_core.config.paths import ensure_runtime_dirs, RUNTIME_CONFIGS_DIR, RUNTIME_DATASETS_DIR
-from ai_core.config.loader import ConfigLoader
+import platform
+import yaml
+from pathlib import Path
+from ai_core.config.paths import RUNTIME_DIR, RUNTIME_CONFIGS, RUNTIME_LOGS, RUNTIME_CHECKPOINTS, RUNTIME_TRACES
 
 
 class RuntimeBootstrap:
-    """Create only generic runtime config. No business logic belongs here."""
-
-    def __init__(self):
-        self.loader = ConfigLoader()
-
     def ensure(self) -> None:
-        ensure_runtime_dirs()
-        self._ensure_environment_config()
-        self._ensure_model_routes()
-        self._ensure_base_workflow()
-        self._ensure_dataset_files()
+        for d in [
+            RUNTIME_DIR,
+            RUNTIME_CONFIGS,
+            RUNTIME_CONFIGS / "environment",
+            RUNTIME_CONFIGS / "workflows",
+            RUNTIME_CONFIGS / "models",
+            RUNTIME_CONFIGS / "prompts",
+            RUNTIME_CONFIGS / "tools",
+            RUNTIME_LOGS,
+            RUNTIME_CHECKPOINTS,
+            RUNTIME_TRACES,
+        ]:
+            d.mkdir(parents=True, exist_ok=True)
 
-    def _ensure_environment_config(self) -> None:
-        path = RUNTIME_CONFIGS_DIR / "environment" / "providers.yaml"
-        if path.exists():
+        self._ensure_provider_config()
+        self._ensure_workflow_config()
+
+    def _ensure_provider_config(self) -> None:
+        p = RUNTIME_CONFIGS / "environment" / "providers.yaml"
+        if p.exists():
             return
-        self.loader.write(path, {
-            "defaults": {
-                "approval_required_for_install": True,
-                "auto_install_enabled": True,
-                "auto_start_enabled": True,
-                "command_timeout_seconds": 1800,
-            },
+
+        system = platform.system().lower()
+        data = {
             "providers": {
                 "ollama": {
                     "enabled": True,
-                    "kind": "local_llm_server",
-                    "base_url": "http://127.0.0.1:11434",
-                    "health_url": "http://127.0.0.1:11434/api/tags",
+                    "priority": 10,
+                    "requires_approval": True,
                     "binary": "ollama",
-                    "models": ["qwen3:4b"],
+                    "host": "http://127.0.0.1:11434",
+                    "health_url": "http://127.0.0.1:11434/api/tags",
+                    "default_model": "qwen3:4b",
                     "install": {
-                        "linux": ["curl -fsSL https://ollama.com/install.sh | sh"],
-                        "mac": ["brew install ollama"],
                         "windows": ["winget install Ollama.Ollama"],
+                        "darwin": ["brew install ollama"],
+                        "linux": ["curl -fsSL https://ollama.com/install.sh | sh"],
                     },
                     "start": {
-                        "linux": ["nohup ollama serve > runtime/logs/ollama.log 2>&1 &"],
-                        "mac": ["nohup ollama serve > runtime/logs/ollama.log 2>&1 &"],
                         "windows": ["ollama serve"],
+                        "darwin": ["ollama serve"],
+                        "linux": ["ollama serve"],
                     },
-                    "model_install": ["ollama pull {model}"],
+                    "pull_model": ["ollama pull {model}"],
                 },
                 "openai": {
                     "enabled": True,
-                    "kind": "external_llm_api",
+                    "priority": 100,
                     "requires_key": True,
-                    "env_keys": ["OPENAI_API_KEY"],
-                    "base_url": "https://api.openai.com/v1",
-                    "model": "gpt-4o-mini",
+                    "env_key": "OPENAI_API_KEY",
+                    "default_model": "gpt-4.1-mini",
                 },
-                "huggingface": {
-                    "enabled": True,
-                    "kind": "model_repository",
-                    "requires_key": False,
-                    "note": "Search/download logic can be plugged in through runtime generated adapters.",
-                },
-            },
-        })
+            }
+        }
+        p.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
-    def _ensure_model_routes(self) -> None:
-        path = RUNTIME_CONFIGS_DIR / "models" / "routes.yaml"
-        if path.exists():
+    def _ensure_workflow_config(self) -> None:
+        p = RUNTIME_CONFIGS / "workflows" / "base_orchestration.yaml"
+        if p.exists():
             return
-        self.loader.write(path, {
-            "default_route": ["ollama", "huggingface", "openai"],
-            "tasks": {
-                "input_parsing": ["ollama", "openai"],
-                "intent_recognition": ["ollama", "openai"],
-                "workflow_planning": ["ollama", "openai"],
-                "execution_review": ["ollama", "openai"],
-            },
-        })
 
-    def _ensure_base_workflow(self) -> None:
-        path = RUNTIME_CONFIGS_DIR / "workflows" / "base_orchestration.yaml"
-        if path.exists():
-            return
-        self.loader.write(path, {
+        data = {
             "workflow_id": "base_orchestration",
-            "description": "Generic orchestration. Business-specific workflow is generated in runtime after intent planning.",
+            "name": "Base Configurable Orchestration",
             "nodes": [
-                {"id": "input_parsing", "type": "llm_step", "review_required": True},
-                {"id": "intent_recognition", "type": "llm_step", "review_required": True},
-                {"id": "context_awareness", "type": "memory_step", "review_required": False},
-                {"id": "workflow_planning", "type": "llm_step", "review_required": True},
-                {"id": "execution", "type": "dynamic_execution", "review_required": True},
-                {"id": "feedback_learning", "type": "learning_step", "review_required": False},
-                {"id": "output", "type": "output_step", "review_required": False},
+                {"id": "input_parsing", "type": "llm_json", "review_required": True},
+                {"id": "intent_recognition", "type": "llm_json", "review_required": True},
+                {"id": "context_awareness", "type": "knowledge_lookup", "review_required": False},
+                {"id": "workflow_planning", "type": "llm_json", "review_required": True},
+                {"id": "execution", "type": "tool_or_agent_execution", "review_required": True},
+                {"id": "feedback_learning", "type": "learning", "review_required": False},
+                {"id": "output", "type": "output", "review_required": False},
             ],
-        })
-
-    def _ensure_dataset_files(self) -> None:
-        for name in ["finetune.jsonl", "eval_cases.jsonl"]:
-            path = RUNTIME_DATASETS_DIR / name
-            if not path.exists():
-                path.write_text("", encoding="utf-8")
+        }
+        p.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
