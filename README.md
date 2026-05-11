@@ -1,34 +1,22 @@
-# AI Core Dynamic Capability Runtime v2
+# AI Core Config-Driven Node Runtime v3
 
-This version fixes the previous skeleton behavior.
+This version enforces the rule that `ai_core` must not contain business/domain/task-specific logic.
 
-## Changes in v2
+## Key Principle
 
-1. UI
-   - User input is shown on the right side.
-   - System/runtime messages are shown on the left side.
-   - Smaller console-like font.
-   - Human review supports Approve / Reject / Modify.
+```text
+ai_core = interpreter / executor
+runtime/generated = generated brain logic
+```
 
-2. Core
-   - Capability readiness is not treated as the node result.
-   - After a capability is ready, the node is actually executed by a generic node runner.
+## What changed
 
-3. Human Review
-   - Approve: continue the workflow.
-   - Reject: enter a reason and retry the current node.
-   - Modify: edit the JSON result and continue with the modified value.
-
-4. Input Parsing
-   - The input parsing node performs real structural parsing.
-   - It outputs:
-     - language
-     - intent_type
-     - tasks
-     - missing_information
-     - required_capabilities
-     - safety_notes
-     - original_input
+- `ai_core/nodes/node_runner.py` is only a generic entry point.
+- Node behavior is loaded from `runtime/generated/nodes/*.yaml`.
+- Prompts are loaded from `runtime/generated/prompts/*.yaml`.
+- Output schemas are loaded from `runtime/generated/schemas/*.json`.
+- Execution is delegated to generic executors: `llm_json`, `tool_call`, `workflow_call`, `mcp_call`, `human_review`, `python_plugin`, `static_transform`.
+- No fixed input parsing, intent analysis, workflow planning, weather, flight, booking, SDLC, family, expense, or domain logic exists inside `ai_core`.
 
 ## Run
 
@@ -41,4 +29,10 @@ Open:
 
 ```text
 http://127.0.0.1:8000
+```
+
+## Smoke test
+
+```bash
+python scripts/smoke_test.py
 ```
