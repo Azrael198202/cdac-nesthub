@@ -1,4 +1,4 @@
-# AI Core Config-Driven Node Runtime v6
+# AI Core Config-Driven Node Runtime v7
 
 This version enforces the rule that `ai_core` must not contain business/domain/task-specific logic.
 
@@ -38,18 +38,30 @@ python scripts/smoke_test.py
 ```
 
 
-## v6 Fix
+## v7 Fix
 
-- Updated UI version label from v3 to v6.
+- Updated UI version label from v3 to v7.
 - Added `/api/version`.
 - Added no-cache headers for `/`.
 - This avoids confusion when the browser or an old server process displays stale UI text.
 
 
-## v6 Fix
+## v7 Fix
 
 - Fixed JavaScript syntax errors in `apps/web/index.html`.
 - `/api/chat` now returns `run_id` immediately.
 - Workflow execution starts in a background task.
 - UI now displays `POST /api/chat` errors and SSE connection status.
 - Added `.vscode/launch.json` and `.vscode/tasks.json`.
+
+
+## v7 Update
+
+- Added `runtime/generated/adapters/*.yaml`.
+- `LLMJsonExecutor` calls a real configured provider instead of returning a placeholder.
+- Provider config is generated at `runtime/configs/models/providers.yaml`.
+- Supported provider protocols:
+  - Ollama `/api/chat`
+  - OpenAI Chat Completions
+- If no provider is available, the workflow shows a clear `Node execution failed` message.
+- `ai_core` still has no domain/task/business logic.
