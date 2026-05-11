@@ -20,9 +20,39 @@ class WorkflowRuntime:
             try: weights.append(int(self.node_loader.load(n).get('progress_weight',1)))
             except Exception: weights.append(1)
         total=sum(weights) or 1; return int(sum(weights[:idx])/total*100)
-    async def start(self,message:str)->str:
-        self.bootstrap.ensure(); run_id=uuid.uuid4().hex[:12]; state={'run_id':run_id,'input':message,'workflow':self._load_workflow(),'node_index':0,'results':{},'progress':0}
-        await self._emit(run_id,{'type':'RUN_STARTED','title':'Run started','message':'Starting config-driven node orchestration.','progress':0}); await self._continue(state); return run_id
+    async def prepare(self, message: str) -> tuple[str, dict]:
+        self.bootstrap.ensure()
+        run_id = uuid.uuid4().hex[:12]
+        state = {
+            'run_id': run_id,
+            'input': message,
+            'workflow': self._load_workflow(),
+            'node_index': 0,
+            'results': {},
+            'progress': 0,
+        }
+        await self._emit(run_id, {
+            'type': 'RUN_CREATED',
+            'title': 'Run created',
+            'message': 'Run id created. Event stream can connect now.',
+            'progress': 0,
+        })
+        return run_id, state
+
+    async def run_prepared(self, state: dict) -> None:
+        run_id = state['run_id']
+        await self._emit(run_id, {
+            'type': 'RUN_STARTED',
+            'title': 'Run started',
+            'message': 'Starting config-driven node orchestration.',
+            'progress': 0,
+        })
+        await self._continue(state)
+
+    async def start(self, message: str) -> str:
+        run_id, state = await self.prepare(message)
+        await self.run_prepared(state)
+        return run_id
     async def resume(self, run_id: str, decision: str='approve', modified_result: dict|None=None, feedback: str|None=None)->None:
         state=self.checkpoints.load(run_id)
         if not state: await self._emit(run_id,{'type':'RUN_FAILED','title':'Resume failed','message':'Checkpoint not found.'}); return

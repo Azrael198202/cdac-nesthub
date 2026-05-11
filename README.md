@@ -1,4 +1,4 @@
-# AI Core Config-Driven Node Runtime v3
+# AI Core Config-Driven Node Runtime v4
 
 This version enforces the rule that `ai_core` must not contain business/domain/task-specific logic.
 
@@ -35,4 +35,31 @@ http://127.0.0.1:8000
 
 ```bash
 python scripts/smoke_test.py
+```
+
+
+## v4 Fix
+
+`/api/chat` now returns `run_id` immediately and starts workflow execution in the background.
+
+Before:
+
+```text
+POST /api/chat waits until the workflow reaches a checkpoint
+↓
+UI cannot connect to SSE immediately
+↓
+Looks like no response
+```
+
+Now:
+
+```text
+POST /api/chat returns run_id immediately
+↓
+UI connects to /api/events/{run_id}
+↓
+Workflow runs in background
+↓
+Events stream to the chat area and workflow panel
 ```

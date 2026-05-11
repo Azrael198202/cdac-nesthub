@@ -1,0 +1,11 @@
+capability_id: generic_tool_execution
+type: generic_capability
+description: Generic runtime capability.
+detect: {}
+install: {}
+verify: {}
+runtime_register:
+  tool_name: generic_tool_execution
+security:
+  approval_required: false
+  risk_level: low

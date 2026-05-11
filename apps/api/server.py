@@ -12,7 +12,10 @@ class ResumeRequest(BaseModel):
 @app.get('/')
 async def home(): return HTMLResponse(open('apps/web/index.html','r',encoding='utf-8').read())
 @app.post('/api/chat')
-async def chat(req: ChatRequest): return {'run_id': await runtime.start(req.message)}
+async def chat(req: ChatRequest):
+    run_id, state = await runtime.prepare(req.message)
+    asyncio.create_task(runtime.run_prepared(state))
+    return {'run_id': run_id}
 @app.post('/api/resume')
 async def resume(req: ResumeRequest): asyncio.create_task(runtime.resume(req.run_id,req.decision,req.modified_result,req.feedback)); return {'ok':True,'run_id':req.run_id}
 @app.get('/api/events/{run_id}')
