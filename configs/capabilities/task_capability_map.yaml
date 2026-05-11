@@ -1,0 +1,27 @@
+intent_recognition:
+  - classification
+  - json_output
+
+workflow_planning:
+  - workflow_planning
+  - reasoning
+  - json_output
+
+deep_research_analysis:
+  - research
+  - evidence_analysis
+  - citation
+
+sdlc_requirement:
+  - japanese
+  - requirement_analysis
+  - document_generation
+
+sdlc_basic_design:
+  - japanese
+  - architecture
+  - basic_design
+
+code_generation:
+  - code_generation
+  - architecture

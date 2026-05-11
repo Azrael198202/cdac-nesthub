@@ -1,0 +1,10 @@
+short_term:
+  enabled: true
+  max_messages: 20
+
+long_term:
+  enabled: true
+  vector_db: weaviate
+
+conversation_history:
+  enabled: true
