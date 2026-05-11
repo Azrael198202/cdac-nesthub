@@ -1,0 +1,78 @@
+{
+  "request_id": "002d473561ba4ffbbdbb39166ecdf903",
+  "user_input": "Please check the weather forecast for Tokyo tomorrow and then book a flight to Tokyo.",
+  "intent": {
+    "primary_intent": "multi_step_travel_assistant",
+    "confidence": 0.93,
+    "intents": [
+      {
+        "name": "weather_forecast",
+        "confidence": 0.95,
+        "slots": {
+          "location": "Tokyo",
+          "date": "tomorrow"
+        }
+      },
+      {
+        "name": "flight_booking",
+        "confidence": 0.91,
+        "slots": {
+          "destination": "Tokyo"
+        }
+      }
+    ]
+  },
+  "context": {
+    "conversation_id": "demo",
+    "memory_used": [
+      "short_term",
+      "long_term"
+    ]
+  },
+  "plan": [
+    {
+      "id": "check_weather",
+      "tool": "weather_forecast",
+      "args": {
+        "location": "Tokyo",
+        "date": "tomorrow"
+      }
+    },
+    {
+      "id": "book_flight",
+      "tool": "flight_booking",
+      "args": {
+        "destination": "Tokyo"
+      },
+      "approval_required": true
+    }
+  ],
+  "tool_results": [
+    {
+      "tool": "weather_forecast",
+      "location": "Tokyo",
+      "date": "2026-05-12",
+      "summary": "Tokyo 2026-05-12: cloudy with possible light rain, 18-24°C (mock forecast)",
+      "source": "mock_weather_runtime_tool"
+    },
+    {
+      "tool": "flight_booking",
+      "status": "approval_required",
+      "summary": "真实订票前需要人工确认。已生成预订草案：destination=Tokyo, cabin=economy, passenger=current_user。",
+      "booking_draft": {
+        "destination": "Tokyo",
+        "cabin": "economy",
+        "status": "draft_only"
+      }
+    }
+  ],
+  "approvals": [
+    {
+      "step_id": "book_flight",
+      "tool": "flight_booking",
+      "status": "auto_demo_approved",
+      "note": "Demo mode only. Real booking must require human confirmation."
+    }
+  ],
+  "final_answer": "已完成处理。东京明天天气：Tokyo 2026-05-12: cloudy with possible light rain, 18-24°C (mock forecast)。机票预订结果：真实订票前需要人工确认。已生成预订草案：destination=Tokyo, cabin=economy, passenger=current_user。。"
+}

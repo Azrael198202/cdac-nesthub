@@ -1,0 +1,11 @@
+tools:
+  weather_forecast:
+    type: builtin
+    enabled: true
+  flight_booking:
+    type: builtin
+    enabled: true
+    approval_required: true
+  web_search:
+    type: builtin
+    enabled: true

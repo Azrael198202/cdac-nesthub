@@ -1,0 +1,4 @@
+intent_recognition: [classification, json_output]
+workflow_planning: [workflow_planning, json_output, reasoning]
+weather_forecast: [tool_call, external_data]
+flight_booking: [tool_call, approval_required]

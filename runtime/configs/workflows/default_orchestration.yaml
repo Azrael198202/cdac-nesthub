@@ -1,0 +1,23 @@
+workflow_id: default_orchestration
+name: Runtime Config Default Orchestration
+nodes:
+  - id: intent_recognition
+    type: intent
+    prompt: prompts/intent/default_intent.yaml
+    description: Detect user goal and extract entities.
+  - id: context_awareness
+    type: context
+    description: Load memory, profile, RAG context.
+  - id: workflow_planning
+    type: planner
+    prompt: prompts/workflow/default_planner.yaml
+    description: Generate executable tool plan.
+  - id: execution
+    type: executor
+    description: Execute tools with approval checkpoints.
+  - id: feedback_learning
+    type: feedback
+    description: Store trace and learning samples.
+  - id: output
+    type: output
+    description: Format final answer.

@@ -1,0 +1,1 @@
+{"type":"object","required":["workflow_id","nodes"],"properties":{"workflow_id":{"type":"string"},"nodes":{"type":"array"}}}
