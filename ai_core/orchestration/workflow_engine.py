@@ -1,151 +1,88 @@
 from __future__ import annotations
+from typing import AsyncGenerator
+import json
+import time
 
-from datetime import datetime, timezone
-from typing import Any, AsyncGenerator
-import uuid
-
-from ai_core.runtime.bootstrap import RuntimeBootstrapper
-from ai_core.runtime.runtime_config import RuntimeConfig
-from ai_core.runtime.file_store import FileStore
-from ai_core.runtime.paths import RUNTIME_DIR
-from ai_core.orchestration.events import WorkflowEvent
-from ai_core.orchestration.node_executor import NodeExecutor
-from ai_core.memory.conversation_store import ConversationStore
+from ai_core.config.loader import ConfigLoader
+from ai_core.config.paths import RUNTIME_CONFIGS_DIR, RUNTIME_TRACES_DIR
+from ai_core.llm.model_router import ModelRouter
+from ai_core.security.approval_service import ApprovalService
+from ai_core.knowledge.knowledge_store import KnowledgeStore
+from ai_core.utils.events import StreamEvent
 
 
 class WorkflowEngine:
-    """Generic config-driven workflow engine.
+    """Generic workflow engine. No business-specific code."""
 
-    It knows only workflow/node execution mechanics. Business content must be
-    generated in runtime configs or tools, not hardcoded here.
-    """
+    def __init__(self, approval: ApprovalService):
+        self.loader = ConfigLoader()
+        self.approval = approval
+        self.router = ModelRouter(approval)
+        self.knowledge = KnowledgeStore()
 
-    def __init__(self) -> None:
-        self.bootstrapper = RuntimeBootstrapper()
-        self.config = RuntimeConfig()
-        self.executor = NodeExecutor()
-        self.store = FileStore()
-        self.conversation = ConversationStore()
+    def _workflow(self) -> dict:
+        return self.loader.read(RUNTIME_CONFIGS_DIR / "workflows" / "base_orchestration.yaml", default={}) or {"nodes": []}
 
-    async def run(self, user_input: str) -> AsyncGenerator[WorkflowEvent, None]:
-        run_id = uuid.uuid4().hex[:12]
-        self.conversation.append("user", user_input, {"run_id": run_id})
-        async for ev in self._run_from(run_id=run_id, user_input=user_input, start_index=0, state=None, approval=None):
-            yield ev
+    async def run(self, user_input: str) -> AsyncGenerator[StreamEvent, None]:
+        run_id = str(int(time.time() * 1000))
+        state: dict = {"run_id": run_id, "user_input": user_input, "steps": []}
+        workflow = self._workflow()
+        yield StreamEvent("run_started", "Run started", "Starting configurable orchestration.", {"run_id": run_id})
 
-    async def resume(self, run_id: str, approved: bool, comment: str | None = None) -> AsyncGenerator[WorkflowEvent, None]:
-        session = self._read_session(run_id)
-        if not session:
-            yield WorkflowEvent("error", "Session not found", f"No waiting session found for run_id={run_id}", "blocked")
-            return
-        approval = {"approved": approved, "comment": comment or "", "time": datetime.now(timezone.utc).isoformat()}
-        state = session.get("state", {})
-        state.setdefault("human_reviews", []).append({
-            "node_id": session.get("waiting_node_id"),
-            **approval,
-        })
-        if not approved:
-            yield WorkflowEvent("human_rejected", "Human rejected checkpoint", comment or "The previous step was rejected.", "blocked")
-            self._delete_session(run_id)
-            self._write_trace(run_id, session.get("trace", []), state)
-            return
-        yield WorkflowEvent("human_approved", "Human approved checkpoint", comment or "Continuing workflow.", "completed", {
-            "run_id": run_id,
-            "node_id": session.get("waiting_node_id"),
-        })
-        async for ev in self._run_from(
-            run_id=run_id,
-            user_input=session.get("user_input", ""),
-            start_index=int(session.get("next_index", 0)),
-            state=state,
-            approval=approval,
-            trace=session.get("trace", []),
-        ):
-            yield ev
-
-    async def _run_from(
-        self,
-        run_id: str,
-        user_input: str,
-        start_index: int,
-        state: dict[str, Any] | None,
-        approval: dict[str, Any] | None,
-        trace: list[dict[str, Any]] | None = None,
-    ) -> AsyncGenerator[WorkflowEvent, None]:
-        trace = trace or []
-        if start_index == 0:
-            status = self.bootstrapper.bootstrap()
-            ev = WorkflowEvent("bootstrap", "Runtime bootstrap", status.message, "completed", {"run_id": run_id, **status.__dict__})
-            trace.append(ev.to_dict()); yield ev
-
-        workflow = self.config.workflow("base_orchestration")
-        if not workflow:
-            ev = WorkflowEvent("error", "Workflow missing", "runtime/configs/workflows/base_orchestration.yaml was not found", "blocked", {"run_id": run_id})
-            trace.append(ev.to_dict()); yield ev; return
-
-        if state is None:
-            state = {"run_id": run_id, "user_input": user_input, "node_results": {}, "errors": {}, "human_reviews": []}
-            ev = WorkflowEvent("workflow", "Workflow loaded", workflow.get("name", "unnamed"), "completed", {"run_id": run_id, "workflow": workflow})
-            trace.append(ev.to_dict()); yield ev
-
-        nodes = workflow.get("nodes", [])
-        for idx in range(start_index, len(nodes)):
-            node = nodes[idx]
-            node_events: list[WorkflowEvent] = []
-            async for event in self.executor.execute(node, state):
-                if event.data is None:
-                    event.data = {"run_id": run_id}
-                elif isinstance(event.data, dict):
-                    event.data.setdefault("run_id", run_id)
-                node_events.append(event)
-                trace.append(event.to_dict())
-
-                if event.status == "blocked":
-                    self._write_trace(run_id, trace, state)
-                    self._delete_session(run_id)
-                    yield event
+        for node in workflow.get("nodes", []):
+            node_id = node.get("id")
+            yield StreamEvent("node_started", node_id, "Executing node.", {"node": node})
+            if node.get("type") == "llm_step":
+                prompt = self._build_generic_prompt(node_id, state)
+                async for ev in self.router.generate(node_id, prompt):
+                    yield ev
+                    if ev.type == "model_output":
+                        state[node_id] = ev.message
+                if node.get("review_required"):
+                    req = self.approval.create(
+                        "review_node_result",
+                        f"Review result for node '{node_id}' before continuing.",
+                        {"run_id": run_id, "node_id": node_id, "result": state.get(node_id, "")},
+                    )
+                    yield StreamEvent("human_review", "Human review required", req.message, {"approval_id": req.approval_id, "node_id": node_id})
                     return
+            elif node.get("type") == "memory_step":
+                yield StreamEvent("memory", node_id, "Loaded recent context and runtime knowledge index.")
+                state[node_id] = "context_loaded"
+            elif node.get("type") == "dynamic_execution":
+                yield StreamEvent("execution", node_id, "Execution is configuration-driven. Waiting for generated workflow/tool definitions if required.")
+                req = self.approval.create("review_execution_plan", "Approve execution phase plan before running generated tools.", {"run_id": run_id, "state": state})
+                yield StreamEvent("human_review", "Human review required", req.message, {"approval_id": req.approval_id, "node_id": node_id})
+                return
+            elif node.get("type") == "learning_step":
+                self.knowledge.save_case({"run_id": run_id, "input": user_input, "state": state})
+                self.knowledge.append_finetune({"messages": [{"role": "user", "content": user_input}, {"role": "assistant", "content": json.dumps(state, ensure_ascii=False)}]})
+                yield StreamEvent("learning", node_id, "Saved trace and learning sample.")
+            elif node.get("type") == "output_step":
+                final = self._final_output(state)
+                yield StreamEvent("final", "Final Output", final, {"state": state})
+            state["steps"].append(node_id)
+            yield StreamEvent("node_completed", node_id, "Node completed.")
 
-                if event.status == "waiting":
-                    self._write_session(run_id, {
-                        "run_id": run_id,
-                        "user_input": user_input,
-                        "state": state,
-                        "trace": trace,
-                        "workflow_id": workflow.get("workflow_id", "base_orchestration"),
-                        "waiting_node_id": node.get("id"),
-                        "next_index": idx + 1,
-                        "created_at": datetime.now(timezone.utc).isoformat(),
-                    })
-                    yield event
-                    return
+        self._save_trace(run_id, state)
+        yield StreamEvent("run_completed", "Run completed", "Workflow completed.", {"run_id": run_id})
 
-                yield event
+    def _build_generic_prompt(self, node_id: str, state: dict) -> str:
+        return (
+            "You are a configurable AI runtime node.\n"
+            "Do not invent tool results.\n"
+            "Return structured JSON where possible.\n"
+            f"Node: {node_id}\n"
+            f"Current state: {json.dumps(state, ensure_ascii=False)}\n"
+        )
 
-        self._delete_session(run_id)
-        self._write_trace(run_id, trace, state)
+    def _final_output(self, state: dict) -> str:
+        parts = []
+        for key in ["input_parsing", "intent_recognition", "workflow_planning"]:
+            if key in state:
+                parts.append(f"[{key}]\n{state[key]}")
+        return "\n\n".join(parts) if parts else "No final output was produced because the workflow is waiting for configuration, provider, or human review."
 
-    def _session_path(self, run_id: str):
-        return RUNTIME_DIR / f"sessions/{run_id}.json"
-
-    def _read_session(self, run_id: str) -> dict[str, Any] | None:
-        path = self._session_path(run_id)
-        if not path.exists():
-            return None
-        return self.store.read_json(path, {})
-
-    def _write_session(self, run_id: str, payload: dict[str, Any]) -> None:
-        self.store.write_json(self._session_path(run_id), payload)
-
-    def _delete_session(self, run_id: str) -> None:
-        path = self._session_path(run_id)
-        if path.exists():
-            path.unlink()
-
-    def _write_trace(self, run_id: str, trace: list[dict[str, Any]], state: dict[str, Any]) -> None:
-        self.store.write_json(RUNTIME_DIR / f"traces/{run_id}.json", {
-            "run_id": run_id,
-            "time": datetime.now(timezone.utc).isoformat(),
-            "trace": trace,
-            "state": state,
-        })
+    def _save_trace(self, run_id: str, state: dict) -> None:
+        RUNTIME_TRACES_DIR.mkdir(parents=True, exist_ok=True)
+        (RUNTIME_TRACES_DIR / f"{run_id}.json").write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")

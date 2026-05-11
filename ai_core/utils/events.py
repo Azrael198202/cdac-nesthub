@@ -1,0 +1,18 @@
+from __future__ import annotations
+from dataclasses import dataclass, asdict
+from typing import Any
+import time
+import json
+
+
+@dataclass
+class StreamEvent:
+    type: str
+    title: str
+    message: str = ""
+    data: dict[str, Any] | None = None
+
+    def to_sse(self) -> str:
+        payload = asdict(self)
+        payload["ts"] = time.time()
+        return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"

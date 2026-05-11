@@ -1,0 +1,7 @@
+{
+  "type": "object",
+  "properties": {
+    "providers": { "type": "object" }
+  },
+  "required": ["providers"]
+}
