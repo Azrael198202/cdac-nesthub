@@ -1,51 +1,30 @@
-# Web API / UI
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 pydantic>=2.6.0
-python-multipart>=0.0.9
-jinja2>=3.1.3
-sse-starlette>=2.1.0
-
-# Config / schema
 pyyaml>=6.0.1
 jsonschema>=4.21.1
-python-dotenv>=1.0.1
-
-# HTTP / API clients
 httpx>=0.26.0
-requests>=2.31.0
-aiofiles>=23.2.1
-
-# LLM / Agent / Workflow
+python-dotenv>=1.0.1
+sse-starlette>=2.1.0
 litellm>=1.35.0
 langchain>=0.2.0
 langchain-core>=0.2.0
 langchain-community>=0.2.0
 langgraph>=0.2.0
 openai>=1.30.0
-
-# Local / HuggingFace model management
 huggingface-hub>=0.23.0
 transformers>=4.41.0
 accelerate>=0.30.0
 sentence-transformers>=2.7.0
-
-# RAG / vector / document parsing
 chromadb>=0.5.0
 faiss-cpu>=1.8.0
 pypdf>=4.2.0
 python-docx>=1.1.2
 openpyxl>=3.1.2
 beautifulsoup4>=4.12.3
-lxml>=5.2.1
-
-# Tooling / browser / shell / retry
 playwright>=1.44.0
 tenacity>=8.2.3
 pexpect>=4.9.0; platform_system != "Windows"
-
-# Monitoring / utils
 rich>=13.7.1
 loguru>=0.7.2
-tiktoken>=0.7.0
 psutil>=5.9.8

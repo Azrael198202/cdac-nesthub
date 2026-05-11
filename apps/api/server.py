@@ -2,6 +2,7 @@ import asyncio
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
+from typing import Any
 from ai_core.orchestration.workflow_runtime import WorkflowRuntime
 from ai_core.events.event_bus import event_bus
 
@@ -16,6 +17,8 @@ class ChatRequest(BaseModel):
 class ResumeRequest(BaseModel):
     run_id: str
     decision: str = "approve"
+    modified_result: dict[str, Any] | None = None
+    feedback: str | None = None
 
 
 @app.get("/")
@@ -31,7 +34,7 @@ async def chat(req: ChatRequest):
 
 @app.post("/api/resume")
 async def resume(req: ResumeRequest):
-    asyncio.create_task(runtime.resume(req.run_id, req.decision))
+    asyncio.create_task(runtime.resume(req.run_id, req.decision, req.modified_result, req.feedback))
     return {"ok": True, "run_id": req.run_id}
 
 
