@@ -4,6 +4,7 @@ from ai_core.executors.template_engine import TemplateEngine
 from ai_core.validation.schema_validator import SchemaValidator
 from ai_core.llm.provider_router import ProviderRouter
 from ai_core.events.event_bus import event_bus
+from ai_core.evolution.correction_learning import CorrectionLearningService
 
 
 class LLMJsonExecutor:
@@ -18,6 +19,7 @@ class LLMJsonExecutor:
         self.template = TemplateEngine()
         self.validator = SchemaValidator()
         self.router = ProviderRouter()
+        self.correction_learning = CorrectionLearningService()
 
     async def execute(self, workflow_node: dict, node_config: dict, state: dict, capability_result: dict) -> dict:
         run_id = state["run_id"]
@@ -42,12 +44,27 @@ class LLMJsonExecutor:
             "prompt_id": prompt.get("id"),
         })
 
+        correction_memory = self.correction_learning.build_prompt_reinforcement(
+            node_id=node_id,
+            user_input=state.get("input", ""),
+        )
+
         rendered = self.template.render(prompt.get("user_template", ""), {
             "user_input": state.get("input", ""),
             "previous_results": state.get("results", {}),
             "capability_result": capability_result,
             "human_feedback": state.get("human_feedback", []),
+            "correction_memory": correction_memory,
         })
+
+        if correction_memory:
+            rendered = rendered + "\n\n" + correction_memory
+            await event_bus.emit(run_id, {
+                "type": "CORRECTION_MEMORY_APPLIED",
+                "title": "Correction memory applied",
+                "message": f"Applied correction memory for node={node_id}.",
+                "node_id": node_id,
+            })
 
         await event_bus.emit(run_id, {
             "type": "LLM_PROMPT_RENDERED",

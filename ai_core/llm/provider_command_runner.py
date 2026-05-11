@@ -1,15 +1,31 @@
 import asyncio
 from ai_core.events.event_bus import event_bus
+from ai_core.environment.binary_resolver import BinaryResolver
 
 
 class ProviderCommandRunner:
+    def __init__(self) -> None:
+        self.binary_resolver = BinaryResolver()
+
     async def run(self, run_id: str, title: str, command: str, timeout_seconds: int = 3600) -> int:
+        original_command = command
+        command = self.binary_resolver.rewrite_command(command)
+
         await event_bus.emit(run_id, {
             "type": "PROVIDER_COMMAND_STARTED",
             "title": title,
             "message": command,
+            "original_command": original_command,
             "command": command,
         })
+
+        if command != original_command:
+            await event_bus.emit(run_id, {
+                "type": "PROVIDER_COMMAND_RESOLVED",
+                "title": "Command binary resolved",
+                "message": f"{original_command} -> {command}",
+                "command": command,
+            })
 
         process = await asyncio.create_subprocess_shell(
             command,

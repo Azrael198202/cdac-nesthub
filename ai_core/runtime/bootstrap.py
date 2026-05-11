@@ -178,7 +178,7 @@ class RuntimeBootstrap:
                 "version": "1.0",
                 "executor_type": "llm_json",
                 "system": "You are a generic input parsing engine. Return JSON only according to the output schema. Do not execute tools.",
-                "user_template": "User input: {{ user_input }}\nPrevious results: {{ previous_results }}",
+                "user_template": "User input: {{ user_input }}\nPrevious results: {{ previous_results }}\nCorrection memory: {{ correction_memory }}",
                 "output_contract": {
                     "language": "string",
                     "intent_type": "string",
@@ -194,7 +194,7 @@ class RuntimeBootstrap:
                 "version": "1.0",
                 "executor_type": "llm_json",
                 "system": "You are a generic intent recognition engine. Use previous node results and return JSON only.",
-                "user_template": "User input: {{ user_input }}\nPrevious results: {{ previous_results }}",
+                "user_template": "User input: {{ user_input }}\nPrevious results: {{ previous_results }}\nCorrection memory: {{ correction_memory }}",
                 "output_contract": {
                     "intent_type": "string",
                     "confidence": "number",
@@ -208,7 +208,7 @@ class RuntimeBootstrap:
                 "version": "1.0",
                 "executor_type": "llm_json",
                 "system": "You are a generic workflow planner. Produce a plan from previous structured results. Return JSON only.",
-                "user_template": "User input: {{ user_input }}\nPrevious results: {{ previous_results }}",
+                "user_template": "User input: {{ user_input }}\nPrevious results: {{ previous_results }}\nCorrection memory: {{ correction_memory }}",
                 "output_contract": {
                     "planned_steps": "array",
                     "blocking_missing_information": "array",

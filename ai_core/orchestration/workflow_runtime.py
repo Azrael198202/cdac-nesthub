@@ -12,6 +12,7 @@ from ai_core.nodes.node_runner import NodeRunner
 from ai_core.nodes.node_config_loader import NodeConfigLoader
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.evolution.finetune_dataset_builder import FinetuneDatasetBuilder
+from ai_core.evolution.correction_learning import CorrectionLearningService
 
 
 class WorkflowRuntime:
@@ -25,6 +26,7 @@ class WorkflowRuntime:
         self.node_loader = NodeConfigLoader()
         self.knowledge = KnowledgeService()
         self.dataset = FinetuneDatasetBuilder()
+        self.correction_learning = CorrectionLearningService()
 
     def _load_workflow(self) -> Dict[str, Any]:
         return self.loader.load_yaml(RUNTIME_CONFIGS / "workflows" / "base_orchestration.yaml")
@@ -148,10 +150,30 @@ class WorkflowRuntime:
                 })
                 return
 
+            original_output = state.get("results", {}).get(node_id, {})
+
+            self.correction_learning.record_correction(
+                run_id=run_id,
+                node_id=node_id,
+                user_input=state.get("input", ""),
+                original_output=original_output,
+                modified_output=modified_result,
+                feedback=feedback,
+            )
+
+            await self._emit(run_id, {
+                "type": "CORRECTION_RECORDED",
+                "title": "Correction recorded",
+                "message": "Saved to runtime/datasets/corrections.jsonl and prompt optimization memory.",
+                "node_id": node_id,
+            })
+
             state["results"][node_id] = modified_result
             state.setdefault("human_modifications", []).append({
                 "node_id": node_id,
-                "modified_result": modified_result
+                "original_output": original_output,
+                "modified_result": modified_result,
+                "feedback": feedback or "",
             })
 
             await self._emit(run_id, {

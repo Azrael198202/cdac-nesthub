@@ -1,4 +1,4 @@
-# AI Core Config-Driven Node Runtime v10
+# AI Core Config-Driven Node Runtime v11
 
 This version enforces the rule that `ai_core` must not contain business/domain/task-specific logic.
 
@@ -38,15 +38,15 @@ python scripts/smoke_test.py
 ```
 
 
-## v10 Fix
+## v11 Fix
 
-- Updated UI version label from v3 to v10.
+- Updated UI version label from v3 to v11.
 - Added `/api/version`.
 - Added no-cache headers for `/`.
 - This avoids confusion when the browser or an old server process displays stale UI text.
 
 
-## v10 Fix
+## v11 Fix
 
 - Fixed JavaScript syntax errors in `apps/web/index.html`.
 - `/api/chat` now returns `run_id` immediately.
@@ -55,7 +55,7 @@ python scripts/smoke_test.py
 - Added `.vscode/launch.json` and `.vscode/tasks.json`.
 
 
-## v10 Update
+## v11 Update
 
 - Added `runtime/generated/adapters/*.yaml`.
 - `LLMJsonExecutor` calls a real configured provider instead of returning a placeholder.
@@ -67,7 +67,7 @@ python scripts/smoke_test.py
 - `ai_core` still has no domain/task/business logic.
 
 
-## v10 Update
+## v11 Update
 
 Adds visible execution status for model calls.
 
@@ -99,7 +99,7 @@ Completed / Failed
 This makes it clear whether the backend is still waiting for the model, checking health, parsing JSON, or failed.
 
 
-## v10 Update
+## v11 Update
 
 Adds provider setup automation.
 
@@ -126,7 +126,7 @@ runtime/configs/secrets/secrets.json
 For production, replace the file-based secret store with OS Keychain, Vault, or a cloud secret manager.
 
 
-## v10 Fix
+## v11 Fix
 
 - Rewrites `RuntimeBootstrap` to always create:
   - `runtime/configs/models/providers.yaml`
@@ -141,3 +141,43 @@ For production, replace the file-based secret store with OS Keychain, Vault, or 
 rm -rf runtime
 python main.py
 ```
+
+
+## v11 Update
+
+### Fix: Ollama command not found
+
+When the Ollama service is running but the command `ollama` is not in the current PATH, runtime now resolves common executable locations before running:
+
+```bash
+ollama pull <model>
+```
+
+On Windows it may rewrite it to:
+
+```text
+"C:\Users\...\AppData\Local\Programs\Ollama\ollama.exe" pull qwen3:4b
+```
+
+### Runtime Learning
+
+When the user clicks `Modify JSON & Continue`, runtime records:
+
+```text
+original_output
+modified_output
+feedback
+node_id
+user_input
+```
+
+Into:
+
+```text
+runtime/datasets/corrections.jsonl
+runtime/knowledge/prompt_optimization_memory.jsonl
+```
+
+### Correction Memory Retrieval
+
+For future similar tasks, the executor retrieves correction memory and injects it into the prompt.
