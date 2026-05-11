@@ -126,10 +126,33 @@ class ProviderRouter:
             "provider": provider_name,
         })
 
-        async with httpx.AsyncClient(timeout=5) as client:
-            health = await client.get(base + "/api/tags")
-            health.raise_for_status()
-            tags = health.json()
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                health = await client.get(base + "/api/tags")
+                health.raise_for_status()
+                tags = health.json()
+        except Exception as exc:
+            if provider.get("auto_start", True):
+                await event_bus.emit(run_id, {
+                    "type": "LLM_PROVIDER_AUTOSTART",
+                    "title": "Starting provider service",
+                    "message": provider.get("start_command", "ollama serve"),
+                    "node_id": node_id,
+                    "provider": provider_name,
+                })
+                start_command = provider.get("start_command", "ollama serve")
+                await self.command_runner.run(
+                    run_id=run_id,
+                    title=f"Start provider {provider_name}",
+                    command=start_command,
+                    timeout_seconds=provider.get("start_timeout_seconds", 8),
+                )
+                async with httpx.AsyncClient(timeout=5) as client:
+                    health = await client.get(base + "/api/tags")
+                    health.raise_for_status()
+                    tags = health.json()
+            else:
+                raise exc
 
         await event_bus.emit(run_id, {
             "type": "LLM_HEALTH_OK",

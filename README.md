@@ -1,4 +1,4 @@
-# AI Core Config-Driven Node Runtime v9
+# AI Core Config-Driven Node Runtime v10
 
 This version enforces the rule that `ai_core` must not contain business/domain/task-specific logic.
 
@@ -38,15 +38,15 @@ python scripts/smoke_test.py
 ```
 
 
-## v9 Fix
+## v10 Fix
 
-- Updated UI version label from v3 to v9.
+- Updated UI version label from v3 to v10.
 - Added `/api/version`.
 - Added no-cache headers for `/`.
 - This avoids confusion when the browser or an old server process displays stale UI text.
 
 
-## v9 Fix
+## v10 Fix
 
 - Fixed JavaScript syntax errors in `apps/web/index.html`.
 - `/api/chat` now returns `run_id` immediately.
@@ -55,7 +55,7 @@ python scripts/smoke_test.py
 - Added `.vscode/launch.json` and `.vscode/tasks.json`.
 
 
-## v9 Update
+## v10 Update
 
 - Added `runtime/generated/adapters/*.yaml`.
 - `LLMJsonExecutor` calls a real configured provider instead of returning a placeholder.
@@ -67,7 +67,7 @@ python scripts/smoke_test.py
 - `ai_core` still has no domain/task/business logic.
 
 
-## v9 Update
+## v10 Update
 
 Adds visible execution status for model calls.
 
@@ -99,7 +99,7 @@ Completed / Failed
 This makes it clear whether the backend is still waiting for the model, checking health, parsing JSON, or failed.
 
 
-## v9 Update
+## v10 Update
 
 Adds provider setup automation.
 
@@ -124,3 +124,20 @@ runtime/configs/secrets/secrets.json
 ```
 
 For production, replace the file-based secret store with OS Keychain, Vault, or a cloud secret manager.
+
+
+## v10 Fix
+
+- Rewrites `RuntimeBootstrap` to always create:
+  - `runtime/configs/models/providers.yaml`
+  - `runtime/generated/adapters/*.yaml`
+  - `runtime/generated/nodes/*.yaml`
+  - `runtime/generated/prompts/*.yaml`
+  - `runtime/generated/schemas/*.json`
+- Adds Ollama auto-start attempt before model pull.
+- Existing old `runtime/` directories should be deleted once when upgrading:
+
+```bash
+rm -rf runtime
+python main.py
+```
