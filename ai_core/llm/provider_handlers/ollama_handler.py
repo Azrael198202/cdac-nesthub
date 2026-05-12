@@ -73,10 +73,17 @@ class OllamaProviderHandler:
             "provider": provider_name,
             "model": model,
         })
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(base + endpoint, json=payload)
-            response.raise_for_status()
-            content = response.json().get("message", {}).get("content", "")
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(base + endpoint, json=payload)
+                response.raise_for_status()
+                content = response.json().get("message", {}).get("content", "")
+        except httpx.TimeoutException as exc:
+            raise ProviderUnavailableError(
+                f"Ollama request timed out. endpoint={endpoint}, model={model}, timeout_seconds={timeout}. "
+                "The model may still be loading or inference is too slow. "
+                "Try increasing timeout_seconds or using a smaller/faster model."
+            ) from exc
         return parse_json_content(content)
 
     async def _call_generate_endpoint(self, run_id, node_id, provider_name, base, endpoint, model, prompt, rendered_user_prompt, schema, timeout):
@@ -94,10 +101,17 @@ class OllamaProviderHandler:
             "provider": provider_name,
             "model": model,
         })
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(base + endpoint, json=payload)
-            response.raise_for_status()
-            content = response.json().get("response", "")
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(base + endpoint, json=payload)
+                response.raise_for_status()
+                content = response.json().get("response", "")
+        except httpx.TimeoutException as exc:
+            raise ProviderUnavailableError(
+                f"Ollama request timed out. endpoint={endpoint}, model={model}, timeout_seconds={timeout}. "
+                "The model may still be loading or inference is too slow. "
+                "Try increasing timeout_seconds or using a smaller/faster model."
+            ) from exc
         return parse_json_content(content)
 
     async def _ensure_service(self, run_id: str, node_id: str, provider_name: str, provider: dict, base: str) -> dict:

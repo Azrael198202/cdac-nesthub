@@ -164,6 +164,18 @@
     }
 
     .status-pill.running{color:#fde68a;border-color:#92400e;background:#2a1b05}
+    .status-pill.running:before{
+      content:"";
+      display:inline-block;
+      width:8px;
+      height:8px;
+      margin-right:6px;
+      border:2px solid #92400e;
+      border-top-color:#fde68a;
+      border-radius:50%;
+      animation:spin .8s linear infinite;
+      vertical-align:-1px;
+    }
     .status-pill.done{color:#bbf7d0;border-color:#166534;background:#052e16}
     .status-pill.error{color:#fecaca;border-color:#991b1b;background:#3b0a0a}
     .status-pill.waiting{color:#ddd6fe;border-color:#6d28d9;background:#1c1239}
@@ -221,6 +233,26 @@
       color:#cbd5e1;
       white-space:pre-wrap;
       line-height:1.45;
+    }
+
+    .interaction-box{
+      margin-top:10px;
+      border:1px solid #d97706;
+      background:#3b2807;
+      border-radius:10px;
+      padding:12px;
+    }
+
+    .interaction-box input{
+      width:100%;
+      background:#020617;
+      color:#e5edff;
+      border:1px solid #334155;
+      border-radius:8px;
+      margin-top:8px;
+      padding:9px;
+      font-family:var(--mono);
+      font-size:12px;
     }
 
     .step-json{
@@ -400,7 +432,7 @@
 <div class="app">
   <main class="main">
     <div id="messages" class="messages">
-      <div class="top-note">Build version: v18 / Hierarchical collapsible workflow UI.</div>
+      <div class="top-note">Build version: v19 / Hierarchical UI with interaction cards and loading indicators.</div>
       <div class="top-note">Each node is grouped into a collapsible card. Internal events are shown as a timeline.</div>
     </div>
 
@@ -581,6 +613,7 @@ function addStep(ev, opts={}){
     detail += `<details open><summary>Validation Error</summary><div class="step-json">${esc(ev.validation_error)}</div></details>`;
   }
 
+  const customHtml = ev.html_content || "";
   step.innerHTML = `
     <div class="step-title">
       <span class="step-type">${esc(ev.type || "event")}</span>
@@ -588,6 +621,7 @@ function addStep(ev, opts={}){
     </div>
     <div class="step-msg">${esc(ev.message || "")}</div>
     ${detail}
+    ${customHtml}
   `;
 
   body.appendChild(step);
@@ -604,50 +638,59 @@ function addStep(ev, opts={}){
 }
 
 function approvalCard(ev){
-  const div = document.createElement("div");
-  div.className = "bubble approval";
+  const nodeId = nodeIdFromEvent(ev);
+  const card = ensureNodeCard(nodeId, ev);
+  const body = card.querySelector(".workflow-body");
+
+  const step = document.createElement("div");
+  step.className = "step waiting";
 
   const json = JSON.stringify(ev.result || {}, null, 2);
-  div.innerHTML = `
-    <b>[Human Review]</b>
-    <div>${esc(ev.message || "")}</div>
-    ${ev.validation_error ? `<div class="spec">${esc(ev.validation_error)}</div>` : ""}
-    <div class="spec" contenteditable="false">${esc(json)}</div>
-    <textarea placeholder="Reject reason or modification note..."></textarea>
-    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
-      <button class="approve" type="button">Approve</button>
-      <button class="reject" type="button">Reject & Retry</button>
-      <button class="modify" type="button">Modify JSON & Continue</button>
-      <button class="edit-json" type="button">Edit JSON</button>
+  step.innerHTML = `
+    <div class="step-title">
+      <span class="step-type">HUMAN_INTERACTION</span>
+      <span>Human Review</span>
+    </div>
+    <div class="step-msg">${esc(ev.message || "")}</div>
+    ${ev.validation_error ? `<div class="step-json">${esc(ev.validation_error)}</div>` : ""}
+    <div class="interaction-box">
+      <div class="step-json" contenteditable="false">${esc(json)}</div>
+      <textarea placeholder="Reject reason or modification note..."></textarea>
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button class="approve" type="button">Approve</button>
+        <button class="reject" type="button">Reject & Retry</button>
+        <button class="modify" type="button">Modify JSON & Continue</button>
+        <button class="edit-json" type="button">Edit JSON</button>
+      </div>
     </div>
   `;
 
-  messages.appendChild(div);
+  body.appendChild(step);
   scrollMessages();
 
-  const textarea = div.querySelector("textarea");
-  const spec = div.querySelector(".spec:last-of-type");
+  const textarea = step.querySelector("textarea");
+  const spec = step.querySelector(".step-json:last-of-type");
 
-  div.querySelector(".edit-json").onclick = () => {
+  step.querySelector(".edit-json").onclick = () => {
     spec.contentEditable = "true";
     spec.focus();
   };
 
-  div.querySelector(".approve").onclick = async () => {
+  step.querySelector(".approve").onclick = async () => {
     await resume("approve", null, textarea.value);
-    div.querySelectorAll("button").forEach(b => b.disabled = true);
+    step.querySelectorAll("button").forEach(b => b.disabled = true);
   };
 
-  div.querySelector(".reject").onclick = async () => {
+  step.querySelector(".reject").onclick = async () => {
     await resume("reject", null, textarea.value || "Rejected by human.");
-    div.querySelectorAll("button").forEach(b => b.disabled = true);
+    step.querySelectorAll("button").forEach(b => b.disabled = true);
   };
 
-  div.querySelector(".modify").onclick = async () => {
+  step.querySelector(".modify").onclick = async () => {
     try{
       const parsed = JSON.parse(spec.textContent);
       await resume("modify", parsed, textarea.value || "Modified by human.");
-      div.querySelectorAll("button").forEach(b => b.disabled = true);
+      step.querySelectorAll("button").forEach(b => b.disabled = true);
     }catch(err){
       alert("Invalid JSON: " + err.message);
     }
@@ -655,30 +698,39 @@ function approvalCard(ev){
 }
 
 function secretRequired(ev){
-  const div = document.createElement("div");
-  div.className = "bubble approval";
-  div.innerHTML = `
-    <b>[API Key Required]</b>
-    <div>${esc(ev.message || "")}</div>
-    <input class="secret-value" type="password" placeholder="${esc(ev.secret_key || "API_KEY")}" style="width:100%;background:#020617;color:#e5edff;border:1px solid #334155;border-radius:8px;margin-top:8px;padding:8px;font-family:inherit;font-size:11px" />
-    <div style="display:flex;gap:8px;margin-top:8px">
-      <button class="approve" type="button">Save Key & Continue</button>
-      <button class="reject" type="button">Cancel</button>
+  const nodeId = nodeIdFromEvent(ev) || "runtime";
+  const card = ensureNodeCard(nodeId, ev);
+  const body = card.querySelector(".workflow-body");
+
+  const step = document.createElement("div");
+  step.className = "step waiting";
+  step.innerHTML = `
+    <div class="step-title">
+      <span class="step-type">SECRET_REQUIRED</span>
+      <span>API Key Required</span>
+    </div>
+    <div class="step-msg">${esc(ev.message || "")}</div>
+    <div class="interaction-box">
+      <input class="secret-value" type="password" placeholder="${esc(ev.secret_key || "API_KEY")}" />
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="approve" type="button">Save Key & Continue</button>
+        <button class="reject" type="button">Cancel</button>
+      </div>
     </div>
   `;
-  messages.appendChild(div);
+  body.appendChild(step);
   scrollMessages();
 
-  const inputEl = div.querySelector(".secret-value");
-  div.querySelector(".approve").onclick = async () => {
+  const inputEl = step.querySelector(".secret-value");
+  step.querySelector(".approve").onclick = async () => {
     const value = inputEl.value.trim();
     if(!value){ alert("Please input the API key."); return; }
     await resume("approve", {value}, "secret provided");
-    div.querySelectorAll("button").forEach(b => b.disabled = true);
+    step.querySelectorAll("button").forEach(b => b.disabled = true);
   };
-  div.querySelector(".reject").onclick = async () => {
+  step.querySelector(".reject").onclick = async () => {
     await resume("reject", null, "secret cancelled");
-    div.querySelectorAll("button").forEach(b => b.disabled = true);
+    step.querySelectorAll("button").forEach(b => b.disabled = true);
   };
 }
 
@@ -783,7 +835,6 @@ form.onsubmit = async (event) => {
   if(!text) return;
 
   setBusy(true, "Starting...");
-  bubble(text, "user");
   input.value = "";
   runCard = null;
   runProgress = null;
@@ -806,8 +857,21 @@ form.onsubmit = async (event) => {
 
     const data = await res.json();
     currentRunId = data.run_id;
-    bubble(`[Run queued]\nrun_id=${currentRunId}`, "system");
     ensureRunCard(currentRunId);
+    addStep({
+      type: "USER_INPUT",
+      title: "User input",
+      message: text,
+      node_id: "runtime",
+      progress: 0
+    });
+    addStep({
+      type: "RUN_QUEUED",
+      title: "Run queued",
+      message: `run_id=${currentRunId}`,
+      node_id: "runtime",
+      progress: 0
+    });
     connect(currentRunId);
   }catch(err){
     bubble("POST /api/chat error: " + err.message, "error");
