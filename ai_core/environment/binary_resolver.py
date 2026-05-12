@@ -5,51 +5,32 @@ from pathlib import Path
 
 
 class BinaryResolver:
-    """
-    Generic executable resolver for runtime commands.
-    """
+    def system_key(self) -> str:
+        name = platform.system().lower()
+        if name == "darwin":
+            return "macos"
+        if name.startswith("win"):
+            return "windows"
+        if name == "linux":
+            return "linux"
+        return name
 
-    def resolve(self, binary_name: str) -> str | None:
+    def resolve(self, binary_name: str, executable_hints: dict | None = None) -> str | None:
         found = shutil.which(binary_name)
         if found:
             return found
 
-        if platform.system().lower() == "windows":
-            return self._resolve_windows(binary_name)
-
+        system = self.system_key()
+        for raw in (executable_hints or {}).get(system, []):
+            expanded = os.path.expandvars(raw)
+            path = Path(expanded)
+            if path.exists():
+                return str(path)
         return None
 
-    def _resolve_windows(self, binary_name: str) -> str | None:
-        candidates = []
-        local = os.getenv("LOCALAPPDATA")
-        pf = os.getenv("ProgramFiles")
-        pfx86 = os.getenv("ProgramFiles(x86)")
-
-        if binary_name.lower() == "ollama":
-            if local:
-                candidates.append(Path(local) / "Programs" / "Ollama" / "ollama.exe")
-            if pf:
-                candidates.append(Path(pf) / "Ollama" / "ollama.exe")
-            if pfx86:
-                candidates.append(Path(pfx86) / "Ollama" / "ollama.exe")
-
-        for item in candidates:
-            if item.exists():
-                return str(item)
-
-        return None
-
-    def rewrite_command(self, command: str) -> str:
-        parts = command.strip().split()
-        if not parts:
-            return command
-
-        binary = parts[0]
-        resolved = self.resolve(binary)
-        if not resolved:
-            return command
-
-        rest = parts[1:]
-        if " " in resolved:
-            resolved = f'"{resolved}"'
-        return " ".join([resolved] + rest)
+    def quote(self, value: str) -> str:
+        if not value:
+            return value
+        if value.startswith('"') and value.endswith('"'):
+            return value
+        return f'"{value}"' if " " in value else value

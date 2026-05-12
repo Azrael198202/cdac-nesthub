@@ -1,34 +1,18 @@
 import asyncio
 from ai_core.events.event_bus import event_bus
-from ai_core.environment.binary_resolver import BinaryResolver
 from ai_core.llm.provider_handlers.base import ProviderCommandResult
 
 
 class ProviderCommandRunner:
-    def __init__(self) -> None:
-        self.binary_resolver = BinaryResolver()
-
     async def run(self, run_id: str, title: str, command: str, timeout_seconds: int = 3600) -> ProviderCommandResult:
-        original_command = command
-        command = self.binary_resolver.rewrite_command(command)
+        result = ProviderCommandResult(returncode=-1, command=command)
 
         await event_bus.emit(run_id, {
             "type": "PROVIDER_COMMAND_STARTED",
             "title": title,
             "message": command,
-            "original_command": original_command,
             "command": command,
         })
-
-        if command != original_command:
-            await event_bus.emit(run_id, {
-                "type": "PROVIDER_COMMAND_RESOLVED",
-                "title": "Command binary resolved",
-                "message": f"{original_command} -> {command}",
-                "command": command,
-            })
-
-        result = ProviderCommandResult(returncode=-1, command=command)
 
         process = await asyncio.create_subprocess_shell(
             command,
@@ -47,7 +31,6 @@ class ProviderCommandRunner:
                     result.stdout_lines.append(text)
                 else:
                     result.stderr_lines.append(text)
-
                 await event_bus.emit(run_id, {
                     "type": "PROVIDER_COMMAND_OUTPUT",
                     "title": "Provider command output",
@@ -55,10 +38,7 @@ class ProviderCommandRunner:
                     "stream": name,
                 })
 
-        task = asyncio.gather(
-            pump(process.stdout, "stdout"),
-            pump(process.stderr, "stderr"),
-        )
+        task = asyncio.gather(pump(process.stdout, "stdout"), pump(process.stderr, "stderr"))
 
         try:
             await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
@@ -77,12 +57,10 @@ class ProviderCommandRunner:
 
         await task
         result.returncode = int(process.returncode or 0)
-
         await event_bus.emit(run_id, {
             "type": "PROVIDER_COMMAND_FINISHED",
             "title": "Provider command finished",
             "message": f"returncode={result.returncode}",
             "returncode": result.returncode,
         })
-
         return result

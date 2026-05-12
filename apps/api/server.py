@@ -31,14 +31,14 @@ async def home():
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
             "Expires": "0",
-            "X-AI-Core-Version": "v13",
+            "X-AI-Core-Version": "v14",
         },
     )
 
 
 @app.get("/api/version")
 async def version():
-    return JSONResponse({"version": "v13", "name": "ai_core_config_driven_node_runtime_v13"})
+    return JSONResponse({"version": "v14", "name": "ai_core_config_driven_node_runtime_v14"})
 
 
 @app.post("/api/chat")

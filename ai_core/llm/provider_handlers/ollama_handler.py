@@ -1,6 +1,8 @@
+import asyncio
 import httpx
 from ai_core.events.event_bus import event_bus
 from ai_core.llm.provider_command_runner import ProviderCommandRunner
+from ai_core.llm.provider_installer import ProviderInstaller
 from ai_core.llm.provider_handlers.base import ProviderUnavailableError
 from ai_core.llm.provider_handlers.utils import build_system_prompt, parse_json_content
 
@@ -10,8 +12,12 @@ class OllamaProviderHandler:
 
     def __init__(self) -> None:
         self.command_runner = ProviderCommandRunner()
+        self.installer = ProviderInstaller()
 
     async def generate_json(self, *, run_id: str, node_id: str, provider_name: str, provider: dict, prompt: dict, rendered_user_prompt: str, schema: dict) -> dict:
+        binary = await self.installer.ensure_binary(run_id, provider_name, provider)
+        provider["_resolved_binary"] = binary
+
         base = provider.get("base_url", "http://127.0.0.1:11434").rstrip("/")
         primary_model = provider.get("model", "qwen3:4b")
         timeout = provider.get("timeout_seconds", 120)
@@ -24,28 +30,15 @@ class OllamaProviderHandler:
         generate_endpoint = provider.get("generate_endpoint", "/api/generate")
 
         if endpoint_strategy == "chat":
-            return await self._call_chat_endpoint(
-                run_id, node_id, provider_name, provider, base, chat_endpoint,
-                selected_model, prompt, rendered_user_prompt, schema, timeout
-            )
-
+            return await self._call_chat_endpoint(run_id, node_id, provider_name, base, chat_endpoint, selected_model, prompt, rendered_user_prompt, schema, timeout)
         if endpoint_strategy == "generate":
-            return await self._call_generate_endpoint(
-                run_id, node_id, provider_name, provider, base, generate_endpoint,
-                selected_model, prompt, rendered_user_prompt, schema, timeout
-            )
+            return await self._call_generate_endpoint(run_id, node_id, provider_name, base, generate_endpoint, selected_model, prompt, rendered_user_prompt, schema, timeout)
 
-        # auto strategy: try /api/chat first, fallback to /api/generate on 404
         try:
-            return await self._call_chat_endpoint(
-                run_id, node_id, provider_name, provider, base, chat_endpoint,
-                selected_model, prompt, rendered_user_prompt, schema, timeout
-            )
+            return await self._call_chat_endpoint(run_id, node_id, provider_name, base, chat_endpoint, selected_model, prompt, rendered_user_prompt, schema, timeout)
         except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            if status != 404:
+            if exc.response.status_code != 404:
                 raise
-
             await event_bus.emit(run_id, {
                 "type": "LLM_ENDPOINT_FALLBACK",
                 "title": "Ollama endpoint fallback",
@@ -53,30 +46,16 @@ class OllamaProviderHandler:
                 "node_id": node_id,
                 "provider": provider_name,
                 "model": selected_model,
-                "from_endpoint": chat_endpoint,
-                "to_endpoint": generate_endpoint,
             })
+            return await self._call_generate_endpoint(run_id, node_id, provider_name, base, generate_endpoint, selected_model, prompt, rendered_user_prompt, schema, timeout)
 
-            return await self._call_generate_endpoint(
-                run_id, node_id, provider_name, provider, base, generate_endpoint,
-                selected_model, prompt, rendered_user_prompt, schema, timeout
-            )
+    def _format_command(self, provider: dict, template: str, **kwargs) -> str:
+        command = template.replace("{binary}", provider.get("_resolved_binary") or provider.get("binary", "ollama"))
+        for k, v in kwargs.items():
+            command = command.replace("{" + k + "}", str(v))
+        return command
 
-    async def _call_chat_endpoint(
-        self,
-        run_id: str,
-        node_id: str,
-        provider_name: str,
-        provider: dict,
-        base: str,
-        endpoint: str,
-        model: str,
-        prompt: dict,
-        rendered_user_prompt: str,
-        schema: dict,
-        timeout: int,
-    ) -> dict:
-        url = base + endpoint
+    async def _call_chat_endpoint(self, run_id, node_id, provider_name, base, endpoint, model, prompt, rendered_user_prompt, schema, timeout):
         payload = {
             "model": model,
             "stream": False,
@@ -86,7 +65,6 @@ class OllamaProviderHandler:
                 {"role": "user", "content": rendered_user_prompt},
             ],
         }
-
         await event_bus.emit(run_id, {
             "type": "LLM_REQUEST_SENT",
             "title": "LLM request sent",
@@ -94,57 +72,20 @@ class OllamaProviderHandler:
             "node_id": node_id,
             "provider": provider_name,
             "model": model,
-            "endpoint": endpoint,
-            "timeout_seconds": timeout,
         })
-
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(url, json=payload)
+            response = await client.post(base + endpoint, json=payload)
             response.raise_for_status()
             content = response.json().get("message", {}).get("content", "")
-
-        await event_bus.emit(run_id, {
-            "type": "LLM_RESPONSE_RECEIVED",
-            "title": "LLM response received",
-            "message": f"{provider_name}: parsing JSON response from {endpoint}.",
-            "node_id": node_id,
-            "provider": provider_name,
-            "model": model,
-            "endpoint": endpoint,
-        })
-
         return parse_json_content(content)
 
-    async def _call_generate_endpoint(
-        self,
-        run_id: str,
-        node_id: str,
-        provider_name: str,
-        provider: dict,
-        base: str,
-        endpoint: str,
-        model: str,
-        prompt: dict,
-        rendered_user_prompt: str,
-        schema: dict,
-        timeout: int,
-    ) -> dict:
-        url = base + endpoint
-        system_prompt = build_system_prompt(prompt, schema)
-        full_prompt = system_prompt + "\n\nUser prompt:\n" + rendered_user_prompt
-
+    async def _call_generate_endpoint(self, run_id, node_id, provider_name, base, endpoint, model, prompt, rendered_user_prompt, schema, timeout):
         payload = {
             "model": model,
             "stream": False,
             "format": "json",
-            "prompt": full_prompt,
+            "prompt": build_system_prompt(prompt, schema) + "\n\nUser prompt:\n" + rendered_user_prompt,
         }
-
-        # Some Ollama versions accept system separately on /api/generate.
-        if provider.get("generate_use_system_field", False):
-            payload["system"] = system_prompt
-            payload["prompt"] = rendered_user_prompt
-
         await event_bus.emit(run_id, {
             "type": "LLM_REQUEST_SENT",
             "title": "LLM request sent",
@@ -152,74 +93,71 @@ class OllamaProviderHandler:
             "node_id": node_id,
             "provider": provider_name,
             "model": model,
-            "endpoint": endpoint,
-            "timeout_seconds": timeout,
         })
-
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(url, json=payload)
+            response = await client.post(base + endpoint, json=payload)
             response.raise_for_status()
             content = response.json().get("response", "")
-
-        await event_bus.emit(run_id, {
-            "type": "LLM_RESPONSE_RECEIVED",
-            "title": "LLM response received",
-            "message": f"{provider_name}: parsing JSON response from {endpoint}.",
-            "node_id": node_id,
-            "provider": provider_name,
-            "model": model,
-            "endpoint": endpoint,
-        })
-
         return parse_json_content(content)
 
     async def _ensure_service(self, run_id: str, node_id: str, provider_name: str, provider: dict, base: str) -> dict:
+        tags = await self._try_tags(base)
+        if tags is not None:
+            await self._emit_health_ok(run_id, node_id, provider_name)
+            return tags
+
+        if not provider.get("auto_start", True):
+            raise ProviderUnavailableError(f"{provider_name}: service is not reachable and auto_start is disabled.")
+
+        start_template = provider.get("start_command", "{binary} serve")
+        start_command = self._format_command(provider, start_template)
+
         await event_bus.emit(run_id, {
-            "type": "LLM_HEALTH_CHECK",
-            "title": "Checking provider health",
-            "message": f"{provider_name}: GET {base}/api/tags",
+            "type": "LLM_PROVIDER_AUTOSTART",
+            "title": "Starting provider service",
+            "message": start_command,
             "node_id": node_id,
             "provider": provider_name,
         })
 
+        proc = await asyncio.create_subprocess_shell(
+            start_command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        await event_bus.emit(run_id, {
+            "type": "PROVIDER_DAEMON_STARTED",
+            "title": "Provider daemon started",
+            "message": f"pid={proc.pid}",
+            "node_id": node_id,
+            "provider": provider_name,
+            "pid": proc.pid,
+        })
+
+        timeout = int(provider.get("ready_timeout_seconds", 30))
+        interval = float(provider.get("ready_poll_interval_seconds", 1.0))
+        attempts = max(1, int(timeout / interval))
+
+        for _ in range(attempts):
+            await asyncio.sleep(interval)
+            tags = await self._try_tags(base)
+            if tags is not None:
+                await self._emit_health_ok(run_id, node_id, provider_name)
+                return tags
+
+        raise ProviderUnavailableError(f"{provider_name}: service did not become ready. Command: {start_command}")
+
+    async def _try_tags(self, base: str) -> dict | None:
         try:
             async with httpx.AsyncClient(timeout=5) as client:
-                health = await client.get(base + "/api/tags")
-                health.raise_for_status()
-                tags = health.json()
-        except Exception as exc:
-            if not provider.get("auto_start", True):
-                raise exc
+                response = await client.get(base + "/api/tags")
+                response.raise_for_status()
+                return response.json()
+        except Exception:
+            return None
 
-            start_command = provider.get("start_command", "ollama serve")
-            await event_bus.emit(run_id, {
-                "type": "LLM_PROVIDER_AUTOSTART",
-                "title": "Starting provider service",
-                "message": start_command,
-                "node_id": node_id,
-                "provider": provider_name,
-            })
-
-            command_result = await self.command_runner.run(
-                run_id=run_id,
-                title=f"Start provider {provider_name}",
-                command=start_command,
-                timeout_seconds=provider.get("start_timeout_seconds", 8),
-            )
-
-            try:
-                async with httpx.AsyncClient(timeout=5) as client:
-                    health = await client.get(base + "/api/tags")
-                    health.raise_for_status()
-                    tags = health.json()
-            except Exception as retry_exc:
-                raise ProviderUnavailableError(
-                    "Ollama service is not reachable after auto-start.\n"
-                    f"Initial error: {exc}\n"
-                    f"Retry error: {retry_exc}\n"
-                    f"Auto-start output:\n{command_result.summary()}"
-                )
-
+    async def _emit_health_ok(self, run_id: str, node_id: str, provider_name: str) -> None:
         await event_bus.emit(run_id, {
             "type": "LLM_HEALTH_OK",
             "title": "Provider health OK",
@@ -227,14 +165,12 @@ class OllamaProviderHandler:
             "node_id": node_id,
             "provider": provider_name,
         })
-        return tags
 
     async def _ensure_model_with_fallbacks(self, run_id: str, node_id: str, provider_name: str, provider: dict, base: str, primary_model: str, tags: dict) -> str:
-        fallback_models = provider.get("fallback_models", [])
-        candidate_models = [primary_model] + [m for m in fallback_models if m and m != primary_model]
-        pull_errors = []
+        candidates = [primary_model] + [m for m in provider.get("fallback_models", []) if m and m != primary_model]
+        errors = []
 
-        for index, model in enumerate(candidate_models):
+        for idx, model in enumerate(candidates):
             if self._model_exists(tags, model):
                 await event_bus.emit(run_id, {
                     "type": "LLM_MODEL_READY",
@@ -247,8 +183,8 @@ class OllamaProviderHandler:
                 return model
 
             await event_bus.emit(run_id, {
-                "type": "LLM_MODEL_MISSING" if index == 0 else "LLM_MODEL_FALLBACK",
-                "title": "Ollama model missing" if index == 0 else "Trying fallback model",
+                "type": "LLM_MODEL_MISSING" if idx == 0 else "LLM_MODEL_FALLBACK",
+                "title": "Ollama model missing" if idx == 0 else "Trying fallback model",
                 "message": f"Model '{model}' was not found. Pulling it now.",
                 "node_id": node_id,
                 "provider": provider_name,
@@ -256,35 +192,30 @@ class OllamaProviderHandler:
             })
 
             if not provider.get("auto_pull_missing_model", True):
-                pull_errors.append(f"{model}: missing and auto pull disabled")
+                errors.append(f"{model}: missing and auto pull disabled")
                 continue
 
-            pull_command = provider.get("pull_command", "ollama pull {model}").replace("{model}", model)
+            command = self._format_command(provider, provider.get("pull_command", "{binary} pull {model}"), model=model)
             result = await self.command_runner.run(
                 run_id=run_id,
                 title=f"Pull Ollama model {model}",
-                command=pull_command,
+                command=command,
                 timeout_seconds=provider.get("pull_timeout_seconds", 3600),
             )
-
             if result.returncode != 0:
-                error_text = f"Model pull failed: {model}\n{result.summary()}"
-                pull_errors.append(error_text)
+                error = f"Model pull failed: {model}\n{result.summary()}"
+                errors.append(error)
                 await event_bus.emit(run_id, {
                     "type": "LLM_MODEL_PULL_FAILED",
                     "title": "Model pull failed",
-                    "message": error_text,
+                    "message": error,
                     "node_id": node_id,
                     "provider": provider_name,
                     "model": model,
                 })
                 continue
 
-            async with httpx.AsyncClient(timeout=5) as client:
-                health = await client.get(base + "/api/tags")
-                health.raise_for_status()
-                tags = health.json()
-
+            tags = await self._try_tags(base) or {}
             if self._model_exists(tags, model):
                 await event_bus.emit(run_id, {
                     "type": "LLM_MODEL_READY",
@@ -296,9 +227,9 @@ class OllamaProviderHandler:
                 })
                 return model
 
-            pull_errors.append(f"{model}: pull succeeded but model still not found in /api/tags")
+            errors.append(f"{model}: pull succeeded but model still not found")
 
-        raise ProviderUnavailableError("All Ollama model pull attempts failed.\n\n" + "\n\n---\n\n".join(pull_errors))
+        raise ProviderUnavailableError("All Ollama model pull attempts failed.\n\n" + "\n\n---\n\n".join(errors))
 
     def _model_exists(self, tags: dict, model: str) -> bool:
         names = set()

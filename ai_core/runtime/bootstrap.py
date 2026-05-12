@@ -56,6 +56,25 @@ class RuntimeBootstrap:
                     "enabled": True,
                     "type": "ollama",
                     "base_url": "http://127.0.0.1:11434",
+                    "binary": "ollama",
+                    "auto_install": True,
+                    "install": {
+                        "windows": [
+                            "winget install Ollama.Ollama --accept-source-agreements --accept-package-agreements --disable-interactivity"
+                        ],
+                        "macos": [
+                            "brew install ollama"
+                        ],
+                        "linux": [
+                            "curl -fsSL https://ollama.com/install.sh | sh"
+                        ]
+                    },
+                    "executable_hints": {
+                        "windows": [
+                            "%LOCALAPPDATA%\\Programs\\Ollama\\ollama.exe",
+                            "%ProgramFiles%\\Ollama\\ollama.exe"
+                        ]
+                    },
                     "endpoint_strategy": "auto",
                     "chat_endpoint": "/api/chat",
                     "generate_endpoint": "/api/generate",
@@ -63,9 +82,11 @@ class RuntimeBootstrap:
                     "fallback_models": ["qwen2.5:3b", "qwen3:1.7b", "llama3.2:3b"],
                     "timeout_seconds": 120,
                     "auto_start": True,
-                    "start_command": "ollama serve",
+                    "start_command": "{binary} serve",
+                    "ready_timeout_seconds": 30,
+                    "ready_poll_interval_seconds": 1,
                     "auto_pull_missing_model": True,
-                    "pull_command": "ollama pull {model}",
+                    "pull_command": "{binary} pull {model}",
                     "pull_timeout_seconds": 3600
                 },
                 "openai": {

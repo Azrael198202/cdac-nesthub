@@ -1,4 +1,4 @@
-# AI Core Config-Driven Node Runtime v13
+# AI Core Config-Driven Node Runtime v14
 
 This version enforces the rule that `ai_core` must not contain business/domain/task-specific logic.
 
@@ -38,15 +38,15 @@ python scripts/smoke_test.py
 ```
 
 
-## v13 Fix
+## v14 Fix
 
-- Updated UI version label from v3 to v13.
+- Updated UI version label from v3 to v14.
 - Added `/api/version`.
 - Added no-cache headers for `/`.
 - This avoids confusion when the browser or an old server process displays stale UI text.
 
 
-## v13 Fix
+## v14 Fix
 
 - Fixed JavaScript syntax errors in `apps/web/index.html`.
 - `/api/chat` now returns `run_id` immediately.
@@ -55,7 +55,7 @@ python scripts/smoke_test.py
 - Added `.vscode/launch.json` and `.vscode/tasks.json`.
 
 
-## v13 Update
+## v14 Update
 
 - Added `runtime/generated/adapters/*.yaml`.
 - `LLMJsonExecutor` calls a real configured provider instead of returning a placeholder.
@@ -67,7 +67,7 @@ python scripts/smoke_test.py
 - `ai_core` still has no domain/task/business logic.
 
 
-## v13 Update
+## v14 Update
 
 Adds visible execution status for model calls.
 
@@ -99,7 +99,7 @@ Completed / Failed
 This makes it clear whether the backend is still waiting for the model, checking health, parsing JSON, or failed.
 
 
-## v13 Update
+## v14 Update
 
 Adds provider setup automation.
 
@@ -126,7 +126,7 @@ runtime/configs/secrets/secrets.json
 For production, replace the file-based secret store with OS Keychain, Vault, or a cloud secret manager.
 
 
-## v13 Fix
+## v14 Fix
 
 - Rewrites `RuntimeBootstrap` to always create:
   - `runtime/configs/models/providers.yaml`
@@ -143,7 +143,7 @@ python main.py
 ```
 
 
-## v13 Update
+## v14 Update
 
 ### Fix: Ollama command not found
 
@@ -183,7 +183,7 @@ runtime/knowledge/prompt_optimization_memory.jsonl
 For future similar tasks, the executor retrieves correction memory and injects it into the prompt.
 
 
-## v13 Update
+## v14 Update
 
 ### Provider Handler Registry
 
@@ -235,7 +235,7 @@ fallback_models:
 If primary model pull fails, runtime automatically tries fallback models.
 
 
-## v13 Update
+## v14 Update
 
 ### Ollama endpoint strategy
 
@@ -269,4 +269,47 @@ message.content
 
 ```text
 response
+```
+
+
+## v14 Update
+
+Provider Auto Installer is added.
+
+Runtime flow:
+
+```text
+resolve provider binary
+↓
+if missing, install by OS-specific command from runtime config
+↓
+resolve binary again
+↓
+start provider as daemon
+↓
+poll /api/tags until ready
+↓
+pull model / fallback models
+↓
+call inference endpoint
+```
+
+Ollama provider now supports:
+
+```yaml
+binary: ollama
+auto_install: true
+install:
+  windows:
+    - winget install Ollama.Ollama --accept-source-agreements --accept-package-agreements --disable-interactivity
+  macos:
+    - brew install ollama
+  linux:
+    - curl -fsSL https://ollama.com/install.sh | sh
+executable_hints:
+  windows:
+    - "%LOCALAPPDATA%\\Programs\\Ollama\\ollama.exe"
+    - "%ProgramFiles%\\Ollama\\ollama.exe"
+start_command: "{binary} serve"
+pull_command: "{binary} pull {model}"
 ```
