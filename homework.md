@@ -234,3 +234,29 @@ Requirements:
    - execution_readiness
 9. Do not explain the correction in reason.
 10. Return valid JSON only.
+
+workflow_plannning
+
+Regenerate workflow_planning as executable workflow state.
+
+Requirements:
+1. Do not simply copy tasks from intent_recognition.
+2. planned_steps must describe workflow execution steps, not original tasks.
+3. Each step must include:
+   - step_id
+   - step_type
+   - objective
+   - input_from
+   - required_capability
+   - execution_ready
+   - human_interaction
+   - next_action
+4. Split flight booking into:
+   - collect_missing_information
+   - confirm_booking_before_execution
+   - booking_execution_pending
+5. Weather query can be executable immediately.
+6. Flight booking must not execute because required information is missing.
+7. blocking_missing_information must be grouped by task_id.
+8. required_capabilities must include capability purpose and status.
+9. Return valid JSON only.
