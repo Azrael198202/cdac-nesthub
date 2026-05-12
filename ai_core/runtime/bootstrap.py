@@ -31,6 +31,8 @@ class RuntimeBootstrap:
             RUNTIME_GENERATED / "schemas",
             RUNTIME_GENERATED / "workflows",
             RUNTIME_GENERATED / "tools",
+            RUNTIME_GENERATED / "module_generation_requests",
+            RUNTIME_GENERATED / "modules",
             RUNTIME_REGISTRY,
         ]:
             d.mkdir(parents=True, exist_ok=True)

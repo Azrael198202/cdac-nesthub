@@ -121,7 +121,9 @@
       gap:10px;
       padding:12px 14px;
       cursor:pointer;
-      user-select:none;
+      -webkit-user-select:none;
+      -ms-user-select:none;
+      user-select :none;      
       border-bottom:1px solid rgba(148,163,184,.14);
     }
 
@@ -359,7 +361,8 @@
       display:flex;
       gap:10px;
       background:rgba(5,9,20,.9);
-      backdrop-filter:blur(8px);
+      -webkit-backdrop-filter:blur(8px);
+      backdrop-filter:blur(8px); 
       padding:10px;
       border:1px solid var(--line);
       border-radius:14px;
@@ -412,7 +415,7 @@
       left:18px;
       right:440px;
       bottom:86px;
-      max-height:360px;
+      max-height:330px;
       overflow:auto;
       z-index:950;
       display:none;
@@ -530,7 +533,7 @@
 <div class="app">
   <main class="main">
     <div id="messages" class="messages">
-      <div class="top-note">Build version: v24 / Collapsed interaction history and fixed auto-repair continuation.</div>
+      <div class="top-note">Build version: v29 / Runtime Module Builder.</div>
       <div class="top-note">Human Review and API Key input stay fixed above the composer until resolved.</div>
     </div>
 
@@ -574,6 +577,7 @@ let bufferedEvents = [];
 
 const NODE_EVENTS = new Set([
   "NODE_STARTED","NODE_EXECUTING","NODE_RESULT",
+  "EXECUTION_PLANNER_STARTED","EXECUTION_STEP_ANALYZING","EXECUTION_PLANNER_RESULT","APPROVAL_MEMORY_APPLIED","APPROVAL_RECORDED_API","APPROVAL_RECORDED","TOOL_BLUEPRINT_GENERATED","MODULE_BLUEPRINT_GENERATED",
   "LLM_EXECUTOR_READY","LLM_PROMPT_RENDERED","LLM_ROUTE_START",
   "LLM_PROVIDER_START","LLM_HEALTH_CHECK","LLM_HEALTH_OK",
   "LLM_MODEL_READY","LLM_MODEL_MISSING","LLM_MODEL_FALLBACK",

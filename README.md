@@ -1,4 +1,4 @@
-# AI Core Config-Driven Node Runtime v25
+# AI Core Config-Driven Node Runtime v29
 
 This version enforces the rule that `ai_core` must not contain business/domain/task-specific logic.
 
@@ -38,15 +38,15 @@ python scripts/smoke_test.py
 ```
 
 
-## v25 Fix
+## v29 Fix
 
-- Updated UI version label from v25 to v25.
+- Updated UI version label from v29 to v29.
 - Added `/api/version`.
 - Added no-cache headers for `/`.
 - This avoids confusion when the browser or an old server process displays stale UI text.
 
 
-## v25 Fix
+## v29 Fix
 
 - Fixed JavaScript syntax errors in `apps/web/index.html`.
 - `/api/chat` now returns `run_id` immediately.
@@ -55,7 +55,7 @@ python scripts/smoke_test.py
 - Added `.vscode/launch.json` and `.vscode/tasks.json`.
 
 
-## v25 Update
+## v29 Update
 
 - Added `runtime/generated/adapters/*.yaml`.
 - `LLMJsonExecutor` calls a real configured provider instead of returning a placeholder.
@@ -67,7 +67,7 @@ python scripts/smoke_test.py
 - `ai_core` still has no domain/task/business logic.
 
 
-## v25 Update
+## v29 Update
 
 Adds visible execution status for model calls.
 
@@ -99,7 +99,7 @@ Completed / Failed
 This makes it clear whether the backend is still waiting for the model, checking health, parsing JSON, or failed.
 
 
-## v25 Update
+## v29 Update
 
 Adds provider setup automation.
 
@@ -126,7 +126,7 @@ runtime/configs/secrets/secrets.json
 For production, replace the file-based secret store with OS Keychain, Vault, or a cloud secret manager.
 
 
-## v25 Fix
+## v29 Fix
 
 - Rewrites `RuntimeBootstrap` to always create:
   - `runtime/configs/models/providers.yaml`
@@ -143,7 +143,7 @@ python main.py
 ```
 
 
-## v25 Update
+## v29 Update
 
 ### Fix: Ollama command not found
 
@@ -183,7 +183,7 @@ runtime/knowledge/prompt_optimization_memory.jsonl
 For future similar tasks, the executor retrieves correction memory and injects it into the prompt.
 
 
-## v25 Update
+## v29 Update
 
 ### Provider Handler Registry
 
@@ -214,7 +214,7 @@ vLLM
 LM Studio
 LocalAI
 LiteLLM proxy
-Any /v25/chat/completions compatible service
+Any /v29/chat/completions compatible service
 ```
 
 ### Ollama Pull Failure Details
@@ -235,7 +235,7 @@ fallback_models:
 If primary model pull fails, runtime automatically tries fallback models.
 
 
-## v25 Update
+## v29 Update
 
 ### Ollama endpoint strategy
 
@@ -272,7 +272,7 @@ response
 ```
 
 
-## v25 Update
+## v29 Update
 
 Provider Auto Installer is added.
 
@@ -315,7 +315,7 @@ pull_command: "{binary} pull {model}"
 ```
 
 
-## v25 Update
+## v29 Update
 
 ### UI single-run lock
 
@@ -343,7 +343,7 @@ SSE error
 Human Review and API Key input use their own buttons, so the main Send button stays locked.
 
 
-## v25 Update
+## v29 Update
 
 ### Runtime Learning + Runtime Template Evolution
 
@@ -417,7 +417,7 @@ Future similar tasks retrieve correction memory and inject it into prompts befor
 `RuntimeTemplateGenerator` works for any node_id. Known nodes get better default contracts; unknown nodes get generic prompt/schema and can evolve from human feedback.
 
 
-## v25 Update
+## v29 Update
 
 ### Recoverable JSON Schema Validation
 
@@ -440,7 +440,7 @@ Reject & Retry combines the human feedback with the validation error, then evolv
 Example: if `requires_human_review` is an object but schema expects boolean, runtime can evolve the schema to support a compatible human_review structure.
 
 
-## v25 Update
+## v29 Update
 
 ### Hierarchical Collapsible Workflow UI
 
@@ -470,7 +470,7 @@ Each node is a collapsible card. Internal steps are displayed as a timeline.
 This makes long-running operations such as installation, model pull, LLM inference, validation, and human review easier to follow.
 
 
-## v25 Update
+## v29 Update
 
 ### Hierarchical interaction UI
 
@@ -494,7 +494,7 @@ suggested mitigation
 This makes it clear whether the issue is installation, model availability, or slow inference.
 
 
-## v25 Update
+## v29 Update
 
 ### Paused Human Interaction UI
 
@@ -529,7 +529,7 @@ intent_recognition / attempt 2
 This prevents new events from visually pushing the active human interaction upward inside the same node card.
 
 
-## v25 Update
+## v29 Update
 
 ### Auto Schema Repair
 
@@ -585,7 +585,7 @@ runtime/knowledge/schema_auto_repair.jsonl
 ```
 
 
-## v25 Update
+## v29 Update
 
 ### Sticky Blocking Interaction Panel
 
@@ -623,7 +623,7 @@ continues normal rendering
 This prevents Human Review input from being pushed upward by later workflow logs.
 
 
-## v25 Update
+## v29 Update
 
 ### Result Auto Repair
 
@@ -664,7 +664,7 @@ runtime/knowledge/result_auto_repair.jsonl
 ```
 
 
-## v25 Update
+## v29 Update
 
 ### Fixed Result Auto Repair Continuation
 
@@ -697,7 +697,7 @@ Resolved human interactions are now stored as collapsed details inside the node 
 After a human interaction is resolved, the main composer stays disabled and shows `Thinking...` until the workflow actually completes/fails/cancels.
 
 
-## v25 Update
+## v29 Update
 
 ### Fixed Schema Auto Repair Path Bug
 
@@ -733,3 +733,228 @@ re-validation
 ↓
 continue workflow
 ```
+
+
+## v29 Update
+
+### Generic Runtime Execution Planner
+
+The `execution` node no longer returns only:
+
+```json
+{
+  "_status": "tool_call_ready"
+}
+```
+
+It now reads:
+
+```text
+previous_results.workflow_planning.planned_steps
+```
+
+and generates a generic execution state:
+
+```text
+execution_steps
+blocked_steps
+human_interactions
+missing_tools
+safety_holds
+summary
+```
+
+### No business logic in ai_core
+
+The executor does not know weather, flight, booking, payment, etc.
+
+It only interprets generic fields:
+
+```text
+step_id
+step_type
+required_capability
+execution_ready
+human_interaction
+requires_human_confirmation
+parameters.missing_required
+```
+
+### Missing Tool Spec Generation
+
+If a required capability has no registered tool, runtime creates a missing implementation spec under:
+
+```text
+runtime/generated/tools/generated_<capability>.json
+```
+
+and registers it in:
+
+```text
+runtime/registry/tool_registry.json
+```
+
+### Execution behavior
+
+```text
+workflow_planning.planned_steps
+↓
+execution planner
+↓
+ready steps / blocked steps / human interactions / missing tools
+```
+
+## v29 Update
+
+### Runtime Approval Memory
+Approve is now positive memory and is saved to:
+- runtime/datasets/approved_outputs.jsonl
+- runtime/knowledge/success_patterns.jsonl
+- runtime/knowledge/prompt_optimization_memory.jsonl
+
+### Runtime Tool Builder Blueprint
+Missing capability now generates:
+- runtime/generated/tools/<tool_id>/tool.json
+- runtime/generated/tools/<tool_id>/tool.py
+- runtime/generated/tools/<tool_id>/README.md
+- runtime/generated/tools/<tool_id>/test_input.json
+- runtime/generated/tool_generation_requests/<request_id>.json
+
+### Browser Automation Blueprint
+Browser automation capability generates:
+- runtime/generated/browser_blueprints/<blueprint_id>/blueprint.json
+- runtime/generated/browser_blueprints/<blueprint_id>/tool.py
+- runtime/generated/browser_blueprints/<blueprint_id>/README.md
+
+Safety policy:
+- prepare page allowed
+- discover elements allowed
+- preview action allowed
+- irreversible click/submit requires explicit human confirmation
+
+### Strong Model Escalation Policy
+Strong models are used as Runtime Architect / Tool Builder for complex workflow, new capability, browser automation, and tool code generation.
+
+
+## v29 Update
+
+### Core Semantic Cleanup
+
+Removed domain/semantic parsing from ai_core.
+
+Fixed examples:
+
+```text
+browser_automation_blueprint.py
+- removed hardcoded time regex
+- removed direct URL/time/schedule semantic extraction
+- now only writes runtime-provided structured metadata
+
+escalation_policy.py
+- removed business/domain/language keywords
+- now uses generic runtime signals and policy config only
+
+tool_blueprint_builder.py
+- removed strategy inference from capability or natural language words
+- strategy must come from runtime metadata
+```
+
+### New Rule
+
+ai_core must not parse business language such as time expressions, attendance words, booking words, browser action semantics, or website-specific concepts.
+
+Correct flow:
+
+```text
+LLM/runtime planning
+↓
+generates structured metadata
+↓
+ai_core stores/dispatches/validates generic metadata
+```
+
+### Scanner
+
+Added:
+
+```text
+tools/scan_core_semantics.py
+```
+
+Run:
+
+```bash
+python tools/scan_core_semantics.py
+```
+
+This helps detect suspicious semantic/domain words inside ai_core.
+
+
+## v29 Update
+
+### Runtime Module Builder
+
+ai_core can now generate generic runtime module blueprints when a required capability has no module/tool implementation.
+
+This keeps ai_core generic:
+
+```text
+ai_core does not implement scheduler/notification/web_query logic directly.
+ai_core generates module blueprints and code generation requests from structured runtime metadata.
+```
+
+Generated module package:
+
+```text
+runtime/generated/modules/<module_id>/
+  module.json
+  module.py
+  README.md
+  test_input.json
+```
+
+Generated code request:
+
+```text
+runtime/generated/module_generation_requests/<request_id>.json
+```
+
+Registry:
+
+```text
+runtime/registry/module_registry.json
+```
+
+### Generic Module Interface
+
+Generated modules are expected to expose:
+
+```text
+validate_config(config)
+health_check()
+run(input_data)
+```
+
+### Example Flow
+
+```text
+User asks for scheduling/reminder/automation
+↓
+LLM/runtime planning produces structured capability + module metadata
+↓
+execution detects missing capability
+↓
+RuntimeModuleBuilder generates module blueprint
+↓
+strong model codegen request is created
+↓
+human review / safety review
+↓
+module registered and reused later
+```
+
+### Core Rule
+
+ai_core must not parse natural language time, appointment, reminder, business actions, or domain semantics.
+
+Those must be produced as structured metadata by runtime planning/LLM, then ai_core can generate and run generic modules.

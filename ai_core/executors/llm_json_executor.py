@@ -8,6 +8,7 @@ from ai_core.validation.recoverable_validation_error import RecoverableValidatio
 from ai_core.validation.schema_auto_repair import SchemaAutoRepair
 from ai_core.validation.result_auto_repair import ResultAutoRepair
 from ai_core.evolution.runtime_learning import RuntimeLearningService
+from ai_core.evolution.approval_learning import ApprovalLearningService
 
 
 class LLMJsonExecutor:
@@ -25,6 +26,7 @@ class LLMJsonExecutor:
         self.result_auto_repair = ResultAutoRepair()
         self.router = ProviderRouter()
         self.runtime_learning = RuntimeLearningService()
+        self.approval_learning = ApprovalLearningService()
 
     async def execute(self, workflow_node: dict, node_config: dict, state: dict, capability_result: dict) -> dict:
         run_id = state["run_id"]
@@ -53,18 +55,31 @@ class LLMJsonExecutor:
             node_id=node_id,
             user_input=state.get("input", ""),
         )
+        approval_memory = self.approval_learning.build_prompt_reinforcement(
+            node_id=node_id,
+            user_input=state.get("input", ""),
+        )
 
         rendered = self.template.render(prompt.get("user_template", ""), {
             "user_input": state.get("input", ""),
             "previous_results": state.get("results", {}),
             "capability_result": capability_result,
             "human_feedback": state.get("human_feedback", []),
-            "correction_memory": correction_memory,
+            "correction_memory": correction_memory + ("\n\n" + approval_memory if approval_memory else ""),
         })
 
         runtime_rules = prompt.get("runtime_rules", [])
         if runtime_rules:
             rendered = rendered + "\n\nRuntime rules:\n" + "\n".join(f"- {r}" for r in runtime_rules)
+
+        if approval_memory:
+            rendered = rendered + "\n\n" + approval_memory
+            await event_bus.emit(run_id, {
+                "type": "APPROVAL_MEMORY_APPLIED",
+                "title": "Approval memory applied",
+                "message": f"Applied approved pattern memory for node={node_id}.",
+                "node_id": node_id,
+            })
 
         if correction_memory:
             rendered = rendered + "\n\n" + correction_memory
