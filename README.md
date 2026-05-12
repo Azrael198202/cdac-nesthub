@@ -1,4 +1,4 @@
-# AI Core Config-Driven Node Runtime v11
+# AI Core Config-Driven Node Runtime v12
 
 This version enforces the rule that `ai_core` must not contain business/domain/task-specific logic.
 
@@ -38,15 +38,15 @@ python scripts/smoke_test.py
 ```
 
 
-## v11 Fix
+## v12 Fix
 
-- Updated UI version label from v3 to v11.
+- Updated UI version label from v3 to v12.
 - Added `/api/version`.
 - Added no-cache headers for `/`.
 - This avoids confusion when the browser or an old server process displays stale UI text.
 
 
-## v11 Fix
+## v12 Fix
 
 - Fixed JavaScript syntax errors in `apps/web/index.html`.
 - `/api/chat` now returns `run_id` immediately.
@@ -55,7 +55,7 @@ python scripts/smoke_test.py
 - Added `.vscode/launch.json` and `.vscode/tasks.json`.
 
 
-## v11 Update
+## v12 Update
 
 - Added `runtime/generated/adapters/*.yaml`.
 - `LLMJsonExecutor` calls a real configured provider instead of returning a placeholder.
@@ -67,7 +67,7 @@ python scripts/smoke_test.py
 - `ai_core` still has no domain/task/business logic.
 
 
-## v11 Update
+## v12 Update
 
 Adds visible execution status for model calls.
 
@@ -99,7 +99,7 @@ Completed / Failed
 This makes it clear whether the backend is still waiting for the model, checking health, parsing JSON, or failed.
 
 
-## v11 Update
+## v12 Update
 
 Adds provider setup automation.
 
@@ -126,7 +126,7 @@ runtime/configs/secrets/secrets.json
 For production, replace the file-based secret store with OS Keychain, Vault, or a cloud secret manager.
 
 
-## v11 Fix
+## v12 Fix
 
 - Rewrites `RuntimeBootstrap` to always create:
   - `runtime/configs/models/providers.yaml`
@@ -143,7 +143,7 @@ python main.py
 ```
 
 
-## v11 Update
+## v12 Update
 
 ### Fix: Ollama command not found
 
@@ -181,3 +181,55 @@ runtime/knowledge/prompt_optimization_memory.jsonl
 ### Correction Memory Retrieval
 
 For future similar tasks, the executor retrieves correction memory and injects it into the prompt.
+
+
+## v12 Update
+
+### Provider Handler Registry
+
+`provider_router.py` no longer hardcodes `if ollama / elif openai`.
+
+It now dispatches by `provider.type`:
+
+```text
+ProviderRouter
+↓
+ProviderHandlerRegistry
+↓
+ProviderHandler
+```
+
+Supported provider types:
+
+```text
+ollama
+openai
+openai_compatible
+```
+
+`openai_compatible` can be used for:
+
+```text
+vLLM
+LM Studio
+LocalAI
+LiteLLM proxy
+Any /v1/chat/completions compatible service
+```
+
+### Ollama Pull Failure Details
+
+When `ollama pull` fails, stdout and stderr are collected and included in the final error.
+
+### Fallback Models
+
+`runtime/configs/models/providers.yaml` supports:
+
+```yaml
+fallback_models:
+  - qwen2.5:3b
+  - qwen3:1.7b
+  - llama3.2:3b
+```
+
+If primary model pull fails, runtime automatically tries fallback models.

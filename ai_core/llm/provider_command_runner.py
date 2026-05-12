@@ -1,13 +1,14 @@
 import asyncio
 from ai_core.events.event_bus import event_bus
 from ai_core.environment.binary_resolver import BinaryResolver
+from ai_core.llm.provider_handlers.base import ProviderCommandResult
 
 
 class ProviderCommandRunner:
     def __init__(self) -> None:
         self.binary_resolver = BinaryResolver()
 
-    async def run(self, run_id: str, title: str, command: str, timeout_seconds: int = 3600) -> int:
+    async def run(self, run_id: str, title: str, command: str, timeout_seconds: int = 3600) -> ProviderCommandResult:
         original_command = command
         command = self.binary_resolver.rewrite_command(command)
 
@@ -27,6 +28,8 @@ class ProviderCommandRunner:
                 "command": command,
             })
 
+        result = ProviderCommandResult(returncode=-1, command=command)
+
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
@@ -39,10 +42,16 @@ class ProviderCommandRunner:
                 line = await stream.readline()
                 if not line:
                     break
+                text = line.decode(errors="replace").rstrip()
+                if name == "stdout":
+                    result.stdout_lines.append(text)
+                else:
+                    result.stderr_lines.append(text)
+
                 await event_bus.emit(run_id, {
                     "type": "PROVIDER_COMMAND_OUTPUT",
                     "title": "Provider command output",
-                    "message": line.decode(errors="replace").rstrip(),
+                    "message": text,
                     "stream": name,
                 })
 
@@ -58,20 +67,22 @@ class ProviderCommandRunner:
                 process.kill()
             except ProcessLookupError:
                 pass
+            result.returncode = 124
             await event_bus.emit(run_id, {
                 "type": "PROVIDER_COMMAND_TIMEOUT",
                 "title": "Provider command timeout",
                 "message": command,
             })
-            return 124
+            return result
 
         await task
-        code = int(process.returncode or 0)
+        result.returncode = int(process.returncode or 0)
 
         await event_bus.emit(run_id, {
             "type": "PROVIDER_COMMAND_FINISHED",
             "title": "Provider command finished",
-            "message": f"returncode={code}",
-            "returncode": code,
+            "message": f"returncode={result.returncode}",
+            "returncode": result.returncode,
         })
-        return code
+
+        return result

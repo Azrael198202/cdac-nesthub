@@ -57,6 +57,7 @@ class RuntimeBootstrap:
                     "type": "ollama",
                     "base_url": "http://127.0.0.1:11434",
                     "model": "qwen3:4b",
+                    "fallback_models": ["qwen2.5:3b", "qwen3:1.7b", "llama3.2:3b"],
                     "timeout_seconds": 120,
                     "auto_start": True,
                     "start_command": "ollama serve",
@@ -71,6 +72,24 @@ class RuntimeBootstrap:
                     "model": "gpt-4o-mini",
                     "timeout_seconds": 120,
                     "interactive_key_required": True
+                },
+                "vllm": {
+                    "enabled": False,
+                    "type": "openai_compatible",
+                    "base_url": "http://127.0.0.1:8001",
+                    "endpoint": "/v1/chat/completions",
+                    "model": "Qwen/Qwen2.5-7B-Instruct",
+                    "timeout_seconds": 120,
+                    "response_format_json": True
+                },
+                "lmstudio": {
+                    "enabled": False,
+                    "type": "openai_compatible",
+                    "base_url": "http://127.0.0.1:1234",
+                    "endpoint": "/v1/chat/completions",
+                    "model": "local-model",
+                    "timeout_seconds": 120,
+                    "response_format_json": True
                 }
             },
             "policy": {
