@@ -12,7 +12,8 @@ from ai_core.nodes.node_runner import NodeRunner
 from ai_core.nodes.node_config_loader import NodeConfigLoader
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.evolution.finetune_dataset_builder import FinetuneDatasetBuilder
-from ai_core.evolution.correction_learning import CorrectionLearningService
+from ai_core.evolution.runtime_learning import RuntimeLearningService
+from ai_core.runtime.runtime_template_generator import RuntimeTemplateGenerator
 
 
 class WorkflowRuntime:
@@ -26,7 +27,9 @@ class WorkflowRuntime:
         self.node_loader = NodeConfigLoader()
         self.knowledge = KnowledgeService()
         self.dataset = FinetuneDatasetBuilder()
-        self.correction_learning = CorrectionLearningService()
+        self.runtime_learning = RuntimeLearningService()
+        self.template_generator = RuntimeTemplateGenerator()
+        self.correction_learning = RuntimeLearningService()
 
     def _load_workflow(self) -> Dict[str, Any]:
         return self.loader.load_yaml(RUNTIME_CONFIGS / "workflows" / "base_orchestration.yaml")
@@ -123,18 +126,60 @@ class WorkflowRuntime:
 
         if decision == "reject":
             node_id = pending.get("node_id")
+            feedback_text = feedback or "Rejected by human."
+            original_output = state.get("results", {}).get(node_id, {})
+            executor_type = None
+
+            if node_id:
+                try:
+                    workflow_node = state["workflow"]["nodes"][max(0, state.get("node_index", 1) - 1)]
+                    node_config = self.node_loader.load(workflow_node)
+                    executor_type = node_config.get("executor_type", "llm_json")
+                except Exception:
+                    executor_type = "llm_json"
+
             state.setdefault("human_feedback", []).append({
                 "node_id": node_id,
-                "feedback": feedback or "Rejected by human."
+                "feedback": feedback_text,
+                "original_output": original_output,
             })
+
             if node_id:
+                self.runtime_learning.record_reject_feedback(
+                    run_id=run_id,
+                    node_id=node_id,
+                    user_input=state.get("input", ""),
+                    original_output=original_output,
+                    feedback=feedback_text,
+                )
+
+                evolution = self.template_generator.evolve_from_feedback(
+                    node_id=node_id,
+                    executor_type=executor_type or "llm_json",
+                    feedback=feedback_text,
+                    original_output=original_output,
+                    user_input=state.get("input", ""),
+                )
+
                 state["results"].pop(node_id, None)
+            else:
+                evolution = {}
+
             state["node_index"] = max(0, state.get("node_index", 1) - 1)
+
+            await self._emit(run_id, {
+                "type": "RUNTIME_TEMPLATE_EVOLVED",
+                "title": "Runtime template evolved",
+                "message": f"Updated generated prompt/schema for node={node_id}. Changes: {evolution.get('changes', [])}",
+                "node_id": node_id,
+                "evolution": evolution,
+                "progress": state.get("progress", 0),
+            })
 
             await self._emit(run_id, {
                 "type": "REJECTED_RETRY",
                 "title": "Rejected. Retrying node",
-                "message": feedback or "No reason provided.",
+                "message": feedback_text,
                 "progress": state.get("progress", 0)
             })
             await self._continue(state)
@@ -152,7 +197,7 @@ class WorkflowRuntime:
 
             original_output = state.get("results", {}).get(node_id, {})
 
-            self.correction_learning.record_correction(
+            self.runtime_learning.record_correction(
                 run_id=run_id,
                 node_id=node_id,
                 user_input=state.get("input", ""),

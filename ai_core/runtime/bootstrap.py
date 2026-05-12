@@ -3,11 +3,13 @@ from ai_core.config.paths import (
     RUNTIME_KNOWLEDGE, RUNTIME_DATASETS, RUNTIME_GENERATED, RUNTIME_REGISTRY
 )
 from ai_core.config.loader import ConfigLoader
+from ai_core.runtime.runtime_template_generator import RuntimeTemplateGenerator
 
 
 class RuntimeBootstrap:
     def __init__(self) -> None:
         self.loader = ConfigLoader()
+        self.template_generator = RuntimeTemplateGenerator()
 
     def ensure(self) -> None:
         for d in [
@@ -36,8 +38,7 @@ class RuntimeBootstrap:
         self._ensure_model_providers()
         self._ensure_workflow()
         self._ensure_node_configs()
-        self._ensure_prompts()
-        self._ensure_schemas()
+        self._ensure_runtime_templates()
         self._ensure_adapters()
         self._ensure_capability_routes()
         self._ensure_base_capabilities()
@@ -213,6 +214,20 @@ class RuntimeBootstrap:
             p = RUNTIME_GENERATED / "nodes" / f"{node_id}.yaml"
             if not p.exists():
                 self.loader.save_yaml(p, cfg)
+
+
+    def _ensure_runtime_templates(self) -> None:
+        node_executor_types = {
+            "input_parsing": "llm_json",
+            "intent_recognition": "llm_json",
+            "context_awareness": "static_transform",
+            "workflow_planning": "llm_json",
+            "execution": "tool_call",
+            "feedback_learning": "static_transform",
+            "output": "static_transform",
+        }
+        for node_id, executor_type in node_executor_types.items():
+            self.template_generator.ensure_node_template(node_id, executor_type)
 
     def _ensure_prompts(self) -> None:
         prompts = {

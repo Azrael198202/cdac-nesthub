@@ -1,8 +1,8 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>AI Core Config-Driven Node Runtime v13</title>
+<title>AI Core Config-Driven Node Runtime v16</title>
 <style>
 :root{--bg:#080d1d;--panel:#111827;--panel2:#0f172a;--line:#25324a;--text:#e5edff;--blue:#2563eb;--yellow:#3a2a0a;--yellowLine:#b45309;--red:#991b1b;--green:#166534}
 *{box-sizing:border-box}
@@ -23,7 +23,7 @@ body{margin:0;background:var(--bg);color:var(--text);font-family:ui-monospace,SF
 button{border:0;color:white;background:var(--blue);padding:8px 12px;border-radius:10px;cursor:pointer;font-weight:700;font-size:12px}
 button.reject{background:var(--red)}
 button.modify{background:var(--green)}
-button:disabled{opacity:.45}
+button:disabled{opacity:.45;cursor:not-allowed} input:disabled{opacity:.65;cursor:not-allowed}
 .side{border-left:1px solid var(--line);height:100vh;overflow-y:auto;padding:14px;background:#070b19}
 .side h2{font-size:15px;margin:0 0 12px}
 .event{border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:10px;margin-bottom:8px}
@@ -37,12 +37,12 @@ button:disabled{opacity:.45}
 <div class="app">
   <main class="main">
     <div id="messages" class="messages">
-      <div class="bubble system">Build version: v13 / JS syntax fixed / API returns run_id immediately.</div>
+      <div class="bubble system">Build version: v16 / JS syntax fixed / API returns run_id immediately.</div>
       <div class="bubble system">Config-Driven Node Runtime: ai_core only loads runtime-generated node config and dispatches generic executors.</div>
     </div>
     <form id="form" class="inputbar">
       <input id="message" placeholder="Message AI Core..." autocomplete="off" />
-      <button type="submit">Send</button>
+      <button id="sendButton" type="submit">Send</button>
     </form>
   </main>
   <aside class="side">
@@ -59,6 +59,19 @@ const messages = document.getElementById("messages");
 const events = document.getElementById("events");
 const form = document.getElementById("form");
 const input = document.getElementById("message");
+const sendButton = document.getElementById("sendButton");
+
+let workflowBusy = false;
+
+function setBusy(isBusy, label = "") {
+  workflowBusy = isBusy;
+  input.disabled = isBusy;
+  sendButton.disabled = isBusy;
+  sendButton.textContent = isBusy ? (label || "Running...") : "Send";
+  input.placeholder = isBusy
+    ? "Workflow is running. Please wait..."
+    : "Message AI Core...";
+}
 
 function esc(value) {
   return String(value ?? "")
@@ -269,6 +282,7 @@ function handleEvent(ev) {
   addEvent(ev);
 
   if (ev.type === "LLM_PROVIDER_START" || ev.type === "LLM_REQUEST_SENT") {
+    setBusy(true, "Thinking...");
     const key = `${ev.node_id || "node"}_${ev.provider || "provider"}`;
     runningBubble(key, ev.title || ev.type, ev.message || "Running...");
     return;
@@ -293,6 +307,7 @@ function handleEvent(ev) {
   }
 
   if (ev.type === "PROVIDER_COMMAND_STARTED") {
+    setBusy(true, "Installing...");
     runningBubble("provider_command", ev.title || ev.type, ev.message || "Running provider command...");
     return;
   }
@@ -307,7 +322,7 @@ function handleEvent(ev) {
     return;
   }
 
-  if (ev.type === "LLM_MODEL_MISSING" || ev.type === "LLM_MODEL_READY" || ev.type === "SECRET_SAVED" || ev.type === "CORRECTION_RECORDED" || ev.type === "CORRECTION_MEMORY_APPLIED" || ev.type === "PROVIDER_COMMAND_RESOLVED" || ev.type === "LLM_MODEL_FALLBACK" || ev.type === "LLM_MODEL_PULL_FAILED" || ev.type === "LLM_ENDPOINT_FALLBACK") {
+  if (ev.type === "LLM_MODEL_MISSING" || ev.type === "LLM_MODEL_READY" || ev.type === "SECRET_SAVED" || ev.type === "CORRECTION_RECORDED" || ev.type === "CORRECTION_MEMORY_APPLIED" || ev.type === "RUNTIME_TEMPLATE_EVOLVED" || ev.type === "PROVIDER_COMMAND_RESOLVED" || ev.type === "LLM_MODEL_FALLBACK" || ev.type === "LLM_MODEL_PULL_FAILED" || ev.type === "LLM_ENDPOINT_FALLBACK" || ev.type === "PROVIDER_BINARY_READY" || ev.type === "PROVIDER_BINARY_MISSING" || ev.type === "PROVIDER_INSTALL_STARTED" || ev.type === "PROVIDER_INSTALL_DONE" || ev.type === "PROVIDER_INSTALL_FAILED" || ev.type === "PROVIDER_DAEMON_STARTED") {
     bubble(`[${ev.title || ev.type}]\n${ev.message || ""}`, "system");
     return;
   }
@@ -324,12 +339,14 @@ function handleEvent(ev) {
 
   if (ev.type === "RUN_COMPLETED") {
     htmlBubble(`<b>[Final Output]</b><div>${esc(ev.message || "")}</div><div class="spec">${esc(JSON.stringify(ev.results || {}, null, 2))}</div>`, "system");
+    setBusy(false);
     if (source) source.close();
     return;
   }
 
   if (ev.type === "RUN_FAILED" || ev.type === "RUN_CANCELLED") {
     bubble(`[${ev.title || ev.type}]\n${ev.message || ""}`, "error");
+    setBusy(false);
     if (source) source.close();
     return;
   }
@@ -350,15 +367,23 @@ function connect(runId) {
   };
   source.onerror = () => {
     bubble("SSE stream closed or failed. Check server logs and DevTools Network tab.", "error");
+    setBusy(false);
     if (source) source.close();
   };
 }
 
 form.onsubmit = async (event) => {
   event.preventDefault();
+
+  if (workflowBusy) {
+    bubble("[Busy]\nA workflow is already running. Please wait until it finishes or fails.", "system");
+    return;
+  }
+
   const text = input.value.trim();
   if (!text) return;
 
+  setBusy(true, "Starting...");
   bubble(text, "user");
   input.value = "";
 
@@ -373,15 +398,18 @@ form.onsubmit = async (event) => {
     if (!res.ok) {
       const body = await res.text();
       bubble(`POST /api/chat failed: HTTP ${res.status}\n${body}`, "error");
+      setBusy(false);
       return;
     }
 
     const data = await res.json();
     currentRunId = data.run_id;
     bubble(`[Run queued]\nrun_id=${currentRunId}`, "system");
+    setBusy(true, "Running...");
     connect(currentRunId);
   } catch (err) {
     bubble("POST /api/chat error: " + err.message, "error");
+    setBusy(false);
   }
 };
 </script>

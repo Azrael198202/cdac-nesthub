@@ -1,4 +1,4 @@
-# AI Core Config-Driven Node Runtime v14
+# AI Core Config-Driven Node Runtime v16
 
 This version enforces the rule that `ai_core` must not contain business/domain/task-specific logic.
 
@@ -38,15 +38,15 @@ python scripts/smoke_test.py
 ```
 
 
-## v14 Fix
+## v16 Fix
 
-- Updated UI version label from v3 to v14.
+- Updated UI version label from v3 to v16.
 - Added `/api/version`.
 - Added no-cache headers for `/`.
 - This avoids confusion when the browser or an old server process displays stale UI text.
 
 
-## v14 Fix
+## v16 Fix
 
 - Fixed JavaScript syntax errors in `apps/web/index.html`.
 - `/api/chat` now returns `run_id` immediately.
@@ -55,7 +55,7 @@ python scripts/smoke_test.py
 - Added `.vscode/launch.json` and `.vscode/tasks.json`.
 
 
-## v14 Update
+## v16 Update
 
 - Added `runtime/generated/adapters/*.yaml`.
 - `LLMJsonExecutor` calls a real configured provider instead of returning a placeholder.
@@ -67,7 +67,7 @@ python scripts/smoke_test.py
 - `ai_core` still has no domain/task/business logic.
 
 
-## v14 Update
+## v16 Update
 
 Adds visible execution status for model calls.
 
@@ -99,7 +99,7 @@ Completed / Failed
 This makes it clear whether the backend is still waiting for the model, checking health, parsing JSON, or failed.
 
 
-## v14 Update
+## v16 Update
 
 Adds provider setup automation.
 
@@ -126,7 +126,7 @@ runtime/configs/secrets/secrets.json
 For production, replace the file-based secret store with OS Keychain, Vault, or a cloud secret manager.
 
 
-## v14 Fix
+## v16 Fix
 
 - Rewrites `RuntimeBootstrap` to always create:
   - `runtime/configs/models/providers.yaml`
@@ -143,7 +143,7 @@ python main.py
 ```
 
 
-## v14 Update
+## v16 Update
 
 ### Fix: Ollama command not found
 
@@ -183,7 +183,7 @@ runtime/knowledge/prompt_optimization_memory.jsonl
 For future similar tasks, the executor retrieves correction memory and injects it into the prompt.
 
 
-## v14 Update
+## v16 Update
 
 ### Provider Handler Registry
 
@@ -235,7 +235,7 @@ fallback_models:
 If primary model pull fails, runtime automatically tries fallback models.
 
 
-## v14 Update
+## v16 Update
 
 ### Ollama endpoint strategy
 
@@ -272,7 +272,7 @@ response
 ```
 
 
-## v14 Update
+## v16 Update
 
 Provider Auto Installer is added.
 
@@ -313,3 +313,105 @@ executable_hints:
 start_command: "{binary} serve"
 pull_command: "{binary} pull {model}"
 ```
+
+
+## v16 Update
+
+### UI single-run lock
+
+The chat input and Send button are disabled while a workflow is running.
+
+Disabled during:
+
+```text
+provider installation
+provider start
+model pull
+LLM request
+workflow execution
+```
+
+Re-enabled after:
+
+```text
+RUN_COMPLETED
+RUN_FAILED
+RUN_CANCELLED
+SSE error
+```
+
+Human Review and API Key input use their own buttons, so the main Send button stays locked.
+
+
+## v16 Update
+
+### Runtime Learning + Runtime Template Evolution
+
+This version fixes the issue where `Reject & Retry` feedback such as:
+
+```text
+tasks should be structured objects instead of string array.
+Need task_id/task_type/action/parameters.
+Booking actions require human confirmation.
+Need more missing_information fields.
+```
+
+was not strong enough to change the next model output.
+
+New behavior:
+
+```text
+Reject & Retry
+↓
+record reject feedback
+↓
+evolve runtime/generated prompt/schema for the current node
+↓
+retry the same node
+```
+
+The generated schema can automatically evolve from:
+
+```json
+"tasks": {"type": "array"}
+```
+
+to:
+
+```json
+"tasks": {
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["task_id", "task_type", "action", "parameters"]
+  }
+}
+```
+
+### Modify JSON & Continue Learning
+
+When the user clicks `Modify JSON & Continue`, runtime records:
+
+```text
+original_output
+modified_output
+human_corrected_output
+feedback
+node_id
+user_input
+```
+
+Into:
+
+```text
+runtime/datasets/corrections.jsonl
+runtime/knowledge/prompt_optimization_memory.jsonl
+```
+
+### Correction Memory Retrieval
+
+Future similar tasks retrieve correction memory and inject it into prompts before model execution.
+
+### Applies to known and unknown nodes
+
+`RuntimeTemplateGenerator` works for any node_id. Known nodes get better default contracts; unknown nodes get generic prompt/schema and can evolve from human feedback.

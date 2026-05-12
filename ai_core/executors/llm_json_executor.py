@@ -4,7 +4,7 @@ from ai_core.executors.template_engine import TemplateEngine
 from ai_core.validation.schema_validator import SchemaValidator
 from ai_core.llm.provider_router import ProviderRouter
 from ai_core.events.event_bus import event_bus
-from ai_core.evolution.correction_learning import CorrectionLearningService
+from ai_core.evolution.runtime_learning import RuntimeLearningService
 
 
 class LLMJsonExecutor:
@@ -19,7 +19,7 @@ class LLMJsonExecutor:
         self.template = TemplateEngine()
         self.validator = SchemaValidator()
         self.router = ProviderRouter()
-        self.correction_learning = CorrectionLearningService()
+        self.runtime_learning = RuntimeLearningService()
 
     async def execute(self, workflow_node: dict, node_config: dict, state: dict, capability_result: dict) -> dict:
         run_id = state["run_id"]
@@ -44,7 +44,7 @@ class LLMJsonExecutor:
             "prompt_id": prompt.get("id"),
         })
 
-        correction_memory = self.correction_learning.build_prompt_reinforcement(
+        correction_memory = self.runtime_learning.build_prompt_reinforcement(
             node_id=node_id,
             user_input=state.get("input", ""),
         )
@@ -56,6 +56,10 @@ class LLMJsonExecutor:
             "human_feedback": state.get("human_feedback", []),
             "correction_memory": correction_memory,
         })
+
+        runtime_rules = prompt.get("runtime_rules", [])
+        if runtime_rules:
+            rendered = rendered + "\n\nRuntime rules:\n" + "\n".join(f"- {r}" for r in runtime_rules)
 
         if correction_memory:
             rendered = rendered + "\n\n" + correction_memory
