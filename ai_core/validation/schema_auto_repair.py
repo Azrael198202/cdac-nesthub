@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from ai_core.config.loader import ConfigLoader
@@ -98,11 +99,11 @@ class SchemaAutoRepair:
 
         changed = bool(changes)
         if changed:
-            self.loader.save_json(schema_path, repaired)
+            self.loader.save_json(Path(schema_path), repaired)
             self._log({
                 "created_at": datetime.utcnow().isoformat(),
                 "node_id": node_id,
-                "schema_path": schema_path,
+                "schema_path": str(schema_path),
                 "error_message": error_message,
                 "changes": changes,
             })

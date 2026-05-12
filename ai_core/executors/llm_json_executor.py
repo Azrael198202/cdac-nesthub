@@ -150,7 +150,7 @@ class LLMJsonExecutor:
             if not validation_ok:
                 repaired, repaired_schema, changes = self.schema_auto_repair.try_repair(
                     node_id=node_id,
-                    schema_path=str(schema_path),
+                    schema_path=schema_path,
                     schema=schema,
                     result=result,
                     error_message=original_error,
