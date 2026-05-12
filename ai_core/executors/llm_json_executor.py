@@ -6,6 +6,7 @@ from ai_core.llm.provider_router import ProviderRouter
 from ai_core.events.event_bus import event_bus
 from ai_core.validation.recoverable_validation_error import RecoverableValidationError
 from ai_core.validation.schema_auto_repair import SchemaAutoRepair
+from ai_core.validation.result_auto_repair import ResultAutoRepair
 from ai_core.evolution.runtime_learning import RuntimeLearningService
 
 
@@ -21,6 +22,7 @@ class LLMJsonExecutor:
         self.template = TemplateEngine()
         self.validator = SchemaValidator()
         self.schema_auto_repair = SchemaAutoRepair()
+        self.result_auto_repair = ResultAutoRepair()
         self.router = ProviderRouter()
         self.runtime_learning = RuntimeLearningService()
 
@@ -101,62 +103,102 @@ class LLMJsonExecutor:
         except Exception as exc:
             original_error = str(exc)
 
-            repaired, repaired_schema, changes = self.schema_auto_repair.try_repair(
+            # 1. First try to repair the RESULT.
+            # This is for cases where the schema is correct but the model omitted required fields.
+            result_repaired, repaired_result, result_changes = self.result_auto_repair.try_repair(
                 node_id=node_id,
-                schema_path=str(schema_path),
-                schema=schema,
                 result=result,
+                schema=schema,
+                state=state,
                 error_message=original_error,
             )
 
-            if repaired:
+            if result_repaired:
                 await event_bus.emit(run_id, {
-                    "type": "SCHEMA_AUTO_REPAIRED",
-                    "title": "Schema auto-repaired",
-                    "message": f"Schema evolved automatically for node={node_id}. Changes: {changes}",
+                    "type": "RESULT_AUTO_REPAIRED",
+                    "title": "Result auto-repaired",
+                    "message": f"Missing or incompatible fields repaired for node={node_id}. Changes: {result_changes}",
                     "node_id": node_id,
-                    "schema_path": str(schema_path),
-                    "changes": changes,
+                    "changes": result_changes,
+                    "result": repaired_result,
                 })
 
                 try:
-                    self.validator.validate_data(result, repaired_schema)
+                    self.validator.validate_data(repaired_result, schema)
+                    result = repaired_result
                     await event_bus.emit(run_id, {
                         "type": "LLM_JSON_VALIDATED",
-                        "title": "JSON validated after schema repair",
+                        "title": "JSON validated after result repair",
                         "message": node_id,
                         "node_id": node_id,
                     })
-                except Exception as second_exc:
+                except Exception as result_repair_exc:
+                    # Continue to schema repair using repaired result, because it may still be structurally better.
+                    result = repaired_result
+                    original_error = str(result_repair_exc)
+
+            # 2. If still invalid, try to repair SCHEMA.
+            try:
+                self.validator.validate_data(result, schema)
+            except Exception as after_result_exc:
+                original_error = str(after_result_exc)
+
+                repaired, repaired_schema, changes = self.schema_auto_repair.try_repair(
+                    node_id=node_id,
+                    schema_path=str(schema_path),
+                    schema=schema,
+                    result=result,
+                    error_message=original_error,
+                )
+
+                if repaired:
+                    await event_bus.emit(run_id, {
+                        "type": "SCHEMA_AUTO_REPAIRED",
+                        "title": "Schema auto-repaired",
+                        "message": f"Schema evolved automatically for node={node_id}. Changes: {changes}",
+                        "node_id": node_id,
+                        "schema_path": str(schema_path),
+                        "changes": changes,
+                    })
+
+                    try:
+                        self.validator.validate_data(result, repaired_schema)
+                        await event_bus.emit(run_id, {
+                            "type": "LLM_JSON_VALIDATED",
+                            "title": "JSON validated after schema repair",
+                            "message": node_id,
+                            "node_id": node_id,
+                        })
+                    except Exception as second_exc:
+                        await event_bus.emit(run_id, {
+                            "type": "LLM_JSON_VALIDATION_FAILED",
+                            "title": "JSON validation failed after auto repair",
+                            "message": str(second_exc),
+                            "node_id": node_id,
+                            "result": result,
+                            "schema_path": str(schema_path),
+                        })
+                        raise RecoverableValidationError(
+                            message=str(second_exc),
+                            node_id=node_id,
+                            result=result,
+                            schema_path=str(schema_path),
+                        ) from second_exc
+                else:
                     await event_bus.emit(run_id, {
                         "type": "LLM_JSON_VALIDATION_FAILED",
-                        "title": "JSON validation failed after schema repair",
-                        "message": str(second_exc),
+                        "title": "JSON validation failed",
+                        "message": original_error,
                         "node_id": node_id,
                         "result": result,
                         "schema_path": str(schema_path),
                     })
                     raise RecoverableValidationError(
-                        message=str(second_exc),
+                        message=original_error,
                         node_id=node_id,
                         result=result,
                         schema_path=str(schema_path),
-                    ) from second_exc
-            else:
-                await event_bus.emit(run_id, {
-                    "type": "LLM_JSON_VALIDATION_FAILED",
-                    "title": "JSON validation failed",
-                    "message": original_error,
-                    "node_id": node_id,
-                    "result": result,
-                    "schema_path": str(schema_path),
-                })
-                raise RecoverableValidationError(
-                    message=original_error,
-                    node_id=node_id,
-                    result=result,
-                    schema_path=str(schema_path),
-                ) from exc
+                    ) from after_result_exc
 
         else:
             await event_bus.emit(run_id, {

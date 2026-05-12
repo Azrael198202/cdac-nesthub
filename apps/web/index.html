@@ -11,7 +11,6 @@
       --panel2:#101827;
       --panel3:#111c2e;
       --line:#26344f;
-      --line2:#334155;
       --text:#e5edff;
       --muted:#8ea3c7;
       --blue:#2563eb;
@@ -47,14 +46,19 @@
       min-width:0;
       border-right:1px solid var(--line);
       height:100vh;
+      position:relative;
     }
 
     .messages{
       flex:1;
       overflow:auto;
       padding:18px;
-      padding-bottom:100px;
+      padding-bottom:130px;
       scroll-behavior:smooth;
+    }
+
+    body.has-sticky-interaction .messages{
+      padding-bottom:420px;
     }
 
     .top-note{
@@ -93,11 +97,6 @@
       background:#320d14;
     }
 
-    .bubble.approval{
-      border-color:#d97706;
-      background:#3b2807;
-    }
-
     .workflow-card{
       border:1px solid var(--line);
       background:linear-gradient(180deg,#0f172a,#0b1220);
@@ -105,6 +104,15 @@
       margin:12px 0;
       overflow:hidden;
       box-shadow:0 8px 24px rgba(0,0,0,.18);
+    }
+
+    .workflow-card.paused{
+      border-color:#d97706;
+      box-shadow:0 0 0 1px rgba(217,119,6,.35), 0 8px 24px rgba(0,0,0,.2);
+    }
+
+    .workflow-card.resolved-human{
+      opacity:.88;
     }
 
     .workflow-header{
@@ -152,15 +160,24 @@
       white-space:nowrap;
     }
 
-    .status-pill{
+    .status-pill,.attempt-tag{
       font-family:var(--mono);
       font-size:10px;
-      color:#bfdbfe;
-      border:1px solid #1e40af;
-      background:#0b1b3a;
       padding:4px 7px;
       border-radius:999px;
       white-space:nowrap;
+    }
+
+    .attempt-tag{
+      color:#c4b5fd;
+      border:1px solid #6d28d9;
+      background:#1c1239;
+    }
+
+    .status-pill{
+      color:#bfdbfe;
+      border:1px solid #1e40af;
+      background:#0b1b3a;
     }
 
     .status-pill.running{color:#fde68a;border-color:#92400e;background:#2a1b05}
@@ -178,36 +195,8 @@
     }
     .status-pill.done{color:#bbf7d0;border-color:#166534;background:#052e16}
     .status-pill.error{color:#fecaca;border-color:#991b1b;background:#3b0a0a}
-    .status-pill.waiting{color:#ddd6fe;border-color:#6d28d9;background:#1c1239}
-    .status-pill.paused{color:#fde68a;border-color:#d97706;background:#3b2807}
+    .status-pill.waiting,.status-pill.paused{color:#fde68a;border-color:#d97706;background:#3b2807}
     .status-pill.resolved{color:#bbf7d0;border-color:#166534;background:#052e16}
-    .workflow-card.paused{
-      border-color:#d97706;
-      box-shadow:0 0 0 1px rgba(217,119,6,.35), 0 8px 24px rgba(0,0,0,.2);
-    }
-    .workflow-card.resolved-human{
-      opacity:.86;
-    }
-    .attempt-tag{
-      font-family:var(--mono);
-      font-size:10px;
-      color:#c4b5fd;
-      border:1px solid #6d28d9;
-      background:#1c1239;
-      padding:3px 6px;
-      border-radius:999px;
-      white-space:nowrap;
-    }
-    .interaction-box.resolved{
-      border-color:#166534;
-      background:#052e16;
-    }
-    .interaction-status{
-      margin-top:8px;
-      font-family:var(--mono);
-      font-size:11px;
-      color:#bbf7d0;
-    }
 
     .workflow-body{
       padding:6px 12px 14px 12px;
@@ -262,26 +251,6 @@
       color:#cbd5e1;
       white-space:pre-wrap;
       line-height:1.45;
-    }
-
-    .interaction-box{
-      margin-top:10px;
-      border:1px solid #d97706;
-      background:#3b2807;
-      border-radius:10px;
-      padding:12px;
-    }
-
-    .interaction-box input{
-      width:100%;
-      background:#020617;
-      color:#e5edff;
-      border:1px solid #334155;
-      border-radius:8px;
-      margin-top:8px;
-      padding:9px;
-      font-family:var(--mono);
-      font-size:12px;
     }
 
     .step-json{
@@ -394,6 +363,7 @@
       padding:10px;
       border:1px solid var(--line);
       border-radius:14px;
+      z-index:900;
     }
 
     .composer input{
@@ -437,6 +407,85 @@
       margin-top:10px;
     }
 
+    .sticky-interaction{
+      position:fixed;
+      left:18px;
+      right:440px;
+      bottom:86px;
+      max-height:330px;
+      overflow:auto;
+      z-index:950;
+      display:none;
+      border:1px solid #d97706;
+      background:linear-gradient(180deg,#3b2807,#251704);
+      border-radius:14px;
+      box-shadow:0 18px 50px rgba(0,0,0,.45), 0 0 0 1px rgba(217,119,6,.25);
+      padding:12px;
+      font-family:var(--mono);
+      font-size:12px;
+    }
+
+    .sticky-interaction.active{display:block}
+
+    .sticky-title{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      margin-bottom:8px;
+      color:#fde68a;
+      font-weight:700;
+    }
+
+    .sticky-title .badge{
+      font-size:10px;
+      padding:3px 7px;
+      border-radius:999px;
+      border:1px solid #d97706;
+      background:#1c1204;
+    }
+
+    .sticky-body{
+      color:#e5edff;
+    }
+
+    .sticky-json{
+      margin-top:8px;
+      background:#020617;
+      border:1px solid #334155;
+      border-radius:8px;
+      padding:10px;
+      max-height:150px;
+      overflow:auto;
+      white-space:pre;
+      font-size:11px;
+    }
+
+    .sticky-actions{
+      display:flex;
+      gap:8px;
+      margin-top:10px;
+      flex-wrap:wrap;
+    }
+
+    .interaction-placeholder{
+      border:1px dashed #d97706;
+      color:#fde68a;
+      background:rgba(217,119,6,.08);
+      border-radius:10px;
+      padding:10px;
+      margin-top:8px;
+      font-family:var(--mono);
+      font-size:11px;
+    }
+
+    .interaction-status{
+      margin-top:8px;
+      font-family:var(--mono);
+      font-size:11px;
+      color:#bbf7d0;
+    }
+
     .spec{
       margin-top:8px;
       background:#020617;
@@ -453,7 +502,7 @@
     @media(max-width:1000px){
       .app{grid-template-columns:1fr}
       .sidebar{display:none}
-      .composer{right:18px}
+      .composer,.sticky-interaction{right:18px}
     }
   </style>
 </head>
@@ -461,9 +510,11 @@
 <div class="app">
   <main class="main">
     <div id="messages" class="messages">
-      <div class="top-note">Build version: v21 / Auto schema repair before human recovery.</div>
-      <div class="top-note">Each node is grouped into a collapsible card. Internal events are shown as a timeline.</div>
+      <div class="top-note">Build version: v23 / Result auto repair + sticky interaction.</div>
+      <div class="top-note">Human Review and API Key input stay fixed above the composer until resolved.</div>
     </div>
+
+    <div id="stickyInteraction" class="sticky-interaction"></div>
 
     <form id="form" class="composer">
       <input id="message" placeholder="Message AI Core..." autocomplete="off" />
@@ -483,21 +534,23 @@ const events = document.getElementById("events");
 const form = document.getElementById("form");
 const input = document.getElementById("message");
 const sendButton = document.getElementById("sendButton");
+const stickyInteraction = document.getElementById("stickyInteraction");
 
 let currentRunId = null;
 let source = null;
 let workflowBusy = false;
+
 let runCard = null;
 let runProgress = null;
 
-// nodeCards maps a visual key, e.g. "intent_recognition#1", to a card.
-// activeNodeKeys maps node_id to current visual key.
-// nodeAttemptCounts maps node_id to latest attempt number.
-// pausedNodeKeys stores nodes waiting for human action.
 const nodeCards = new Map();
 const activeNodeKeys = new Map();
 const nodeAttemptCounts = new Map();
 const pausedNodeKeys = new Set();
+
+let workflowPaused = false;
+let activeInteraction = null;
+let bufferedEvents = [];
 
 const NODE_EVENTS = new Set([
   "NODE_STARTED","NODE_EXECUTING","NODE_RESULT",
@@ -507,7 +560,8 @@ const NODE_EVENTS = new Set([
   "LLM_MODEL_PULL_FAILED","LLM_ENDPOINT_FALLBACK",
   "LLM_REQUEST_SENT","LLM_RESPONSE_RECEIVED","LLM_PROVIDER_DONE",
   "LLM_PROVIDER_ERROR","LLM_JSON_VALIDATING","LLM_JSON_VALIDATED",
-  "LLM_JSON_VALIDATION_FAILED","SCHEMA_AUTO_REPAIRED","CORRECTION_MEMORY_APPLIED",
+  "LLM_JSON_VALIDATION_FAILED","RESULT_AUTO_REPAIRED","SCHEMA_AUTO_REPAIRED",
+  "CORRECTION_MEMORY_APPLIED",
   "RUNTIME_TEMPLATE_EVOLVED","VALIDATION_RECOVERY_REQUIRED",
   "HUMAN_REVIEW","CAPABILITY_READY","CAPABILITY_ROUTE",
   "PROVIDER_BINARY_READY","PROVIDER_BINARY_MISSING",
@@ -601,7 +655,6 @@ function statusForEvent(ev){
 }
 
 function visualKeyForNode(nodeId, ev={}){
-  // A fresh NODE_STARTED after a paused/waiting node means a resume/retry attempt.
   if(ev.type === "NODE_STARTED"){
     const currentKey = activeNodeKeys.get(nodeId);
     if(!currentKey || pausedNodeKeys.has(currentKey)){
@@ -678,7 +731,6 @@ function addStep(ev, opts={}){
     detail += `<details open><summary>Validation Error</summary><div class="step-json">${esc(ev.validation_error)}</div></details>`;
   }
 
-  const customHtml = ev.html_content || "";
   step.innerHTML = `
     <div class="step-title">
       <span class="step-type">${esc(ev.type || "event")}</span>
@@ -686,7 +738,6 @@ function addStep(ev, opts={}){
     </div>
     <div class="step-msg">${esc(ev.message || "")}</div>
     ${detail}
-    ${customHtml}
   `;
 
   body.appendChild(step);
@@ -711,139 +762,187 @@ function addStep(ev, opts={}){
   scrollMessages();
 }
 
-function markInteractionResolved(container, decisionText){
-  const box = container.querySelector(".interaction-box");
-  if(box){
-    box.classList.add("resolved");
-    const status = document.createElement("div");
-    status.className = "interaction-status";
-    status.textContent = decisionText;
-    box.appendChild(status);
-  }
+function markCurrentInteractionResolved(decisionText){
+  if(!activeInteraction) return;
 
-  const card = container.closest(".workflow-card");
+  const {nodeId, key} = activeInteraction;
+
+  const card = nodeCards.get(key);
   if(card){
     card.classList.remove("paused");
     card.classList.add("resolved-human");
-    pausedNodeKeys.delete(card.dataset.visualKey);
+    pausedNodeKeys.delete(key);
+
     const pill = card.querySelector(".status-pill");
     pill.className = "status-pill resolved";
     pill.textContent = "resolved";
+
+    const body = card.querySelector(".workflow-body");
+    const step = document.createElement("div");
+    step.className = "step done";
+    step.innerHTML = `
+      <div class="step-title">
+        <span class="step-type">HUMAN_INTERACTION_RESOLVED</span>
+        <span>Interaction resolved</span>
+      </div>
+      <div class="step-msg">${esc(decisionText)}</div>
+    `;
+    body.appendChild(step);
   }
+
+  stickyInteraction.classList.remove("active");
+  stickyInteraction.innerHTML = "";
+  document.body.classList.remove("has-sticky-interaction");
+
+  workflowPaused = false;
+  activeInteraction = null;
+  scrollMessages();
+
+  flushBufferedEvents();
 }
 
-function approvalCard(ev){
+function showStickyHumanReview(ev){
   const nodeId = nodeIdFromEvent(ev);
   const card = ensureNodeCard(nodeId, ev);
-  const body = card.querySelector(".workflow-body");
-
-  const step = document.createElement("div");
-  step.className = "step waiting";
-
-  const json = JSON.stringify(ev.result || {}, null, 2);
-  step.innerHTML = `
-    <div class="step-title">
-      <span class="step-type">HUMAN_INTERACTION</span>
-      <span>Human Review</span>
-    </div>
-    <div class="step-msg">${esc(ev.message || "")}</div>
-    ${ev.validation_error ? `<div class="step-json">${esc(ev.validation_error)}</div>` : ""}
-    <div class="interaction-box">
-      <div class="step-json" contenteditable="false">${esc(json)}</div>
-      <textarea placeholder="Reject reason or modification note..."></textarea>
-      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
-        <button class="approve" type="button">Approve</button>
-        <button class="reject" type="button">Reject & Retry</button>
-        <button class="modify" type="button">Modify JSON & Continue</button>
-        <button class="edit-json" type="button">Edit JSON</button>
-      </div>
-    </div>
-  `;
-
-  body.appendChild(step);
-
   const key = card.dataset.visualKey;
+
   pausedNodeKeys.add(key);
   card.classList.add("paused");
   const pill = card.querySelector(".status-pill");
   pill.className = "status-pill paused";
   pill.textContent = "waiting";
-  scrollMessages();
 
-  const textarea = step.querySelector("textarea");
-  const spec = step.querySelector(".step-json:last-of-type");
+  const body = card.querySelector(".workflow-body");
+  const placeholder = document.createElement("div");
+  placeholder.className = "step waiting";
+  placeholder.innerHTML = `
+    <div class="step-title">
+      <span class="step-type">HUMAN_INTERACTION</span>
+      <span>Waiting for user input</span>
+    </div>
+    <div class="interaction-placeholder">
+      Human Review is pinned at the bottom. Please approve, reject, or modify there.
+    </div>
+  `;
+  body.appendChild(placeholder);
 
-  step.querySelector(".edit-json").onclick = () => {
-    spec.contentEditable = "true";
-    spec.focus();
+  workflowPaused = true;
+  activeInteraction = {type:"human_review", nodeId, key, event:ev};
+  document.body.classList.add("has-sticky-interaction");
+
+  const json = JSON.stringify(ev.result || {}, null, 2);
+  stickyInteraction.innerHTML = `
+    <div class="sticky-title">
+      <div><span class="spinner"></span>Human Review Required</div>
+      <div class="badge">${esc(nodeId)}</div>
+    </div>
+    <div class="sticky-body">
+      <div>${esc(ev.message || "")}</div>
+      ${ev.validation_error ? `<div class="sticky-json">${esc(ev.validation_error)}</div>` : ""}
+      <div id="stickyJson" class="sticky-json" contenteditable="false">${esc(json)}</div>
+      <textarea id="stickyFeedback" placeholder="Reject reason or modification note..."></textarea>
+      <div class="sticky-actions">
+        <button id="stickyApprove" class="approve" type="button">Approve</button>
+        <button id="stickyReject" class="reject" type="button">Reject & Retry</button>
+        <button id="stickyModify" class="modify" type="button">Modify JSON & Continue</button>
+        <button id="stickyEdit" class="edit-json" type="button">Edit JSON</button>
+      </div>
+    </div>
+  `;
+  stickyInteraction.classList.add("active");
+
+  const feedback = document.getElementById("stickyFeedback");
+  const jsonBox = document.getElementById("stickyJson");
+
+  document.getElementById("stickyEdit").onclick = () => {
+    jsonBox.contentEditable = "true";
+    jsonBox.focus();
   };
 
-  step.querySelector(".approve").onclick = async () => {
-    step.querySelectorAll("button").forEach(b => b.disabled = true);
-    markInteractionResolved(step, "Approved. Continuing workflow...");
-    await resume("approve", null, textarea.value);
+  document.getElementById("stickyApprove").onclick = async () => {
+    stickyInteraction.querySelectorAll("button").forEach(b => b.disabled = true);
+    markCurrentInteractionResolved("Approved. Continuing workflow...");
+    await resume("approve", null, feedback.value);
   };
 
-  step.querySelector(".reject").onclick = async () => {
-    step.querySelectorAll("button").forEach(b => b.disabled = true);
-    markInteractionResolved(step, "Rejected. Retrying with feedback...");
-    await resume("reject", null, textarea.value || "Rejected by human.");
+  document.getElementById("stickyReject").onclick = async () => {
+    stickyInteraction.querySelectorAll("button").forEach(b => b.disabled = true);
+    markCurrentInteractionResolved("Rejected. Retrying with feedback...");
+    await resume("reject", null, feedback.value || "Rejected by human.");
   };
 
-  step.querySelector(".modify").onclick = async () => {
+  document.getElementById("stickyModify").onclick = async () => {
     try{
-      const parsed = JSON.parse(spec.textContent);
-      step.querySelectorAll("button").forEach(b => b.disabled = true);
-      markInteractionResolved(step, "Modified JSON accepted. Continuing workflow...");
-      await resume("modify", parsed, textarea.value || "Modified by human.");
+      const parsed = JSON.parse(jsonBox.textContent);
+      stickyInteraction.querySelectorAll("button").forEach(b => b.disabled = true);
+      markCurrentInteractionResolved("Modified JSON accepted. Continuing workflow...");
+      await resume("modify", parsed, feedback.value || "Modified by human.");
     }catch(err){
       alert("Invalid JSON: " + err.message);
     }
   };
+
+  stickyInteraction.scrollIntoView({block:"end", behavior:"smooth"});
 }
 
-function secretRequired(ev){
+function showStickySecretRequired(ev){
   const nodeId = nodeIdFromEvent(ev) || "runtime";
   const card = ensureNodeCard(nodeId, ev);
-  const body = card.querySelector(".workflow-body");
-
-  const step = document.createElement("div");
-  step.className = "step waiting";
-  step.innerHTML = `
-    <div class="step-title">
-      <span class="step-type">SECRET_REQUIRED</span>
-      <span>API Key Required</span>
-    </div>
-    <div class="step-msg">${esc(ev.message || "")}</div>
-    <div class="interaction-box">
-      <input class="secret-value" type="password" placeholder="${esc(ev.secret_key || "API_KEY")}" />
-      <div style="display:flex;gap:8px;margin-top:8px">
-        <button class="approve" type="button">Save Key & Continue</button>
-        <button class="reject" type="button">Cancel</button>
-      </div>
-    </div>
-  `;
-  body.appendChild(step);
-
   const key = card.dataset.visualKey;
+
   pausedNodeKeys.add(key);
   card.classList.add("paused");
   const pill = card.querySelector(".status-pill");
   pill.className = "status-pill paused";
   pill.textContent = "waiting";
-  scrollMessages();
 
-  const inputEl = step.querySelector(".secret-value");
-  step.querySelector(".approve").onclick = async () => {
+  const body = card.querySelector(".workflow-body");
+  const placeholder = document.createElement("div");
+  placeholder.className = "step waiting";
+  placeholder.innerHTML = `
+    <div class="step-title">
+      <span class="step-type">SECRET_REQUIRED</span>
+      <span>Waiting for API key</span>
+    </div>
+    <div class="interaction-placeholder">
+      API key input is pinned at the bottom.
+    </div>
+  `;
+  body.appendChild(placeholder);
+
+  workflowPaused = true;
+  activeInteraction = {type:"secret", nodeId, key, event:ev};
+  document.body.classList.add("has-sticky-interaction");
+
+  stickyInteraction.innerHTML = `
+    <div class="sticky-title">
+      <div><span class="spinner"></span>API Key Required</div>
+      <div class="badge">${esc(nodeId)}</div>
+    </div>
+    <div class="sticky-body">
+      <div>${esc(ev.message || "")}</div>
+      <input id="stickySecret" type="password" placeholder="${esc(ev.secret_key || "API_KEY")}" style="width:100%;background:#020617;color:#e5edff;border:1px solid #334155;border-radius:8px;margin-top:8px;padding:9px;font-family:inherit;font-size:12px" />
+      <div class="sticky-actions">
+        <button id="stickySaveSecret" class="approve" type="button">Save Key & Continue</button>
+        <button id="stickyCancelSecret" class="reject" type="button">Cancel</button>
+      </div>
+    </div>
+  `;
+  stickyInteraction.classList.add("active");
+
+  const inputEl = document.getElementById("stickySecret");
+
+  document.getElementById("stickySaveSecret").onclick = async () => {
     const value = inputEl.value.trim();
     if(!value){ alert("Please input the API key."); return; }
-    step.querySelectorAll("button").forEach(b => b.disabled = true);
-    markInteractionResolved(step, "API key saved. Continuing workflow...");
+    stickyInteraction.querySelectorAll("button").forEach(b => b.disabled = true);
+    markCurrentInteractionResolved("API key saved. Continuing workflow...");
     await resume("approve", {value}, "secret provided");
   };
-  step.querySelector(".reject").onclick = async () => {
-    step.querySelectorAll("button").forEach(b => b.disabled = true);
-    markInteractionResolved(step, "API key input cancelled.");
+
+  document.getElementById("stickyCancelSecret").onclick = async () => {
+    stickyInteraction.querySelectorAll("button").forEach(b => b.disabled = true);
+    markCurrentInteractionResolved("API key input cancelled.");
     await resume("reject", null, "secret cancelled");
   };
 }
@@ -860,10 +959,27 @@ async function resume(decision, modified_result=null, feedback=""){
   });
 }
 
-function handleEvent(ev){
+function flushBufferedEvents(){
+  const items = bufferedEvents;
+  bufferedEvents = [];
+  for(const ev of items){
+    handleEvent(ev, true);
+  }
+}
+
+function handleEvent(ev, fromBuffer=false){
   addEventMini(ev);
 
   if(ev.progress !== undefined) setProgress(ev.progress);
+
+  if(workflowPaused && !fromBuffer){
+    if(ev.type === "RUN_FAILED" || ev.type === "RUN_CANCELLED" || ev.type === "RUN_COMPLETED"){
+      // terminal events should still be shown
+    }else if(ev.type !== "HUMAN_REVIEW" && ev.type !== "SECRET_REQUIRED"){
+      bufferedEvents.push(ev);
+      return;
+    }
+  }
 
   if(ev.type === "RUN_CREATED" || ev.type === "RUN_STARTED"){
     ensureRunCard(ev.run_id || currentRunId);
@@ -887,13 +1003,12 @@ function handleEvent(ev){
   }
 
   if(ev.type === "SECRET_REQUIRED"){
-    addStep({...ev, node_id:nodeIdFromEvent(ev)});
-    secretRequired(ev);
+    showStickySecretRequired(ev);
     return;
   }
 
   if(ev.type === "HUMAN_REVIEW"){
-    approvalCard(ev);
+    showStickyHumanReview(ev);
     return;
   }
 
@@ -955,6 +1070,12 @@ form.onsubmit = async (event) => {
   activeNodeKeys.clear();
   nodeAttemptCounts.clear();
   pausedNodeKeys.clear();
+  workflowPaused = false;
+  activeInteraction = null;
+  bufferedEvents = [];
+  stickyInteraction.classList.remove("active");
+  stickyInteraction.innerHTML = "";
+  document.body.classList.remove("has-sticky-interaction");
 
   try{
     bubble("[Sending]\nPOST /api/chat", "system");
