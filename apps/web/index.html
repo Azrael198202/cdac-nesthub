@@ -179,6 +179,35 @@
     .status-pill.done{color:#bbf7d0;border-color:#166534;background:#052e16}
     .status-pill.error{color:#fecaca;border-color:#991b1b;background:#3b0a0a}
     .status-pill.waiting{color:#ddd6fe;border-color:#6d28d9;background:#1c1239}
+    .status-pill.paused{color:#fde68a;border-color:#d97706;background:#3b2807}
+    .status-pill.resolved{color:#bbf7d0;border-color:#166534;background:#052e16}
+    .workflow-card.paused{
+      border-color:#d97706;
+      box-shadow:0 0 0 1px rgba(217,119,6,.35), 0 8px 24px rgba(0,0,0,.2);
+    }
+    .workflow-card.resolved-human{
+      opacity:.86;
+    }
+    .attempt-tag{
+      font-family:var(--mono);
+      font-size:10px;
+      color:#c4b5fd;
+      border:1px solid #6d28d9;
+      background:#1c1239;
+      padding:3px 6px;
+      border-radius:999px;
+      white-space:nowrap;
+    }
+    .interaction-box.resolved{
+      border-color:#166534;
+      background:#052e16;
+    }
+    .interaction-status{
+      margin-top:8px;
+      font-family:var(--mono);
+      font-size:11px;
+      color:#bbf7d0;
+    }
 
     .workflow-body{
       padding:6px 12px 14px 12px;
@@ -432,7 +461,7 @@
 <div class="app">
   <main class="main">
     <div id="messages" class="messages">
-      <div class="top-note">Build version: v19 / Hierarchical UI with interaction cards and loading indicators.</div>
+      <div class="top-note">Build version: v21 / Auto schema repair before human recovery.</div>
       <div class="top-note">Each node is grouped into a collapsible card. Internal events are shown as a timeline.</div>
     </div>
 
@@ -460,7 +489,15 @@ let source = null;
 let workflowBusy = false;
 let runCard = null;
 let runProgress = null;
+
+// nodeCards maps a visual key, e.g. "intent_recognition#1", to a card.
+// activeNodeKeys maps node_id to current visual key.
+// nodeAttemptCounts maps node_id to latest attempt number.
+// pausedNodeKeys stores nodes waiting for human action.
 const nodeCards = new Map();
+const activeNodeKeys = new Map();
+const nodeAttemptCounts = new Map();
+const pausedNodeKeys = new Set();
 
 const NODE_EVENTS = new Set([
   "NODE_STARTED","NODE_EXECUTING","NODE_RESULT",
@@ -470,7 +507,7 @@ const NODE_EVENTS = new Set([
   "LLM_MODEL_PULL_FAILED","LLM_ENDPOINT_FALLBACK",
   "LLM_REQUEST_SENT","LLM_RESPONSE_RECEIVED","LLM_PROVIDER_DONE",
   "LLM_PROVIDER_ERROR","LLM_JSON_VALIDATING","LLM_JSON_VALIDATED",
-  "LLM_JSON_VALIDATION_FAILED","CORRECTION_MEMORY_APPLIED",
+  "LLM_JSON_VALIDATION_FAILED","SCHEMA_AUTO_REPAIRED","CORRECTION_MEMORY_APPLIED",
   "RUNTIME_TEMPLATE_EVOLVED","VALIDATION_RECOVERY_REQUIRED",
   "HUMAN_REVIEW","CAPABILITY_READY","CAPABILITY_ROUTE",
   "PROVIDER_BINARY_READY","PROVIDER_BINARY_MISSING",
@@ -563,15 +600,41 @@ function statusForEvent(ev){
   return "running";
 }
 
+function visualKeyForNode(nodeId, ev={}){
+  // A fresh NODE_STARTED after a paused/waiting node means a resume/retry attempt.
+  if(ev.type === "NODE_STARTED"){
+    const currentKey = activeNodeKeys.get(nodeId);
+    if(!currentKey || pausedNodeKeys.has(currentKey)){
+      const nextAttempt = (nodeAttemptCounts.get(nodeId) || 0) + 1;
+      nodeAttemptCounts.set(nodeId, nextAttempt);
+      const key = `${nodeId}#${nextAttempt}`;
+      activeNodeKeys.set(nodeId, key);
+      pausedNodeKeys.delete(currentKey);
+      return key;
+    }
+  }
+
+  if(!activeNodeKeys.has(nodeId)){
+    const nextAttempt = (nodeAttemptCounts.get(nodeId) || 0) + 1;
+    nodeAttemptCounts.set(nodeId, nextAttempt);
+    activeNodeKeys.set(nodeId, `${nodeId}#${nextAttempt}`);
+  }
+
+  return activeNodeKeys.get(nodeId);
+}
+
 function ensureNodeCard(nodeId, ev={}){
   ensureRunCard(currentRunId);
 
-  if(nodeCards.has(nodeId)) return nodeCards.get(nodeId);
+  const key = visualKeyForNode(nodeId, ev);
+  if(nodeCards.has(key)) return nodeCards.get(key);
 
   const body = runCard.querySelector("#runBody");
+  const attempt = key.split("#")[1] || "1";
   const card = document.createElement("div");
   card.className = "workflow-card";
   card.dataset.nodeId = nodeId;
+  card.dataset.visualKey = key;
   card.innerHTML = `
     <div class="workflow-header">
       <div class="chevron">›</div>
@@ -579,6 +642,7 @@ function ensureNodeCard(nodeId, ev={}){
         <div class="id">${esc(nodeId)}</div>
         <div class="sub">${esc(ev.message || "Waiting...")}</div>
       </div>
+      <div class="attempt-tag">attempt ${esc(attempt)}</div>
       <div class="status-pill running">running</div>
     </div>
     <div class="workflow-body"></div>
@@ -589,7 +653,7 @@ function ensureNodeCard(nodeId, ev={}){
   };
 
   body.appendChild(card);
-  nodeCards.set(nodeId, card);
+  nodeCards.set(key, card);
   scrollMessages();
   return card;
 }
@@ -597,6 +661,7 @@ function ensureNodeCard(nodeId, ev={}){
 function addStep(ev, opts={}){
   const nodeId = opts.nodeId || nodeIdFromEvent(ev);
   const card = ensureNodeCard(nodeId, ev);
+  const key = card.dataset.visualKey;
   const body = card.querySelector(".workflow-body");
 
   const status = statusForEvent(ev);
@@ -630,11 +695,41 @@ function addStep(ev, opts={}){
   sub.textContent = ev.message || ev.title || "";
 
   const pill = card.querySelector(".status-pill");
-  pill.className = "status-pill " + status;
-  pill.textContent = status;
+  card.classList.remove("paused");
+
+  if(ev.type === "HUMAN_REVIEW" || ev.type === "VALIDATION_RECOVERY_REQUIRED" || ev.type === "SECRET_REQUIRED"){
+    pausedNodeKeys.add(key);
+    card.classList.add("paused");
+    pill.className = "status-pill paused";
+    pill.textContent = "waiting";
+  }else{
+    pill.className = "status-pill " + status;
+    pill.textContent = status;
+  }
 
   if(ev.progress !== undefined) setProgress(ev.progress);
   scrollMessages();
+}
+
+function markInteractionResolved(container, decisionText){
+  const box = container.querySelector(".interaction-box");
+  if(box){
+    box.classList.add("resolved");
+    const status = document.createElement("div");
+    status.className = "interaction-status";
+    status.textContent = decisionText;
+    box.appendChild(status);
+  }
+
+  const card = container.closest(".workflow-card");
+  if(card){
+    card.classList.remove("paused");
+    card.classList.add("resolved-human");
+    pausedNodeKeys.delete(card.dataset.visualKey);
+    const pill = card.querySelector(".status-pill");
+    pill.className = "status-pill resolved";
+    pill.textContent = "resolved";
+  }
 }
 
 function approvalCard(ev){
@@ -666,6 +761,13 @@ function approvalCard(ev){
   `;
 
   body.appendChild(step);
+
+  const key = card.dataset.visualKey;
+  pausedNodeKeys.add(key);
+  card.classList.add("paused");
+  const pill = card.querySelector(".status-pill");
+  pill.className = "status-pill paused";
+  pill.textContent = "waiting";
   scrollMessages();
 
   const textarea = step.querySelector("textarea");
@@ -677,20 +779,23 @@ function approvalCard(ev){
   };
 
   step.querySelector(".approve").onclick = async () => {
-    await resume("approve", null, textarea.value);
     step.querySelectorAll("button").forEach(b => b.disabled = true);
+    markInteractionResolved(step, "Approved. Continuing workflow...");
+    await resume("approve", null, textarea.value);
   };
 
   step.querySelector(".reject").onclick = async () => {
-    await resume("reject", null, textarea.value || "Rejected by human.");
     step.querySelectorAll("button").forEach(b => b.disabled = true);
+    markInteractionResolved(step, "Rejected. Retrying with feedback...");
+    await resume("reject", null, textarea.value || "Rejected by human.");
   };
 
   step.querySelector(".modify").onclick = async () => {
     try{
       const parsed = JSON.parse(spec.textContent);
-      await resume("modify", parsed, textarea.value || "Modified by human.");
       step.querySelectorAll("button").forEach(b => b.disabled = true);
+      markInteractionResolved(step, "Modified JSON accepted. Continuing workflow...");
+      await resume("modify", parsed, textarea.value || "Modified by human.");
     }catch(err){
       alert("Invalid JSON: " + err.message);
     }
@@ -719,18 +824,27 @@ function secretRequired(ev){
     </div>
   `;
   body.appendChild(step);
+
+  const key = card.dataset.visualKey;
+  pausedNodeKeys.add(key);
+  card.classList.add("paused");
+  const pill = card.querySelector(".status-pill");
+  pill.className = "status-pill paused";
+  pill.textContent = "waiting";
   scrollMessages();
 
   const inputEl = step.querySelector(".secret-value");
   step.querySelector(".approve").onclick = async () => {
     const value = inputEl.value.trim();
     if(!value){ alert("Please input the API key."); return; }
-    await resume("approve", {value}, "secret provided");
     step.querySelectorAll("button").forEach(b => b.disabled = true);
+    markInteractionResolved(step, "API key saved. Continuing workflow...");
+    await resume("approve", {value}, "secret provided");
   };
   step.querySelector(".reject").onclick = async () => {
-    await resume("reject", null, "secret cancelled");
     step.querySelectorAll("button").forEach(b => b.disabled = true);
+    markInteractionResolved(step, "API key input cancelled.");
+    await resume("reject", null, "secret cancelled");
   };
 }
 
@@ -779,7 +893,6 @@ function handleEvent(ev){
   }
 
   if(ev.type === "HUMAN_REVIEW"){
-    addStep(ev);
     approvalCard(ev);
     return;
   }
@@ -839,6 +952,9 @@ form.onsubmit = async (event) => {
   runCard = null;
   runProgress = null;
   nodeCards.clear();
+  activeNodeKeys.clear();
+  nodeAttemptCounts.clear();
+  pausedNodeKeys.clear();
 
   try{
     bubble("[Sending]\nPOST /api/chat", "system");

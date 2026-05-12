@@ -1,4 +1,4 @@
-# AI Core Config-Driven Node Runtime v19
+# AI Core Config-Driven Node Runtime v21
 
 This version enforces the rule that `ai_core` must not contain business/domain/task-specific logic.
 
@@ -38,15 +38,15 @@ python scripts/smoke_test.py
 ```
 
 
-## v19 Fix
+## v21 Fix
 
-- Updated UI version label from v19 to v19.
+- Updated UI version label from v21 to v21.
 - Added `/api/version`.
 - Added no-cache headers for `/`.
 - This avoids confusion when the browser or an old server process displays stale UI text.
 
 
-## v19 Fix
+## v21 Fix
 
 - Fixed JavaScript syntax errors in `apps/web/index.html`.
 - `/api/chat` now returns `run_id` immediately.
@@ -55,7 +55,7 @@ python scripts/smoke_test.py
 - Added `.vscode/launch.json` and `.vscode/tasks.json`.
 
 
-## v19 Update
+## v21 Update
 
 - Added `runtime/generated/adapters/*.yaml`.
 - `LLMJsonExecutor` calls a real configured provider instead of returning a placeholder.
@@ -67,7 +67,7 @@ python scripts/smoke_test.py
 - `ai_core` still has no domain/task/business logic.
 
 
-## v19 Update
+## v21 Update
 
 Adds visible execution status for model calls.
 
@@ -99,7 +99,7 @@ Completed / Failed
 This makes it clear whether the backend is still waiting for the model, checking health, parsing JSON, or failed.
 
 
-## v19 Update
+## v21 Update
 
 Adds provider setup automation.
 
@@ -126,7 +126,7 @@ runtime/configs/secrets/secrets.json
 For production, replace the file-based secret store with OS Keychain, Vault, or a cloud secret manager.
 
 
-## v19 Fix
+## v21 Fix
 
 - Rewrites `RuntimeBootstrap` to always create:
   - `runtime/configs/models/providers.yaml`
@@ -143,7 +143,7 @@ python main.py
 ```
 
 
-## v19 Update
+## v21 Update
 
 ### Fix: Ollama command not found
 
@@ -183,7 +183,7 @@ runtime/knowledge/prompt_optimization_memory.jsonl
 For future similar tasks, the executor retrieves correction memory and injects it into the prompt.
 
 
-## v19 Update
+## v21 Update
 
 ### Provider Handler Registry
 
@@ -214,7 +214,7 @@ vLLM
 LM Studio
 LocalAI
 LiteLLM proxy
-Any /v19/chat/completions compatible service
+Any /v21/chat/completions compatible service
 ```
 
 ### Ollama Pull Failure Details
@@ -235,7 +235,7 @@ fallback_models:
 If primary model pull fails, runtime automatically tries fallback models.
 
 
-## v19 Update
+## v21 Update
 
 ### Ollama endpoint strategy
 
@@ -272,7 +272,7 @@ response
 ```
 
 
-## v19 Update
+## v21 Update
 
 Provider Auto Installer is added.
 
@@ -315,7 +315,7 @@ pull_command: "{binary} pull {model}"
 ```
 
 
-## v19 Update
+## v21 Update
 
 ### UI single-run lock
 
@@ -343,7 +343,7 @@ SSE error
 Human Review and API Key input use their own buttons, so the main Send button stays locked.
 
 
-## v19 Update
+## v21 Update
 
 ### Runtime Learning + Runtime Template Evolution
 
@@ -417,7 +417,7 @@ Future similar tasks retrieve correction memory and inject it into prompts befor
 `RuntimeTemplateGenerator` works for any node_id. Known nodes get better default contracts; unknown nodes get generic prompt/schema and can evolve from human feedback.
 
 
-## v19 Update
+## v21 Update
 
 ### Recoverable JSON Schema Validation
 
@@ -440,7 +440,7 @@ Reject & Retry combines the human feedback with the validation error, then evolv
 Example: if `requires_human_review` is an object but schema expects boolean, runtime can evolve the schema to support a compatible human_review structure.
 
 
-## v19 Update
+## v21 Update
 
 ### Hierarchical Collapsible Workflow UI
 
@@ -470,7 +470,7 @@ Each node is a collapsible card. Internal steps are displayed as a timeline.
 This makes long-running operations such as installation, model pull, LLM inference, validation, and human review easier to follow.
 
 
-## v19 Update
+## v21 Update
 
 ### Hierarchical interaction UI
 
@@ -492,3 +492,94 @@ suggested mitigation
 ```
 
 This makes it clear whether the issue is installation, model availability, or slow inference.
+
+
+## v21 Update
+
+### Paused Human Interaction UI
+
+Human interaction now behaves visually as a blocking checkpoint:
+
+```text
+node attempt 1
+↓
+Human Review: waiting
+↓
+user clicks Approve / Reject / Modify
+↓
+interaction is marked resolved
+↓
+workflow continues
+```
+
+### Retry Attempt Grouping
+
+When `Reject & Retry` reruns the same node, the UI creates a new attempt card:
+
+```text
+intent_recognition / attempt 1
+  └─ Human Review: resolved
+
+intent_recognition / attempt 2
+  └─ capability
+  └─ provider
+  └─ validation
+```
+
+This prevents new events from visually pushing the active human interaction upward inside the same node card.
+
+
+## v21 Update
+
+### Auto Schema Repair
+
+When LLM JSON is structurally useful but the generated schema is too old or too narrow, runtime tries to repair the schema automatically before stopping for human recovery.
+
+Example:
+
+```text
+confidence object is not of type number
+```
+
+Runtime can automatically evolve:
+
+```json
+"confidence": {"type": "number"}
+```
+
+into:
+
+```json
+"confidence": {
+  "anyOf": [
+    {"type": "number"},
+    {"type": "object"}
+  ]
+}
+```
+
+Then it re-validates the same model output and continues the workflow if validation passes.
+
+### Recovery order
+
+```text
+LLM JSON
+↓
+Schema validation
+↓
+If failed:
+  auto schema repair
+  ↓
+  re-validation
+  ↓
+  continue if valid
+↓
+If still failed:
+  Human recovery
+```
+
+Auto repair events are recorded in:
+
+```text
+runtime/knowledge/schema_auto_repair.jsonl
+```
