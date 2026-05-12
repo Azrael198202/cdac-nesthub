@@ -1,90 +1,471 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<title>AI Core Config-Driven Node Runtime v16</title>
-<style>
-:root{--bg:#080d1d;--panel:#111827;--panel2:#0f172a;--line:#25324a;--text:#e5edff;--blue:#2563eb;--yellow:#3a2a0a;--yellowLine:#b45309;--red:#991b1b;--green:#166534}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;height:100vh;overflow:hidden;font-size:12px}
-.app{display:grid;grid-template-columns:minmax(0,1fr) 410px;height:100vh}
-.main{position:relative;height:100vh;padding:18px 22px 92px;overflow:hidden}
-.messages{height:100%;overflow-y:auto;padding-right:10px;scroll-behavior:smooth}
-.bubble{border:1px solid var(--line);border-radius:12px;padding:12px;margin:10px 0;max-width:78%;white-space:pre-wrap;line-height:1.35}
-.system{background:var(--panel);margin-right:auto}
-.user{background:#1d4ed8;border-color:#1d4ed8;margin-left:auto}
-.approval{background:var(--yellow);border-color:var(--yellowLine);max-width:86%;margin-right:auto}
-.result{background:#07111f}
-.error{background:#3b0b0b;border-color:#991b1b}
-.spec,.json-editor{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#020617;border:1px solid #334155;border-radius:8px;padding:8px;max-height:260px;overflow:auto;font-size:11px}
-.json-editor{width:100%;height:220px;color:#d1fae5;resize:vertical}
-.inputbar{position:fixed;left:22px;right:430px;bottom:18px;display:flex;gap:10px;background:#0b1223;border:1px solid #334155;border-radius:14px;padding:10px}
-.inputbar input{flex:1;border:0;outline:none;background:transparent;color:var(--text);font-size:12px;font-family:inherit}
-button{border:0;color:white;background:var(--blue);padding:8px 12px;border-radius:10px;cursor:pointer;font-weight:700;font-size:12px}
-button.reject{background:var(--red)}
-button.modify{background:var(--green)}
-button:disabled{opacity:.45;cursor:not-allowed} input:disabled{opacity:.65;cursor:not-allowed}
-.side{border-left:1px solid var(--line);height:100vh;overflow-y:auto;padding:14px;background:#070b19}
-.side h2{font-size:15px;margin:0 0 12px}
-.event{border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:10px;margin-bottom:8px}
-.type{color:#93c5fd;font-size:11px}.title{font-weight:800;margin:3px 0}
-.progress-wrap{margin-top:8px;background:#111827;border:1px solid #334155;border-radius:999px;height:8px;overflow:hidden}
-.progress-bar{height:100%;background:linear-gradient(90deg,#2563eb,#60a5fa)}
-.spinner{display:inline-block;width:10px;height:10px;border:2px solid #64748b;border-top-color:#60a5fa;border-radius:50%;animation:spin .8s linear infinite;margin-right:6px}@keyframes spin{to{transform:rotate(360deg)}}.runningLine{color:#bfdbfe}
-</style>
+  <meta charset="utf-8" />
+  <title>AI Core Runtime</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{
+      --bg:#050914;
+      --panel:#0b1220;
+      --panel2:#101827;
+      --panel3:#111c2e;
+      --line:#26344f;
+      --line2:#334155;
+      --text:#e5edff;
+      --muted:#8ea3c7;
+      --blue:#2563eb;
+      --cyan:#38bdf8;
+      --green:#22c55e;
+      --yellow:#f59e0b;
+      --red:#ef4444;
+      --purple:#a78bfa;
+      --card-radius:14px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      background:var(--bg);
+      color:var(--text);
+      font-family:var(--sans);
+      height:100vh;
+      overflow:hidden;
+    }
+
+    .app{
+      display:grid;
+      grid-template-columns:minmax(0,1fr) 420px;
+      height:100vh;
+    }
+
+    .main{
+      display:flex;
+      flex-direction:column;
+      min-width:0;
+      border-right:1px solid var(--line);
+      height:100vh;
+    }
+
+    .messages{
+      flex:1;
+      overflow:auto;
+      padding:18px;
+      padding-bottom:100px;
+      scroll-behavior:smooth;
+    }
+
+    .top-note{
+      font-family:var(--mono);
+      font-size:12px;
+      color:#cbd5e1;
+      border:1px solid var(--line);
+      background:var(--panel);
+      border-radius:12px;
+      padding:12px 14px;
+      margin-bottom:10px;
+    }
+
+    .bubble{
+      max-width:90%;
+      border:1px solid var(--line);
+      background:var(--panel2);
+      border-radius:12px;
+      padding:12px 14px;
+      margin:10px 0;
+      white-space:pre-wrap;
+      font-family:var(--mono);
+      font-size:12px;
+      line-height:1.45;
+    }
+
+    .bubble.user{
+      margin-left:auto;
+      background:#1d4ed8;
+      border-color:#2563eb;
+      color:white;
+    }
+
+    .bubble.error{
+      border-color:#dc2626;
+      background:#320d14;
+    }
+
+    .bubble.approval{
+      border-color:#d97706;
+      background:#3b2807;
+    }
+
+    .workflow-card{
+      border:1px solid var(--line);
+      background:linear-gradient(180deg,#0f172a,#0b1220);
+      border-radius:var(--card-radius);
+      margin:12px 0;
+      overflow:hidden;
+      box-shadow:0 8px 24px rgba(0,0,0,.18);
+    }
+
+    .workflow-header{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      padding:12px 14px;
+      cursor:pointer;
+      user-select:none;
+      border-bottom:1px solid rgba(148,163,184,.14);
+    }
+
+    .workflow-header:hover{background:rgba(148,163,184,.06)}
+
+    .chevron{
+      width:18px;
+      color:#cbd5e1;
+      transform:rotate(90deg);
+      transition:.15s ease;
+      font-family:var(--mono);
+    }
+
+    .workflow-card.collapsed .chevron{transform:rotate(0deg)}
+    .workflow-card.collapsed .workflow-body{display:none}
+
+    .node-title{
+      flex:1;
+      min-width:0;
+    }
+
+    .node-title .id{
+      font-family:var(--mono);
+      font-weight:700;
+      font-size:13px;
+      color:#f8fafc;
+    }
+
+    .node-title .sub{
+      font-family:var(--mono);
+      font-size:11px;
+      color:var(--muted);
+      margin-top:3px;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+    }
+
+    .status-pill{
+      font-family:var(--mono);
+      font-size:10px;
+      color:#bfdbfe;
+      border:1px solid #1e40af;
+      background:#0b1b3a;
+      padding:4px 7px;
+      border-radius:999px;
+      white-space:nowrap;
+    }
+
+    .status-pill.running{color:#fde68a;border-color:#92400e;background:#2a1b05}
+    .status-pill.done{color:#bbf7d0;border-color:#166534;background:#052e16}
+    .status-pill.error{color:#fecaca;border-color:#991b1b;background:#3b0a0a}
+    .status-pill.waiting{color:#ddd6fe;border-color:#6d28d9;background:#1c1239}
+
+    .workflow-body{
+      padding:6px 12px 14px 12px;
+    }
+
+    .step{
+      position:relative;
+      margin-left:12px;
+      padding:10px 0 10px 18px;
+      border-left:1px solid rgba(148,163,184,.28);
+    }
+
+    .step:before{
+      content:"";
+      position:absolute;
+      left:-5px;
+      top:15px;
+      width:9px;
+      height:9px;
+      background:var(--cyan);
+      border-radius:50%;
+      box-shadow:0 0 0 3px rgba(56,189,248,.12);
+    }
+
+    .step.error:before{background:var(--red);box-shadow:0 0 0 3px rgba(239,68,68,.14)}
+    .step.done:before{background:var(--green);box-shadow:0 0 0 3px rgba(34,197,94,.14)}
+    .step.waiting:before{background:var(--yellow);box-shadow:0 0 0 3px rgba(245,158,11,.14)}
+    .step.memory:before{background:var(--purple);box-shadow:0 0 0 3px rgba(167,139,250,.14)}
+
+    .step-title{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      font-family:var(--mono);
+      font-size:12px;
+      font-weight:700;
+      color:#f8fafc;
+    }
+
+    .step-type{
+      font-family:var(--mono);
+      font-size:10px;
+      color:#93c5fd;
+      text-transform:uppercase;
+      letter-spacing:.03em;
+    }
+
+    .step-msg{
+      margin-top:5px;
+      font-family:var(--mono);
+      font-size:12px;
+      color:#cbd5e1;
+      white-space:pre-wrap;
+      line-height:1.45;
+    }
+
+    .step-json{
+      margin-top:8px;
+      background:#020617;
+      border:1px solid var(--line);
+      border-radius:9px;
+      padding:10px;
+      max-height:280px;
+      overflow:auto;
+      font-family:var(--mono);
+      font-size:11px;
+      color:#dbeafe;
+      white-space:pre;
+    }
+
+    .step details{
+      margin-top:8px;
+    }
+
+    .step summary{
+      cursor:pointer;
+      color:#93c5fd;
+      font-family:var(--mono);
+      font-size:11px;
+    }
+
+    .run-card{
+      border:1px solid var(--line);
+      background:#07101f;
+      border-radius:var(--card-radius);
+      margin:12px 0;
+      overflow:hidden;
+    }
+
+    .run-header{
+      padding:12px 14px;
+      border-bottom:1px solid rgba(148,163,184,.14);
+      font-family:var(--mono);
+      font-size:12px;
+      color:#e2e8f0;
+    }
+
+    .progress{
+      height:5px;
+      background:#0f172a;
+      border-radius:999px;
+      border:1px solid #1f2937;
+      overflow:hidden;
+      margin-top:8px;
+    }
+
+    .progress-bar{
+      height:100%;
+      width:0%;
+      background:linear-gradient(90deg,#2563eb,#38bdf8);
+      transition:width .3s ease;
+    }
+
+    .spinner{
+      display:inline-block;
+      width:10px;
+      height:10px;
+      border:2px solid #64748b;
+      border-top-color:#60a5fa;
+      border-radius:50%;
+      animation:spin .8s linear infinite;
+      margin-right:6px;
+    }
+    @keyframes spin{to{transform:rotate(360deg)}}
+
+    .sidebar{
+      height:100vh;
+      overflow:auto;
+      background:#070b18;
+      padding:16px;
+    }
+
+    .sidebar h2{
+      margin:0 0 14px 0;
+      font-size:16px;
+    }
+
+    .event-mini{
+      border:1px solid var(--line);
+      background:#0f172a;
+      border-radius:10px;
+      padding:10px;
+      margin:9px 0;
+      font-family:var(--mono);
+      font-size:11px;
+      color:#cbd5e1;
+    }
+
+    .event-mini .type{
+      color:#93c5fd;
+      font-size:10px;
+      text-transform:uppercase;
+    }
+
+    .composer{
+      position:fixed;
+      left:18px;
+      right:440px;
+      bottom:16px;
+      display:flex;
+      gap:10px;
+      background:rgba(5,9,20,.9);
+      backdrop-filter:blur(8px);
+      padding:10px;
+      border:1px solid var(--line);
+      border-radius:14px;
+    }
+
+    .composer input{
+      flex:1;
+      border:0;
+      outline:0;
+      background:#0b1220;
+      color:var(--text);
+      padding:12px 14px;
+      border-radius:10px;
+      font-family:var(--mono);
+      font-size:12px;
+    }
+
+    .composer button,.approve,.reject,.modify,.edit-json{
+      border:0;
+      border-radius:10px;
+      padding:10px 14px;
+      font-weight:700;
+      color:white;
+      cursor:pointer;
+    }
+
+    .composer button{background:#2563eb}
+    .approve{background:#2563eb}
+    .reject{background:#b91c1c}
+    .modify{background:#15803d}
+    .edit-json{background:#4f46e5}
+    button:disabled,input:disabled{opacity:.5;cursor:not-allowed}
+
+    textarea{
+      width:100%;
+      min-height:74px;
+      background:#020617;
+      color:#e5edff;
+      border:1px solid #334155;
+      border-radius:8px;
+      padding:10px;
+      font-family:var(--mono);
+      font-size:12px;
+      margin-top:10px;
+    }
+
+    .spec{
+      margin-top:8px;
+      background:#020617;
+      border:1px solid #334155;
+      border-radius:8px;
+      padding:10px;
+      max-height:270px;
+      overflow:auto;
+      white-space:pre;
+      font-family:var(--mono);
+      font-size:11px;
+    }
+
+    @media(max-width:1000px){
+      .app{grid-template-columns:1fr}
+      .sidebar{display:none}
+      .composer{right:18px}
+    }
+  </style>
 </head>
 <body>
 <div class="app">
   <main class="main">
     <div id="messages" class="messages">
-      <div class="bubble system">Build version: v16 / JS syntax fixed / API returns run_id immediately.</div>
-      <div class="bubble system">Config-Driven Node Runtime: ai_core only loads runtime-generated node config and dispatches generic executors.</div>
+      <div class="top-note">Build version: v18 / Hierarchical collapsible workflow UI.</div>
+      <div class="top-note">Each node is grouped into a collapsible card. Internal events are shown as a timeline.</div>
     </div>
-    <form id="form" class="inputbar">
+
+    <form id="form" class="composer">
       <input id="message" placeholder="Message AI Core..." autocomplete="off" />
       <button id="sendButton" type="submit">Send</button>
     </form>
   </main>
-  <aside class="side">
+
+  <aside class="sidebar">
     <h2>Execution Workflow</h2>
     <div id="events"></div>
   </aside>
 </div>
 
 <script>
-let currentRunId = null;
-let source = null;
-
 const messages = document.getElementById("messages");
 const events = document.getElementById("events");
 const form = document.getElementById("form");
 const input = document.getElementById("message");
 const sendButton = document.getElementById("sendButton");
 
+let currentRunId = null;
+let source = null;
 let workflowBusy = false;
+let runCard = null;
+let runProgress = null;
+const nodeCards = new Map();
 
-function setBusy(isBusy, label = "") {
+const NODE_EVENTS = new Set([
+  "NODE_STARTED","NODE_EXECUTING","NODE_RESULT",
+  "LLM_EXECUTOR_READY","LLM_PROMPT_RENDERED","LLM_ROUTE_START",
+  "LLM_PROVIDER_START","LLM_HEALTH_CHECK","LLM_HEALTH_OK",
+  "LLM_MODEL_READY","LLM_MODEL_MISSING","LLM_MODEL_FALLBACK",
+  "LLM_MODEL_PULL_FAILED","LLM_ENDPOINT_FALLBACK",
+  "LLM_REQUEST_SENT","LLM_RESPONSE_RECEIVED","LLM_PROVIDER_DONE",
+  "LLM_PROVIDER_ERROR","LLM_JSON_VALIDATING","LLM_JSON_VALIDATED",
+  "LLM_JSON_VALIDATION_FAILED","CORRECTION_MEMORY_APPLIED",
+  "RUNTIME_TEMPLATE_EVOLVED","VALIDATION_RECOVERY_REQUIRED",
+  "HUMAN_REVIEW","CAPABILITY_READY","CAPABILITY_ROUTE",
+  "PROVIDER_BINARY_READY","PROVIDER_BINARY_MISSING",
+  "PROVIDER_INSTALL_STARTED","PROVIDER_INSTALL_DONE","PROVIDER_INSTALL_FAILED",
+  "PROVIDER_COMMAND_STARTED","PROVIDER_COMMAND_OUTPUT","PROVIDER_COMMAND_FINISHED",
+  "PROVIDER_DAEMON_STARTED"
+]);
+
+function esc(s){
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+  }[c]));
+}
+
+function scrollMessages(){
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function setBusy(isBusy, label = ""){
   workflowBusy = isBusy;
   input.disabled = isBusy;
   sendButton.disabled = isBusy;
   sendButton.textContent = isBusy ? (label || "Running...") : "Send";
-  input.placeholder = isBusy
-    ? "Workflow is running. Please wait..."
-    : "Message AI Core...";
+  input.placeholder = isBusy ? "Workflow is running. Please wait..." : "Message AI Core...";
 }
 
-function esc(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
-}
-
-function scrollMessages() {
-  messages.scrollTop = messages.scrollHeight;
-}
-
-function bubble(text, cls = "system") {
+function bubble(text, cls="system"){
   const div = document.createElement("div");
   div.className = "bubble " + cls;
   div.textContent = text;
@@ -93,7 +474,7 @@ function bubble(text, cls = "system") {
   return div;
 }
 
-function htmlBubble(html, cls = "system") {
+function htmlBubble(html, cls="system"){
   const div = document.createElement("div");
   div.className = "bubble " + cls;
   div.innerHTML = html;
@@ -102,131 +483,178 @@ function htmlBubble(html, cls = "system") {
   return div;
 }
 
-function addEvent(ev) {
+function addEventMini(ev){
   const div = document.createElement("div");
-  div.className = "event";
-  const progress = ev.progress !== undefined
-    ? `<div class="progress-wrap"><div class="progress-bar" style="width:${Number(ev.progress)}%"></div></div>`
-    : "";
-  div.innerHTML = `
-    <div class="type">${esc(ev.type || "")}</div>
-    <div class="title">${esc(ev.title || "")}</div>
-    <div>${esc(ev.message || "")}</div>
-    ${progress}
-  `;
+  div.className = "event-mini";
+  div.innerHTML = `<div class="type">${esc(ev.type || "")}</div><b>${esc(ev.title || "")}</b><div>${esc(ev.message || "")}</div>`;
   events.prepend(div);
 }
 
-function review(ev) {
-  const result = ev.result || ev.spec || {};
-  const json = JSON.stringify(result, null, 2);
+function ensureRunCard(runId){
+  if(runCard) return runCard;
+
+  runCard = document.createElement("div");
+  runCard.className = "run-card";
+  runCard.innerHTML = `
+    <div class="run-header">
+      <b>Run</b> <span id="runIdText">${esc(runId || "")}</span>
+      <div class="progress"><div id="runProgress" class="progress-bar"></div></div>
+    </div>
+    <div id="runBody"></div>
+  `;
+  messages.appendChild(runCard);
+  runProgress = runCard.querySelector("#runProgress");
+  scrollMessages();
+  return runCard;
+}
+
+function setProgress(p){
+  if(!runProgress) return;
+  const n = Math.max(0, Math.min(100, Number(p || 0)));
+  runProgress.style.width = n + "%";
+}
+
+function nodeIdFromEvent(ev){
+  if(ev.node_id) return ev.node_id;
+  if(ev.title && /^[a-zA-Z0-9_]+$/.test(ev.title)) return ev.title;
+  if(ev.message){
+    const m = String(ev.message).match(/node=([a-zA-Z0-9_]+)/);
+    if(m) return m[1];
+  }
+  return "runtime";
+}
+
+function statusForEvent(ev){
+  if(ev.type === "NODE_RESULT" || ev.type === "LLM_PROVIDER_DONE" || ev.type === "LLM_JSON_VALIDATED") return "done";
+  if(ev.type === "RUN_FAILED" || ev.type === "LLM_PROVIDER_ERROR" || ev.type === "LLM_JSON_VALIDATION_FAILED") return "error";
+  if(ev.type === "HUMAN_REVIEW" || ev.type === "VALIDATION_RECOVERY_REQUIRED" || ev.type === "SECRET_REQUIRED") return "waiting";
+  return "running";
+}
+
+function ensureNodeCard(nodeId, ev={}){
+  ensureRunCard(currentRunId);
+
+  if(nodeCards.has(nodeId)) return nodeCards.get(nodeId);
+
+  const body = runCard.querySelector("#runBody");
+  const card = document.createElement("div");
+  card.className = "workflow-card";
+  card.dataset.nodeId = nodeId;
+  card.innerHTML = `
+    <div class="workflow-header">
+      <div class="chevron">›</div>
+      <div class="node-title">
+        <div class="id">${esc(nodeId)}</div>
+        <div class="sub">${esc(ev.message || "Waiting...")}</div>
+      </div>
+      <div class="status-pill running">running</div>
+    </div>
+    <div class="workflow-body"></div>
+  `;
+
+  card.querySelector(".workflow-header").onclick = () => {
+    card.classList.toggle("collapsed");
+  };
+
+  body.appendChild(card);
+  nodeCards.set(nodeId, card);
+  scrollMessages();
+  return card;
+}
+
+function addStep(ev, opts={}){
+  const nodeId = opts.nodeId || nodeIdFromEvent(ev);
+  const card = ensureNodeCard(nodeId, ev);
+  const body = card.querySelector(".workflow-body");
+
+  const status = statusForEvent(ev);
+  const step = document.createElement("div");
+  step.className = "step " + status + (ev.type && ev.type.includes("MEMORY") ? " memory" : "");
+
+  let detail = "";
+  const data = ev.result || ev.evolution || ev.spec || null;
+  if(data){
+    detail = `<details open><summary>JSON / Details</summary><div class="step-json">${esc(JSON.stringify(data, null, 2))}</div></details>`;
+  }
+
+  if(ev.validation_error){
+    detail += `<details open><summary>Validation Error</summary><div class="step-json">${esc(ev.validation_error)}</div></details>`;
+  }
+
+  step.innerHTML = `
+    <div class="step-title">
+      <span class="step-type">${esc(ev.type || "event")}</span>
+      <span>${esc(ev.title || nodeId)}</span>
+    </div>
+    <div class="step-msg">${esc(ev.message || "")}</div>
+    ${detail}
+  `;
+
+  body.appendChild(step);
+
+  const sub = card.querySelector(".sub");
+  sub.textContent = ev.message || ev.title || "";
+
+  const pill = card.querySelector(".status-pill");
+  pill.className = "status-pill " + status;
+  pill.textContent = status;
+
+  if(ev.progress !== undefined) setProgress(ev.progress);
+  scrollMessages();
+}
+
+function approvalCard(ev){
   const div = document.createElement("div");
   div.className = "bubble approval";
+
+  const json = JSON.stringify(ev.result || {}, null, 2);
   div.innerHTML = `
     <b>[Human Review]</b>
     <div>${esc(ev.message || "")}</div>
-    <div class="spec">${esc(json)}</div>
-    <textarea class="json-editor" style="display:none">${esc(json)}</textarea>
-    <textarea class="feedback" placeholder="Reject reason or modification note..." style="width:100%;height:70px;background:#020617;color:#e5edff;border:1px solid #334155;border-radius:8px;margin-top:8px;padding:8px;font-family:inherit;font-size:11px"></textarea>
-    <div style="display:flex;gap:8px;margin-top:8px">
+    ${ev.validation_error ? `<div class="spec">${esc(ev.validation_error)}</div>` : ""}
+    <div class="spec" contenteditable="false">${esc(json)}</div>
+    <textarea placeholder="Reject reason or modification note..."></textarea>
+    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
       <button class="approve" type="button">Approve</button>
       <button class="reject" type="button">Reject & Retry</button>
       <button class="modify" type="button">Modify JSON & Continue</button>
-      <button class="edit" type="button">Edit JSON</button>
+      <button class="edit-json" type="button">Edit JSON</button>
     </div>
   `;
+
   messages.appendChild(div);
   scrollMessages();
 
-  const editor = div.querySelector(".json-editor");
-  const spec = div.querySelector(".spec");
-  const feedback = div.querySelector(".feedback");
+  const textarea = div.querySelector("textarea");
+  const spec = div.querySelector(".spec:last-of-type");
 
-  div.querySelector(".edit").onclick = () => {
-    const editing = editor.style.display === "none";
-    editor.style.display = editing ? "block" : "none";
-    spec.style.display = editing ? "none" : "block";
+  div.querySelector(".edit-json").onclick = () => {
+    spec.contentEditable = "true";
+    spec.focus();
   };
 
-  async function resume(decision, modifiedResult, feedbackText) {
-    for (const btn of div.querySelectorAll("button")) btn.disabled = true;
-    bubble(`${decision.toUpperCase()}: resuming workflow...`, "system");
-    const res = await fetch("/api/resume", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        run_id: ev.run_id || currentRunId,
-        decision: decision,
-        modified_result: modifiedResult,
-        feedback: feedbackText
-      })
-    });
-    if (!res.ok) {
-      bubble(`Resume failed: HTTP ${res.status}`, "error");
-    }
-  }
+  div.querySelector(".approve").onclick = async () => {
+    await resume("approve", null, textarea.value);
+    div.querySelectorAll("button").forEach(b => b.disabled = true);
+  };
 
-  div.querySelector(".approve").onclick = () => resume("approve", null, feedback.value);
-  div.querySelector(".reject").onclick = () => resume("reject", null, feedback.value || "Rejected by human.");
-  div.querySelector(".modify").onclick = () => {
-    try {
-      resume("modify", JSON.parse(editor.value), feedback.value);
-    } catch (err) {
+  div.querySelector(".reject").onclick = async () => {
+    await resume("reject", null, textarea.value || "Rejected by human.");
+    div.querySelectorAll("button").forEach(b => b.disabled = true);
+  };
+
+  div.querySelector(".modify").onclick = async () => {
+    try{
+      const parsed = JSON.parse(spec.textContent);
+      await resume("modify", parsed, textarea.value || "Modified by human.");
+      div.querySelectorAll("button").forEach(b => b.disabled = true);
+    }catch(err){
       alert("Invalid JSON: " + err.message);
     }
   };
 }
 
-
-const runningTimers = {};
-
-function runningBubble(key, title, message) {
-  const id = "run-" + key.replaceAll("_", "-");
-  let div = document.getElementById(id);
-  if (!div) {
-    div = document.createElement("div");
-    div.id = id;
-    div.className = "bubble system";
-    div.dataset.startedAt = String(Date.now());
-    messages.appendChild(div);
-  }
-  const elapsed = Math.floor((Date.now() - Number(div.dataset.startedAt)) / 1000);
-  div.innerHTML = `<span class="spinner"></span><b>${esc(title)}</b>\n<span class="runningLine">${esc(message)}</span>\nElapsed: ${elapsed}s`;
-  scrollMessages();
-
-  if (!runningTimers[key]) {
-    runningTimers[key] = setInterval(() => {
-      const current = document.getElementById(id);
-      if (!current) {
-        clearInterval(runningTimers[key]);
-        delete runningTimers[key];
-        return;
-      }
-      const sec = Math.floor((Date.now() - Number(current.dataset.startedAt)) / 1000);
-      const line = current.querySelector(".runningLine")?.textContent || message;
-      current.innerHTML = `<span class="spinner"></span><b>${esc(title)}</b>\n<span class="runningLine">${esc(line)}</span>\nElapsed: ${sec}s`;
-    }, 1000);
-  }
-}
-
-function finishRunning(key, title, message, cls = "system") {
-  const timer = runningTimers[key];
-  if (timer) {
-    clearInterval(timer);
-    delete runningTimers[key];
-  }
-  const id = "run-" + key.replaceAll("_", "-");
-  const div = document.getElementById(id);
-  if (div) {
-    div.className = "bubble " + cls;
-    div.textContent = `[${title}]\n${message}`;
-  } else {
-    bubble(`[${title}]\n${message}`, cls);
-  }
-}
-
-
-function secretRequired(ev) {
+function secretRequired(ev){
   const div = document.createElement("div");
   div.className = "bubble approval";
   div.innerHTML = `
@@ -241,161 +669,135 @@ function secretRequired(ev) {
   messages.appendChild(div);
   scrollMessages();
 
-  const input = div.querySelector(".secret-value");
-
+  const inputEl = div.querySelector(".secret-value");
   div.querySelector(".approve").onclick = async () => {
-    const value = input.value.trim();
-    if (!value) {
-      alert("Please input the API key.");
-      return;
-    }
-    for (const btn of div.querySelectorAll("button")) btn.disabled = true;
-    bubble("[Secret]\\nSaving key and resuming workflow...", "system");
-    await fetch("/api/resume", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        run_id: ev.run_id || currentRunId,
-        decision: "approve",
-        modified_result: {value: value},
-        feedback: "secret provided"
-      })
-    });
+    const value = inputEl.value.trim();
+    if(!value){ alert("Please input the API key."); return; }
+    await resume("approve", {value}, "secret provided");
+    div.querySelectorAll("button").forEach(b => b.disabled = true);
   };
-
   div.querySelector(".reject").onclick = async () => {
-    for (const btn of div.querySelectorAll("button")) btn.disabled = true;
-    await fetch("/api/resume", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        run_id: ev.run_id || currentRunId,
-        decision: "reject",
-        feedback: "secret cancelled"
-      })
-    });
+    await resume("reject", null, "secret cancelled");
+    div.querySelectorAll("button").forEach(b => b.disabled = true);
   };
 }
 
+async function resume(decision, modified_result=null, feedback=""){
+  if(!currentRunId){
+    bubble("[Resume failed]\nNo current run id.", "error");
+    return;
+  }
+  await fetch("/api/resume", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({run_id:currentRunId, decision, modified_result, feedback})
+  });
+}
 
-function handleEvent(ev) {
-  addEvent(ev);
+function handleEvent(ev){
+  addEventMini(ev);
 
-  if (ev.type === "LLM_PROVIDER_START" || ev.type === "LLM_REQUEST_SENT") {
-    setBusy(true, "Thinking...");
-    const key = `${ev.node_id || "node"}_${ev.provider || "provider"}`;
-    runningBubble(key, ev.title || ev.type, ev.message || "Running...");
+  if(ev.progress !== undefined) setProgress(ev.progress);
+
+  if(ev.type === "RUN_CREATED" || ev.type === "RUN_STARTED"){
+    ensureRunCard(ev.run_id || currentRunId);
+    addStep({...ev, node_id:"runtime"});
     return;
   }
 
-  if (ev.type === "LLM_PROVIDER_DONE") {
-    const key = `${ev.node_id || "node"}_${ev.provider || "provider"}`;
-    finishRunning(key, ev.title || ev.type, ev.message || "Completed.", "system");
+  if(ev.type === "RUN_COMPLETED"){
+    addStep({...ev, node_id:"runtime"});
+    htmlBubble(`<b>[Final Output]</b><div>${esc(ev.message || "")}</div><div class="spec">${esc(JSON.stringify(ev.results || {}, null, 2))}</div>`, "system");
+    setBusy(false);
+    if(source) source.close();
     return;
   }
 
-  if (ev.type === "LLM_PROVIDER_ERROR") {
-    const key = `${ev.node_id || "node"}_${ev.provider || "provider"}`;
-    finishRunning(key, ev.title || ev.type, ev.message || "Failed.", "error");
+  if(ev.type === "RUN_FAILED" || ev.type === "RUN_CANCELLED"){
+    addStep({...ev, node_id:nodeIdFromEvent(ev)});
+    setBusy(false);
+    if(source) source.close();
     return;
   }
 
-
-  if (ev.type === "SECRET_REQUIRED") {
+  if(ev.type === "SECRET_REQUIRED"){
+    addStep({...ev, node_id:nodeIdFromEvent(ev)});
     secretRequired(ev);
     return;
   }
 
-  if (ev.type === "PROVIDER_COMMAND_STARTED") {
-    setBusy(true, "Installing...");
-    runningBubble("provider_command", ev.title || ev.type, ev.message || "Running provider command...");
+  if(ev.type === "HUMAN_REVIEW"){
+    addStep(ev);
+    approvalCard(ev);
     return;
   }
 
-  if (ev.type === "PROVIDER_COMMAND_OUTPUT") {
-    bubble(`[${ev.stream || "output"}]\n${ev.message || ""}`, "system");
+  if(ev.type === "VALIDATION_RECOVERY_REQUIRED"){
+    addStep(ev);
     return;
   }
 
-  if (ev.type === "PROVIDER_COMMAND_FINISHED") {
-    finishRunning("provider_command", ev.title || ev.type, ev.message || "Provider command completed.", "system");
-    return;
-  }
-
-  if (ev.type === "LLM_MODEL_MISSING" || ev.type === "LLM_MODEL_READY" || ev.type === "SECRET_SAVED" || ev.type === "CORRECTION_RECORDED" || ev.type === "CORRECTION_MEMORY_APPLIED" || ev.type === "RUNTIME_TEMPLATE_EVOLVED" || ev.type === "PROVIDER_COMMAND_RESOLVED" || ev.type === "LLM_MODEL_FALLBACK" || ev.type === "LLM_MODEL_PULL_FAILED" || ev.type === "LLM_ENDPOINT_FALLBACK" || ev.type === "PROVIDER_BINARY_READY" || ev.type === "PROVIDER_BINARY_MISSING" || ev.type === "PROVIDER_INSTALL_STARTED" || ev.type === "PROVIDER_INSTALL_DONE" || ev.type === "PROVIDER_INSTALL_FAILED" || ev.type === "PROVIDER_DAEMON_STARTED") {
-    bubble(`[${ev.title || ev.type}]\n${ev.message || ""}`, "system");
-    return;
-  }
-
-  if (ev.type === "NODE_RESULT") {
-    htmlBubble(`<b>[${esc(ev.title)}]</b><div class="spec">${esc(JSON.stringify(ev.result || {}, null, 2))}</div>`, "result");
-    return;
-  }
-
-  if (ev.type === "HUMAN_REVIEW") {
-    review(ev);
-    return;
-  }
-
-  if (ev.type === "RUN_COMPLETED") {
-    htmlBubble(`<b>[Final Output]</b><div>${esc(ev.message || "")}</div><div class="spec">${esc(JSON.stringify(ev.results || {}, null, 2))}</div>`, "system");
-    setBusy(false);
-    if (source) source.close();
-    return;
-  }
-
-  if (ev.type === "RUN_FAILED" || ev.type === "RUN_CANCELLED") {
-    bubble(`[${ev.title || ev.type}]\n${ev.message || ""}`, "error");
-    setBusy(false);
-    if (source) source.close();
+  if(NODE_EVENTS.has(ev.type) || ev.node_id){
+    addStep(ev);
+    if(ev.type === "PROVIDER_COMMAND_STARTED") setBusy(true, "Installing...");
+    if(ev.type === "LLM_REQUEST_SENT" || ev.type === "LLM_PROVIDER_START") setBusy(true, "Thinking...");
     return;
   }
 
   bubble(`[${ev.title || ev.type}]\n${ev.message || ""}`, "system");
 }
 
-function connect(runId) {
-  if (source) source.close();
+function connect(runId){
+  if(source) source.close();
   source = new EventSource(`/api/events/${runId}`);
-  source.onopen = () => bubble(`[SSE connected]\nrun_id=${runId}`, "system");
+
+  source.onopen = () => {
+    addStep({type:"SSE_CONNECTED", title:"SSE connected", message:`run_id=${runId}`, node_id:"runtime"});
+  };
+
   source.onmessage = (msg) => {
-    try {
-      handleEvent(JSON.parse(msg.data));
-    } catch (err) {
-      bubble("Failed to parse SSE event: " + err.message, "error");
+    try{
+      const ev = JSON.parse(msg.data);
+      handleEvent(ev);
+    }catch(err){
+      bubble("Bad SSE event: " + err.message, "error");
     }
   };
+
   source.onerror = () => {
-    bubble("SSE stream closed or failed. Check server logs and DevTools Network tab.", "error");
+    bubble("SSE stream closed or failed. Check server logs.", "error");
     setBusy(false);
-    if (source) source.close();
+    if(source) source.close();
   };
 }
 
 form.onsubmit = async (event) => {
   event.preventDefault();
 
-  if (workflowBusy) {
+  if(workflowBusy){
     bubble("[Busy]\nA workflow is already running. Please wait until it finishes or fails.", "system");
     return;
   }
 
   const text = input.value.trim();
-  if (!text) return;
+  if(!text) return;
 
   setBusy(true, "Starting...");
   bubble(text, "user");
   input.value = "";
+  runCard = null;
+  runProgress = null;
+  nodeCards.clear();
 
-  try {
+  try{
     bubble("[Sending]\nPOST /api/chat", "system");
     const res = await fetch("/api/chat", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({message: text})
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({message:text})
     });
 
-    if (!res.ok) {
+    if(!res.ok){
       const body = await res.text();
       bubble(`POST /api/chat failed: HTTP ${res.status}\n${body}`, "error");
       setBusy(false);
@@ -405,9 +807,9 @@ form.onsubmit = async (event) => {
     const data = await res.json();
     currentRunId = data.run_id;
     bubble(`[Run queued]\nrun_id=${currentRunId}`, "system");
-    setBusy(true, "Running...");
+    ensureRunCard(currentRunId);
     connect(currentRunId);
-  } catch (err) {
+  }catch(err){
     bubble("POST /api/chat error: " + err.message, "error");
     setBusy(false);
   }

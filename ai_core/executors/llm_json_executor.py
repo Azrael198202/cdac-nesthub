@@ -4,6 +4,7 @@ from ai_core.executors.template_engine import TemplateEngine
 from ai_core.validation.schema_validator import SchemaValidator
 from ai_core.llm.provider_router import ProviderRouter
 from ai_core.events.event_bus import event_bus
+from ai_core.validation.recoverable_validation_error import RecoverableValidationError
 from ai_core.evolution.runtime_learning import RuntimeLearningService
 
 
@@ -93,7 +94,23 @@ class LLMJsonExecutor:
             "node_id": node_id,
         })
 
-        self.validator.validate_data(result, schema)
+        try:
+            self.validator.validate_data(result, schema)
+        except Exception as exc:
+            await event_bus.emit(run_id, {
+                "type": "LLM_JSON_VALIDATION_FAILED",
+                "title": "JSON validation failed",
+                "message": str(exc),
+                "node_id": node_id,
+                "result": result,
+                "schema_path": str(schema_path),
+            })
+            raise RecoverableValidationError(
+                message=str(exc),
+                node_id=node_id,
+                result=result,
+                schema_path=str(schema_path),
+            ) from exc
 
         await event_bus.emit(run_id, {
             "type": "LLM_JSON_VALIDATED",

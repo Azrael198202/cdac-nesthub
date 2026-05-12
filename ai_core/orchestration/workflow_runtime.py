@@ -14,6 +14,7 @@ from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.evolution.finetune_dataset_builder import FinetuneDatasetBuilder
 from ai_core.evolution.runtime_learning import RuntimeLearningService
 from ai_core.runtime.runtime_template_generator import RuntimeTemplateGenerator
+from ai_core.validation.recoverable_validation_error import RecoverableValidationError
 
 
 class WorkflowRuntime:
@@ -138,10 +139,16 @@ class WorkflowRuntime:
                 except Exception:
                     executor_type = "llm_json"
 
+            validation_error = pending.get("validation_error")
+            combined_feedback = feedback_text
+            if validation_error:
+                combined_feedback = feedback_text + "\nValidation error:\n" + validation_error
+
             state.setdefault("human_feedback", []).append({
                 "node_id": node_id,
-                "feedback": feedback_text,
+                "feedback": combined_feedback,
                 "original_output": original_output,
+                "validation_error": validation_error,
             })
 
             if node_id:
@@ -150,13 +157,13 @@ class WorkflowRuntime:
                     node_id=node_id,
                     user_input=state.get("input", ""),
                     original_output=original_output,
-                    feedback=feedback_text,
+                    feedback=combined_feedback,
                 )
 
                 evolution = self.template_generator.evolve_from_feedback(
                     node_id=node_id,
                     executor_type=executor_type or "llm_json",
-                    feedback=feedback_text,
+                    feedback=combined_feedback,
                     original_output=original_output,
                     user_input=state.get("input", ""),
                 )
@@ -179,7 +186,7 @@ class WorkflowRuntime:
             await self._emit(run_id, {
                 "type": "REJECTED_RETRY",
                 "title": "Rejected. Retrying node",
-                "message": feedback_text,
+                "message": combined_feedback,
                 "progress": state.get("progress", 0)
             })
             await self._continue(state)
@@ -301,6 +308,37 @@ class WorkflowRuntime:
 
             try:
                 result = await self.node_runner.run(workflow_node, state, cap_result)
+            except RecoverableValidationError as exc:
+                state["results"][node_id] = exc.result
+                state["pending_action"] = {
+                    "kind": "validation_recovery",
+                    "node_id": node_id,
+                    "validation_error": exc.message,
+                    "schema_path": exc.schema_path,
+                }
+                self.checkpoints.save(run_id, state)
+                await self._emit(run_id, {
+                    "type": "VALIDATION_RECOVERY_REQUIRED",
+                    "title": "Validation failed. Human recovery required",
+                    "message": f"{node_id}: {exc.message}",
+                    "result": exc.result,
+                    "schema_path": exc.schema_path,
+                    "run_id": run_id,
+                    "progress": progress,
+                })
+                await self._emit(run_id, {
+                    "type": "HUMAN_REVIEW",
+                    "title": "Validation recovery",
+                    "message": (
+                        f"Node '{node_id}' produced JSON but schema validation failed. "
+                        "Reject & Retry to evolve prompt/schema, or Modify JSON & Continue."
+                    ),
+                    "result": exc.result,
+                    "validation_error": exc.message,
+                    "run_id": run_id,
+                    "progress": progress,
+                })
+                return
             except Exception as exc:
                 message = str(exc)
                 if "MISSING_SECRET:" in message:

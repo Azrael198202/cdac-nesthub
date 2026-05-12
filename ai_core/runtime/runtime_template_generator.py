@@ -79,6 +79,12 @@ class RuntimeTemplateGenerator:
             ]):
                 changes.append("prompt.human_confirmation_rules")
 
+        if self._needs_human_review_object(feedback_l):
+            if self._evolve_human_review_schema(schema):
+                changes.append("schema.human_review.compatible")
+            if self._add_human_review_prompt_rules(prompt):
+                changes.append("prompt.human_review_rules")
+
         if self._needs_more_missing_info(feedback_l):
             if self._ensure_string_array_field(schema, "missing_information"):
                 changes.append("schema.missing_information.string_array")
@@ -316,6 +322,58 @@ class RuntimeTemplateGenerator:
 
         prompt["user_template"] = template
         return changed
+
+
+    def _needs_human_review_object(self, feedback: str) -> bool:
+        return (
+            "human_review object" in feedback
+            or ("requires_human_review" in feedback and "object" in feedback)
+            or ("not of type 'boolean'" in feedback and "requires_human_review" in feedback)
+            or ("is not of type" in feedback and "requires_human_review" in feedback)
+        )
+
+    def _evolve_human_review_schema(self, schema: dict[str, Any]) -> bool:
+        props = schema.setdefault("properties", {})
+        changed = False
+        compatible = {
+            "anyOf": [
+                {"type": "boolean"},
+                {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string"},
+                        "required": {"type": "boolean"},
+                        "reason": {"type": "string"},
+                        "reasons": {"type": "array", "items": {"type": "string"}},
+                        "review_stage": {"type": "string"},
+                    },
+                    "additionalProperties": True,
+                },
+            ]
+        }
+        if props.get("requires_human_review") != compatible:
+            props["requires_human_review"] = compatible
+            changed = True
+        human_review_schema = {
+            "type": "object",
+            "properties": {
+                "required": {"type": "boolean"},
+                "review_stage": {"type": "string"},
+                "reasons": {"type": "array", "items": {"type": "string"}},
+            },
+            "additionalProperties": True,
+        }
+        if props.get("human_review") != human_review_schema:
+            props["human_review"] = human_review_schema
+            changed = True
+        return changed
+
+    def _add_human_review_prompt_rules(self, prompt: dict[str, Any]) -> bool:
+        return self._add_runtime_rules(prompt, [
+            "If the schema allows human_review, prefer human_review.required, human_review.review_stage, and human_review.reasons.",
+            "If requires_human_review is present and schema expects boolean, use true or false only.",
+            "Do not output an object into a boolean-only field unless schema explicitly allows it.",
+        ])
 
     def _extract_required_fields(self, feedback: str) -> list[str]:
         # Lightweight generic parser for "need x/y/z" patterns.

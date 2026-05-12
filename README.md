@@ -1,4 +1,4 @@
-# AI Core Config-Driven Node Runtime v16
+# AI Core Config-Driven Node Runtime v18
 
 This version enforces the rule that `ai_core` must not contain business/domain/task-specific logic.
 
@@ -38,15 +38,15 @@ python scripts/smoke_test.py
 ```
 
 
-## v16 Fix
+## v18 Fix
 
-- Updated UI version label from v3 to v16.
+- Updated UI version label from v18 to v18.
 - Added `/api/version`.
 - Added no-cache headers for `/`.
 - This avoids confusion when the browser or an old server process displays stale UI text.
 
 
-## v16 Fix
+## v18 Fix
 
 - Fixed JavaScript syntax errors in `apps/web/index.html`.
 - `/api/chat` now returns `run_id` immediately.
@@ -55,7 +55,7 @@ python scripts/smoke_test.py
 - Added `.vscode/launch.json` and `.vscode/tasks.json`.
 
 
-## v16 Update
+## v18 Update
 
 - Added `runtime/generated/adapters/*.yaml`.
 - `LLMJsonExecutor` calls a real configured provider instead of returning a placeholder.
@@ -67,7 +67,7 @@ python scripts/smoke_test.py
 - `ai_core` still has no domain/task/business logic.
 
 
-## v16 Update
+## v18 Update
 
 Adds visible execution status for model calls.
 
@@ -99,7 +99,7 @@ Completed / Failed
 This makes it clear whether the backend is still waiting for the model, checking health, parsing JSON, or failed.
 
 
-## v16 Update
+## v18 Update
 
 Adds provider setup automation.
 
@@ -126,7 +126,7 @@ runtime/configs/secrets/secrets.json
 For production, replace the file-based secret store with OS Keychain, Vault, or a cloud secret manager.
 
 
-## v16 Fix
+## v18 Fix
 
 - Rewrites `RuntimeBootstrap` to always create:
   - `runtime/configs/models/providers.yaml`
@@ -143,7 +143,7 @@ python main.py
 ```
 
 
-## v16 Update
+## v18 Update
 
 ### Fix: Ollama command not found
 
@@ -183,7 +183,7 @@ runtime/knowledge/prompt_optimization_memory.jsonl
 For future similar tasks, the executor retrieves correction memory and injects it into the prompt.
 
 
-## v16 Update
+## v18 Update
 
 ### Provider Handler Registry
 
@@ -214,7 +214,7 @@ vLLM
 LM Studio
 LocalAI
 LiteLLM proxy
-Any /v1/chat/completions compatible service
+Any /v18/chat/completions compatible service
 ```
 
 ### Ollama Pull Failure Details
@@ -235,7 +235,7 @@ fallback_models:
 If primary model pull fails, runtime automatically tries fallback models.
 
 
-## v16 Update
+## v18 Update
 
 ### Ollama endpoint strategy
 
@@ -272,7 +272,7 @@ response
 ```
 
 
-## v16 Update
+## v18 Update
 
 Provider Auto Installer is added.
 
@@ -315,7 +315,7 @@ pull_command: "{binary} pull {model}"
 ```
 
 
-## v16 Update
+## v18 Update
 
 ### UI single-run lock
 
@@ -343,7 +343,7 @@ SSE error
 Human Review and API Key input use their own buttons, so the main Send button stays locked.
 
 
-## v16 Update
+## v18 Update
 
 ### Runtime Learning + Runtime Template Evolution
 
@@ -415,3 +415,56 @@ Future similar tasks retrieve correction memory and inject it into prompts befor
 ### Applies to known and unknown nodes
 
 `RuntimeTemplateGenerator` works for any node_id. Known nodes get better default contracts; unknown nodes get generic prompt/schema and can evolve from human feedback.
+
+
+## v18 Update
+
+### Recoverable JSON Schema Validation
+
+Schema validation failure no longer terminates the workflow.
+
+```text
+LLM JSON generated
+↓
+schema validation failed
+↓
+checkpoint current state
+↓
+show validation error and generated JSON
+↓
+Human can Reject & Retry or Modify JSON & Continue
+```
+
+Reject & Retry combines the human feedback with the validation error, then evolves the current node's runtime-generated prompt/schema and retries the same node.
+
+Example: if `requires_human_review` is an object but schema expects boolean, runtime can evolve the schema to support a compatible human_review structure.
+
+
+## v18 Update
+
+### Hierarchical Collapsible Workflow UI
+
+The UI now groups execution events by logical node instead of showing every event as a flat card.
+
+Display structure:
+
+```text
+Run
+ ├─ runtime
+ ├─ input_parsing
+ │   ├─ capability check
+ │   ├─ provider route
+ │   ├─ model request
+ │   ├─ validation
+ │   └─ human review
+ ├─ intent_recognition
+ │   ├─ correction memory
+ │   ├─ prompt rendering
+ │   ├─ provider route
+ │   └─ validation
+ └─ ...
+```
+
+Each node is a collapsible card. Internal steps are displayed as a timeline.
+
+This makes long-running operations such as installation, model pull, LLM inference, validation, and human review easier to follow.
