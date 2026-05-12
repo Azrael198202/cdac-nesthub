@@ -1,4 +1,4 @@
-# AI Core Config-Driven Node Runtime v12
+# AI Core Config-Driven Node Runtime v13
 
 This version enforces the rule that `ai_core` must not contain business/domain/task-specific logic.
 
@@ -38,15 +38,15 @@ python scripts/smoke_test.py
 ```
 
 
-## v12 Fix
+## v13 Fix
 
-- Updated UI version label from v3 to v12.
+- Updated UI version label from v3 to v13.
 - Added `/api/version`.
 - Added no-cache headers for `/`.
 - This avoids confusion when the browser or an old server process displays stale UI text.
 
 
-## v12 Fix
+## v13 Fix
 
 - Fixed JavaScript syntax errors in `apps/web/index.html`.
 - `/api/chat` now returns `run_id` immediately.
@@ -55,7 +55,7 @@ python scripts/smoke_test.py
 - Added `.vscode/launch.json` and `.vscode/tasks.json`.
 
 
-## v12 Update
+## v13 Update
 
 - Added `runtime/generated/adapters/*.yaml`.
 - `LLMJsonExecutor` calls a real configured provider instead of returning a placeholder.
@@ -67,7 +67,7 @@ python scripts/smoke_test.py
 - `ai_core` still has no domain/task/business logic.
 
 
-## v12 Update
+## v13 Update
 
 Adds visible execution status for model calls.
 
@@ -99,7 +99,7 @@ Completed / Failed
 This makes it clear whether the backend is still waiting for the model, checking health, parsing JSON, or failed.
 
 
-## v12 Update
+## v13 Update
 
 Adds provider setup automation.
 
@@ -126,7 +126,7 @@ runtime/configs/secrets/secrets.json
 For production, replace the file-based secret store with OS Keychain, Vault, or a cloud secret manager.
 
 
-## v12 Fix
+## v13 Fix
 
 - Rewrites `RuntimeBootstrap` to always create:
   - `runtime/configs/models/providers.yaml`
@@ -143,7 +143,7 @@ python main.py
 ```
 
 
-## v12 Update
+## v13 Update
 
 ### Fix: Ollama command not found
 
@@ -183,7 +183,7 @@ runtime/knowledge/prompt_optimization_memory.jsonl
 For future similar tasks, the executor retrieves correction memory and injects it into the prompt.
 
 
-## v12 Update
+## v13 Update
 
 ### Provider Handler Registry
 
@@ -233,3 +233,40 @@ fallback_models:
 ```
 
 If primary model pull fails, runtime automatically tries fallback models.
+
+
+## v13 Update
+
+### Ollama endpoint strategy
+
+Some local Ollama-compatible services support `/api/tags` and `/api/generate` but return 404 on `/api/chat`.
+
+The Ollama handler now supports:
+
+```yaml
+endpoint_strategy: auto
+chat_endpoint: /api/chat
+generate_endpoint: /api/generate
+```
+
+Behavior:
+
+```text
+POST /api/chat
+↓
+if 404
+↓
+fallback to POST /api/generate
+```
+
+`/api/chat` reads content from:
+
+```text
+message.content
+```
+
+`/api/generate` reads content from:
+
+```text
+response
+```

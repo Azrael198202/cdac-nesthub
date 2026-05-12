@@ -19,8 +19,66 @@ class OllamaProviderHandler:
         tags = await self._ensure_service(run_id, node_id, provider_name, provider, base)
         selected_model = await self._ensure_model_with_fallbacks(run_id, node_id, provider_name, provider, base, primary_model, tags)
 
+        endpoint_strategy = provider.get("endpoint_strategy", "auto")
+        chat_endpoint = provider.get("chat_endpoint", "/api/chat")
+        generate_endpoint = provider.get("generate_endpoint", "/api/generate")
+
+        if endpoint_strategy == "chat":
+            return await self._call_chat_endpoint(
+                run_id, node_id, provider_name, provider, base, chat_endpoint,
+                selected_model, prompt, rendered_user_prompt, schema, timeout
+            )
+
+        if endpoint_strategy == "generate":
+            return await self._call_generate_endpoint(
+                run_id, node_id, provider_name, provider, base, generate_endpoint,
+                selected_model, prompt, rendered_user_prompt, schema, timeout
+            )
+
+        # auto strategy: try /api/chat first, fallback to /api/generate on 404
+        try:
+            return await self._call_chat_endpoint(
+                run_id, node_id, provider_name, provider, base, chat_endpoint,
+                selected_model, prompt, rendered_user_prompt, schema, timeout
+            )
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status != 404:
+                raise
+
+            await event_bus.emit(run_id, {
+                "type": "LLM_ENDPOINT_FALLBACK",
+                "title": "Ollama endpoint fallback",
+                "message": f"{chat_endpoint} returned 404. Falling back to {generate_endpoint}.",
+                "node_id": node_id,
+                "provider": provider_name,
+                "model": selected_model,
+                "from_endpoint": chat_endpoint,
+                "to_endpoint": generate_endpoint,
+            })
+
+            return await self._call_generate_endpoint(
+                run_id, node_id, provider_name, provider, base, generate_endpoint,
+                selected_model, prompt, rendered_user_prompt, schema, timeout
+            )
+
+    async def _call_chat_endpoint(
+        self,
+        run_id: str,
+        node_id: str,
+        provider_name: str,
+        provider: dict,
+        base: str,
+        endpoint: str,
+        model: str,
+        prompt: dict,
+        rendered_user_prompt: str,
+        schema: dict,
+        timeout: int,
+    ) -> dict:
+        url = base + endpoint
         payload = {
-            "model": selected_model,
+            "model": model,
             "stream": False,
             "format": "json",
             "messages": [
@@ -32,25 +90,85 @@ class OllamaProviderHandler:
         await event_bus.emit(run_id, {
             "type": "LLM_REQUEST_SENT",
             "title": "LLM request sent",
-            "message": f"{provider_name}: waiting for model response...",
+            "message": f"{provider_name}: POST {endpoint}, waiting for model response...",
             "node_id": node_id,
             "provider": provider_name,
-            "model": selected_model,
+            "model": model,
+            "endpoint": endpoint,
             "timeout_seconds": timeout,
         })
 
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(base + "/api/chat", json=payload)
+            response = await client.post(url, json=payload)
             response.raise_for_status()
             content = response.json().get("message", {}).get("content", "")
 
         await event_bus.emit(run_id, {
             "type": "LLM_RESPONSE_RECEIVED",
             "title": "LLM response received",
-            "message": f"{provider_name}: parsing JSON response...",
+            "message": f"{provider_name}: parsing JSON response from {endpoint}.",
             "node_id": node_id,
             "provider": provider_name,
-            "model": selected_model,
+            "model": model,
+            "endpoint": endpoint,
+        })
+
+        return parse_json_content(content)
+
+    async def _call_generate_endpoint(
+        self,
+        run_id: str,
+        node_id: str,
+        provider_name: str,
+        provider: dict,
+        base: str,
+        endpoint: str,
+        model: str,
+        prompt: dict,
+        rendered_user_prompt: str,
+        schema: dict,
+        timeout: int,
+    ) -> dict:
+        url = base + endpoint
+        system_prompt = build_system_prompt(prompt, schema)
+        full_prompt = system_prompt + "\n\nUser prompt:\n" + rendered_user_prompt
+
+        payload = {
+            "model": model,
+            "stream": False,
+            "format": "json",
+            "prompt": full_prompt,
+        }
+
+        # Some Ollama versions accept system separately on /api/generate.
+        if provider.get("generate_use_system_field", False):
+            payload["system"] = system_prompt
+            payload["prompt"] = rendered_user_prompt
+
+        await event_bus.emit(run_id, {
+            "type": "LLM_REQUEST_SENT",
+            "title": "LLM request sent",
+            "message": f"{provider_name}: POST {endpoint}, waiting for model response...",
+            "node_id": node_id,
+            "provider": provider_name,
+            "model": model,
+            "endpoint": endpoint,
+            "timeout_seconds": timeout,
+        })
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+            content = response.json().get("response", "")
+
+        await event_bus.emit(run_id, {
+            "type": "LLM_RESPONSE_RECEIVED",
+            "title": "LLM response received",
+            "message": f"{provider_name}: parsing JSON response from {endpoint}.",
+            "node_id": node_id,
+            "provider": provider_name,
+            "model": model,
+            "endpoint": endpoint,
         })
 
         return parse_json_content(content)

@@ -1,9 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html>
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width">
-<title>AI Core Config-Driven Node Runtime v6</title>
+<title>AI Core Config-Driven Node Runtime v13</title>
 <style>
 :root{--bg:#080d1d;--panel:#111827;--panel2:#0f172a;--line:#25324a;--text:#e5edff;--blue:#2563eb;--yellow:#3a2a0a;--yellowLine:#b45309;--red:#991b1b;--green:#166534}
 *{box-sizing:border-box}
@@ -31,13 +30,14 @@ button:disabled{opacity:.45}
 .type{color:#93c5fd;font-size:11px}.title{font-weight:800;margin:3px 0}
 .progress-wrap{margin-top:8px;background:#111827;border:1px solid #334155;border-radius:999px;height:8px;overflow:hidden}
 .progress-bar{height:100%;background:linear-gradient(90deg,#2563eb,#60a5fa)}
+.spinner{display:inline-block;width:10px;height:10px;border:2px solid #64748b;border-top-color:#60a5fa;border-radius:50%;animation:spin .8s linear infinite;margin-right:6px}@keyframes spin{to{transform:rotate(360deg)}}.runningLine{color:#bfdbfe}
 </style>
 </head>
 <body>
 <div class="app">
   <main class="main">
     <div id="messages" class="messages">
-      <div class="bubble system">Build version: v6 / JS syntax fixed / API returns run_id immediately.</div>
+      <div class="bubble system">Build version: v13 / JS syntax fixed / API returns run_id immediately.</div>
       <div class="bubble system">Config-Driven Node Runtime: ai_core only loads runtime-generated node config and dispatches generic executors.</div>
     </div>
     <form id="form" class="inputbar">
@@ -164,8 +164,153 @@ function review(ev) {
   };
 }
 
+
+const runningTimers = {};
+
+function runningBubble(key, title, message) {
+  const id = "run-" + key.replaceAll("_", "-");
+  let div = document.getElementById(id);
+  if (!div) {
+    div = document.createElement("div");
+    div.id = id;
+    div.className = "bubble system";
+    div.dataset.startedAt = String(Date.now());
+    messages.appendChild(div);
+  }
+  const elapsed = Math.floor((Date.now() - Number(div.dataset.startedAt)) / 1000);
+  div.innerHTML = `<span class="spinner"></span><b>${esc(title)}</b>\n<span class="runningLine">${esc(message)}</span>\nElapsed: ${elapsed}s`;
+  scrollMessages();
+
+  if (!runningTimers[key]) {
+    runningTimers[key] = setInterval(() => {
+      const current = document.getElementById(id);
+      if (!current) {
+        clearInterval(runningTimers[key]);
+        delete runningTimers[key];
+        return;
+      }
+      const sec = Math.floor((Date.now() - Number(current.dataset.startedAt)) / 1000);
+      const line = current.querySelector(".runningLine")?.textContent || message;
+      current.innerHTML = `<span class="spinner"></span><b>${esc(title)}</b>\n<span class="runningLine">${esc(line)}</span>\nElapsed: ${sec}s`;
+    }, 1000);
+  }
+}
+
+function finishRunning(key, title, message, cls = "system") {
+  const timer = runningTimers[key];
+  if (timer) {
+    clearInterval(timer);
+    delete runningTimers[key];
+  }
+  const id = "run-" + key.replaceAll("_", "-");
+  const div = document.getElementById(id);
+  if (div) {
+    div.className = "bubble " + cls;
+    div.textContent = `[${title}]\n${message}`;
+  } else {
+    bubble(`[${title}]\n${message}`, cls);
+  }
+}
+
+
+function secretRequired(ev) {
+  const div = document.createElement("div");
+  div.className = "bubble approval";
+  div.innerHTML = `
+    <b>[API Key Required]</b>
+    <div>${esc(ev.message || "")}</div>
+    <input class="secret-value" type="password" placeholder="${esc(ev.secret_key || "API_KEY")}" style="width:100%;background:#020617;color:#e5edff;border:1px solid #334155;border-radius:8px;margin-top:8px;padding:8px;font-family:inherit;font-size:11px" />
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="approve" type="button">Save Key & Continue</button>
+      <button class="reject" type="button">Cancel</button>
+    </div>
+  `;
+  messages.appendChild(div);
+  scrollMessages();
+
+  const input = div.querySelector(".secret-value");
+
+  div.querySelector(".approve").onclick = async () => {
+    const value = input.value.trim();
+    if (!value) {
+      alert("Please input the API key.");
+      return;
+    }
+    for (const btn of div.querySelectorAll("button")) btn.disabled = true;
+    bubble("[Secret]\\nSaving key and resuming workflow...", "system");
+    await fetch("/api/resume", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        run_id: ev.run_id || currentRunId,
+        decision: "approve",
+        modified_result: {value: value},
+        feedback: "secret provided"
+      })
+    });
+  };
+
+  div.querySelector(".reject").onclick = async () => {
+    for (const btn of div.querySelectorAll("button")) btn.disabled = true;
+    await fetch("/api/resume", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        run_id: ev.run_id || currentRunId,
+        decision: "reject",
+        feedback: "secret cancelled"
+      })
+    });
+  };
+}
+
+
 function handleEvent(ev) {
   addEvent(ev);
+
+  if (ev.type === "LLM_PROVIDER_START" || ev.type === "LLM_REQUEST_SENT") {
+    const key = `${ev.node_id || "node"}_${ev.provider || "provider"}`;
+    runningBubble(key, ev.title || ev.type, ev.message || "Running...");
+    return;
+  }
+
+  if (ev.type === "LLM_PROVIDER_DONE") {
+    const key = `${ev.node_id || "node"}_${ev.provider || "provider"}`;
+    finishRunning(key, ev.title || ev.type, ev.message || "Completed.", "system");
+    return;
+  }
+
+  if (ev.type === "LLM_PROVIDER_ERROR") {
+    const key = `${ev.node_id || "node"}_${ev.provider || "provider"}`;
+    finishRunning(key, ev.title || ev.type, ev.message || "Failed.", "error");
+    return;
+  }
+
+
+  if (ev.type === "SECRET_REQUIRED") {
+    secretRequired(ev);
+    return;
+  }
+
+  if (ev.type === "PROVIDER_COMMAND_STARTED") {
+    runningBubble("provider_command", ev.title || ev.type, ev.message || "Running provider command...");
+    return;
+  }
+
+  if (ev.type === "PROVIDER_COMMAND_OUTPUT") {
+    bubble(`[${ev.stream || "output"}]\n${ev.message || ""}`, "system");
+    return;
+  }
+
+  if (ev.type === "PROVIDER_COMMAND_FINISHED") {
+    finishRunning("provider_command", ev.title || ev.type, ev.message || "Provider command completed.", "system");
+    return;
+  }
+
+  if (ev.type === "LLM_MODEL_MISSING" || ev.type === "LLM_MODEL_READY" || ev.type === "SECRET_SAVED" || ev.type === "CORRECTION_RECORDED" || ev.type === "CORRECTION_MEMORY_APPLIED" || ev.type === "PROVIDER_COMMAND_RESOLVED" || ev.type === "LLM_MODEL_FALLBACK" || ev.type === "LLM_MODEL_PULL_FAILED" || ev.type === "LLM_ENDPOINT_FALLBACK") {
+    bubble(`[${ev.title || ev.type}]\n${ev.message || ""}`, "system");
+    return;
+  }
 
   if (ev.type === "NODE_RESULT") {
     htmlBubble(`<b>[${esc(ev.title)}]</b><div class="spec">${esc(JSON.stringify(ev.result || {}, null, 2))}</div>`, "result");
