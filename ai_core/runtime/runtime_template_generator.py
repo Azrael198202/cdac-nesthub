@@ -74,8 +74,8 @@ class RuntimeTemplateGenerator:
             if self._ensure_field_in_array_items(schema, "tasks", "requires_human_confirmation", {"type": "boolean"}):
                 changes.append("schema.tasks.requires_human_confirmation")
             if self._add_runtime_rules(prompt, [
-                "Booking, payment, purchase, reservation, and irreversible actions MUST include requires_human_confirmation=true.",
-                "Do not finalize booking/payment/purchase/reservation actions without explicit human approval.",
+                "Any irreversible or externally mutating action MUST include requires_human_confirmation=true unless runtime policy explicitly allows it.",
+                "Do not finalize externally mutating actions without explicit human approval.",
             ]):
                 changes.append("prompt.human_confirmation_rules")
 
@@ -90,7 +90,7 @@ class RuntimeTemplateGenerator:
                 changes.append("schema.missing_information.string_array")
             if self._add_runtime_rules(prompt, [
                 "missing_information MUST include every required item absent from the user input.",
-                "For booking/reservation tasks, missing_information should include dates, origin/destination, passenger/user details, budget/class/preferences, and final confirmation when absent.",
+                "For any task, missing_information should include required parameters, actor/entity details, constraints, preferences, and final confirmation when absent.",
             ]):
                 changes.append("prompt.missing_information_rules")
 
@@ -237,7 +237,15 @@ class RuntimeTemplateGenerator:
         return isinstance(tasks, list) and any(isinstance(x, str) for x in tasks)
 
     def _needs_human_confirmation(self, feedback: str) -> bool:
-        keys = ["confirmation", "human confirmation", "booking", "payment", "purchase", "reservation", "approval"]
+        keys = [
+            "confirmation",
+            "human confirmation",
+            "approval",
+            "irreversible",
+            "external action",
+            "mutating action",
+            "side effect",
+        ]
         return any(k in feedback for k in keys)
 
     def _needs_more_missing_info(self, feedback: str) -> bool:

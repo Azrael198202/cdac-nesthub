@@ -11,7 +11,7 @@ class ToolCallExecutor:
     """
     Generic tool-call executor.
 
-    It does not know weather, flight, booking, payment, etc.
+    It does not know any business/domain-specific concepts.
 
     It reads workflow_planning.planned_steps and produces an execution state:
     - executable steps
@@ -24,6 +24,22 @@ class ToolCallExecutor:
     def __init__(self) -> None:
         self.tool_registry = RuntimeToolRegistry()
         self.module_builder = RuntimeModuleBuilder()
+
+    async def execute(
+        self,
+        workflow_node: dict[str, Any],
+        node_config: dict[str, Any],
+        state: dict[str, Any],
+        capability_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Standard executor interface used by NodeRunner."""
+        return await self.run(
+            run_id=state.get("run_id", ""),
+            node_id=node_config.get("node_id") or workflow_node.get("id", "execution"),
+            node_config=node_config,
+            state=state,
+            capability_result=capability_result,
+        )
 
     async def run(
         self,

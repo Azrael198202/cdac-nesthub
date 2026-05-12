@@ -34,9 +34,9 @@ class ToolCodeGenerationRequestBuilder:
             },
             "safety_requirements": [
                 "No secret logging.",
-                "No payment/purchase/booking/attendance submission without confirmation.",
+                "No irreversible or externally mutating action without confirmation.",
                 "Network access must be explicit in tool metadata.",
-                "Browser automation must pause before irreversible click/submit.",
+                "Automation must pause before irreversible external actions.",
             ],
         }
         path = self.dir / f"{request_id}.json"

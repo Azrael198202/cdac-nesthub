@@ -163,8 +163,8 @@ class RuntimeLearningService:
         feedback_l = feedback.lower()
         if "task_id" in feedback_l or "task_type" in feedback_l or "structured object" in feedback_l:
             return "Tasks should be structured objects with task_id, task_type, action, and parameters."
-        if "confirmation" in feedback_l or "booking" in feedback_l:
-            return "Booking/payment/purchase/reservation actions require explicit human confirmation."
+        if "confirmation" in feedback_l or "approval" in feedback_l or "irreversible" in feedback_l:
+            return "Irreversible or externally mutating actions require explicit human confirmation."
         if "missing_information" in feedback_l or "missing information" in feedback_l:
             return "missing_information should include all required information absent from the user input."
         return "Follow human feedback in future prompt generation."
