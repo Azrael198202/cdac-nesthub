@@ -8,6 +8,7 @@ from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_REGISTRY
 from ai_core.tools.tool_blueprint_builder import ToolBlueprintBuilder
 from ai_core.tools.browser_automation_blueprint import BrowserAutomationBlueprintBuilder
 from ai_core.tools.tool_code_generation_request import ToolCodeGenerationRequestBuilder
+from ai_core.tools.runtime_generated_tool_installer import RuntimeGeneratedToolInstaller
 
 
 class RuntimeToolRegistry:
@@ -27,6 +28,8 @@ class RuntimeToolRegistry:
         if not self.registry_path.exists():
             self.registry_path.write_text("{}", encoding="utf-8")
 
+        self.generated_tool_installer = RuntimeGeneratedToolInstaller()
+
         self.blueprint_builder = ToolBlueprintBuilder()
         self.browser_blueprint_builder = BrowserAutomationBlueprintBuilder()
         self.codegen_request_builder = ToolCodeGenerationRequestBuilder()
@@ -42,12 +45,28 @@ class RuntimeToolRegistry:
 
     def find_by_capability(self, capability: str) -> dict[str, Any] | None:
         registry = self.load_registry()
+        matches: list[dict[str, Any]] = []
         for tool in registry.values():
-            if capability in tool.get("capabilities", []):
-                return tool
-            if tool.get("capability") == capability:
-                return tool
-        return None
+            if capability in tool.get("capabilities", []) or tool.get("capability") == capability:
+                matches.append(tool)
+
+        if not matches:
+            return None
+
+        def score(tool: dict[str, Any]) -> int:
+            implementation = tool.get("implementation")
+            has_impl = isinstance(implementation, dict) and bool(implementation.get("module_path") or implementation.get("path"))
+            status = str(tool.get("status", "")).lower()
+            value = 0
+            if status in {"enabled", "active", "approved", "ready"}:
+                value += 100
+            if has_impl:
+                value += 50
+            if status in {"missing_implementation_blueprint_generated", "blueprint_generated", "pending"}:
+                value -= 25
+            return value
+
+        return sorted(matches, key=score, reverse=True)[0]
 
 
     def create_missing_tool_spec(
@@ -60,6 +79,19 @@ class RuntimeToolRegistry:
     ) -> dict[str, Any]:
         safe_name = self._safe_name(capability)
         tool_id = f"generated_{safe_name}"
+
+        installed_artifact = self.generated_tool_installer.install_from_step(
+            capability=capability,
+            step=step,
+            user_input=user_input,
+        )
+        if installed_artifact:
+            return {
+                **installed_artifact,
+                "status": installed_artifact.get("status", "enabled"),
+                "generation_status": "runtime_tool_artifact_installed",
+                "source_step": step,
+            }
 
         blueprint_result = self.blueprint_builder.create_blueprint(
             capability=capability,

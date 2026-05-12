@@ -1016,3 +1016,25 @@ This lets a stronger model generate a project-specific semantic boundary policy 
 - Removed business/domain-specific safety examples from `ai_core` runtime code.
 - Kept irreversible-action safety as generic runtime policy guidance.
 - Preserved v30 principle: `ai_core` is a generic orchestration kernel; runtime-generated files hold business semantics.
+
+
+## v36 Zero Seed Runtime Generation
+
+Concrete business tools are no longer shipped under `extensions/approved_tools`. `extensions` may contain only generic contracts/templates. Runtime-generated tool artifacts are installed into `runtime/generated/tools` and registered in `runtime/registry/tool_registry.json` during execution.
+
+
+## v37 Real Runtime Generation
+
+This version keeps `ai_core` provider-agnostic and domain-neutral.
+
+- `ai_core` does not contain weather provider names, weather API URLs, or weather-specific routing.
+- A workflow step may contain a `runtime_tool_generation` artifact produced by the runtime intelligence layer.
+- `ai_core` validates, installs, registers, and executes that artifact generically.
+- Generated tools must implement real HTTP/API behavior themselves, including retry, timeout, schema-compatible output, and error handling.
+- The real network test is opt-in and contains no mock execution branch:
+
+```bash
+RUN_REAL_NETWORK_TEST=1 python3 scripts/smoke_test_weather_tool.py
+```
+
+Without `RUN_REAL_NETWORK_TEST=1`, the test exits before network execution to avoid accidental external calls.

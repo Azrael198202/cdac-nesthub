@@ -15,6 +15,8 @@ from ai_core.evolution.finetune_dataset_builder import FinetuneDatasetBuilder
 from ai_core.evolution.runtime_learning import RuntimeLearningService
 from ai_core.runtime.runtime_template_generator import RuntimeTemplateGenerator
 from ai_core.validation.recoverable_validation_error import RecoverableValidationError
+from ai_core.execution.continuation_engine import ContinuationEngine
+from ai_core.workflow.workflow_state_merger import WorkflowStateMerger
 
 
 class WorkflowRuntime:
@@ -31,6 +33,8 @@ class WorkflowRuntime:
         self.runtime_learning = RuntimeLearningService()
         self.template_generator = RuntimeTemplateGenerator()
         self.correction_learning = RuntimeLearningService()
+        self.continuation_engine = ContinuationEngine()
+        self.workflow_state_merger = WorkflowStateMerger()
 
     def _load_workflow(self) -> Dict[str, Any]:
         return self.loader.load_yaml(RUNTIME_CONFIGS / "workflows" / "base_orchestration.yaml")
@@ -91,6 +95,90 @@ class WorkflowRuntime:
 
         pending = state.get("pending_action", {})
         self.checkpoints.delete(run_id)
+
+        if pending.get("kind") == "human_information_required":
+            if decision not in {"approve", "modify"} or not modified_result:
+                await self._emit(run_id, {
+                    "type": "RUN_CANCELLED",
+                    "title": "Human information cancelled",
+                    "message": "Required information was not provided.",
+                })
+                return
+
+            current_plan = state.get("results", {}).get("workflow_planning", {})
+            merged_plan = self.workflow_state_merger.merge_human_information(current_plan, modified_result)
+            state.setdefault("results", {})["workflow_planning"] = merged_plan
+            state.get("results", {}).pop(pending.get("node_id", ""), None)
+            state.setdefault("human_information_history", []).append({
+                "node_id": pending.get("node_id"),
+                "provided": modified_result,
+            })
+
+            node_id = pending.get("node_id")
+            if node_id:
+                state["node_index"] = self._node_index_by_id(state.get("workflow", {}), node_id)
+
+            await self._emit(run_id, {
+                "type": "HUMAN_INFORMATION_MERGED",
+                "title": "Human information merged",
+                "message": "Merged provided values into workflow state and resuming execution.",
+                "workflow_planning": merged_plan,
+                "progress": state.get("progress", 0),
+            })
+            await self._continue(state)
+            return
+
+        if pending.get("kind") == "generated_capability_review":
+            if decision == "reject":
+                await self._emit(run_id, {
+                    "type": "RUN_CANCELLED",
+                    "title": "Generated capability rejected",
+                    "message": feedback or "Generated capability request was rejected.",
+                })
+                return
+
+            state.setdefault("approved_generation_requests", []).append({
+                "node_id": pending.get("node_id"),
+                "missing_tools": pending.get("missing_tools", []),
+                "feedback": feedback or "",
+            })
+            await self._emit(run_id, {
+                "type": "GENERATION_REQUEST_APPROVED",
+                "title": "Generation request approved",
+                "message": "Tool/module generation request has been recorded. Implementation and registration are still required before execution can continue.",
+                "missing_tools": pending.get("missing_tools", []),
+                "progress": state.get("progress", 0),
+            })
+            await self._emit(run_id, {
+                "type": "RUN_PAUSED",
+                "title": "Workflow paused",
+                "message": "Missing capability request was generated. Add or approve the implementation, then rerun or resume from the saved workflow context.",
+                "results": state.get("results", {}),
+                "progress": state.get("progress", 0),
+            })
+            return
+
+        if pending.get("kind") == "human_confirmation_required":
+            if decision != "approve":
+                await self._emit(run_id, {
+                    "type": "RUN_CANCELLED",
+                    "title": "Human confirmation rejected",
+                    "message": feedback or "Human confirmation was not granted.",
+                })
+                return
+            state.setdefault("human_confirmations", []).append({
+                "node_id": pending.get("node_id"),
+                "safety_holds": pending.get("safety_holds", []),
+                "feedback": feedback or "",
+            })
+            await self._emit(run_id, {
+                "type": "HUMAN_CONFIRMATION_ACCEPTED",
+                "title": "Human confirmation accepted",
+                "message": "Confirmation recorded. Runtime can continue when executable implementation is available.",
+                "progress": state.get("progress", 0),
+            })
+            await self._continue(state)
+            return
 
         if pending.get("kind") == "secret_input":
             if decision != "approve" or not modified_result:
@@ -380,6 +468,52 @@ class WorkflowRuntime:
                 "progress": done
             })
 
+            continuation_action = self.continuation_engine.build_pending_action(node_id, result)
+            if continuation_action:
+                state["pending_action"] = continuation_action
+                self.checkpoints.save(run_id, state)
+
+                if continuation_action.get("kind") == "human_information_required":
+                    await self._emit(run_id, {
+                        "type": "HUMAN_INPUT_REQUIRED",
+                        "title": "Additional information required",
+                        "message": continuation_action.get("request", {}).get("message"),
+                        "request": continuation_action.get("request"),
+                        "run_id": run_id,
+                        "progress": done,
+                    })
+                    return
+
+                if continuation_action.get("kind") == "generated_capability_review":
+                    await self._emit(run_id, {
+                        "type": "CAPABILITY_GENERATION_REQUESTED",
+                        "title": "Missing capability request generated",
+                        "message": continuation_action.get("message"),
+                        "missing_tools": continuation_action.get("missing_tools", []),
+                        "run_id": run_id,
+                        "progress": done,
+                    })
+                    await self._emit(run_id, {
+                        "type": "HUMAN_REVIEW",
+                        "title": "Review generated tool/module request",
+                        "message": "Review the generated request before implementation and registration.",
+                        "result": result,
+                        "run_id": run_id,
+                        "progress": done,
+                    })
+                    return
+
+                if continuation_action.get("kind") == "human_confirmation_required":
+                    await self._emit(run_id, {
+                        "type": "HUMAN_REVIEW",
+                        "title": "Human confirmation required",
+                        "message": continuation_action.get("message"),
+                        "result": result,
+                        "run_id": run_id,
+                        "progress": done,
+                    })
+                    return
+
             if node_config.get("review_required"):
                 state["pending_action"] = {
                     "kind": "node_review",
@@ -413,6 +547,12 @@ class WorkflowRuntime:
             "results": state["results"],
             "progress": 100
         })
+
+    def _node_index_by_id(self, workflow: dict, node_id: str) -> int:
+        for index, node in enumerate(workflow.get("nodes", []) or []):
+            if node.get("id") == node_id:
+                return index
+        return max(0, int(workflow.get("node_index", 0) or 0))
 
     async def _emit(self, run_id: str, event: dict) -> None:
         self.trace.write(run_id, event)
