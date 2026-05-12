@@ -198,3 +198,32 @@ core 会自动：
 这才是真正的：
 
 Self-Evolving Runtime AI Core
+
+# homework 1.2
+intent
+
+Please regenerate this node output as executable orchestration state, not as explanation.
+
+Requirements:
+1. Do not put missing information inside reason.
+2. Output missing information as structured fields.
+3. tasks must be an array of objects.
+4. Each task must include:
+   - task_id
+   - task_type using dot notation, such as weather.forecast.query or travel.flight.booking
+   - capability_action
+   - parameters.known
+   - parameters.missing_required
+   - parameters.optional
+   - depends_on
+   - requires_human_confirmation
+   - execution_ready
+5. Booking, payment, purchase, reservation, and irreversible actions must set requires_human_confirmation=true.
+6. If required parameters are missing, execution_ready must be false.
+7. Use human_review object instead of plain requires_human_review boolean.
+8. Confidence should be structured:
+   - overall
+   - intent
+   - execution_readiness
+9. Do not explain the correction in reason.
+10. Return valid JSON only.
