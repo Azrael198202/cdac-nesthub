@@ -1,0 +1,20 @@
+# Runtime-generated semantic boundary policy.
+#
+# ai_core does not contain business/domain forbidden words.
+# Project-specific forbidden patterns should be generated or reviewed here.
+#
+# Example:
+#
+# enabled: true
+# fail_on_findings: true
+# output: text
+# rules:
+#   - id: "domain_word_example"
+#     mode: "literal"
+#     pattern: "example_domain_word"
+#     ignore_case: true
+
+enabled: false
+fail_on_findings: true
+output: text
+rules: []
