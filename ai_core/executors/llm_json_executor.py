@@ -98,13 +98,22 @@ class LLMJsonExecutor:
             "node_id": node_id,
         })
 
+        validation_ok = False
+
         try:
             self.validator.validate_data(result, schema)
+            validation_ok = True
+            await event_bus.emit(run_id, {
+                "type": "LLM_JSON_VALIDATED",
+                "title": "JSON validated",
+                "message": node_id,
+                "node_id": node_id,
+            })
         except Exception as exc:
             original_error = str(exc)
 
-            # 1. First try to repair the RESULT.
-            # This is for cases where the schema is correct but the model omitted required fields.
+            # 1. First repair the RESULT when the model omitted required fields
+            # or returned a shape that can be safely normalized.
             result_repaired, repaired_result, result_changes = self.result_auto_repair.try_repair(
                 node_id=node_id,
                 result=result,
@@ -126,6 +135,7 @@ class LLMJsonExecutor:
                 try:
                     self.validator.validate_data(repaired_result, schema)
                     result = repaired_result
+                    validation_ok = True
                     await event_bus.emit(run_id, {
                         "type": "LLM_JSON_VALIDATED",
                         "title": "JSON validated after result repair",
@@ -133,16 +143,11 @@ class LLMJsonExecutor:
                         "node_id": node_id,
                     })
                 except Exception as result_repair_exc:
-                    # Continue to schema repair using repaired result, because it may still be structurally better.
                     result = repaired_result
                     original_error = str(result_repair_exc)
 
-            # 2. If still invalid, try to repair SCHEMA.
-            try:
-                self.validator.validate_data(result, schema)
-            except Exception as after_result_exc:
-                original_error = str(after_result_exc)
-
+            # 2. Only if result repair did NOT validate, try schema repair.
+            if not validation_ok:
                 repaired, repaired_schema, changes = self.schema_auto_repair.try_repair(
                     node_id=node_id,
                     schema_path=str(schema_path),
@@ -163,6 +168,7 @@ class LLMJsonExecutor:
 
                     try:
                         self.validator.validate_data(result, repaired_schema)
+                        validation_ok = True
                         await event_bus.emit(run_id, {
                             "type": "LLM_JSON_VALIDATED",
                             "title": "JSON validated after schema repair",
@@ -198,15 +204,15 @@ class LLMJsonExecutor:
                         node_id=node_id,
                         result=result,
                         schema_path=str(schema_path),
-                    ) from after_result_exc
+                    ) from exc
 
-        else:
-            await event_bus.emit(run_id, {
-                "type": "LLM_JSON_VALIDATED",
-                "title": "JSON validated",
-                "message": node_id,
-                "node_id": node_id,
-            })
+        if not validation_ok:
+            raise RecoverableValidationError(
+                message="JSON validation did not complete.",
+                node_id=node_id,
+                result=result,
+                schema_path=str(schema_path),
+            )
 
         result["_executor_type"] = "llm_json"
         result["_node_id"] = node_id

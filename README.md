@@ -1,4 +1,4 @@
-# AI Core Config-Driven Node Runtime v23
+# AI Core Config-Driven Node Runtime v24
 
 This version enforces the rule that `ai_core` must not contain business/domain/task-specific logic.
 
@@ -38,15 +38,15 @@ python scripts/smoke_test.py
 ```
 
 
-## v23 Fix
+## v24 Fix
 
-- Updated UI version label from v23 to v23.
+- Updated UI version label from v24 to v24.
 - Added `/api/version`.
 - Added no-cache headers for `/`.
 - This avoids confusion when the browser or an old server process displays stale UI text.
 
 
-## v23 Fix
+## v24 Fix
 
 - Fixed JavaScript syntax errors in `apps/web/index.html`.
 - `/api/chat` now returns `run_id` immediately.
@@ -55,7 +55,7 @@ python scripts/smoke_test.py
 - Added `.vscode/launch.json` and `.vscode/tasks.json`.
 
 
-## v23 Update
+## v24 Update
 
 - Added `runtime/generated/adapters/*.yaml`.
 - `LLMJsonExecutor` calls a real configured provider instead of returning a placeholder.
@@ -67,7 +67,7 @@ python scripts/smoke_test.py
 - `ai_core` still has no domain/task/business logic.
 
 
-## v23 Update
+## v24 Update
 
 Adds visible execution status for model calls.
 
@@ -99,7 +99,7 @@ Completed / Failed
 This makes it clear whether the backend is still waiting for the model, checking health, parsing JSON, or failed.
 
 
-## v23 Update
+## v24 Update
 
 Adds provider setup automation.
 
@@ -126,7 +126,7 @@ runtime/configs/secrets/secrets.json
 For production, replace the file-based secret store with OS Keychain, Vault, or a cloud secret manager.
 
 
-## v23 Fix
+## v24 Fix
 
 - Rewrites `RuntimeBootstrap` to always create:
   - `runtime/configs/models/providers.yaml`
@@ -143,7 +143,7 @@ python main.py
 ```
 
 
-## v23 Update
+## v24 Update
 
 ### Fix: Ollama command not found
 
@@ -183,7 +183,7 @@ runtime/knowledge/prompt_optimization_memory.jsonl
 For future similar tasks, the executor retrieves correction memory and injects it into the prompt.
 
 
-## v23 Update
+## v24 Update
 
 ### Provider Handler Registry
 
@@ -214,7 +214,7 @@ vLLM
 LM Studio
 LocalAI
 LiteLLM proxy
-Any /v23/chat/completions compatible service
+Any /v24/chat/completions compatible service
 ```
 
 ### Ollama Pull Failure Details
@@ -235,7 +235,7 @@ fallback_models:
 If primary model pull fails, runtime automatically tries fallback models.
 
 
-## v23 Update
+## v24 Update
 
 ### Ollama endpoint strategy
 
@@ -272,7 +272,7 @@ response
 ```
 
 
-## v23 Update
+## v24 Update
 
 Provider Auto Installer is added.
 
@@ -315,7 +315,7 @@ pull_command: "{binary} pull {model}"
 ```
 
 
-## v23 Update
+## v24 Update
 
 ### UI single-run lock
 
@@ -343,7 +343,7 @@ SSE error
 Human Review and API Key input use their own buttons, so the main Send button stays locked.
 
 
-## v23 Update
+## v24 Update
 
 ### Runtime Learning + Runtime Template Evolution
 
@@ -417,7 +417,7 @@ Future similar tasks retrieve correction memory and inject it into prompts befor
 `RuntimeTemplateGenerator` works for any node_id. Known nodes get better default contracts; unknown nodes get generic prompt/schema and can evolve from human feedback.
 
 
-## v23 Update
+## v24 Update
 
 ### Recoverable JSON Schema Validation
 
@@ -440,7 +440,7 @@ Reject & Retry combines the human feedback with the validation error, then evolv
 Example: if `requires_human_review` is an object but schema expects boolean, runtime can evolve the schema to support a compatible human_review structure.
 
 
-## v23 Update
+## v24 Update
 
 ### Hierarchical Collapsible Workflow UI
 
@@ -470,7 +470,7 @@ Each node is a collapsible card. Internal steps are displayed as a timeline.
 This makes long-running operations such as installation, model pull, LLM inference, validation, and human review easier to follow.
 
 
-## v23 Update
+## v24 Update
 
 ### Hierarchical interaction UI
 
@@ -494,7 +494,7 @@ suggested mitigation
 This makes it clear whether the issue is installation, model availability, or slow inference.
 
 
-## v23 Update
+## v24 Update
 
 ### Paused Human Interaction UI
 
@@ -529,7 +529,7 @@ intent_recognition / attempt 2
 This prevents new events from visually pushing the active human interaction upward inside the same node card.
 
 
-## v23 Update
+## v24 Update
 
 ### Auto Schema Repair
 
@@ -585,7 +585,7 @@ runtime/knowledge/schema_auto_repair.jsonl
 ```
 
 
-## v23 Update
+## v24 Update
 
 ### Sticky Blocking Interaction Panel
 
@@ -623,7 +623,7 @@ continues normal rendering
 This prevents Human Review input from being pushed upward by later workflow logs.
 
 
-## v23 Update
+## v24 Update
 
 ### Result Auto Repair
 
@@ -662,3 +662,36 @@ Repair log:
 ```text
 runtime/knowledge/result_auto_repair.jsonl
 ```
+
+
+## v24 Update
+
+### Fixed Result Auto Repair Continuation
+
+`RESULT_AUTO_REPAIRED` no longer leaves the node visually stuck.
+
+Executor validation flow is now:
+
+```text
+validate original result
+↓
+if invalid, try result repair
+↓
+if repaired result validates:
+  continue immediately
+↓
+else try schema repair
+↓
+if repaired schema validates:
+  continue
+↓
+else human recovery
+```
+
+### Collapsed Human Interaction History
+
+Resolved human interactions are now stored as collapsed details inside the node card instead of occupying a large visible area.
+
+### UI Running State Fix
+
+After a human interaction is resolved, the main composer stays disabled and shows `Thinking...` until the workflow actually completes/fails/cancels.

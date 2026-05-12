@@ -468,6 +468,26 @@
       flex-wrap:wrap;
     }
 
+    .interaction-history{
+      margin-top:8px;
+      border:1px solid #166534;
+      background:rgba(5,46,22,.35);
+      border-radius:10px;
+      padding:8px 10px;
+      font-family:var(--mono);
+      font-size:11px;
+    }
+
+    .interaction-history summary{
+      cursor:pointer;
+      color:#bbf7d0;
+      font-weight:700;
+    }
+
+    .interaction-history .step-json{
+      max-height:180px;
+    }
+
     .interaction-placeholder{
       border:1px dashed #d97706;
       color:#fde68a;
@@ -510,7 +530,7 @@
 <div class="app">
   <main class="main">
     <div id="messages" class="messages">
-      <div class="top-note">Build version: v23 / Result auto repair + sticky interaction.</div>
+      <div class="top-note">Build version: v24 / Collapsed interaction history and fixed auto-repair continuation.</div>
       <div class="top-note">Human Review and API Key input stay fixed above the composer until resolved.</div>
     </div>
 
@@ -649,6 +669,7 @@ function nodeIdFromEvent(ev){
 
 function statusForEvent(ev){
   if(ev.type === "NODE_RESULT" || ev.type === "LLM_PROVIDER_DONE" || ev.type === "LLM_JSON_VALIDATED") return "done";
+  if(ev.type === "RESULT_AUTO_REPAIRED" || ev.type === "SCHEMA_AUTO_REPAIRED") return "running";
   if(ev.type === "RUN_FAILED" || ev.type === "LLM_PROVIDER_ERROR" || ev.type === "LLM_JSON_VALIDATION_FAILED") return "error";
   if(ev.type === "HUMAN_REVIEW" || ev.type === "VALIDATION_RECOVERY_REQUIRED" || ev.type === "SECRET_REQUIRED") return "waiting";
   return "running";
@@ -765,7 +786,7 @@ function addStep(ev, opts={}){
 function markCurrentInteractionResolved(decisionText){
   if(!activeInteraction) return;
 
-  const {nodeId, key} = activeInteraction;
+  const {nodeId, key, event} = activeInteraction;
 
   const card = nodeCards.get(key);
   if(card){
@@ -780,12 +801,17 @@ function markCurrentInteractionResolved(decisionText){
     const body = card.querySelector(".workflow-body");
     const step = document.createElement("div");
     step.className = "step done";
+
+    const compact = event && event.result ? JSON.stringify(event.result, null, 2) : "";
     step.innerHTML = `
       <div class="step-title">
         <span class="step-type">HUMAN_INTERACTION_RESOLVED</span>
         <span>Interaction resolved</span>
       </div>
-      <div class="step-msg">${esc(decisionText)}</div>
+      <details class="interaction-history">
+        <summary>${esc(decisionText)}</summary>
+        ${compact ? `<div class="step-json">${esc(compact)}</div>` : ""}
+      </details>
     `;
     body.appendChild(step);
   }
@@ -796,8 +822,12 @@ function markCurrentInteractionResolved(decisionText){
 
   workflowPaused = false;
   activeInteraction = null;
-  scrollMessages();
 
+  // Important:
+  // Do NOT setBusy(false) here. The workflow is still running after resume.
+  setBusy(true, "Thinking...");
+
+  scrollMessages();
   flushBufferedEvents();
 }
 

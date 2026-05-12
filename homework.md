@@ -200,6 +200,13 @@ core 会自动：
 Self-Evolving Runtime AI Core
 
 # homework 1.2
+
+tasks should be structured objects instead of string array.
+Need task_id/task_type/action/parameters.
+Booking actions require human confirmation.
+Need more missing_information fields.
+
+
 intent
 
 Please regenerate this node output as executable orchestration state, not as explanation.
