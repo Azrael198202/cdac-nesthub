@@ -289,6 +289,54 @@ class ToolCallExecutor:
                             user_input=state.get("input", ""),
                         )
                         generated_modules.append({"step_id": step_id, "capability": required_capability, "generated_module": module_blueprint})
+
+                        # v50: if a reusable module is already registered, the workflow must
+                        # immediately re-enter execution instead of pausing on a stale
+                        # missing_tool_implementation state. ai_core remains generic here:
+                        # it only checks registry/loadability by capability and executes the
+                        # declared module entrypoint; it does not know the module domain.
+                        if module_blueprint.get("status") == "module_already_registered":
+                            executed_module = await self._execute_registered_module(
+                                run_id=run_id,
+                                node_id=node_id,
+                                step_id=step_id,
+                                capability=required_capability or "unknown_capability",
+                                step=step,
+                                state=state,
+                                component_type="runtime_registered_module",
+                            )
+                            if executed_module:
+                                module_result = executed_module.get("result", {})
+                                execution_steps.append({
+                                    "step_id": step_id,
+                                    "status": "executed" if self._is_success_result(module_result) else "module_execution_failed",
+                                    "module": executed_module.get("registry_record"),
+                                    "input": executed_module.get("input"),
+                                    "result": module_result,
+                                    "provenance": module_result.get("provenance") if isinstance(module_result, dict) else None,
+                                    "source_step": step,
+                                })
+                                if not self._is_success_result(module_result):
+                                    blocked_steps.append({
+                                        "step_id": step_id,
+                                        "status": "module_execution_failed",
+                                        "capability": required_capability,
+                                        "reason": self._result_error_message(module_result, "Module execution failed."),
+                                        "source_step": step,
+                                        "module_result": module_result,
+                                    })
+                                continue
+
+                            blocked_steps.append({
+                                "step_id": step_id,
+                                "status": "registered_module_not_executable",
+                                "capability": required_capability,
+                                "reason": "A module is registered for this capability but could not be loaded or executed.",
+                                "source_step": step,
+                                "generated_module": module_blueprint,
+                            })
+                            continue
+
                         missing_tools.append({"step_id": step_id, "capability": required_capability, "generated_tool_spec": generated_spec, "generated_module": module_blueprint})
                         await event_bus.emit(run_id, {
                             "type": "TOOL_AND_MODULE_REQUEST_GENERATED",
@@ -416,6 +464,97 @@ class ToolCallExecutor:
             "result": result,
         })
         return result
+
+    async def _execute_registered_module(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        step_id: str,
+        capability: str,
+        step: dict[str, Any],
+        state: dict[str, Any],
+        component_type: str = "runtime_module",
+    ) -> dict[str, Any] | None:
+        """Load and execute an already-registered runtime module by capability.
+
+        This is the v50 continuation bridge. When a previous run or an earlier
+        phase generated/registered a module, execution must not stop at a
+        generated-capability review. It should reuse the registered module and
+        continue the workflow. The method is domain-neutral: it only uses
+        capability metadata and the module registry.
+        """
+        module = self.module_loader.load_by_capability(capability)
+        if module is None:
+            await event_bus.emit(run_id, {
+                "type": "MODULE_REUSE_UNAVAILABLE",
+                "title": "Registered module unavailable",
+                "message": f"A module is registered for capability={capability}, but it could not be loaded.",
+                "node_id": node_id,
+                "step_id": step_id,
+            })
+            return None
+
+        module_record = self.module_loader.registry.find_by_capability(capability) or {"module_id": capability}
+        module_input = self._build_tool_input(
+            step=step,
+            run_id=run_id,
+            node_id=node_id,
+            step_id=step_id,
+            user_input=state.get("input", ""),
+        )
+        await event_bus.emit(run_id, {
+            "type": "MODULE_REUSE_EXECUTION_STARTED",
+            "title": "Reusable module execution started",
+            "message": f"Executing registered runtime module for capability={capability}",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": {"module": module_record, "input": module_input},
+        })
+        trace = self.provenance.start(
+            run_id=run_id,
+            node_id=node_id,
+            step_id=step_id,
+            component_type=component_type,
+            component_id=str(module_record.get("module_id") or capability),
+            capability=capability,
+            input_data=module_input,
+            artifact=module_record,
+        )
+        try:
+            raw_result = module.run(module_input)
+            result = self._normalize_runtime_execution_result(raw_result, source=component_type)
+            trace = self.provenance.finish(
+                trace,
+                output=result,
+                status="success" if self._is_success_result(result) else "error",
+                error=result.get("error") if isinstance(result, dict) else None,
+            )
+            result = self.provenance.attach(result, trace)
+        except Exception as exc:
+            result = {"status": "error", "error": {"message": str(exc)}, "data": {}, "source": component_type}
+            trace = self.provenance.finish(trace, output=result, status="error", error=result.get("error"))
+            result = self.provenance.attach(result, trace)
+
+        await event_bus.emit(run_id, {
+            "type": "MODULE_REUSE_EXECUTED",
+            "title": "Reusable module executed",
+            "message": f"Registered module executed for capability={capability}",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": result,
+        })
+        if isinstance(result, dict) and result.get("provenance"):
+            await event_bus.emit(run_id, {
+                "type": "EXECUTION_PROVENANCE_RECORDED",
+                "title": "Execution provenance recorded",
+                "message": f"Recorded provenance for step={step_id}",
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": result.get("provenance"),
+            })
+        return {"module": module, "registry_record": module_record, "input": module_input, "result": result}
+
 
 
     def _normalize_runtime_execution_result(self, value: Any, *, source: str) -> dict[str, Any]:

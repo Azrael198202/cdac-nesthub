@@ -144,25 +144,41 @@ class WorkflowRuntime:
                 })
                 return
 
+            node_id = pending.get("node_id")
+            retry_index = pending.get("retry_node_index")
+            if retry_index is None and node_id:
+                retry_index = self._node_index_by_id(state.get("workflow", {}), node_id)
+
             state.setdefault("approved_generation_requests", []).append({
-                "node_id": pending.get("node_id"),
+                "node_id": node_id,
                 "missing_tools": pending.get("missing_tools", []),
                 "feedback": feedback or "",
             })
+
+            # v50: approval of a generated capability review is not terminal.
+            # It means the execution node may now reuse or execute the generated
+            # registered module/tool. Remove the stale execution result and
+            # reschedule the same node immediately.
+            if node_id:
+                state.get("results", {}).pop(node_id, None)
+                state["node_index"] = int(retry_index if retry_index is not None else self._node_index_by_id(state.get("workflow", {}), node_id))
+
             await self._emit(run_id, {
                 "type": "GENERATION_REQUEST_APPROVED",
                 "title": "Generation request approved",
-                "message": "Tool/module generation request has been recorded. Implementation and registration are still required before execution can continue.",
+                "message": "Approval recorded. Re-dispatching the blocked node to execute registered/generated runtime components.",
+                "node_id": node_id,
                 "missing_tools": pending.get("missing_tools", []),
                 "progress": state.get("progress", 0),
             })
             await self._emit(run_id, {
-                "type": "RUN_PAUSED",
-                "title": "Workflow paused",
-                "message": "Missing capability request was generated. Add or approve the implementation, then rerun or resume from the saved workflow context.",
-                "results": state.get("results", {}),
+                "type": "RESUME_REDISPATCH_STARTED",
+                "title": "Resume redispatch started",
+                "message": f"Re-running node={node_id} after generated capability approval.",
+                "node_id": node_id,
                 "progress": state.get("progress", 0),
             })
+            await self._continue(state)
             return
 
         if pending.get("kind") == "human_confirmation_required":
