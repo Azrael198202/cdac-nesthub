@@ -571,7 +571,7 @@
 <div class="app">
   <main class="main">
     <div id="messages" class="messages">
-      <div class="top-note">Build version: v30 / Config-driven semantic boundary scanner.</div>
+      <div class="top-note">Build version: v39 / Human-readable interaction runtime.</div>
       <div class="top-note">Human Review and API Key input stay fixed above the composer until resolved.</div>
     </div>
 
@@ -964,35 +964,45 @@ function normalizeHumanInputFields(request){
     if(typeof raw === "string"){
       return {
         field: raw,
-        label: raw.replace(/[_-]/g, " "),
-        question: `Please provide: ${raw.replace(/[_-]/g, " ")}.`,
-        type: inferInputType(raw),
+        label: toHumanLabel(raw),
+        question: `Please provide this information: ${toHumanLabel(raw)}.`,
+        type: "text",
         required: true,
         step_id: ""
       };
     }
+
     const field = raw.field || raw.field_id || raw.name || raw.id || `field_${idx+1}`;
+    const type = normalizeInputType(raw.type || raw.input_type || raw.ui_type || raw.component || "text");
     return {
       field,
-      label: raw.label || raw.title || String(field).replace(/[_-]/g, " "),
-      question: raw.question || `Please provide: ${String(field).replace(/[_-]/g, " ")}.`,
-      type: raw.type || raw.input_type || inferInputType(field),
+      label: raw.label || raw.title || raw.display_name || toHumanLabel(field),
+      question: raw.question || raw.prompt || raw.message || `Please provide this information: ${toHumanLabel(field)}.`,
+      type,
       required: raw.required !== false,
-      options: Array.isArray(raw.options) ? raw.options : [],
+      options: Array.isArray(raw.options || raw.choices || raw.enum) ? (raw.options || raw.choices || raw.enum) : [],
       placeholder: raw.placeholder || "",
-      description: raw.description || "",
+      description: raw.description || raw.help_text || "",
+      examples: Array.isArray(raw.examples) ? raw.examples : [],
       step_id: raw.step_id || ""
     };
   });
 }
 
-function inferInputType(field){
-  const name = String(field || "").toLowerCase();
-  if(name.includes("date")) return "date";
-  if(name.includes("time")) return "time";
-  if(["count","number","amount","quantity","passenger"].some(x => name.includes(x))) return "number";
-  if(name.includes("email")) return "email";
-  return "text";
+function toHumanLabel(value){
+  return String(value || "required value")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeInputType(value){
+  const type = String(value || "text").toLowerCase().trim();
+  const allowed = new Set([
+    "text", "textarea", "select", "number", "date", "time", "datetime-local",
+    "email", "url", "tel", "password", "checkbox"
+  ]);
+  return allowed.has(type) ? type : "text";
 }
 
 function showStickyHumanInputRequired(ev){
@@ -1036,14 +1046,22 @@ function showStickyHumanInputRequired(ev){
         <option value="">Select...</option>
         ${field.options.map(opt => `<option value="${esc(opt)}">${esc(opt)}</option>`).join("")}
       </select>`;
+    }else if(field.type === "textarea"){
+      inputHtml = `<textarea id="${fieldId}" data-field="${esc(field.field)}" placeholder="${esc(field.placeholder || "")}" ${required}></textarea>`;
+    }else if(field.type === "checkbox"){
+      inputHtml = `<input id="${fieldId}" data-field="${esc(field.field)}" type="checkbox" ${required} />`;
     }else{
       inputHtml = `<input id="${fieldId}" data-field="${esc(field.field)}" type="${esc(field.type || "text")}" placeholder="${esc(field.placeholder || "")}" ${required} />`;
     }
+    const examples = Array.isArray(field.examples) && field.examples.length
+      ? `<div class="hint">Examples: ${esc(field.examples.join(" / "))}</div>`
+      : "";
     return `
       <div class="human-input-field">
         <label for="${fieldId}">${esc(label)}</label>
         ${inputHtml}
         <div class="hint">${esc(field.question || field.description || "")}</div>
+        ${examples}
       </div>
     `;
   }).join("");
@@ -1074,8 +1092,11 @@ function showStickyHumanInputRequired(ev){
     let firstInvalid = null;
     fields.forEach((field, idx) => {
       const el = document.getElementById(`humanField_${idx}`);
-      const value = el ? String(el.value || "").trim() : "";
-      if(field.required && !value && !firstInvalid) firstInvalid = el;
+      let value = "";
+      if(el){
+        value = el.type === "checkbox" ? Boolean(el.checked) : String(el.value || "").trim();
+      }
+      if(field.required && (value === "" || value === false) && !firstInvalid) firstInvalid = el;
       answers[field.field] = value;
     });
     if(firstInvalid){
@@ -1095,7 +1116,7 @@ function showStickyHumanInputRequired(ev){
     await resume("reject", null, "Missing information cancelled by user.");
   };
 
-  const first = stickyInteraction.querySelector("input,select");
+  const first = stickyInteraction.querySelector("input,select,textarea");
   if(first) setTimeout(() => first.focus(), 50);
   stickyInteraction.scrollIntoView({block:"end", behavior:"smooth"});
 }

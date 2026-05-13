@@ -468,7 +468,7 @@ class WorkflowRuntime:
                 "progress": done
             })
 
-            continuation_action = self.continuation_engine.build_pending_action(node_id, result)
+            continuation_action = self.continuation_engine.build_pending_action(node_id, result, state)
             if continuation_action:
                 state["pending_action"] = continuation_action
                 self.checkpoints.save(run_id, state)

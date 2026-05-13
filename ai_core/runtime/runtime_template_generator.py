@@ -143,6 +143,8 @@ class RuntimeTemplateGenerator:
                 "Return one valid JSON object only.",
                 "Follow the JSON schema strictly.",
                 "Use human feedback and correction memory as higher-priority guidance than previous failed outputs.",
+                "When required information is missing, include structured missing_required metadata and, when possible, generate a human_interaction.fields contract with user-friendly labels, questions, placeholders, and examples in the user's language.",
+                "Do not rely on ai_core for business wording. Interaction wording should be generated from user input, task context, and runtime metadata.",
             ],
             "output_contract": self._default_contract(node_id),
         }
@@ -171,6 +173,7 @@ class RuntimeTemplateGenerator:
                 "planned_steps": "array",
                 "blocking_missing_information": "array",
                 "required_capabilities": "array",
+                "human_interaction": "object optional; generate user-friendly fields when required information is missing",
             }
         return {"status": "string", "data": "object"}
 
@@ -213,6 +216,7 @@ class RuntimeTemplateGenerator:
                     "planned_steps": {"type": "array"},
                     "blocking_missing_information": {"type": "array"},
                     "required_capabilities": {"type": "array"},
+                    "human_interaction": {"type": "object"},
                 },
                 "additionalProperties": True,
             }

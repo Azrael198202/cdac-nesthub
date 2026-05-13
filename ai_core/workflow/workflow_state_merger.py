@@ -24,15 +24,17 @@ class WorkflowStateMerger:
 
             if isinstance(missing, dict):
                 for field in list(missing.keys()):
-                    if field in answers and answers[field] not in [None, "", [], {}]:
-                        known[field] = answers[field]
+                    matched_key = self._find_answer_key(field, answers)
+                    if matched_key and answers[matched_key] not in [None, "", [], {}]:
+                        known[field] = answers[matched_key]
                         missing.pop(field, None)
             elif isinstance(missing, list):
                 remaining = []
                 for field in missing:
                     field_name = str(field)
-                    if field_name in answers and answers[field_name] not in [None, "", [], {}]:
-                        known[field_name] = answers[field_name]
+                    matched_key = self._find_answer_key(field_name, answers)
+                    if matched_key and answers[matched_key] not in [None, "", [], {}]:
+                        known[field_name] = answers[matched_key]
                     else:
                         remaining.append(field)
                 params["missing_required"] = remaining
@@ -60,6 +62,19 @@ class WorkflowStateMerger:
             else:
                 result[str(key)] = value
         return result
+
+    def _find_answer_key(self, field: str, answers: dict[str, Any]) -> str | None:
+        candidates = {field, self._safe_key(field)}
+        for key in answers.keys():
+            if key in candidates or self._safe_key(key) in candidates:
+                return key
+        return None
+
+    def _safe_key(self, value: str) -> str:
+        chars = []
+        for ch in str(value or "").lower():
+            chars.append(ch if ch.isalnum() else "_")
+        return "_".join(part for part in "".join(chars).split("_") if part)
 
     def _missing_fields(self, params: dict[str, Any]) -> list[str]:
         raw = params.get("missing_required")

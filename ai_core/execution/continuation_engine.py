@@ -11,13 +11,19 @@ class ContinuationEngine:
     def __init__(self) -> None:
         self.question_generator = QuestionGenerator()
 
-    def build_pending_action(self, node_id: str, result: dict[str, Any]) -> dict[str, Any] | None:
+    def build_pending_action(self, node_id: str, result: dict[str, Any], state: dict[str, Any] | None = None) -> dict[str, Any] | None:
         if not isinstance(result, dict):
             return None
 
+        state = state or {}
         human_interactions = result.get("human_interactions") or []
         if human_interactions:
-            request = self.question_generator.build_request(human_interactions)
+            language = self._detect_language(state)
+            request = self.question_generator.build_request(
+                human_interactions,
+                user_input=str(state.get("input", "")),
+                language=language,
+            )
             return {
                 "kind": "human_information_required",
                 "node_id": node_id,
@@ -45,4 +51,14 @@ class ContinuationEngine:
                 "message": "Human confirmation is required before irreversible or sensitive execution continues.",
             }
 
+        return None
+
+    def _detect_language(self, state: dict[str, Any]) -> str | None:
+        results = state.get("results", {}) if isinstance(state, dict) else {}
+        for node_id in ["input_parsing", "intent_recognition", "workflow_planning"]:
+            result = results.get(node_id)
+            if isinstance(result, dict):
+                language = result.get("language") or result.get("user_language")
+                if isinstance(language, str) and language.strip():
+                    return language.strip()
         return None
