@@ -206,7 +206,7 @@ class RuntimeBootstrap:
             },
             "output": {
                 "node_id": "output",
-                "executor_type": "static_transform",
+                "executor_type": "output",
                 "prompt": "runtime/generated/prompts/output.yaml",
                 "output_schema": "runtime/generated/schemas/output.schema.json",
                 "capabilities": ["response_generation"],
@@ -228,7 +228,7 @@ class RuntimeBootstrap:
             "workflow_planning": "llm_json",
             "execution": "tool_call",
             "feedback_learning": "static_transform",
-            "output": "static_transform",
+            "output": "output",
         }
         for node_id, executor_type in node_executor_types.items():
             self.template_generator.ensure_node_template(node_id, executor_type)
@@ -280,7 +280,7 @@ class RuntimeBootstrap:
             "context_awareness": {"id": "context_awareness_prompt", "version": "1.0", "executor_type": "static_transform"},
             "execution": {"id": "execution_prompt", "version": "1.0", "executor_type": "tool_call"},
             "feedback_learning": {"id": "feedback_learning_prompt", "version": "1.0", "executor_type": "static_transform"},
-            "output": {"id": "output_prompt", "version": "1.0", "executor_type": "static_transform"}
+            "output": {"id": "output_prompt", "version": "1.0", "executor_type": "output"}
         }
         for name, cfg in prompts.items():
             p = RUNTIME_GENERATED / "prompts" / f"{name}.yaml"

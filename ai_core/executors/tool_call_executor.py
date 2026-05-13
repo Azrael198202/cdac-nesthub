@@ -7,6 +7,8 @@ from ai_core.tools.runtime_tool_registry import RuntimeToolRegistry
 from ai_core.modules.module_builder import RuntimeModuleBuilder
 from ai_core.workflow.workflow_normalizer import WorkflowNormalizer
 from ai_core.tools.generic_tool_runner import GenericToolRunner
+from ai_core.tools.runtime_tool_artifact_generator import RuntimeToolArtifactGenerator
+from ai_core.tools.runtime_generated_tool_installer import RuntimeGeneratedToolInstaller
 
 
 class ToolCallExecutor:
@@ -24,6 +26,8 @@ class ToolCallExecutor:
         self.module_builder = RuntimeModuleBuilder()
         self.normalizer = WorkflowNormalizer()
         self.tool_runner = GenericToolRunner()
+        self.artifact_generator = RuntimeToolArtifactGenerator()
+        self.artifact_installer = RuntimeGeneratedToolInstaller()
 
     async def execute(
         self,
@@ -129,21 +133,6 @@ class ToolCallExecutor:
                 })
                 continue
 
-            if requires_confirmation:
-                safety_holds.append({
-                    "step_id": step_id,
-                    "status": "waiting_for_human_confirmation",
-                    "reason": "Step requires explicit human confirmation.",
-                    "source_step": step,
-                })
-                blocked_steps.append({
-                    "step_id": step_id,
-                    "status": "waiting_for_human_confirmation",
-                    "reason": "Human confirmation required.",
-                    "source_step": step,
-                })
-                continue
-
             tool = self.tool_registry.find_by_capability(required_capability) if required_capability else None
             if not tool:
                 generated_spec = self.tool_registry.create_missing_tool_spec(
@@ -163,40 +152,67 @@ class ToolCallExecutor:
                         "result": self._public_tool_spec(generated_spec),
                     })
                 else:
-                    module_result = self.module_builder.ensure_module_for_capability(
+                    generated_tool = await self._try_generate_executable_tool(
+                        run_id=run_id,
+                        node_id=node_id,
+                        step_id=step_id,
                         capability=required_capability or "unknown_capability",
-                        source_step=step,
-                        user_input=state.get("input", ""),
+                        step=step,
+                        state=state,
                     )
-                    generated_modules.append({
-                        "step_id": step_id,
-                        "capability": required_capability,
-                        "generated_module": module_result,
-                    })
-                    missing_tools.append({
-                        "step_id": step_id,
-                        "capability": required_capability,
-                        "generated_tool_spec": generated_spec,
-                        "generated_module": module_result,
-                    })
-                    await event_bus.emit(run_id, {
-                        "type": "TOOL_AND_MODULE_REQUEST_GENERATED",
-                        "title": "Tool/module request generated",
-                        "message": f"Generated request for capability={required_capability or 'unknown_capability'}",
-                        "node_id": node_id,
-                        "step_id": step_id,
-                        "result": {
-                            "tool": generated_spec,
-                            "module": module_result,
-                        },
-                    })
-                    blocked_steps.append({
-                        "step_id": step_id,
-                        "status": "missing_tool_implementation",
-                        "capability": required_capability,
-                        "source_step": step,
-                    })
-                    continue
+                    if generated_tool:
+                        tool = generated_tool
+                    else:
+                        module_result = self.module_builder.ensure_module_for_capability(
+                            capability=required_capability or "unknown_capability",
+                            source_step=step,
+                            user_input=state.get("input", ""),
+                        )
+                        generated_modules.append({
+                            "step_id": step_id,
+                            "capability": required_capability,
+                            "generated_module": module_result,
+                        })
+                        missing_tools.append({
+                            "step_id": step_id,
+                            "capability": required_capability,
+                            "generated_tool_spec": generated_spec,
+                            "generated_module": module_result,
+                        })
+                        await event_bus.emit(run_id, {
+                            "type": "TOOL_AND_MODULE_REQUEST_GENERATED",
+                            "title": "Tool/module request generated",
+                            "message": f"Generated request for capability={required_capability or 'unknown_capability'}",
+                            "node_id": node_id,
+                            "step_id": step_id,
+                            "result": {
+                                "tool": generated_spec,
+                                "module": module_result,
+                            },
+                        })
+                        blocked_steps.append({
+                            "step_id": step_id,
+                            "status": "missing_tool_implementation",
+                            "capability": required_capability,
+                            "source_step": step,
+                        })
+                        continue
+
+            if self._requires_confirmation(step, tool, state):
+                safety_holds.append({
+                    "step_id": step_id,
+                    "status": "waiting_for_human_confirmation",
+                    "reason": "Step or runtime tool policy requires explicit human confirmation.",
+                    "source_step": step,
+                    "tool": self._public_tool_spec(tool),
+                })
+                blocked_steps.append({
+                    "step_id": step_id,
+                    "status": "waiting_for_human_confirmation",
+                    "reason": "Human confirmation required by runtime policy.",
+                    "source_step": step,
+                })
+                continue
 
             tool_input = {
                 "parameters": step.get("parameters", {}),
@@ -259,6 +275,117 @@ class ToolCallExecutor:
             "result": result,
         })
         return result
+
+
+    async def _try_generate_executable_tool(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        step_id: str,
+        capability: str,
+        step: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Ask the runtime intelligence layer to generate a reusable tool artifact.
+
+        This is generic: ai_core does not choose an API, endpoint, provider, or
+        business strategy. The LLM/runtime-generated artifact must declare its
+        files, manifest, schemas, safety, retry/timeout behavior, and callable.
+        """
+        generation_request = {
+            "request_type": "runtime_tool_artifact_generation",
+            "capability": capability,
+            "step": step,
+            "user_input": state.get("input", ""),
+            "constraints": {
+                "must_be_reusable": True,
+                "must_return_schema_compatible_output": True,
+                "must_not_log_secrets": True,
+                "must_not_perform_irreversible_actions_without_confirmation": True,
+                "must_define_retry_and_timeout_when_using_network": True,
+                "no_mock_data": True,
+            },
+            "expected_contract": {
+                "tool_id": "string",
+                "manifest": "tool.json compatible object",
+                "files": {"tool.py": "python source code"},
+            },
+        }
+        await event_bus.emit(run_id, {
+            "type": "RUNTIME_TOOL_GENERATION_STARTED",
+            "title": "Runtime tool generation started",
+            "message": f"Generating reusable tool artifact for capability={capability}",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": generation_request,
+        })
+        try:
+            artifact = await self.artifact_generator.generate_artifact(
+                run_id=run_id,
+                node_id=node_id,
+                generation_request=generation_request,
+            )
+            if not isinstance(artifact, dict) or not artifact.get("files"):
+                await event_bus.emit(run_id, {
+                    "type": "RUNTIME_TOOL_GENERATION_FAILED",
+                    "title": "Runtime tool generation failed",
+                    "message": "Generated artifact was empty or invalid.",
+                    "node_id": node_id,
+                    "step_id": step_id,
+                    "result": artifact,
+                })
+                return None
+            installed = self.artifact_installer.install_artifact(
+                artifact=artifact,
+                capability=capability,
+                source_step=step,
+                user_input=state.get("input", ""),
+            )
+            await event_bus.emit(run_id, {
+                "type": "RUNTIME_TOOL_GENERATED_AND_REGISTERED",
+                "title": "Runtime tool generated and registered",
+                "message": f"Reusable runtime tool registered for capability={capability}",
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": self._public_tool_spec(installed),
+            })
+            return installed
+        except Exception as exc:
+            await event_bus.emit(run_id, {
+                "type": "RUNTIME_TOOL_GENERATION_FAILED",
+                "title": "Runtime tool generation failed",
+                "message": str(exc),
+                "node_id": node_id,
+                "step_id": step_id,
+            })
+            return None
+
+    def _requires_confirmation(self, step: dict[str, Any], tool: dict[str, Any], state: dict[str, Any]) -> bool:
+        confirmations = state.get("human_confirmations") if isinstance(state, dict) else []
+        step_id = str(step.get("step_id") or step.get("task_id") or "")
+        if isinstance(confirmations, list):
+            for item in confirmations:
+                if isinstance(item, dict):
+                    holds = item.get("safety_holds") if isinstance(item.get("safety_holds"), list) else []
+                    if any(str(h.get("step_id", "")) == step_id for h in holds if isinstance(h, dict)):
+                        return False
+
+        tool_safety = tool.get("safety") if isinstance(tool.get("safety"), dict) else {}
+        step_safety = step.get("safety") if isinstance(step.get("safety"), dict) else {}
+        runtime_safety = {**step_safety, **tool_safety}
+
+        # Runtime/tool safety declaration is authoritative. This avoids treating
+        # a model's generic requires_human_confirmation=true as business logic.
+        if runtime_safety.get("requires_human_confirmation") is False:
+            return False
+        if runtime_safety.get("can_perform_irreversible_action") is True:
+            return True
+        if runtime_safety.get("can_write_external_data") is True:
+            return True
+        if runtime_safety.get("requires_human_confirmation") is True:
+            return True
+        return bool(step.get("requires_human_confirmation", False) and runtime_safety)
 
 
     def _has_executable_implementation(self, tool: dict[str, Any]) -> bool:

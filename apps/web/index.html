@@ -1203,6 +1203,32 @@ function flushBufferedEvents(){
   }
 }
 
+
+function markAllNodesTerminal(status="done") {
+  nodeCards.forEach(card => {
+    const pill = card.querySelector(".status-pill");
+    if (!pill) return;
+    if (pill.classList.contains("error") && status !== "error") return;
+    card.classList.remove("paused");
+    pill.className = "status-pill " + status;
+    pill.textContent = status;
+  });
+}
+
+function finalDisplayPayload(ev){
+  const output = ev.results && ev.results.output ? ev.results.output : null;
+  if(output && (output.final_answer || output.message)){
+    return {
+      message: output.final_answer || output.message,
+      details: output
+    };
+  }
+  return {
+    message: ev.message || "Workflow completed.",
+    details: ev.results || {}
+  };
+}
+
 function handleEvent(ev, fromBuffer=false){
   addEventMini(ev);
 
@@ -1225,7 +1251,9 @@ function handleEvent(ev, fromBuffer=false){
 
   if(ev.type === "RUN_COMPLETED"){
     addStep({...ev, node_id:"runtime"});
-    htmlBubble(`<b>[Final Output]</b><div>${esc(ev.message || "")}</div><div class="spec">${esc(JSON.stringify(ev.results || {}, null, 2))}</div>`, "system");
+    markAllNodesTerminal("done");
+    const finalPayload = finalDisplayPayload(ev);
+    htmlBubble(`<b>[Final Output]</b><div>${esc(finalPayload.message || "")}</div><div class="spec">${esc(JSON.stringify(finalPayload.details || {}, null, 2))}</div>`, "system");
     setBusy(false);
     if(source) source.close();
     return;
@@ -1240,6 +1268,7 @@ function handleEvent(ev, fromBuffer=false){
 
   if(ev.type === "RUN_FAILED" || ev.type === "RUN_CANCELLED"){
     addStep({...ev, node_id:nodeIdFromEvent(ev)});
+    markAllNodesTerminal(ev.type === "RUN_FAILED" ? "error" : "done");
     setBusy(false);
     if(source) source.close();
     return;
