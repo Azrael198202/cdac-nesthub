@@ -214,16 +214,13 @@ class ToolCallExecutor:
                 })
                 continue
 
-            tool_input = {
-                "parameters": step.get("parameters", {}),
-                "context": {
-                    "run_id": run_id,
-                    "node_id": node_id,
-                    "step_id": step_id,
-                    "user_input": state.get("input", ""),
-                },
-                "source_step": step,
-            }
+            tool_input = self._build_tool_input(
+                step=step,
+                run_id=run_id,
+                node_id=node_id,
+                step_id=step_id,
+                user_input=state.get("input", ""),
+            )
             tool_result = self.tool_runner.run_tool(tool, tool_input)
             execution_steps.append({
                 "step_id": step_id,
@@ -276,6 +273,50 @@ class ToolCallExecutor:
         })
         return result
 
+
+
+    def _build_tool_input(
+        self,
+        *,
+        step: dict[str, Any],
+        run_id: str,
+        node_id: str,
+        step_id: str,
+        user_input: str,
+    ) -> dict[str, Any]:
+        """Build a generic, schema-friendly tool input object.
+
+        Runtime-generated tools may declare schemas that require fields at the
+        top level, while workflow planning usually stores values under
+        parameters.known / parameters.optional. To keep ai_core domain-neutral,
+        this method does not infer meanings from field names. It simply exposes
+        the already-structured runtime metadata in both canonical nested form
+        and flattened top-level form so reusable generated tools can validate
+        reliably.
+        """
+        params = step.get("parameters") if isinstance(step.get("parameters"), dict) else {}
+        known = params.get("known") if isinstance(params.get("known"), dict) else {}
+        optional = params.get("optional") if isinstance(params.get("optional"), dict) else {}
+
+        tool_input: dict[str, Any] = {}
+        for source in (known, optional):
+            for key, value in source.items():
+                if key not in tool_input:
+                    tool_input[str(key)] = value
+
+        tool_input.update({
+            "parameters": params,
+            "known": known,
+            "optional": optional,
+            "context": {
+                "run_id": run_id,
+                "node_id": node_id,
+                "step_id": step_id,
+                "user_input": user_input,
+            },
+            "source_step": step,
+        })
+        return tool_input
 
     async def _try_generate_executable_tool(
         self,

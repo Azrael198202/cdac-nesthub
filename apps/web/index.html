@@ -608,6 +608,8 @@ const nodeCards = new Map();
 const activeNodeKeys = new Map();
 const nodeAttemptCounts = new Map();
 const pausedNodeKeys = new Set();
+const completedNodeKeys = new Set();
+const retryNodeIds = new Set();
 
 let workflowPaused = false;
 let activeInteraction = null;
@@ -720,6 +722,14 @@ function statusForEvent(ev){
 function visualKeyForNode(nodeId, ev={}){
   if(ev.type === "NODE_STARTED"){
     const currentKey = activeNodeKeys.get(nodeId);
+    if(retryNodeIds.has(nodeId)){
+      retryNodeIds.delete(nodeId);
+      const nextAttempt = (nodeAttemptCounts.get(nodeId) || 0) + 1;
+      nodeAttemptCounts.set(nodeId, nextAttempt);
+      const key = `${nodeId}#${nextAttempt}`;
+      activeNodeKeys.set(nodeId, key);
+      return key;
+    }
     if(!currentKey || pausedNodeKeys.has(currentKey)){
       const nextAttempt = (nodeAttemptCounts.get(nodeId) || 0) + 1;
       nodeAttemptCounts.set(nodeId, nextAttempt);
@@ -781,6 +791,7 @@ function addStep(ev, opts={}){
   const body = card.querySelector(".workflow-body");
 
   const status = statusForEvent(ev);
+  if(ev.type === "NODE_RESULT") completedNodeKeys.add(key);
   const step = document.createElement("div");
   step.className = "step " + status + (ev.type && ev.type.includes("MEMORY") ? " memory" : "");
 
@@ -816,6 +827,9 @@ function addStep(ev, opts={}){
     card.classList.add("paused");
     pill.className = "status-pill paused";
     pill.textContent = "waiting";
+  }else if(completedNodeKeys.has(key) && status === "running"){
+    pill.className = "status-pill done";
+    pill.textContent = "done";
   }else{
     pill.className = "status-pill " + status;
     pill.textContent = status;
@@ -939,6 +953,7 @@ function showStickyHumanReview(ev){
 
   document.getElementById("stickyReject").onclick = async () => {
     stickyInteraction.querySelectorAll("button").forEach(b => b.disabled = true);
+    retryNodeIds.add(nodeId);
     markCurrentInteractionResolved("Rejected. Retrying with feedback...");
     await resume("reject", null, feedback.value || "Rejected by human.");
   };
@@ -1205,13 +1220,14 @@ function flushBufferedEvents(){
 
 
 function markAllNodesTerminal(status="done") {
-  nodeCards.forEach(card => {
+  nodeCards.forEach((card, key) => {
     const pill = card.querySelector(".status-pill");
     if (!pill) return;
     if (pill.classList.contains("error") && status !== "error") return;
     card.classList.remove("paused");
     pill.className = "status-pill " + status;
     pill.textContent = status;
+    completedNodeKeys.add(key);
   });
 }
 
@@ -1347,6 +1363,8 @@ form.onsubmit = async (event) => {
   activeNodeKeys.clear();
   nodeAttemptCounts.clear();
   pausedNodeKeys.clear();
+  completedNodeKeys.clear();
+  retryNodeIds.clear();
   workflowPaused = false;
   activeInteraction = null;
   bufferedEvents = [];

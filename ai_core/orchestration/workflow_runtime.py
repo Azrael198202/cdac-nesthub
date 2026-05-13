@@ -353,6 +353,7 @@ class WorkflowRuntime:
             await self._emit(run_id, {
                 "type": "NODE_STARTED",
                 "title": node_id,
+                "node_id": node_id,
                 "message": f"Loading runtime node config: {workflow_node.get('node_config')}",
                 "progress": progress
             })
@@ -394,6 +395,7 @@ class WorkflowRuntime:
             await self._emit(run_id, {
                 "type": "NODE_EXECUTING",
                 "title": node_id,
+                "node_id": node_id,
                 "message": f"Capability ready. Dispatching to executor_type={node_config.get('executor_type')}.",
                 "progress": progress
             })
@@ -467,6 +469,7 @@ class WorkflowRuntime:
             await self._emit(run_id, {
                 "type": "NODE_RESULT",
                 "title": f"{node_id} result",
+                "node_id": node_id,
                 "message": "Node executed by generic executor.",
                 "result": result,
                 "progress": done
@@ -535,9 +538,11 @@ class WorkflowRuntime:
                 return
 
         self.knowledge.save_success_case(run_id, state["results"])
+        output_result = state.get("results", {}).get("output", {}) if isinstance(state.get("results", {}).get("output"), dict) else {}
+        final_message = output_result.get("final_answer") or output_result.get("message") or "Workflow completed."
         self.dataset.append_case(
             state.get("input", ""),
-            "Workflow completed.",
+            str(final_message),
             {
                 "run_id": run_id,
                 "results": state["results"]
@@ -547,8 +552,9 @@ class WorkflowRuntime:
         await self._emit(run_id, {
             "type": "RUN_COMPLETED",
             "title": "Final output",
-            "message": "Workflow completed. Results were saved to runtime knowledge and finetune dataset.",
+            "message": str(final_message),
             "results": state["results"],
+            "final_status": output_result.get("status", "completed"),
             "progress": 100
         })
 
