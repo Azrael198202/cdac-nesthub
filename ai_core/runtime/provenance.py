@@ -103,6 +103,9 @@ class ExecutionProvenanceRecorder:
             "duration_ms": trace.get("duration_ms"),
             "artifact": trace.get("artifact"),
             "execution_claims": trace.get("execution_claims"),
+            "input": trace.get("input"),
+            "output": trace.get("output"),
+            "error": trace.get("error"),
         }
 
     def _trace_id(self, *, run_id: str, node_id: str, step_id: str, component_id: str) -> str:
@@ -113,6 +116,10 @@ class ExecutionProvenanceRecorder:
         if not isinstance(artifact, dict):
             return {}
         metadata = artifact.get("metadata") if isinstance(artifact.get("metadata"), dict) else {}
+        manifest = metadata.get("manifest") if isinstance(metadata.get("manifest"), dict) else {}
+        merged_artifact = dict(manifest)
+        merged_artifact.update({k: v for k, v in artifact.items() if k != "metadata"})
+        artifact = merged_artifact
         implementation = artifact.get("implementation") if isinstance(artifact.get("implementation"), dict) else {}
         runtime_interface = artifact.get("runtime_interface") if isinstance(artifact.get("runtime_interface"), dict) else {}
         return {
@@ -127,15 +134,23 @@ class ExecutionProvenanceRecorder:
             "callable": implementation.get("function") or implementation.get("callable") or runtime_interface.get("callable") or "run",
             "input_schema_present": isinstance(artifact.get("input_schema"), dict),
             "output_schema_present": isinstance(artifact.get("output_schema"), dict),
+            "api_discovery_present": isinstance(artifact.get("api_discovery"), dict),
+            "verification_present": isinstance(artifact.get("verification"), dict),
         }
 
     def _execution_claims(self, artifact: dict[str, Any]) -> dict[str, Any]:
         metadata = artifact.get("metadata") if isinstance(artifact.get("metadata"), dict) else {}
+        manifest = metadata.get("manifest") if isinstance(metadata.get("manifest"), dict) else {}
+        merged_artifact = dict(manifest)
+        merged_artifact.update({k: v for k, v in artifact.items() if k != "metadata"})
+        artifact = merged_artifact
         safety = artifact.get("safety") or artifact.get("safety_policy") or metadata.get("safety") or {}
         if not isinstance(safety, dict):
             safety = {}
         network = artifact.get("network") if isinstance(artifact.get("network"), dict) else metadata.get("network") if isinstance(metadata.get("network"), dict) else {}
         claims = artifact.get("execution_claims") if isinstance(artifact.get("execution_claims"), dict) else metadata.get("execution_claims") if isinstance(metadata.get("execution_claims"), dict) else {}
+        verification = artifact.get("verification") if isinstance(artifact.get("verification"), dict) else metadata.get("verification") if isinstance(metadata.get("verification"), dict) else {}
+        api_discovery = artifact.get("api_discovery") if isinstance(artifact.get("api_discovery"), dict) else metadata.get("api_discovery") if isinstance(metadata.get("api_discovery"), dict) else {}
         return {
             "uses_network": claims.get("uses_network", network.get("enabled", safety.get("can_read_external_data"))),
             "network_declared": bool(network) or "uses_network" in claims,
@@ -144,6 +159,10 @@ class ExecutionProvenanceRecorder:
             "requires_human_confirmation": safety.get("requires_human_confirmation"),
             "no_mock_data_declared": claims.get("no_mock_data") or artifact.get("no_mock_data"),
             "real_execution_declared": claims.get("real_execution") or artifact.get("real_execution"),
+            "live_verification_required": claims.get("live_verification_required") or verification.get("required"),
+            "live_verification_passed": claims.get("live_verification_passed") or verification.get("live_verification_passed"),
+            "api_discovery_trace_id": api_discovery.get("trace_id") or api_discovery.get("discovery_trace_id"),
+            "official_sources_count": len(api_discovery.get("sources", [])) if isinstance(api_discovery.get("sources"), list) else None,
         }
 
     def _safe_json(self, value: Any) -> Any:

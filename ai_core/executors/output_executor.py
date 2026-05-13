@@ -87,6 +87,10 @@ class OutputExecutor:
         else:
             final_answer = "Workflow finished, but no executable tool result was produced."
 
+        trust_summary = self._trust_summary(provenance_records)
+        if trust_summary.get("trace_available") and not trust_summary.get("verified_real_execution"):
+            final_answer = final_answer + "\n\nTrust: unverified generated result. The runtime did not confirm live network verification and no-mock execution."
+
         return {
             "_executor_type": "output",
             "_node_id": node_config.get("node_id", "output"),
@@ -96,7 +100,7 @@ class OutputExecutor:
             "execution_status": status,
             "tool_results": tool_results,
             "provenance": provenance_records,
-            "trust_summary": self._trust_summary(provenance_records),
+            "trust_summary": trust_summary,
             "executed_steps": len(execution_steps),
             "blocked_steps": blocked_steps,
             "previous_result_keys": list(results.keys()),
@@ -111,12 +115,19 @@ class OutputExecutor:
         real_declared = any(bool((p.get("execution_claims") or {}).get("real_execution_declared")) for p in provenance_records)
         no_mock_declared = any(bool((p.get("execution_claims") or {}).get("no_mock_data_declared")) for p in provenance_records)
         network_declared = any(bool((p.get("execution_claims") or {}).get("network_declared")) for p in provenance_records)
+        live_verified = any(bool((p.get("execution_claims") or {}).get("live_verification_passed")) for p in provenance_records)
+        api_discovery = any(bool((p.get("execution_claims") or {}).get("api_discovery_trace_id")) for p in provenance_records)
+        verified_real_execution = bool(real_declared and no_mock_declared and network_declared and live_verified)
         return {
             "trace_available": True,
             "trace_count": len(provenance_records),
             "real_execution_declared": real_declared,
             "no_mock_data_declared": no_mock_declared,
             "network_declared": network_declared,
+            "api_discovery_trace_available": api_discovery,
+            "live_verification_passed": live_verified,
+            "verified_real_execution": verified_real_execution,
+            "trust_level": "verified_real_execution" if verified_real_execution else "unverified_generated_result",
             "trace_ids": [p.get("trace_id") for p in provenance_records if p.get("trace_id")],
         }
 

@@ -13,6 +13,7 @@ from ai_core.workflow.workflow_normalizer import WorkflowNormalizer
 from ai_core.tools.generic_tool_runner import GenericToolRunner
 from ai_core.tools.runtime_tool_artifact_generator import RuntimeToolArtifactGenerator
 from ai_core.tools.runtime_generated_tool_installer import RuntimeGeneratedToolInstaller
+from ai_core.research.api_discovery import ApiDiscoveryEngine
 
 
 class ToolCallExecutor:
@@ -36,6 +37,7 @@ class ToolCallExecutor:
         self.artifact_generator = RuntimeToolArtifactGenerator()
         self.artifact_installer = RuntimeGeneratedToolInstaller()
         self.provenance = ExecutionProvenanceRecorder()
+        self.api_discovery = ApiDiscoveryEngine()
 
     async def execute(
         self,
@@ -541,11 +543,19 @@ class ToolCallExecutor:
         step: dict[str, Any],
         state: dict[str, Any],
     ) -> dict[str, Any] | None:
+        api_discovery = await self.api_discovery.discover(
+            run_id=run_id,
+            node_id=node_id,
+            capability=capability,
+            step=step,
+            user_input=state.get("input", ""),
+        )
         generation_request = {
             "request_type": "runtime_module_artifact_generation",
             "capability": capability,
             "step": step,
             "user_input": state.get("input", ""),
+            "api_discovery": api_discovery,
             "constraints": {
                 "must_be_reusable": True,
                 "must_define_runtime_interface": ["validate_config", "health_check", "run"],
@@ -553,10 +563,14 @@ class ToolCallExecutor:
                 "must_not_log_secrets": True,
                 "must_not_perform_irreversible_actions_without_confirmation": True,
                 "no_mock_data": True,
+                "must_use_real_network_when_external_data_is_required": True,
+                "must_include_request_response_evidence": True,
+                "must_declare_execution_claims": True,
+                "must_include_live_verification_metadata": True,
             },
             "expected_contract": {
                 "module_id": "string",
-                "manifest": "module.json compatible object",
+                "manifest": "module.json compatible object with execution_claims, api_discovery, verification",
                 "files": {"module.py": "python source code"},
             },
         }
@@ -660,22 +674,34 @@ class ToolCallExecutor:
         business strategy. The LLM/runtime-generated artifact must declare its
         files, manifest, schemas, safety, retry/timeout behavior, and callable.
         """
+        api_discovery = await self.api_discovery.discover(
+            run_id=run_id,
+            node_id=node_id,
+            capability=capability,
+            step=step,
+            user_input=state.get("input", ""),
+        )
         generation_request = {
             "request_type": "runtime_tool_artifact_generation",
             "capability": capability,
             "step": step,
             "user_input": state.get("input", ""),
+            "api_discovery": api_discovery,
             "constraints": {
                 "must_be_reusable": True,
                 "must_return_schema_compatible_output": True,
                 "must_not_log_secrets": True,
                 "must_not_perform_irreversible_actions_without_confirmation": True,
                 "must_define_retry_and_timeout_when_using_network": True,
+                "must_use_real_network_when_external_data_is_required": True,
+                "must_include_request_response_evidence": True,
+                "must_declare_execution_claims": True,
+                "must_include_live_verification_metadata": True,
                 "no_mock_data": True,
             },
             "expected_contract": {
                 "tool_id": "string",
-                "manifest": "tool.json compatible object",
+                "manifest": "tool.json compatible object with execution_claims, api_discovery, verification",
                 "files": {"tool.py": "python source code"},
             },
         }

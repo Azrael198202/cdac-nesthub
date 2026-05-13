@@ -25,8 +25,11 @@ class RuntimeModuleArtifactGenerator:
                 "You are a production runtime module artifact generator. Return ONLY JSON matching the schema. "
                 "Generate a safe, reusable Python module artifact from the supplied structured runtime request. "
                 "Do not include secrets. Do not use mock data or placeholder outputs. "
+                "If the request includes api_discovery, use only the discovered/evidenced connector design and official sources. "
+                "If real external data is required, module.py must perform a real network call with timeout/retry and return request/response evidence. "
                 "The module.py file must define validate_config(config), health_check(), and run(input_data). "
-                "Every helper function called must be defined or imported. Avoid top-level side effects."
+                "Every helper function called must be defined or imported. Avoid top-level side effects. "
+                "The manifest must declare execution_claims including real_execution, no_mock_data, uses_network, and live_verification_required when applicable."
             ),
             "user": generation_request,
         }
@@ -60,7 +63,7 @@ class RuntimeModuleArtifactGenerator:
                 "requires_review": {"type": "boolean"},
                 "manifest": {
                     "type": "object",
-                    "required": ["capability", "capabilities", "input_schema", "output_schema", "runtime_interface", "safety_policy"],
+                    "required": ["capability", "capabilities", "input_schema", "output_schema", "runtime_interface", "safety_policy", "execution_claims"],
                     "properties": {
                         "module_id": {"type": "string"},
                         "capability": {"type": "string"},
@@ -70,10 +73,17 @@ class RuntimeModuleArtifactGenerator:
                         "output_schema": {"type": "object"},
                         "runtime_interface": {"type": "object"},
                         "safety_policy": {"type": "object"},
+                        "execution_claims": {"type": "object"},
+                        "api_discovery": {"type": "object"},
+                        "verification": {"type": "object"},
                     },
                     "additionalProperties": True,
                 },
                 "files": {"type": "object", "additionalProperties": {"type": "string"}},
+                "real_execution": {"type": "boolean"},
+                "no_mock_data": {"type": "boolean"},
+                "uses_network": {"type": "boolean"},
+                "verification": {"type": "object"},
             },
             "additionalProperties": True,
         }

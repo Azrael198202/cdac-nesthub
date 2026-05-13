@@ -61,7 +61,13 @@ class RuntimeGeneratedModuleInstaller:
             "no_mock_data": artifact.get("no_mock_data"),
             "uses_network": artifact.get("uses_network"),
             "generated_by_runtime": True,
+            "live_verification_required": True if artifact.get("uses_network") else False,
+            "live_verification_passed": bool((artifact.get("verification") or {}).get("live_verification_passed")),
         })
+        if artifact.get("verification") and "verification" not in manifest:
+            manifest["verification"] = artifact.get("verification")
+        if artifact.get("api_discovery") and "api_discovery" not in manifest:
+            manifest["api_discovery"] = artifact.get("api_discovery")
         manifest_path = target_dir / "module.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 

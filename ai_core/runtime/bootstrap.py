@@ -35,7 +35,11 @@ class RuntimeBootstrap:
             RUNTIME_GENERATED / "policies",
             RUNTIME_GENERATED / "module_generation_requests",
             RUNTIME_GENERATED / "modules",
+            RUNTIME_GENERATED / "api_discovery_requests",
+            RUNTIME_GENERATED / "connectors",
             RUNTIME_REGISTRY,
+            RUNTIME_TRACES / "api_discovery",
+            RUNTIME_TRACES / "web_research",
         ]:
             d.mkdir(parents=True, exist_ok=True)
 
@@ -58,6 +62,8 @@ class RuntimeBootstrap:
             "default_route": ["ollama", "openai"],
             "routes": {
                 "code_generation": ["openai", "vllm", "lmstudio", "ollama"],
+                "api_discovery_local": ["ollama"],
+                "api_discovery_external": ["openai"],
                 "reasoning": ["ollama", "openai"],
                 "fallback": ["openai"]
             },

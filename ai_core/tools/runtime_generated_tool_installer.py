@@ -95,7 +95,13 @@ class RuntimeGeneratedToolInstaller:
             "no_mock_data": artifact.get("no_mock_data"),
             "uses_network": artifact.get("uses_network"),
             "generated_by_runtime": True,
+            "live_verification_required": True if artifact.get("uses_network") else False,
+            "live_verification_passed": bool((artifact.get("verification") or {}).get("live_verification_passed")),
         })
+        if artifact.get("verification") and "verification" not in manifest:
+            manifest["verification"] = artifact.get("verification")
+        if artifact.get("api_discovery") and "api_discovery" not in manifest:
+            manifest["api_discovery"] = artifact.get("api_discovery")
 
         implementation = manifest.setdefault("implementation", {})
         if not isinstance(implementation, dict):
@@ -135,6 +141,8 @@ class RuntimeGeneratedToolInstaller:
             "source": manifest.get("source"),
             "execution_claims": manifest.get("execution_claims", {}),
             "network": manifest.get("network", {}),
+            "api_discovery": manifest.get("api_discovery", {}),
+            "verification": manifest.get("verification", {}),
         }
         self.registry_path.write_text(json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
         return registry[tool_id]

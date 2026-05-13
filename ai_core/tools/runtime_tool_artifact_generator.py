@@ -80,7 +80,8 @@ class RuntimeToolArtifactGenerator:
                 "You are a production runtime tool artifact generator. Return ONLY JSON matching the schema. "
                 "Generate a safe, reusable Python tool artifact from the supplied capability request. "
                 "Do not include secrets. Do not use mock data or placeholder outputs. "
-                "When network/API access is needed, include real timeout/retry/error handling. "
+                "If the request includes api_discovery, use only discovered/evidenced connector candidates and official sources. "
+                "When network/API access is needed, include real timeout/retry/error handling and request/response evidence. "
                 "The generated tool must expose a run(input_data: dict) -> dict function unless the manifest declares another callable. "
                 "Every helper function called by run must be defined in the file or imported. "
                 "Avoid top-level network calls. Put side effects inside the callable. "
@@ -120,7 +121,7 @@ class RuntimeToolArtifactGenerator:
                 "requires_review": {"type": "boolean"},
                 "manifest": {
                     "type": "object",
-                    "required": ["capability", "capabilities", "implementation", "input_schema", "output_schema", "safety"],
+                    "required": ["capability", "capabilities", "implementation", "input_schema", "output_schema", "safety", "execution_claims"],
                     "properties": {
                         "name": {"type": "string"},
                         "capability": {"type": "string"},
@@ -130,6 +131,9 @@ class RuntimeToolArtifactGenerator:
                         "input_schema": {"type": "object"},
                         "output_schema": {"type": "object"},
                         "safety": {"type": "object"},
+                        "execution_claims": {"type": "object"},
+                        "api_discovery": {"type": "object"},
+                        "verification": {"type": "object"},
                     },
                     "additionalProperties": True,
                 },
@@ -137,6 +141,10 @@ class RuntimeToolArtifactGenerator:
                     "type": "object",
                     "additionalProperties": {"type": "string"},
                 },
+                "real_execution": {"type": "boolean"},
+                "no_mock_data": {"type": "boolean"},
+                "uses_network": {"type": "boolean"},
+                "verification": {"type": "object"},
             },
             "additionalProperties": True,
         }
