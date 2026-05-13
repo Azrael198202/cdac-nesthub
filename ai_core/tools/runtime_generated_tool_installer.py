@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_REGISTRY
+from ai_core.tools.runtime_tool_artifact_validator import RuntimeToolArtifactValidator
 
 
 class RuntimeGeneratedToolInstaller:
@@ -26,6 +27,7 @@ class RuntimeGeneratedToolInstaller:
         RUNTIME_REGISTRY.mkdir(parents=True, exist_ok=True)
         if not self.registry_path.exists():
             self.registry_path.write_text("{}", encoding="utf-8")
+        self.validator = RuntimeToolArtifactValidator()
 
     def install_from_step(
         self,
@@ -101,6 +103,12 @@ class RuntimeGeneratedToolInstaller:
             # Fall back to the first written file if the manifest did not match.
             module_file_name = Path(next(iter(written_files.values()))).name
         implementation["module_path"] = str(target_dir / module_file_name)
+
+        module_path_for_validation = Path(str(implementation.get("module_path")))
+        callable_name = str(implementation.get("function") or implementation.get("callable") or "run")
+        validation = self.validator.validate_python_file(module_path_for_validation, callable_name=callable_name)
+        if not validation.get("valid"):
+            raise ValueError("Generated runtime tool artifact failed validation: " + "; ".join(validation.get("errors", [])))
 
         manifest_path = target_dir / "tool.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")

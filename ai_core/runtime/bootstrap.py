@@ -56,6 +56,11 @@ class RuntimeBootstrap:
             return
         self.loader.save_yaml(p, {
             "default_route": ["ollama", "openai"],
+            "routes": {
+                "code_generation": ["openai", "vllm", "lmstudio", "ollama"],
+                "reasoning": ["ollama", "openai"],
+                "fallback": ["openai"]
+            },
             "providers": {
                 "ollama": {
                     "enabled": True,

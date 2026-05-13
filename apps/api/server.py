@@ -34,14 +34,14 @@ async def home():
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
             "Expires": "0",
-            "X-AI-Core-Version": "v42",
+            "X-AI-Core-Version": "v46",
         },
     )
 
 
 @app.get("/api/version")
 async def version():
-    return JSONResponse({"version": "v42", "name": "ai_core_reliable_human_input_merge_runtime_v42"})
+    return JSONResponse({"version": "v46", "name": "ai_core_generic_module_execution_reliable_retry_runtime_v46"})
 
 
 @app.post("/api/chat")

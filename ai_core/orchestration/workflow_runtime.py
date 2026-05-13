@@ -59,12 +59,14 @@ class WorkflowRuntime:
             "node_index": 0,
             "results": {},
             "progress": 0,
+            "node_attempts": {},
         }
         await self._emit(run_id, {
             "type": "RUN_CREATED",
             "title": "Run created",
             "message": "Run id created. Event stream can connect now.",
             "progress": 0,
+            "node_attempts": {},
         })
         return run_id, state
 
@@ -75,6 +77,7 @@ class WorkflowRuntime:
             "title": "Run started",
             "message": "Starting config-driven node orchestration.",
             "progress": 0,
+            "node_attempts": {},
         })
         await self._continue(state)
 
@@ -264,7 +267,21 @@ class WorkflowRuntime:
             else:
                 evolution = {}
 
-            state["node_index"] = max(0, state.get("node_index", 1) - 1)
+            retry_index = pending.get("retry_node_index")
+            if retry_index is None:
+                retry_index = max(0, state.get("node_index", 1) - 1)
+            state["node_index"] = int(retry_index)
+            attempt_number = self._begin_retry_attempt(state, node_id) if node_id else 1
+
+            await self._emit(run_id, {
+                "type": "NODE_RETRY_STARTED",
+                "title": "Retry started",
+                "message": f"Retrying node={node_id} with human feedback.",
+                "node_id": node_id,
+                "attempt_number": attempt_number,
+                "feedback": combined_feedback,
+                "progress": state.get("progress", 0),
+            })
 
             await self._emit(run_id, {
                 "type": "RUNTIME_TEMPLATE_EVOLVED",
@@ -279,6 +296,8 @@ class WorkflowRuntime:
                 "type": "REJECTED_RETRY",
                 "title": "Rejected. Retrying node",
                 "message": combined_feedback,
+                "node_id": node_id,
+                "attempt_number": attempt_number,
                 "progress": state.get("progress", 0)
             })
             await self._continue(state)
@@ -347,6 +366,7 @@ class WorkflowRuntime:
             workflow_node = nodes[idx]
             node_id = workflow_node["id"]
             node_config = self.node_loader.load(workflow_node)
+            attempt_number = self._attempt_number(state, node_id)
             progress = self._progress(workflow, idx)
             state["progress"] = progress
 
@@ -354,6 +374,7 @@ class WorkflowRuntime:
                 "type": "NODE_STARTED",
                 "title": node_id,
                 "node_id": node_id,
+                "attempt_number": attempt_number,
                 "message": f"Loading runtime node config: {workflow_node.get('node_config')}",
                 "progress": progress
             })
@@ -396,6 +417,7 @@ class WorkflowRuntime:
                 "type": "NODE_EXECUTING",
                 "title": node_id,
                 "node_id": node_id,
+                "attempt_number": attempt_number,
                 "message": f"Capability ready. Dispatching to executor_type={node_config.get('executor_type')}.",
                 "progress": progress
             })
@@ -409,12 +431,15 @@ class WorkflowRuntime:
                     "node_id": node_id,
                     "validation_error": exc.message,
                     "schema_path": exc.schema_path,
+                    "retry_node_index": idx,
                 }
                 self.checkpoints.save(run_id, state)
                 await self._emit(run_id, {
                     "type": "VALIDATION_RECOVERY_REQUIRED",
                     "title": "Validation failed. Human recovery required",
                     "message": f"{node_id}: {exc.message}",
+                    "node_id": node_id,
+                    "attempt_number": attempt_number,
                     "result": exc.result,
                     "schema_path": exc.schema_path,
                     "run_id": run_id,
@@ -423,6 +448,8 @@ class WorkflowRuntime:
                 await self._emit(run_id, {
                     "type": "HUMAN_REVIEW",
                     "title": "Validation recovery",
+                    "node_id": node_id,
+                    "attempt_number": attempt_number,
                     "message": (
                         f"Node '{node_id}' produced JSON but schema validation failed. "
                         "Reject & Retry to evolve prompt/schema, or Modify JSON & Continue."
@@ -440,7 +467,9 @@ class WorkflowRuntime:
                     state["pending_action"] = {
                         "kind": "secret_input",
                         "node_id": node_id,
+                        "attempt_number": attempt_number,
                         "secret_key": secret_key,
+                    "retry_node_index": idx,
                     }
                     self.checkpoints.save(run_id, state)
                     await self._emit(run_id, {
@@ -470,6 +499,7 @@ class WorkflowRuntime:
                 "type": "NODE_RESULT",
                 "title": f"{node_id} result",
                 "node_id": node_id,
+                "attempt_number": attempt_number,
                 "message": "Node executed by generic executor.",
                 "result": result,
                 "progress": done
@@ -477,6 +507,8 @@ class WorkflowRuntime:
 
             continuation_action = self.continuation_engine.build_pending_action(node_id, result, state)
             if continuation_action:
+                continuation_action.setdefault("node_id", node_id)
+                continuation_action.setdefault("retry_node_index", idx)
                 state["pending_action"] = continuation_action
                 self.checkpoints.save(run_id, state)
 
@@ -484,6 +516,8 @@ class WorkflowRuntime:
                     await self._emit(run_id, {
                         "type": "HUMAN_INPUT_REQUIRED",
                         "title": "Additional information required",
+                        "node_id": node_id,
+                        "attempt_number": attempt_number,
                         "message": continuation_action.get("request", {}).get("message"),
                         "request": continuation_action.get("request"),
                         "run_id": run_id,
@@ -495,6 +529,8 @@ class WorkflowRuntime:
                     await self._emit(run_id, {
                         "type": "CAPABILITY_GENERATION_REQUESTED",
                         "title": "Missing capability request generated",
+                        "node_id": node_id,
+                        "attempt_number": attempt_number,
                         "message": continuation_action.get("message"),
                         "missing_tools": continuation_action.get("missing_tools", []),
                         "run_id": run_id,
@@ -503,6 +539,8 @@ class WorkflowRuntime:
                     await self._emit(run_id, {
                         "type": "HUMAN_REVIEW",
                         "title": "Review generated tool/module request",
+                        "node_id": node_id,
+                        "attempt_number": attempt_number,
                         "message": "Review the generated request before implementation and registration.",
                         "result": result,
                         "run_id": run_id,
@@ -514,6 +552,8 @@ class WorkflowRuntime:
                     await self._emit(run_id, {
                         "type": "HUMAN_REVIEW",
                         "title": "Human confirmation required",
+                        "node_id": node_id,
+                        "attempt_number": attempt_number,
                         "message": continuation_action.get("message"),
                         "result": result,
                         "run_id": run_id,
@@ -524,12 +564,15 @@ class WorkflowRuntime:
             if node_config.get("review_required"):
                 state["pending_action"] = {
                     "kind": "node_review",
-                    "node_id": node_id
+                    "node_id": node_id,
+                    "retry_node_index": idx
                 }
                 self.checkpoints.save(run_id, state)
                 await self._emit(run_id, {
                     "type": "HUMAN_REVIEW",
                     "title": "Human review required",
+                    "node_id": node_id,
+                    "attempt_number": attempt_number,
                     "message": f"Review result for node '{node_id}'. Approve, reject, or modify JSON.",
                     "result": result,
                     "run_id": run_id,
@@ -557,6 +600,21 @@ class WorkflowRuntime:
             "final_status": output_result.get("status", "completed"),
             "progress": 100
         })
+
+
+    def _attempt_number(self, state: dict, node_id: str) -> int:
+        attempts = state.setdefault("node_attempts", {})
+        try:
+            return int(attempts.get(node_id, 1) or 1)
+        except Exception:
+            return 1
+
+    def _begin_retry_attempt(self, state: dict, node_id: str) -> int:
+        attempts = state.setdefault("node_attempts", {})
+        current = self._attempt_number(state, node_id)
+        next_attempt = current + 1
+        attempts[node_id] = next_attempt
+        return next_attempt
 
     def _node_index_by_id(self, workflow: dict, node_id: str) -> int:
         for index, node in enumerate(workflow.get("nodes", []) or []):
