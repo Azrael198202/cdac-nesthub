@@ -12,12 +12,12 @@ from ai_core.research.web_research_tool import GenericWebResearchTool
 
 
 class ApiDiscoveryEngine:
-    """Runtime API discovery orchestration.
+    """Domain-neutral runtime API discovery and documentation understanding.
 
-    The engine is domain-neutral. It does not know any API vendor or specific
-    data domain. It creates a generic discovery request, tries local reasoning
-    first, optionally uses generic web research, then escalates to a stronger
-    external model route when configured/needed.
+    The engine does not contain business/API-provider knowledge. It only builds
+    a generic discovery package from the runtime request, searches the public
+    web for documentation evidence, fetches candidate documents, and asks the
+    configured runtime intelligence route to select and understand an API.
     """
 
     def __init__(self) -> None:
@@ -45,22 +45,28 @@ class ApiDiscoveryEngine:
         await event_bus.emit(run_id, {
             "type": "API_DISCOVERY_STARTED",
             "title": "API discovery started",
-            "message": f"Discovering external API candidates for capability={capability}",
+            "message": f"Discovering runtime API documentation for capability={capability}",
             "node_id": node_id,
             "result": {"request_id": request["request_id"], "request_path": str(request_path)},
         })
 
         web_evidence = await self._collect_web_evidence(run_id=run_id, node_id=node_id, request=request)
+        documentation_evidence = await self._fetch_documentation_evidence(
+            run_id=run_id,
+            node_id=node_id,
+            search_evidence=web_evidence,
+        )
         request["web_evidence"] = web_evidence
+        request["documentation_evidence"] = documentation_evidence
 
         local = await self._try_model_discovery(run_id=run_id, node_id=node_id, request=request, route_name="api_discovery_local")
         if self._usable_discovery(local):
-            discovery = self._finalize(request=request, result=local, strategy="local_model", web_evidence=web_evidence)
+            discovery = self._finalize(request=request, result=local, strategy="local_model", web_evidence=web_evidence, documentation_evidence=documentation_evidence)
             await self._emit_done(run_id, node_id, discovery)
             return discovery
 
         external = await self._try_model_discovery(run_id=run_id, node_id=node_id, request=request, route_name="api_discovery_external")
-        discovery = self._finalize(request=request, result=external or {}, strategy="external_model", web_evidence=web_evidence)
+        discovery = self._finalize(request=request, result=external or {}, strategy="external_model", web_evidence=web_evidence, documentation_evidence=documentation_evidence)
         await self._emit_done(run_id, node_id, discovery)
         return discovery
 
@@ -70,43 +76,118 @@ class ApiDiscoveryEngine:
             "request_id": request_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "capability": capability,
-            "task_goal": "Discover candidate external APIs/connectors that can satisfy the capability with real data.",
+            "task_goal": "Find and understand an external API or connector that can satisfy this runtime capability with real data.",
             "user_input": user_input,
             "source_step": step,
+            "runtime_request_semantics": self._extract_runtime_semantics(step=step, user_input=user_input),
             "requirements": {
                 "must_use_real_network": True,
                 "no_mock_data": True,
                 "must_return_json": True,
-                "must_have_official_documentation": True,
+                "must_search_documentation": True,
+                "must_understand_authentication": True,
+                "must_understand_parameters": True,
+                "must_understand_response_shape": True,
                 "must_support_live_verification": True,
                 "prefer_no_api_key_when_possible": True,
             },
             "strategy": {
-                "first": "local_model",
-                "fallback": "external_model_with_generic_web_research",
+                "first": "generic_web_documentation_search",
+                "second": "runtime_model_api_selection_and_document_understanding",
+                "fallback": "external_model_with_documentation_evidence",
             },
         }
 
+    def _extract_runtime_semantics(self, *, step: dict[str, Any], user_input: str) -> dict[str, Any]:
+        parameters = step.get("parameters") if isinstance(step.get("parameters"), dict) else {}
+        return {
+            "original_user_input": user_input,
+            "objective": step.get("objective"),
+            "action": step.get("action"),
+            "task_type": step.get("task_type"),
+            "known_parameters": parameters.get("known", parameters),
+            "optional_parameters": parameters.get("optional", {}),
+            "missing_required": parameters.get("missing_required", {}),
+            "runtime_modifiers": step.get("modifiers") or parameters.get("modifiers") or parameters.get("qualifiers") or [],
+            "runtime_constraints": step.get("constraints") or parameters.get("constraints") or {},
+            "output_preferences": step.get("output_preferences") or parameters.get("output_preferences") or {},
+        }
+
+    def _search_queries(self, request: dict[str, Any]) -> list[str]:
+        capability = str(request.get("capability") or "").strip()
+        objective = str((request.get("source_step") or {}).get("objective") or "").strip()
+        action = str((request.get("source_step") or {}).get("action") or "").strip()
+        user_input = str(request.get("user_input") or "").strip()
+        base = " ".join(part for part in [capability, objective, action, user_input] if part)
+        if not base:
+            base = capability or "external data"
+        return [
+            f"{base} official API documentation JSON parameters response example",
+            f"{base} REST API docs authentication endpoint schema",
+            f"{base} free public API documentation json no api key",
+        ]
+
     async def _collect_web_evidence(self, *, run_id: str, node_id: str, request: dict[str, Any]) -> list[dict[str, Any]]:
-        query = f"official API documentation JSON {request.get('capability')}"
-        try:
-            search_result = await self.web.search(query=query, max_results=5)
-            await event_bus.emit(run_id, {
-                "type": "WEB_RESEARCH_DONE",
-                "title": "Generic web research completed",
-                "message": f"query={query}",
-                "node_id": node_id,
-                "result": search_result,
-            })
-            return search_result.get("results", []) if isinstance(search_result, dict) else []
-        except Exception as exc:
-            await event_bus.emit(run_id, {
-                "type": "WEB_RESEARCH_FAILED",
-                "title": "Generic web research failed",
-                "message": str(exc),
-                "node_id": node_id,
-            })
-            return []
+        all_results: list[dict[str, Any]] = []
+        for query in self._search_queries(request):
+            try:
+                search_result = await self.web.search(query=query, max_results=5)
+                await event_bus.emit(run_id, {
+                    "type": "WEB_RESEARCH_DONE",
+                    "title": "Generic web research completed",
+                    "message": f"query={query}",
+                    "node_id": node_id,
+                    "result": search_result,
+                })
+                if isinstance(search_result, dict):
+                    for item in search_result.get("results", []) or []:
+                        if isinstance(item, dict):
+                            all_results.append(item)
+            except Exception as exc:
+                await event_bus.emit(run_id, {
+                    "type": "WEB_RESEARCH_FAILED",
+                    "title": "Generic web research failed",
+                    "message": str(exc),
+                    "node_id": node_id,
+                    "result": {"query": query},
+                })
+        return self._dedupe_by_url(all_results)[:10]
+
+    async def _fetch_documentation_evidence(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        search_evidence: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        fetched: list[dict[str, Any]] = []
+        for item in search_evidence[:6]:
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            try:
+                doc = await self.web.fetch(url=url, max_chars=12000)
+                if isinstance(doc, dict) and doc.get("status") == "success":
+                    fetched.append({
+                        "source_search_result": item,
+                        "document": doc,
+                    })
+                    await event_bus.emit(run_id, {
+                        "type": "API_DOCUMENTATION_FETCHED",
+                        "title": "API documentation fetched",
+                        "message": doc.get("title") or url,
+                        "node_id": node_id,
+                        "result": {"url": url, "trace": doc.get("web_research_trace")},
+                    })
+            except Exception as exc:
+                await event_bus.emit(run_id, {
+                    "type": "API_DOCUMENTATION_FETCH_FAILED",
+                    "title": "API documentation fetch failed",
+                    "message": str(exc),
+                    "node_id": node_id,
+                    "result": {"url": url},
+                })
+        return fetched
 
     async def _try_model_discovery(self, *, run_id: str, node_id: str, request: dict[str, Any], route_name: str) -> dict[str, Any] | None:
         route = self._route(route_name)
@@ -114,9 +195,10 @@ class ApiDiscoveryEngine:
             return None
         prompt = {
             "system": (
-                "You are a domain-neutral API discovery planner. Return ONLY JSON. "
-                "Use the supplied capability, workflow step, and web evidence to propose external API candidates. "
-                "Prefer official documentation and APIs that can be live-verified. Do not invent verification results. "
+                "You are a domain-neutral API documentation analyst. Return ONLY JSON. "
+                "Use the supplied runtime request, web search evidence, and fetched documentation excerpts. "
+                "Select one candidate only when documentation evidence supports its authentication, parameters, response shape, and live-verification approach. "
+                "Do not invent URLs, endpoints, parameters, or verification results. "
                 "If evidence is insufficient, set confidence below 0.5 and explain what is missing."
             ),
             "user": request,
@@ -153,18 +235,33 @@ class ApiDiscoveryEngine:
             return [str(x) for x in route if str(x).strip()]
         if name.endswith("local"):
             return ["ollama"]
-        return routes.get("fallback", ["openai"])
+        fallback = routes.get("fallback", ["openai"])
+        return [str(x) for x in fallback] if isinstance(fallback, list) else [str(fallback)]
 
     def _usable_discovery(self, result: dict[str, Any] | None) -> bool:
         if not isinstance(result, dict):
             return False
         confidence = result.get("confidence")
-        candidates = result.get("candidates")
-        if not isinstance(candidates, list) or not candidates:
+        selected = result.get("selected_candidate")
+        docs = result.get("documentation_understanding")
+        if not isinstance(confidence, (int, float)) or confidence < 0.65:
             return False
-        return isinstance(confidence, (int, float)) and confidence >= 0.65
+        if not isinstance(selected, dict) or not selected.get("official_documentation_url"):
+            return False
+        if not isinstance(docs, dict):
+            return False
+        required_doc_keys = ["authentication", "request", "response", "verification_plan"]
+        return all(key in docs for key in required_doc_keys)
 
-    def _finalize(self, *, request: dict[str, Any], result: dict[str, Any], strategy: str, web_evidence: list[dict[str, Any]]) -> dict[str, Any]:
+    def _finalize(
+        self,
+        *,
+        request: dict[str, Any],
+        result: dict[str, Any],
+        strategy: str,
+        web_evidence: list[dict[str, Any]],
+        documentation_evidence: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         trace_id = "api_discovery_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
         trace_path = self.trace_dir / f"{trace_id}.json"
         discovery = {
@@ -173,6 +270,7 @@ class ApiDiscoveryEngine:
             "request": request,
             "result": result,
             "web_evidence": web_evidence,
+            "documentation_evidence": documentation_evidence,
             "trace_id": trace_id,
             "trace_path": str(trace_path),
         }
@@ -180,6 +278,7 @@ class ApiDiscoveryEngine:
         return discovery
 
     async def _emit_done(self, run_id: str, node_id: str, discovery: dict[str, Any]) -> None:
+        result = discovery.get("result") if isinstance(discovery.get("result"), dict) else {}
         await event_bus.emit(run_id, {
             "type": "API_DISCOVERY_DONE",
             "title": "API discovery completed",
@@ -190,14 +289,28 @@ class ApiDiscoveryEngine:
                 "strategy_used": discovery.get("strategy_used"),
                 "trace_id": discovery.get("trace_id"),
                 "trace_path": discovery.get("trace_path"),
-                "candidate_count": len((discovery.get("result") or {}).get("candidates") or []),
+                "candidate_count": len(result.get("candidates") or []),
+                "selected_candidate": result.get("selected_candidate"),
+                "documentation_evidence_count": len(discovery.get("documentation_evidence") or []),
             },
         })
+
+    def _dedupe_by_url(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        seen: set[str] = set()
+        output: list[dict[str, Any]] = []
+        for item in items:
+            url = str(item.get("url") or "").strip()
+            key = url or json.dumps(item, sort_keys=True, ensure_ascii=False)
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(item)
+        return output
 
     def discovery_schema(self) -> dict[str, Any]:
         return {
             "type": "object",
-            "required": ["confidence", "candidates", "verification_plan"],
+            "required": ["confidence", "candidates", "selected_candidate", "documentation_understanding", "verification_plan"],
             "properties": {
                 "confidence": {"type": "number"},
                 "reason": {"type": "string"},
@@ -211,15 +324,38 @@ class ApiDiscoveryEngine:
                             "requires_api_key": {"type": "boolean"},
                             "supports_json": {"type": "boolean"},
                             "supports_live_verification": {"type": "boolean"},
+                            "evidence_urls": {"type": "array", "items": {"type": "string"}},
                             "notes": {"type": "string"},
                         },
                         "additionalProperties": True,
                     },
                 },
-                "selected_candidate": {"type": "object", "additionalProperties": True},
-                "connector_design": {"type": "object", "additionalProperties": True},
+                "selected_candidate": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "official_documentation_url": {"type": "string"},
+                        "selection_reason": {"type": "string"},
+                        "requires_api_key": {"type": "boolean"},
+                    },
+                    "additionalProperties": True,
+                },
+                "documentation_understanding": {
+                    "type": "object",
+                    "properties": {
+                        "authentication": {"type": "object", "additionalProperties": True},
+                        "request": {"type": "object", "additionalProperties": True},
+                        "response": {"type": "object", "additionalProperties": True},
+                        "parameter_mapping": {"type": "object", "additionalProperties": True},
+                        "runtime_semantics_mapping": {"type": "object", "additionalProperties": True},
+                        "verification_plan": {"type": "object", "additionalProperties": True},
+                        "evidence_urls": {"type": "array", "items": {"type": "string"}},
+                        "limitations": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "additionalProperties": True,
+                },
                 "verification_plan": {"type": "object", "additionalProperties": True},
-                "sources": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+                "missing_evidence": {"type": "array", "items": {"type": "string"}},
             },
             "additionalProperties": True,
         }

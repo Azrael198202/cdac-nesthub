@@ -1,0 +1,18 @@
+{
+  "request_id": "20260513143457067583_model_download_and_benchmark",
+  "operation": "model_download_and_benchmark",
+  "subject": {
+    "model_id": "unit-test-model",
+    "runtime": "unit",
+    "requires_human_review": true
+  },
+  "risks": [
+    {
+      "level": "review",
+      "message": "Model license, size, or runtime requirements need review before download."
+    }
+  ],
+  "approved": false,
+  "created_at": "2026-05-13T14:34:57.067617+00:00",
+  "instructions": "Review this file. Set approved to true only after manual review."
+}

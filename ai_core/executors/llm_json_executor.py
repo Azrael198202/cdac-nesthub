@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import PROJECT_ROOT
 from ai_core.executors.template_engine import TemplateEngine
@@ -60,12 +61,15 @@ class LLMJsonExecutor:
             user_input=state.get("input", ""),
         )
 
+        runtime_context = self._build_runtime_context(state)
+
         rendered = self.template.render(prompt.get("user_template", ""), {
             "user_input": state.get("input", ""),
             "previous_results": state.get("results", {}),
             "capability_result": capability_result,
             "human_feedback": state.get("human_feedback", []),
             "correction_memory": correction_memory + ("\n\n" + approval_memory if approval_memory else ""),
+            "runtime_context": runtime_context,
         })
 
         runtime_rules = prompt.get("runtime_rules", [])
@@ -233,3 +237,18 @@ class LLMJsonExecutor:
         result["_node_id"] = node_id
         result["_adapter_id"] = adapter.get("adapter_id")
         return result
+    def _build_runtime_context(self, state: dict) -> dict:
+        """Build generic runtime context for prompts.
+
+        This is intentionally domain-neutral. It gives runtime-generated nodes
+        enough context to resolve relative expressions already present in the
+        user input, without hardcoding any business vocabulary in ai_core.
+        """
+        now = datetime.now(timezone.utc)
+        return {
+            "current_datetime_utc": now.isoformat(),
+            "current_date_utc": now.date().isoformat(),
+            "timezone_hint": state.get("timezone") or state.get("timezone_hint") or "system_default",
+            "locale_hint": state.get("locale") or state.get("locale_hint") or "auto",
+        }
+

@@ -1,0 +1,24 @@
+{
+  "request_id": "20260513143457065601_external_repository_dependency_install",
+  "operation": "external_repository_dependency_install",
+  "subject": {
+    "repository_path": "/tmp/tmpjtrkc7h_",
+    "dependency_scan": {
+      "status": "passed",
+      "scanner": "static",
+      "findings": [],
+      "safe_to_install": true,
+      "requires_human_review": false,
+      "reason": "No dependency findings detected."
+    }
+  },
+  "risks": [
+    {
+      "level": "review",
+      "message": "External repository dependencies require approval before installation."
+    }
+  ],
+  "approved": false,
+  "created_at": "2026-05-13T14:34:57.065642+00:00",
+  "instructions": "Review this file. Set approved to true only after manual review."
+}

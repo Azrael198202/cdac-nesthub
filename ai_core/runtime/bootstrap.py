@@ -35,11 +35,17 @@ class RuntimeBootstrap:
             RUNTIME_GENERATED / "policies",
             RUNTIME_GENERATED / "module_generation_requests",
             RUNTIME_GENERATED / "modules",
+            RUNTIME_GENERATED / "models",
             RUNTIME_GENERATED / "api_discovery_requests",
             RUNTIME_GENERATED / "connectors",
             RUNTIME_REGISTRY,
             RUNTIME_TRACES / "api_discovery",
             RUNTIME_TRACES / "web_research",
+            RUNTIME_TRACES / "model_benchmarks",
+            RUNTIME_TRACES / "model_lifecycle",
+            RUNTIME_DIR / "approvals",
+            RUNTIME_DIR / "downloads" / "models",
+            RUNTIME_DIR / "downloads" / "repositories",
         ]:
             d.mkdir(parents=True, exist_ok=True)
 
@@ -328,10 +334,35 @@ class RuntimeBootstrap:
                 "type": "object",
                 "required": ["planned_steps"],
                 "properties": {
-                    "planned_steps": {"type": "array"},
+                    "planned_steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": [
+                                "task_id", "task_type", "action", "objective",
+                                "parameters", "required_capability", "execution_ready",
+                                "depends_on", "requires_human_confirmation"
+                            ],
+                            "properties": {
+                                "task_id": {"type": "string"},
+                                "step_id": {"type": "string"},
+                                "task_type": {"type": "string"},
+                                "action": {"type": "string"},
+                                "objective": {"type": "string"},
+                                "parameters": {"type": "object", "additionalProperties": True},
+                                "required_capability": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+                                "execution_ready": {"type": "boolean"},
+                                "depends_on": {"type": "array"},
+                                "requires_human_confirmation": {"type": "boolean"}
+                            },
+                            "additionalProperties": True
+                        }
+                    },
                     "blocking_missing_information": {"type": "array"},
-                    "required_capabilities": {"type": "array"}
-                }
+                    "required_capabilities": {"type": "array"},
+                    "human_interaction": {"type": "object"}
+                },
+                "additionalProperties": True
             },
             "context_awareness": {"type": "object"},
             "execution": {"type": "object"},

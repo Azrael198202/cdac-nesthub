@@ -10,10 +10,13 @@ from ai_core.modules.module_loader import RuntimeModuleLoader
 from ai_core.modules.module_artifact_generator import RuntimeModuleArtifactGenerator
 from ai_core.modules.runtime_generated_module_installer import RuntimeGeneratedModuleInstaller
 from ai_core.workflow.workflow_normalizer import WorkflowNormalizer
+from ai_core.workflow.planning_recovery import PlanningRecoveryService
 from ai_core.tools.generic_tool_runner import GenericToolRunner
 from ai_core.tools.runtime_tool_artifact_generator import RuntimeToolArtifactGenerator
 from ai_core.tools.runtime_generated_tool_installer import RuntimeGeneratedToolInstaller
 from ai_core.research.api_discovery import ApiDiscoveryEngine
+from ai_core.research.external_solution_discovery import ExternalSolutionDiscoveryEngine
+from ai_core.sandbox.verified_sandbox_runtime import VerifiedSandboxRuntime
 
 
 class ToolCallExecutor:
@@ -33,11 +36,14 @@ class ToolCallExecutor:
         self.module_artifact_generator = RuntimeModuleArtifactGenerator()
         self.module_installer = RuntimeGeneratedModuleInstaller()
         self.normalizer = WorkflowNormalizer()
+        self.planning_recovery = PlanningRecoveryService()
         self.tool_runner = GenericToolRunner()
         self.artifact_generator = RuntimeToolArtifactGenerator()
         self.artifact_installer = RuntimeGeneratedToolInstaller()
         self.provenance = ExecutionProvenanceRecorder()
         self.api_discovery = ApiDiscoveryEngine()
+        self.external_discovery = ExternalSolutionDiscoveryEngine()
+        self.sandbox_verifier = VerifiedSandboxRuntime()
 
     async def execute(
         self,
@@ -66,6 +72,11 @@ class ToolCallExecutor:
         previous_results = state.get("results", {})
         workflow_plan = previous_results.get("workflow_planning", {})
         normalized_plan = self.normalizer.normalize(workflow_plan)
+        normalized_plan = self.planning_recovery.recover_if_empty(
+            workflow_plan=normalized_plan,
+            user_input=state.get("input", ""),
+            previous_results=previous_results,
+        )
         previous_results["workflow_planning"] = normalized_plan
         planned_steps = normalized_plan.get("planned_steps", [])
 
@@ -240,6 +251,16 @@ class ToolCallExecutor:
                         step=step,
                         state=state,
                     )
+                    if generated_tool and generated_tool.get("__runtime_blocked__"):
+                        blocked_steps.append({
+                            "step_id": step_id,
+                            "status": generated_tool.get("status", "runtime_discovery_blocked"),
+                            "capability": required_capability,
+                            "reason": generated_tool.get("reason", "Runtime discovery did not produce enough evidence to generate executable code."),
+                            "source_step": step,
+                            "discovery": generated_tool.get("discovery"),
+                        })
+                        continue
                     if generated_tool:
                         tool = generated_tool
                     else:
@@ -813,6 +834,13 @@ class ToolCallExecutor:
         business strategy. The LLM/runtime-generated artifact must declare its
         files, manifest, schemas, safety, retry/timeout behavior, and callable.
         """
+        external_discovery = await self.external_discovery.discover(
+            run_id=run_id,
+            node_id=node_id,
+            capability=capability,
+            step=step,
+            user_input=state.get("input", ""),
+        )
         api_discovery = await self.api_discovery.discover(
             run_id=run_id,
             node_id=node_id,
@@ -820,12 +848,31 @@ class ToolCallExecutor:
             step=step,
             user_input=state.get("input", ""),
         )
+        if api_discovery.get("status") != "success" and not external_discovery.get("documents") and not external_discovery.get("repositories"):
+            await event_bus.emit(run_id, {
+                "type": "RUNTIME_TOOL_GENERATION_BLOCKED",
+                "title": "Runtime tool generation blocked",
+                "message": "API documentation evidence was insufficient for safe executable tool generation.",
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": api_discovery,
+            })
+            return {
+                "__runtime_blocked__": True,
+                "status": "api_documentation_evidence_insufficient",
+                "reason": "API documentation evidence was insufficient for safe executable tool generation.",
+                "discovery": {"api_discovery": api_discovery, "external_solution_discovery": external_discovery},
+            }
+
         generation_request = {
             "request_type": "runtime_tool_artifact_generation",
             "capability": capability,
             "step": step,
             "user_input": state.get("input", ""),
+            "runtime_request_semantics": api_discovery.get("request", {}).get("runtime_request_semantics", {}),
             "api_discovery": api_discovery,
+            "external_solution_discovery": external_discovery,
+            "documentation_understanding": (api_discovery.get("result") or {}).get("documentation_understanding", {}),
             "constraints": {
                 "must_be_reusable": True,
                 "must_return_schema_compatible_output": True,
@@ -836,6 +883,8 @@ class ToolCallExecutor:
                 "must_include_request_response_evidence": True,
                 "must_declare_execution_claims": True,
                 "must_include_live_verification_metadata": True,
+                "must_generate_parameter_mapping_from_runtime_semantics": True,
+                "must_not_assume_fixed_domain_fields": True,
                 "no_mock_data": True,
             },
             "expected_contract": {
@@ -868,6 +917,30 @@ class ToolCallExecutor:
                     "result": artifact,
                 })
                 return None
+            verification = self.sandbox_verifier.verify_tool_artifact(
+                artifact=artifact,
+                test_input=self._build_tool_input(
+                    step=step, run_id=run_id, node_id=node_id, step_id=step_id, user_input=state.get("input", "")
+                ),
+                allow_network=bool(((artifact.get("manifest") or {}).get("execution_claims") or {}).get("uses_network") or artifact.get("uses_network")),
+            )
+            artifact.setdefault("verification", {})["sandbox_verification"] = verification
+            await event_bus.emit(run_id, {
+                "type": "RUNTIME_TOOL_SANDBOX_VERIFICATION_DONE",
+                "title": "Runtime tool sandbox verification completed",
+                "message": f"status={verification.get('status')}",
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": verification,
+            })
+            if not verification.get("safe_to_register") and verification.get("status") != "passed":
+                return {
+                    "__runtime_blocked__": True,
+                    "status": "sandbox_verification_failed",
+                    "reason": verification.get("reason", "Sandbox verification failed."),
+                    "discovery": {"api_discovery": api_discovery, "external_solution_discovery": external_discovery},
+                    "verification": verification,
+                }
             installed = self.artifact_installer.install_artifact(
                 artifact=artifact,
                 capability=capability,
@@ -952,6 +1025,24 @@ class ToolCallExecutor:
                 failed_artifact={"tool": failed_tool},
                 error=error,
             )
+            verification = self.sandbox_verifier.verify_tool_artifact(
+                artifact=artifact,
+                test_input=self._build_tool_input(
+                    step=step, run_id=run_id, node_id=node_id, step_id=step_id, user_input=state.get("input", "")
+                ),
+                allow_network=bool(((artifact.get("manifest") or {}).get("execution_claims") or {}).get("uses_network") or artifact.get("uses_network")),
+            )
+            artifact.setdefault("verification", {})["sandbox_verification"] = verification
+            if not verification.get("safe_to_register") and verification.get("status") != "passed":
+                await event_bus.emit(run_id, {
+                    "type": "RUNTIME_TOOL_REPAIR_BLOCKED",
+                    "title": "Runtime tool repair blocked",
+                    "message": verification.get("reason", "Sandbox verification failed."),
+                    "node_id": node_id,
+                    "step_id": step_id,
+                    "result": verification,
+                })
+                return None
             installed = self.artifact_installer.install_artifact(
                 artifact=artifact,
                 capability=capability,

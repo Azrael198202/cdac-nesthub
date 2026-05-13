@@ -7,7 +7,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -68,7 +68,7 @@ class GenericWebResearchTool:
                 results.append(asdict(WebResearchResult(
                     status="success",
                     query=query,
-                    url=str(href or ""),
+                    url=self._normalize_search_url(str(href or "")),
                     title=self._clean(a.get_text(" ") if a else ""),
                     snippet=self._clean(snippet.get_text(" ") if snippet else ""),
                     response_status=response.status_code,
@@ -115,6 +115,24 @@ class GenericWebResearchTool:
         path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
         payload["web_research_trace"] = {"trace_id": trace_id, "trace_path": str(path)}
         return payload
+
+    def _normalize_search_url(self, href: str) -> str:
+        href = str(href or "").strip()
+        if not href:
+            return ""
+        parsed = urlparse(href)
+        if parsed.scheme in {"http", "https"}:
+            return href
+        query = parse_qs(parsed.query)
+        for key in ("uddg", "url", "u"):
+            value = query.get(key)
+            if value:
+                candidate = unquote(value[0])
+                if self._safe_http_url(candidate):
+                    return candidate
+        if href.startswith("//"):
+            return "https:" + href
+        return href
 
     def _safe_http_url(self, value: str) -> bool:
         try:

@@ -135,6 +135,7 @@ class RuntimeTemplateGenerator:
             ),
             "user_template": (
                 "User input:\n{{ user_input }}\n\n"
+                "Runtime context:\n{{ runtime_context }}\n\n"
                 "Previous results:\n{{ previous_results }}\n\n"
                 "Human feedback:\n{{ human_feedback }}\n\n"
                 "Correction memory:\n{{ correction_memory }}\n"
@@ -144,6 +145,11 @@ class RuntimeTemplateGenerator:
                 "Follow the JSON schema strictly.",
                 "Use human feedback and correction memory as higher-priority guidance than previous failed outputs.",
                 "When required information is missing, include structured missing_required metadata and, when possible, generate a human_interaction.fields contract with user-friendly labels, questions, placeholders, and examples in the user's language.",
+                "Relative expressions already present in the user input are known information, not missing information. Resolve them using runtime_context when a concrete value is needed, and also preserve the original expression.",
+                "Preserve user modifiers, qualifiers, constraints, requested specificity, and completeness expectations as runtime semantics because they may affect execution and output formatting.",
+                "For workflow_planning, produce at least one executable planned_step when the request requires an external/read-only capability and all required parameters can be extracted or resolved from user input and runtime_context.",
+                "For workflow_planning, when a planned step requires external real-world data, describe the needed capability generically and preserve runtime semantics; do not choose a specific API provider in the plan unless the user supplied one.",
+                "Each planned_step should include task_id, task_type, action, objective, parameters.known, parameters.optional, parameters.missing_required, required_capability, execution_ready, depends_on, and requires_human_confirmation.",
                 "Do not rely on ai_core for business wording. Interaction wording should be generated from user input, task context, and runtime metadata.",
             ],
             "output_contract": self._default_contract(node_id),
@@ -213,7 +219,44 @@ class RuntimeTemplateGenerator:
                 "type": "object",
                 "required": ["planned_steps"],
                 "properties": {
-                    "planned_steps": {"type": "array"},
+                    "planned_steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": [
+                                "task_id", "task_type", "action", "objective",
+                                "parameters", "required_capability", "execution_ready",
+                                "depends_on", "requires_human_confirmation"
+                            ],
+                            "properties": {
+                                "task_id": {"type": "string"},
+                                "step_id": {"type": "string"},
+                                "task_type": {"type": "string"},
+                                "action": {"type": "string"},
+                                "objective": {"type": "string"},
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "known": {"type": "object"},
+                                        "optional": {"type": "object"},
+                                        "missing_required": {
+                                            "oneOf": [{"type": "object"}, {"type": "array"}]
+                                        },
+                                    },
+                                    "additionalProperties": True,
+                                },
+                                "required_capability": {
+                                    "oneOf": [{"type": "string"}, {"type": "object"}]
+                                },
+                                "execution_ready": {"type": "boolean"},
+                                "depends_on": {"type": "array"},
+                                "requires_human_confirmation": {"type": "boolean"},
+                                "human_interaction": {"type": "object"},
+                                "missing_fields": {"type": "array"},
+                            },
+                            "additionalProperties": True,
+                        },
+                    },
                     "blocking_missing_information": {"type": "array"},
                     "required_capabilities": {"type": "array"},
                     "human_interaction": {"type": "object"},

@@ -1047,3 +1047,48 @@ Without `RUN_REAL_NETWORK_TEST=1`, the test exits before network execution to av
 - Runtime writes an interaction generation request under `runtime/generated/interaction_generation_requests/` so stronger LLMs can improve wording without adding business semantics to `ai_core`.
 - Human answers are merged back into `workflow_planning.parameters.known`, and matching missing fields are removed from `missing_required`.
 - `ai_core` remains domain-neutral: no field-specific business dictionaries are embedded in the core.
+
+
+## v53 update
+
+v53 adds Verified External Capability Discovery Runtime. When a planned step requires a missing capability, runtime can now collect external evidence from web documentation, public repositories, and model catalogs, then use that evidence to generate a runtime tool/module proposal. External code is treated as untrusted evidence and must pass generic verification before registration.
+
+See `V53_EXTERNAL_CAPABILITY_DISCOVERY_NOTES.md` for details.
+
+## v55: Verified Model Lifecycle Runtime
+
+v55 adds a generic model lifecycle and approval layer without putting business/domain logic into `ai_core`.
+
+Implemented runtime capabilities:
+
+1. Automatic model download preparation
+   - `ai_core.models.model_downloader.RuntimeModelDownloader`
+   - supports Ollama pull and Hugging Face snapshot download when dependencies are installed
+   - human review is required when candidate metadata requests review
+
+2. Model benchmark before route registration
+   - `ai_core.models.model_benchmark.RuntimeModelBenchmark`
+   - runs a small generic benchmark and writes reports to `runtime/traces/model_benchmarks`
+
+3. Route registration only after benchmark success
+   - `ai_core.models.model_route_registry.RuntimeModelRouteRegistry`
+   - updates `runtime/configs/models/providers.yaml`
+   - writes `runtime/registry/model_route_registry.json`
+
+4. Docker image preflight
+   - `ai_core.environment.docker_preflight.DockerPreflight`
+   - checks Docker command, daemon availability, and optional image availability/pull
+
+5. External repository dependency install approval
+   - `ai_core.security.repository_dependency_gate.RepositoryDependencyGate`
+   - writes approval requests to `runtime/approvals`
+   - repository dependencies remain blocked until explicit approval
+
+6. Successful model routes are saved to runtime knowledge
+   - `runtime/knowledge/success_cases.jsonl`
+
+Important boundary:
+
+- v55 can prepare, request approval, download, benchmark, and register models.
+- Risky external dependencies and license-sensitive model downloads are not silently installed.
+- `ai_core` remains generic infrastructure; discovered business logic stays in runtime artifacts and traces.

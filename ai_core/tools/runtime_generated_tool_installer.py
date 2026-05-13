@@ -102,6 +102,10 @@ class RuntimeGeneratedToolInstaller:
             manifest["verification"] = artifact.get("verification")
         if artifact.get("api_discovery") and "api_discovery" not in manifest:
             manifest["api_discovery"] = artifact.get("api_discovery")
+        if artifact.get("documentation_understanding") and "documentation_understanding" not in manifest:
+            manifest["documentation_understanding"] = artifact.get("documentation_understanding")
+        if artifact.get("parameter_mapping") and "parameter_mapping" not in manifest:
+            manifest["parameter_mapping"] = artifact.get("parameter_mapping")
 
         implementation = manifest.setdefault("implementation", {})
         if not isinstance(implementation, dict):
@@ -142,6 +146,8 @@ class RuntimeGeneratedToolInstaller:
             "execution_claims": manifest.get("execution_claims", {}),
             "network": manifest.get("network", {}),
             "api_discovery": manifest.get("api_discovery", {}),
+            "documentation_understanding": manifest.get("documentation_understanding", {}),
+            "parameter_mapping": manifest.get("parameter_mapping", {}),
             "verification": manifest.get("verification", {}),
         }
         self.registry_path.write_text(json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
