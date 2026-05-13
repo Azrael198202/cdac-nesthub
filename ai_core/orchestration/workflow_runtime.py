@@ -106,7 +106,11 @@ class WorkflowRuntime:
                 return
 
             current_plan = state.get("results", {}).get("workflow_planning", {})
-            merged_plan = self.workflow_state_merger.merge_human_information(current_plan, modified_result)
+            merged_plan = self.workflow_state_merger.merge_human_information(
+                current_plan,
+                modified_result,
+                interaction_request=pending.get("request"),
+            )
             state.setdefault("results", {})["workflow_planning"] = merged_plan
             state.get("results", {}).pop(pending.get("node_id", ""), None)
             state.setdefault("human_information_history", []).append({

@@ -1107,7 +1107,7 @@ function showStickyHumanInputRequired(ev){
     stickyInteraction.querySelectorAll("button,input,select,textarea").forEach(b => b.disabled = true);
     const feedback = document.getElementById("humanInputFeedback").value || "Missing information provided.";
     markCurrentInteractionResolved("Missing information provided. Continuing workflow...");
-    await resume("modify", {answers}, feedback);
+    await resume("modify", {answers, field_mapping: fieldMapping, interaction_request: request}, feedback);
   };
 
   document.getElementById("humanInputCancel").onclick = async () => {

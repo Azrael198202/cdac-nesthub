@@ -41,6 +41,7 @@ class InteractionContractGenerator:
         for interaction in interactions or []:
             step_id = str(interaction.get("step_id", ""))
             source_step = interaction.get("source_step") if isinstance(interaction.get("source_step"), dict) else {}
+            original_required_fields = self._collect_raw_fields(interaction, source_step)
 
             runtime_contract = self._runtime_contract_from_interaction(interaction, source_step)
             if runtime_contract:
@@ -50,10 +51,11 @@ class InteractionContractGenerator:
                 cancel_label = self._text_or(runtime_contract.get("cancel_label"), cancel_label)
                 raw_fields = runtime_contract.get("fields", []) or []
             else:
-                raw_fields = self._collect_raw_fields(interaction, source_step)
+                raw_fields = original_required_fields
 
-            for raw_field in raw_fields:
+            for index, raw_field in enumerate(raw_fields):
                 field = self._normalize_field(raw_field, step_id=step_id, source_step=source_step)
+                self._attach_merge_metadata(field, raw_field, original_required_fields, index=index, step_id=step_id)
                 key = (field.get("step_id", ""), field.get("field", ""))
                 if key[1] and key not in seen:
                     seen.add(key)
@@ -76,6 +78,7 @@ class InteractionContractGenerator:
             "submit_label": submit_label,
             "cancel_label": cancel_label,
             "expected_response_format": {"answers": {"<field name>": "<value>"}},
+            "field_mapping": self._field_mapping(fields),
             "resume_strategy": {"type": "resume_workflow", "merge_target": "workflow_planning"},
             "runtime_generation": generation_request,
         }
@@ -164,6 +167,82 @@ class InteractionContractGenerator:
             "placeholder": self._generic_placeholder(field_name),
             "description": self._generic_description(source_step),
         }
+
+
+    def _attach_merge_metadata(
+        self,
+        field: dict[str, Any],
+        raw_field: Any,
+        original_required_fields: list[Any],
+        *,
+        index: int,
+        step_id: str,
+    ) -> None:
+        """Attach generic merge metadata for resume.
+
+        This method does not infer business meaning. It only preserves aliases
+        that already exist in runtime metadata and, when a runtime/LLM contract
+        rewrites the visible field name, keeps the original required field by
+        position so the submitted answer can be merged back safely.
+        """
+        aliases: list[str] = []
+
+        for value in [
+            field.get("field"),
+            field.get("source_field"),
+            self._field_name(raw_field),
+        ]:
+            if isinstance(value, str) and value.strip():
+                aliases.append(value.strip())
+
+        if isinstance(raw_field, dict):
+            for key in ["source_field", "original_field", "merge_field", "parameter", "parameter_name"]:
+                value = raw_field.get(key)
+                if isinstance(value, str) and value.strip():
+                    aliases.append(value.strip())
+            raw_aliases = raw_field.get("aliases") or raw_field.get("merge_aliases")
+            if isinstance(raw_aliases, list):
+                aliases.extend(str(x).strip() for x in raw_aliases if str(x).strip())
+
+        if index < len(original_required_fields):
+            original = self._field_name(original_required_fields[index])
+            if original:
+                aliases.append(original)
+                field.setdefault("source_field", original)
+
+        unique_aliases = self._unique_texts(aliases)
+        field["aliases"] = unique_aliases
+        field["merge_targets"] = [
+            {"step_id": step_id, "source_field": alias}
+            for alias in unique_aliases
+        ]
+
+    def _field_mapping(self, fields: list[dict[str, Any]]) -> dict[str, Any]:
+        mapping: dict[str, Any] = {}
+        for field in fields:
+            field_id = str(field.get("field") or "").strip()
+            if not field_id:
+                continue
+            mapping[field_id] = {
+                "step_id": str(field.get("step_id") or ""),
+                "source_field": str(field.get("source_field") or ""),
+                "aliases": list(field.get("aliases") or []),
+                "merge_targets": list(field.get("merge_targets") or []),
+            }
+        return mapping
+
+    def _unique_texts(self, values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            key = self._safe_field_id(text)
+            if key and key not in seen:
+                seen.add(key)
+                result.append(text)
+        return result
 
     def _field_name(self, raw_field: Any) -> str:
         if isinstance(raw_field, dict):
