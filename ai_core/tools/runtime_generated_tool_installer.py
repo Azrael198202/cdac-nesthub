@@ -90,6 +90,12 @@ class RuntimeGeneratedToolInstaller:
             "requires_human_confirmation": bool((source_step or {}).get("requires_human_confirmation", False)),
             "generated_code_must_be_reviewed": bool(artifact.get("requires_review", False)),
         })
+        manifest.setdefault("execution_claims", {
+            "real_execution": artifact.get("real_execution"),
+            "no_mock_data": artifact.get("no_mock_data"),
+            "uses_network": artifact.get("uses_network"),
+            "generated_by_runtime": True,
+        })
 
         implementation = manifest.setdefault("implementation", {})
         if not isinstance(implementation, dict):
@@ -127,6 +133,8 @@ class RuntimeGeneratedToolInstaller:
             "safety": manifest.get("safety", {}),
             "runtime_generated": True,
             "source": manifest.get("source"),
+            "execution_claims": manifest.get("execution_claims", {}),
+            "network": manifest.get("network", {}),
         }
         self.registry_path.write_text(json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
         return registry[tool_id]

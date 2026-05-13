@@ -5,6 +5,7 @@ import inspect
 from pathlib import Path
 from typing import Any, Callable
 
+from ai_core.runtime.provenance import ExecutionProvenanceRecorder
 from ai_core.tools.tool_schema_validator import ToolSchemaValidator
 
 
@@ -19,8 +20,9 @@ class GenericToolRunner:
 
     def __init__(self) -> None:
         self.schema_validator = ToolSchemaValidator()
+        self.provenance = ExecutionProvenanceRecorder()
 
-    def run_tool(self, tool_spec: dict[str, Any], input_data: dict[str, Any]) -> dict[str, Any]:
+    def run_tool(self, tool_spec: dict[str, Any], input_data: dict[str, Any], *, run_id: str = "", node_id: str = "", step_id: str = "", capability: str | None = None) -> dict[str, Any]:
         implementation = tool_spec.get("implementation", {})
         if not isinstance(implementation, dict):
             return self._error("invalid_tool_spec", "Tool implementation metadata must be an object.")
@@ -46,11 +48,24 @@ class GenericToolRunner:
         if not path.exists():
             return self._error("module_not_found", f"Tool implementation not found: {path}")
 
+        trace = self.provenance.start(
+            run_id=run_id,
+            node_id=node_id,
+            step_id=step_id,
+            component_type="runtime_tool",
+            component_id=str(tool_spec.get("tool_id") or tool_spec.get("name") or path.stem),
+            capability=capability or self._first_capability(tool_spec),
+            input_data=input_data,
+            artifact=tool_spec,
+        )
+
         try:
             fn = self._load_function(path, function_name)
             output = fn(input_data)
             if inspect.isawaitable(output):
-                return self._error("async_tool_not_supported_here", "Async tool output must be awaited by an async runner.")
+                result = self._error("async_tool_not_supported_here", "Async tool output must be awaited by an async runner.")
+                trace = self.provenance.finish(trace, output=result, status="error", error=result.get("error"))
+                return self.provenance.attach(result, trace)
             if not isinstance(output, dict):
                 output = {
                     "status": "success",
@@ -60,10 +75,24 @@ class GenericToolRunner:
                 }
             output_validation = self.schema_validator.validate_output(tool_spec.get("output_schema"), output)
             if not output_validation.get("valid"):
-                return self._error("tool_output_schema_validation_failed", "; ".join(output_validation.get("errors", [])))
-            return output
+                result = self._error("tool_output_schema_validation_failed", "; ".join(output_validation.get("errors", [])))
+                trace = self.provenance.finish(trace, output=result, status="error", error=result.get("error"))
+                return self.provenance.attach(result, trace)
+            trace = self.provenance.finish(trace, output=output, status="success")
+            return self.provenance.attach(output, trace)
         except Exception as exc:
-            return self._error("tool_execution_failed", str(exc))
+            result = self._error("tool_execution_failed", str(exc))
+            trace = self.provenance.finish(trace, output=result, status="error", error=result.get("error"))
+            return self.provenance.attach(result, trace)
+
+    def _first_capability(self, tool_spec: dict[str, Any]) -> str | None:
+        capability = tool_spec.get("capability")
+        if isinstance(capability, str) and capability.strip():
+            return capability.strip()
+        capabilities = tool_spec.get("capabilities")
+        if isinstance(capabilities, list) and capabilities:
+            return str(capabilities[0])
+        return None
 
     def _load_function(self, path: Path, function_name: str) -> Callable[[dict[str, Any]], Any]:
         module_name = f"runtime_tool_{path.stem}_{abs(hash(str(path)))}"

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ai_core.events.event_bus import event_bus
+from ai_core.runtime.provenance import ExecutionProvenanceRecorder
 from ai_core.tools.runtime_tool_registry import RuntimeToolRegistry
 from ai_core.modules.module_builder import RuntimeModuleBuilder
 from ai_core.modules.module_loader import RuntimeModuleLoader
@@ -34,6 +35,7 @@ class ToolCallExecutor:
         self.tool_runner = GenericToolRunner()
         self.artifact_generator = RuntimeToolArtifactGenerator()
         self.artifact_installer = RuntimeGeneratedToolInstaller()
+        self.provenance = ExecutionProvenanceRecorder()
 
     async def execute(
         self,
@@ -157,23 +159,54 @@ class ToolCallExecutor:
                         "node_id": node_id,
                         "step_id": step_id,
                     })
+                    module_record = self.module_loader.registry.find_by_capability(required_capability) or {"module_id": required_capability}
+                    trace = self.provenance.start(
+                        run_id=run_id,
+                        node_id=node_id,
+                        step_id=step_id,
+                        component_type="runtime_module",
+                        component_id=str(module_record.get("module_id") or required_capability),
+                        capability=required_capability,
+                        input_data=module_input,
+                        artifact=module_record,
+                    )
                     try:
-                        module_result = existing_module.run(module_input)
+                        raw_module_result = existing_module.run(module_input)
+                        module_result = self._normalize_runtime_execution_result(raw_module_result, source="runtime_module")
+                        trace = self.provenance.finish(
+                            trace,
+                            output=module_result,
+                            status="success" if self._is_success_result(module_result) else "error",
+                            error=module_result.get("error") if isinstance(module_result, dict) else None,
+                        )
+                        module_result = self.provenance.attach(module_result, trace)
                     except Exception as exc:
                         module_result = {"status": "error", "error": {"message": str(exc)}, "data": {}, "source": "runtime_module"}
+                        trace = self.provenance.finish(trace, output=module_result, status="error", error=module_result.get("error"))
+                        module_result = self.provenance.attach(module_result, trace)
+                    if isinstance(module_result, dict) and module_result.get("provenance"):
+                        await event_bus.emit(run_id, {
+                            "type": "EXECUTION_PROVENANCE_RECORDED",
+                            "title": "Execution provenance recorded",
+                            "message": f"Recorded provenance for step={step_id}",
+                            "node_id": node_id,
+                            "step_id": step_id,
+                            "result": module_result.get("provenance"),
+                        })
                     execution_steps.append({
                         "step_id": step_id,
-                        "status": "executed" if module_result.get("status") in {"success", "ok", "executed"} else "module_execution_failed",
+                        "status": "executed" if self._is_success_result(module_result) else "module_execution_failed",
                         "module": {"capability": required_capability},
                         "input": module_input,
                         "result": module_result,
+                        "provenance": module_result.get("provenance") if isinstance(module_result, dict) else None,
                         "source_step": step,
                     })
-                    if module_result.get("status") not in {"success", "ok", "executed"}:
+                    if not self._is_success_result(module_result):
                         blocked_steps.append({
                             "step_id": step_id,
                             "status": "module_execution_failed",
-                            "reason": module_result.get("error", {}).get("message") or "Module execution failed.",
+                            "reason": self._result_error_message(module_result, "Module execution failed."),
                             "source_step": step,
                             "module_result": module_result,
                         })
@@ -225,22 +258,26 @@ class ToolCallExecutor:
                             module_input = self._build_tool_input(
                                 step=step, run_id=run_id, node_id=node_id, step_id=step_id, user_input=state.get("input", "")
                             )
+                            normalized_module_result = self._normalize_runtime_execution_result(
+                                module_result.get("result"), source="runtime_generated_module"
+                            )
                             execution_steps.append({
                                 "step_id": step_id,
-                                "status": "executed" if module_result.get("result", {}).get("status") in {"success", "ok", "executed"} else "module_execution_failed",
+                                "status": "executed" if self._is_success_result(normalized_module_result) else "module_execution_failed",
                                 "module": module_result.get("registry_record"),
                                 "input": module_input,
-                                "result": module_result.get("result"),
+                                "result": normalized_module_result,
+                                "provenance": normalized_module_result.get("provenance") if isinstance(normalized_module_result, dict) else None,
                                 "source_step": step,
                             })
-                            if module_result.get("result", {}).get("status") not in {"success", "ok", "executed"}:
+                            if not self._is_success_result(normalized_module_result):
                                 blocked_steps.append({
                                     "step_id": step_id,
                                     "status": "module_execution_failed",
                                     "capability": required_capability,
-                                    "reason": module_result.get("result", {}).get("error", {}).get("message") or "Module execution failed.",
+                                    "reason": self._result_error_message(normalized_module_result, "Module execution failed."),
                                     "source_step": step,
-                                    "module_result": module_result.get("result"),
+                                    "module_result": normalized_module_result,
                                 })
                             continue
 
@@ -285,7 +322,14 @@ class ToolCallExecutor:
                 step_id=step_id,
                 user_input=state.get("input", ""),
             )
-            tool_result = self.tool_runner.run_tool(tool, tool_input)
+            tool_result = self.tool_runner.run_tool(
+                tool,
+                tool_input,
+                run_id=run_id,
+                node_id=node_id,
+                step_id=step_id,
+                capability=required_capability,
+            )
 
             if tool_result.get("status") != "success":
                 repaired_tool = await self._try_repair_executable_tool(
@@ -300,7 +344,24 @@ class ToolCallExecutor:
                 )
                 if repaired_tool:
                     tool = repaired_tool
-                    tool_result = self.tool_runner.run_tool(tool, tool_input)
+                    tool_result = self.tool_runner.run_tool(
+                tool,
+                tool_input,
+                run_id=run_id,
+                node_id=node_id,
+                step_id=step_id,
+                capability=required_capability,
+            )
+
+            if isinstance(tool_result, dict) and tool_result.get("provenance"):
+                await event_bus.emit(run_id, {
+                    "type": "EXECUTION_PROVENANCE_RECORDED",
+                    "title": "Execution provenance recorded",
+                    "message": f"Recorded provenance for step={step_id}",
+                    "node_id": node_id,
+                    "step_id": step_id,
+                    "result": tool_result.get("provenance"),
+                })
 
             execution_steps.append({
                 "step_id": step_id,
@@ -308,6 +369,7 @@ class ToolCallExecutor:
                 "tool": self._public_tool_spec(tool),
                 "input": tool_input,
                 "result": tool_result,
+                "provenance": tool_result.get("provenance") if isinstance(tool_result, dict) else None,
                 "source_step": step,
             })
 
@@ -335,7 +397,7 @@ class ToolCallExecutor:
             "summary": {
                 "planned": len(planned_steps),
                 "executed": len([step for step in execution_steps if step.get("status") == "executed"]),
-                "failed": len([step for step in execution_steps if step.get("status") == "tool_execution_failed"]),
+                "failed": len([step for step in execution_steps if step.get("status") in {"tool_execution_failed", "module_execution_failed"}]),
                 "blocked": len(blocked_steps),
                 "human_interactions": len(human_interactions),
                 "missing_tools": len(missing_tools),
@@ -352,6 +414,77 @@ class ToolCallExecutor:
             "result": result,
         })
         return result
+
+
+    def _normalize_runtime_execution_result(self, value: Any, *, source: str) -> dict[str, Any]:
+        """Normalize runtime tool/module outputs into a generic success/error contract.
+
+        Runtime-generated modules are allowed to return a plain data object, for
+        example {"temperature": 25, "condition": "Sunny"}. A missing `status`
+        field must not be treated as failure. This method stays domain-neutral:
+        it only checks generic error/status shape and wraps useful payloads into
+        the common result contract.
+        """
+        if isinstance(value, dict):
+            raw_status = str(value.get("status", "")).lower().strip()
+            has_error = bool(value.get("error"))
+
+            if raw_status in {"success", "ok", "executed"} and not has_error:
+                normalized = dict(value)
+                normalized["status"] = "success"
+                normalized.setdefault("source", source)
+                if "data" not in normalized:
+                    data = {k: v for k, v in value.items() if k not in {"status", "source", "requires_human_confirmation"}}
+                    normalized["data"] = data
+                return normalized
+
+            if raw_status in {"error", "failed", "failure"} or has_error:
+                error = value.get("error") if isinstance(value.get("error"), dict) else {"message": str(value.get("error") or value)}
+                return {
+                    "status": "error",
+                    "error": error,
+                    "data": value.get("data") if isinstance(value.get("data"), dict) else {},
+                    "source": value.get("source") or source,
+                    "requires_human_confirmation": bool(value.get("requires_human_confirmation", False)),
+                }
+
+            # Plain dict payload without a status is a valid successful result.
+            return {
+                "status": "success",
+                "data": value,
+                "source": source,
+                "requires_human_confirmation": bool(value.get("requires_human_confirmation", False)),
+            }
+
+        if value is None:
+            return {
+                "status": "error",
+                "error": {"message": "Runtime component returned no result."},
+                "data": {},
+                "source": source,
+                "requires_human_confirmation": False,
+            }
+
+        return {
+            "status": "success",
+            "data": {"value": value},
+            "source": source,
+            "requires_human_confirmation": False,
+        }
+
+    def _is_success_result(self, result: Any) -> bool:
+        return isinstance(result, dict) and result.get("status") == "success"
+
+    def _result_error_message(self, result: Any, fallback: str) -> str:
+        if isinstance(result, dict):
+            error = result.get("error")
+            if isinstance(error, dict):
+                message = error.get("message")
+                if isinstance(message, str) and message.strip():
+                    return message.strip()
+            if isinstance(result.get("message"), str) and result.get("message").strip():
+                return result.get("message").strip()
+        return fallback
 
 
 
@@ -463,7 +596,25 @@ class ToolCallExecutor:
                 "node_id": node_id,
                 "step_id": step_id,
             })
-            result = module.run(module_input)
+            trace = self.provenance.start(
+                run_id=run_id,
+                node_id=node_id,
+                step_id=step_id,
+                component_type="runtime_generated_module",
+                component_id=str(installed.get("module_id") or capability),
+                capability=capability,
+                input_data=module_input,
+                artifact=installed,
+            )
+            raw_result = module.run(module_input)
+            result = self._normalize_runtime_execution_result(raw_result, source="runtime_generated_module")
+            trace = self.provenance.finish(
+                trace,
+                output=result,
+                status="success" if self._is_success_result(result) else "error",
+                error=result.get("error") if isinstance(result, dict) else None,
+            )
+            result = self.provenance.attach(result, trace)
             await event_bus.emit(run_id, {
                 "type": "MODULE_EXECUTED",
                 "title": "Runtime module executed",
@@ -472,6 +623,15 @@ class ToolCallExecutor:
                 "step_id": step_id,
                 "result": result,
             })
+            if isinstance(result, dict) and result.get("provenance"):
+                await event_bus.emit(run_id, {
+                    "type": "EXECUTION_PROVENANCE_RECORDED",
+                    "title": "Execution provenance recorded",
+                    "message": f"Recorded provenance for step={step_id}",
+                    "node_id": node_id,
+                    "step_id": step_id,
+                    "result": result.get("provenance"),
+                })
             return {"module": module, "registry_record": installed, "result": result}
         except Exception as exc:
             await event_bus.emit(run_id, {
@@ -739,7 +899,7 @@ class ToolCallExecutor:
             return "waiting_for_human_confirmation"
         if blocked_steps and not execution_steps:
             return "blocked"
-        if blocked_steps and any(step.get("status") == "tool_execution_failed" for step in execution_steps):
+        if blocked_steps and any(step.get("status") in {"tool_execution_failed", "module_execution_failed"} for step in execution_steps):
             return "tool_execution_failed"
         if execution_steps and blocked_steps:
             return "partially_executed"

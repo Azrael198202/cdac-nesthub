@@ -56,6 +56,12 @@ class RuntimeGeneratedModuleInstaller:
         manifest.setdefault("source", "runtime_generated_module_artifact")
         manifest.setdefault("source_user_input", user_input)
         manifest.setdefault("source_step", source_step or {})
+        manifest.setdefault("execution_claims", {
+            "real_execution": artifact.get("real_execution"),
+            "no_mock_data": artifact.get("no_mock_data"),
+            "uses_network": artifact.get("uses_network"),
+            "generated_by_runtime": True,
+        })
         manifest_path = target_dir / "module.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 

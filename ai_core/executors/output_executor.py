@@ -71,11 +71,15 @@ class OutputExecutor:
 
         summaries: list[str] = []
         tool_results: list[dict[str, Any]] = []
+        provenance_records: list[dict[str, Any]] = []
         for step in execution_steps:
             if not isinstance(step, dict):
                 continue
             tool_result = step.get("result") if isinstance(step.get("result"), dict) else {}
             tool_results.append(tool_result)
+            provenance = tool_result.get("provenance") if isinstance(tool_result.get("provenance"), dict) else step.get("provenance")
+            if isinstance(provenance, dict):
+                provenance_records.append(provenance)
             summaries.append(self._summarize_tool_result(step, tool_result))
 
         if summaries:
@@ -91,10 +95,42 @@ class OutputExecutor:
             "final_answer": final_answer,
             "execution_status": status,
             "tool_results": tool_results,
+            "provenance": provenance_records,
+            "trust_summary": self._trust_summary(provenance_records),
             "executed_steps": len(execution_steps),
             "blocked_steps": blocked_steps,
             "previous_result_keys": list(results.keys()),
         }
+
+    def _trust_summary(self, provenance_records: list[dict[str, Any]]) -> dict[str, Any]:
+        if not provenance_records:
+            return {
+                "trace_available": False,
+                "message": "No execution provenance was recorded for this result.",
+            }
+        real_declared = any(bool((p.get("execution_claims") or {}).get("real_execution_declared")) for p in provenance_records)
+        no_mock_declared = any(bool((p.get("execution_claims") or {}).get("no_mock_data_declared")) for p in provenance_records)
+        network_declared = any(bool((p.get("execution_claims") or {}).get("network_declared")) for p in provenance_records)
+        return {
+            "trace_available": True,
+            "trace_count": len(provenance_records),
+            "real_execution_declared": real_declared,
+            "no_mock_data_declared": no_mock_declared,
+            "network_declared": network_declared,
+            "trace_ids": [p.get("trace_id") for p in provenance_records if p.get("trace_id")],
+        }
+
+    def _format_data_result(self, data: dict[str, Any]) -> str:
+        if not data:
+            return "Tool executed successfully."
+        lines = ["Result:"]
+        for key, value in data.items():
+            if key in {"status", "source", "requires_human_confirmation"}:
+                continue
+            label = str(key).replace("_", " ").replace("-", " ").strip() or str(key)
+            label = " ".join(part[:1].upper() + part[1:] for part in label.split())
+            lines.append(f"- {label}: {value}")
+        return "\n".join(lines) if len(lines) > 1 else "Tool executed successfully."
 
     def _waiting_message(self, status: str, human_interactions, safety_holds, missing_tools, blocked_steps) -> str:
         if human_interactions:
@@ -123,7 +159,7 @@ class OutputExecutor:
                 value = data.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
-            return "Tool executed successfully. Result data: " + str(data)
+            return self._format_data_result(data)
         if data is not None:
             return "Tool executed successfully. Result: " + str(data)
         return "Tool executed successfully."
