@@ -199,6 +199,73 @@ core 会自动：
 
 Self-Evolving Runtime AI Core
 
+# homework 1.1.1
+
+一阶段：意图解析与参数提取 (Reasoning)
+当我接收到你的请求时，我首先会进行语义分析：
+
+识别意图：用户想要查询天气（Weather Forecast）。
+
+提取关键参数：
+
+地点：福冈，日本 (Fukuoka, Japan)。
+
+时间：明天 (Tomorrow，我会根据当前的系统时间计算出具体的日期)。
+
+详情程度：用户要求“Detailed”（详细），这意味着我不仅要提供气温，还要关注降水概率、风速、湿度等。
+
+ 没有分析出来 “Detailed”（详细）这个概念，会影响后续的内容。
+
+
+第二阶段：工具调用决策 (Tool Calling)
+我本身并不实时连接气象卫星，但我拥有“工具库”（Tools）。
+
+选择工具：我会决定调用类似 Google Search 或专门的天气 API 接口。
+
+构造查询：我会生成一个结构化的指令，例如：search_weather(location="Fukuoka", date="2024-XX-XX")。
+
+发送请求：系统根据我的指令去抓取实时数据。
+
+后续是不是需要创建工具库，并且读取别人的工具库，导入到自己的系统中来使用。
+
+
+第三阶段：数据过滤与整合 (Data Processing)
+这是最关键的一步。工具返回的数据通常是杂乱的原始信息（JSON 格式或网页快照），可能包含：
+
+每小时气温趋势
+
+紫外线指数
+
+日出日落时间
+
+体感温度
+
+降雨预警
+
+我会根据你要求的 "Detailed"，从海量信息中筛选出最重要的部分，过滤掉无关的广告或冗余链接。
+
+第四阶段：生成最终回答 (Generation)
+我会将筛选后的枯燥数据转化为自然语言。我会考虑：
+
+语气：友好且专业。
+
+逻辑：先整体（晴天/雨天），后局部（最高/最低温），再到细节（建议穿衣或带伞）。
+
+语言习惯：既然你用英文提问，我通常会用英文回答，除非你有特殊要求。
+
+实际案例模拟
+如果你现在问我这个问题，后台的 Token 往返大致如下：
+
+Input (你): "Could you please check the detailed weather forecast for Fukuoka, Japan tomorrow?" (~15 tokens)
+
+Thought (我): 确定需要调用天气工具，计算出“明天”的具体日期。
+
+Tool Call: 发出查询指令。
+
+Tool Output: 收到数据（例如：18°C-24°C, 阵雨概率 40%, 西北风 15km/h）。
+
+Final Output (我): "Tomorrow in Fukuoka, expect a mix of clouds and sun with a 40% chance of afternoon showers. Highs will be around 24°C..."
+
 # homework 1.2
 
 tasks should be structured objects instead of string array.
