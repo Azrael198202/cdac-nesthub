@@ -4,6 +4,7 @@ from typing import Any
 
 from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import PROJECT_ROOT
+from ai_core.presentation.result_presenter import ResultPresenter
 from ai_core.validation.schema_validator import SchemaValidator
 
 
@@ -28,6 +29,7 @@ class OutputExecutor:
     def __init__(self) -> None:
         self.loader = ConfigLoader()
         self.validator = SchemaValidator()
+        self.presenter = ResultPresenter()
 
     async def execute(self, workflow_node, node_config, state, capability_result):
         result = self._build(state, node_config)
@@ -105,9 +107,9 @@ class OutputExecutor:
         else:
             final_answer = "Workflow finished, but no executable tool result was produced."
 
-        trust_summary = self._trust_summary(provenance_records)
-        if trust_summary.get("trace_available") and not trust_summary.get("verified_real_execution"):
-            final_answer = final_answer + "\n\nTrust: unverified generated result. The runtime did not confirm live network verification and no-mock execution."
+        trust_summary = self._trust_summary(provenance_records, tool_results)
+        if trust_summary.get("trust_level") == "unverified_generated_result":
+            final_answer = final_answer + "\n\nTrust: unverified generated result. The runtime did not confirm live network verification, no-mock execution, or evidence-supported material quality."
 
         return {
             "_executor_type": "output",
@@ -150,10 +152,15 @@ class OutputExecutor:
             ],
         }
 
-    def _trust_summary(self, provenance_records: list[dict[str, Any]]) -> dict[str, Any]:
+    def _trust_summary(self, provenance_records: list[dict[str, Any]], tool_results: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        tool_results = tool_results or []
+        evidence_supported = any(self.presenter.evidence_quality_passed(item) for item in tool_results if isinstance(item, dict))
         if not provenance_records:
             return {
                 "trace_available": False,
+                "evidence_quality_passed": evidence_supported,
+                "verified_real_execution": False,
+                "trust_level": "evidence_supported_result" if evidence_supported else "unverified_generated_result",
                 "message": "No execution provenance was recorded for this result.",
             }
         real_declared = any(bool((p.get("execution_claims") or {}).get("real_execution_declared")) for p in provenance_records)
@@ -162,6 +169,7 @@ class OutputExecutor:
         live_verified = any(bool((p.get("execution_claims") or {}).get("live_verification_passed")) for p in provenance_records)
         api_discovery = any(bool((p.get("execution_claims") or {}).get("api_discovery_trace_id")) for p in provenance_records)
         verified_real_execution = bool(real_declared and no_mock_declared and network_declared and live_verified)
+        trust_level = "verified_real_execution" if verified_real_execution else "evidence_supported_result" if evidence_supported else "unverified_generated_result"
         return {
             "trace_available": True,
             "trace_count": len(provenance_records),
@@ -170,22 +178,14 @@ class OutputExecutor:
             "network_declared": network_declared,
             "api_discovery_trace_available": api_discovery,
             "live_verification_passed": live_verified,
+            "evidence_quality_passed": evidence_supported,
             "verified_real_execution": verified_real_execution,
-            "trust_level": "verified_real_execution" if verified_real_execution else "unverified_generated_result",
+            "trust_level": trust_level,
             "trace_ids": [p.get("trace_id") for p in provenance_records if p.get("trace_id")],
         }
 
     def _format_data_result(self, data: dict[str, Any]) -> str:
-        if not data:
-            return "Tool executed successfully."
-        lines = ["Result:"]
-        for key, value in data.items():
-            if key in {"status", "source", "requires_human_confirmation"}:
-                continue
-            label = str(key).replace("_", " ").replace("-", " ").strip() or str(key)
-            label = " ".join(part[:1].upper() + part[1:] for part in label.split())
-            lines.append(f"- {label}: {value}")
-        return "\n".join(lines) if len(lines) > 1 else "Tool executed successfully."
+        return self.presenter.present_data(data)
 
     def _waiting_message(self, status: str, human_interactions, safety_holds, missing_tools, blocked_steps) -> str:
         if human_interactions:
@@ -214,7 +214,7 @@ class OutputExecutor:
                 value = data.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
-            return self._format_data_result(data)
+            return self.presenter.present_tool_result(tool_result)
         if data is not None:
-            return "Tool executed successfully. Result: " + str(data)
-        return "Tool executed successfully."
+            return "The step completed with result: " + str(data)
+        return "The step completed successfully."

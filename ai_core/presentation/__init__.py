@@ -1,0 +1,1 @@
+"""Generic result presentation helpers."""
