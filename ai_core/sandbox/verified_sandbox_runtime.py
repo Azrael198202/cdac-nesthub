@@ -58,7 +58,7 @@ class VerifiedSandboxRuntime:
                 checks=checks,
                 safe_to_register=False,
                 requires_human_review=True,
-                reason="Static verification failed before sandbox execution.",
+                reason=self._summarize_static_failure(static_result),
             ))
 
         with tempfile.TemporaryDirectory(prefix="verified_runtime_") as tmp:
@@ -102,6 +102,20 @@ class VerifiedSandboxRuntime:
                 stdout=result.get("stdout", ""),
                 stderr=result.get("stderr", ""),
             ))
+
+    def _summarize_static_failure(self, static_result: dict[str, Any]) -> str:
+        checks = static_result.get("checks") if isinstance(static_result.get("checks"), list) else []
+        findings: list[str] = []
+        for check in checks:
+            if not isinstance(check, dict):
+                continue
+            if check.get("message"):
+                findings.append(str(check.get("message")))
+            for item in check.get("findings", []) if isinstance(check.get("findings"), list) else []:
+                findings.append(str(item))
+        if findings:
+            return "Static verification failed before sandbox execution: " + "; ".join(findings[:8])
+        return str(static_result.get("reason") or "Static verification failed before sandbox execution.")
 
 
     def verify_module_artifact(

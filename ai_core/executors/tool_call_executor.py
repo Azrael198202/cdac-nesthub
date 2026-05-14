@@ -1093,6 +1093,20 @@ class ToolCallExecutor:
                 "result": verification,
             })
             if not verification.get("safe_to_register") and verification.get("status") != "passed":
+                fallback_tool = await self._try_generate_web_extraction_fallback_tool(
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    capability=capability,
+                    step=step,
+                    state=state,
+                    base_generation_request=generation_request,
+                    api_discovery=api_discovery,
+                    external_discovery=external_discovery,
+                    failed_verification=verification,
+                )
+                if fallback_tool:
+                    return fallback_tool
                 return {
                     "__runtime_blocked__": True,
                     "status": "sandbox_verification_failed",
@@ -1119,6 +1133,115 @@ class ToolCallExecutor:
             await event_bus.emit(run_id, {
                 "type": "RUNTIME_TOOL_GENERATION_FAILED",
                 "title": "Runtime tool generation failed",
+                "message": str(exc),
+                "node_id": node_id,
+                "step_id": step_id,
+            })
+            return None
+
+
+    async def _try_generate_web_extraction_fallback_tool(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        step_id: str,
+        capability: str,
+        step: dict[str, Any],
+        state: dict[str, Any],
+        base_generation_request: dict[str, Any],
+        api_discovery: dict[str, Any],
+        external_discovery: dict[str, Any],
+        failed_verification: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Generate a generic extraction fallback when a JSON/API tool fails.
+
+        The method is domain-neutral. It uses endpoint verification and fetched
+        documentation/page evidence to request an alternate artifact type. It
+        does not choose providers or hardcode extraction selectors in ai_core.
+        """
+        endpoint_verification = api_discovery.get("endpoint_verification") if isinstance(api_discovery, dict) else {}
+        recommended_type = str((endpoint_verification or {}).get("recommended_tool_type") or "").strip()
+        if recommended_type not in {"web_extract", "browser_automation", "external_solution_discovery"}:
+            return None
+
+        fallback_request = dict(base_generation_request)
+        fallback_constraints = dict(fallback_request.get("constraints") or {})
+        fallback_constraints.update({
+            "force_runtime_strategy": recommended_type,
+            "must_not_assume_json_api_when_endpoint_verification_failed": True,
+            "must_use_documentation_or_page_evidence_for_extraction": True,
+            "must_use_standard_library_when_possible": True,
+            "must_not_use_blocked_primitives": True,
+        })
+        fallback_request["constraints"] = fallback_constraints
+        fallback_request["request_type"] = "runtime_tool_artifact_generation_fallback"
+        fallback_request["runtime_fallback"] = {
+            "reason": "primary_artifact_failed_verification",
+            "failed_verification": failed_verification,
+            "endpoint_verification": endpoint_verification,
+            "recommended_tool_type": recommended_type,
+            "instruction": (
+                "Generate a replacement artifact using the recommended runtime strategy. "
+                "If the verified endpoint is an HTML page, extract from the supplied page/document evidence. "
+                "Do not claim JSON API support unless endpoint verification contains verified_json_api=true."
+            ),
+        }
+
+        await event_bus.emit(run_id, {
+            "type": "RUNTIME_TOOL_FALLBACK_GENERATION_STARTED",
+            "title": "Runtime fallback tool generation started",
+            "message": f"Generating fallback artifact using strategy={recommended_type}",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": fallback_request,
+        })
+        try:
+            artifact = await self.artifact_generator.generate_artifact(
+                run_id=run_id,
+                node_id=node_id,
+                generation_request=fallback_request,
+            )
+            if not isinstance(artifact, dict) or not artifact.get("files"):
+                return None
+            verification = self.sandbox_verifier.verify_tool_artifact(
+                artifact=artifact,
+                test_input=self._build_tool_input(
+                    step=step, run_id=run_id, node_id=node_id, step_id=step_id, user_input=state.get("input", "")
+                ),
+                allow_network=True,
+            )
+            artifact.setdefault("verification", {})["fallback_sandbox_verification"] = verification
+            await event_bus.emit(run_id, {
+                "type": "RUNTIME_TOOL_FALLBACK_SANDBOX_DONE",
+                "title": "Runtime fallback sandbox verification completed",
+                "message": f"status={verification.get('status')}",
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": verification,
+            })
+            if not verification.get("safe_to_register") and verification.get("status") != "passed":
+                return None
+            installed = self.artifact_installer.install_artifact(
+                artifact=artifact,
+                capability=capability,
+                source_step=step,
+                user_input=state.get("input", ""),
+            )
+            installed.setdefault("runtime_fallback", {})["strategy"] = recommended_type
+            await event_bus.emit(run_id, {
+                "type": "RUNTIME_TOOL_FALLBACK_REGISTERED",
+                "title": "Runtime fallback tool registered",
+                "message": f"Registered fallback runtime tool for capability={capability}",
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": self._public_tool_spec(installed),
+            })
+            return installed
+        except Exception as exc:
+            await event_bus.emit(run_id, {
+                "type": "RUNTIME_TOOL_FALLBACK_GENERATION_FAILED",
+                "title": "Runtime fallback generation failed",
                 "message": str(exc),
                 "node_id": node_id,
                 "step_id": step_id,

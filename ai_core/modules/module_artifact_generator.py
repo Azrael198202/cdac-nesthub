@@ -29,6 +29,9 @@ class RuntimeModuleArtifactGenerator:
                 "If real external data is required, module.py must perform a real network call with timeout/retry and return request/response evidence. "
                 "The module.py file must define validate_config(config), health_check(), and run(input_data). "
                 "Every helper function called must be defined or imported. Avoid top-level side effects. "
+                "Do not use blocked primitives such as eval, exec, compile, __import__, input, open, subprocess, os, pty, socketserver, ftplib, telnetlib, or shutil. "
+                "Prefer Python standard library network access such as urllib.request so sandbox tests can run without installing third-party packages. "
+                "If endpoint verification says verified_json_api=false or recommended_tool_type=web_extract, do not generate a JSON API client; generate a generic webpage extraction adapter using documented HTML evidence. "
                 "The manifest must declare execution_claims including real_execution, no_mock_data, uses_network, and live_verification_required when applicable."
             ),
             "user": generation_request,

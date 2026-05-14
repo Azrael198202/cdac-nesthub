@@ -9,6 +9,7 @@ from ai_core.config.paths import RUNTIME_CONFIGS, RUNTIME_GENERATED, RUNTIME_TRA
 from ai_core.events.event_bus import event_bus
 from ai_core.llm.provider_router import ProviderRouter
 from ai_core.research.web_research_tool import GenericWebResearchTool
+from ai_core.research.endpoint_verifier import EndpointVerifier
 
 
 class ApiDiscoveryEngine:
@@ -24,6 +25,7 @@ class ApiDiscoveryEngine:
         self.loader = ConfigLoader()
         self.provider_router = ProviderRouter()
         self.web = GenericWebResearchTool()
+        self.endpoint_verifier = EndpointVerifier()
         self.request_dir = RUNTIME_GENERATED / "api_discovery_requests"
         self.trace_dir = RUNTIME_TRACES / "api_discovery"
         self.request_dir.mkdir(parents=True, exist_ok=True)
@@ -62,11 +64,13 @@ class ApiDiscoveryEngine:
         local = await self._try_model_discovery(run_id=run_id, node_id=node_id, request=request, route_name="api_discovery_local")
         if self._usable_discovery(local):
             discovery = self._finalize(request=request, result=local, strategy="local_model", web_evidence=web_evidence, documentation_evidence=documentation_evidence)
+            discovery = self.endpoint_verifier.verify_discovery(discovery)
             await self._emit_done(run_id, node_id, discovery)
             return discovery
 
         external = await self._try_model_discovery(run_id=run_id, node_id=node_id, request=request, route_name="api_discovery_external")
         discovery = self._finalize(request=request, result=external or {}, strategy="external_model", web_evidence=web_evidence, documentation_evidence=documentation_evidence)
+        discovery = self.endpoint_verifier.verify_discovery(discovery)
         await self._emit_done(run_id, node_id, discovery)
         return discovery
 
@@ -292,6 +296,8 @@ class ApiDiscoveryEngine:
                 "candidate_count": len(result.get("candidates") or []),
                 "selected_candidate": result.get("selected_candidate"),
                 "documentation_evidence_count": len(discovery.get("documentation_evidence") or []),
+                "endpoint_verification": discovery.get("endpoint_verification"),
+                "runtime_strategy": discovery.get("runtime_strategy"),
             },
         })
 

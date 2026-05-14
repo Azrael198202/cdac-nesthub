@@ -88,6 +88,9 @@ class RuntimeToolArtifactGenerator:
                 "When network/API access is needed, include real timeout/retry/error handling and request/response evidence. "
                 "The generated tool must expose a run(input_data: dict) -> dict function unless the manifest declares another callable. "
                 "Every helper function called by run must be defined in the file or imported. "
+                "Do not use blocked primitives such as eval, exec, compile, __import__, input, open, subprocess, os, pty, socketserver, ftplib, telnetlib, or shutil. "
+                "Prefer Python standard library network access such as urllib.request so sandbox tests can run without installing third-party packages. "
+                "If endpoint verification says verified_json_api=false or recommended_tool_type=web_extract, do not generate a JSON API client; generate a generic webpage extraction adapter using documented HTML evidence. "
                 "Avoid top-level network calls. Put side effects inside the callable. "
                 "Return code and metadata only inside the artifact JSON."
             ),
