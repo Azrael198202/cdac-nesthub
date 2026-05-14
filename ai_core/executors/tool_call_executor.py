@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from ai_core.events.event_bus import event_bus
@@ -26,6 +27,9 @@ from ai_core.execution.candidate_extractor import CandidateExtractor
 from ai_core.execution.candidate_strategy_scorer import CandidateStrategyScorer
 from ai_core.execution.capability_resolution_decision import CapabilityResolutionDecision
 from ai_core.execution.evidence_quality_validator import EvidenceQualityValidator
+from ai_core.execution.candidate_result_synthesizer import CandidateResultSynthesizer
+from ai_core.execution.runtime_strategy_memory import RuntimeStrategyMemory
+from ai_core.execution.provider_reliability import ProviderReliabilityTracker
 from ai_core.utils.safe_json import make_json_safe
 
 
@@ -63,6 +67,9 @@ class ToolCallExecutor:
         self.capability_resolution = CapabilityResolutionDecision()
         self.generic_web_extract_factory = GenericWebExtractArtifactFactory()
         self.evidence_quality = EvidenceQualityValidator()
+        self.candidate_synthesizer = CandidateResultSynthesizer()
+        self.strategy_memory = RuntimeStrategyMemory()
+        self.provider_reliability = ProviderReliabilityTracker()
 
     async def execute(
         self,
@@ -294,6 +301,48 @@ class ToolCallExecutor:
                         state=state,
                     )
                     if generated_tool and generated_tool.get("__runtime_blocked__"):
+                        tool_input = self._build_tool_input(
+                            step=step, run_id=run_id, node_id=node_id, step_id=step_id, user_input=state.get("input", "")
+                        )
+                        fallback_execution = await self._try_multi_candidate_fallback_execution(
+                            run_id=run_id,
+                            node_id=node_id,
+                            step_id=step_id,
+                            capability=required_capability or "unknown_capability",
+                            step=step,
+                            state=state,
+                            failed_tool={"api_discovery": (generated_tool.get("discovery") or {}).get("api_discovery") or {}},
+                            failed_result={
+                                "status": "error",
+                                "error": {"code": generated_tool.get("status", "runtime_generation_blocked"), "message": generated_tool.get("reason", "Runtime tool generation was blocked.")},
+                                "data": {},
+                            },
+                            tool_input=tool_input,
+                        )
+                        if fallback_execution and fallback_execution.get("status") == "success":
+                            tool = fallback_execution.get("tool") or tool
+                            tool_result = fallback_execution.get("result") or {"status": "error"}
+                            execution_steps.append({
+                                "step_id": step_id,
+                                "status": "executed" if self._is_success_result(tool_result) else "tool_execution_failed",
+                                "tool": self._public_tool_spec(tool) if isinstance(tool, dict) else tool,
+                                "input": tool_input,
+                                "result": tool_result,
+                                "provenance": tool_result.get("provenance") if isinstance(tool_result, dict) else None,
+                                "source_step": step,
+                            })
+                            continue
+                        if fallback_execution and fallback_execution.get("status") == "human_interaction_required":
+                            interaction = fallback_execution.get("human_interaction") or {}
+                            human_interactions.append({
+                                "step_id": step_id,
+                                "type": interaction.get("type") or "choose_credential_or_skip",
+                                "objective": step.get("objective"),
+                                "fields": interaction.get("fields") or {},
+                                "options": interaction.get("options") or [],
+                                "reason": interaction.get("reason") or "A candidate requires credentials. Provide them or skip to another method.",
+                                "source_step": step,
+                            })
                         blocked_steps.append({
                             "step_id": step_id,
                             "status": generated_tool.get("status", "runtime_discovery_blocked"),
@@ -301,6 +350,7 @@ class ToolCallExecutor:
                             "reason": generated_tool.get("reason", "Runtime discovery did not produce enough evidence to generate executable code."),
                             "source_step": step,
                             "discovery": generated_tool.get("discovery"),
+                            "fallback_attempts": self._compact_attempts(fallback_execution.get("attempts", [])) if fallback_execution else [],
                         })
                         continue
                     if generated_tool:
@@ -1587,22 +1637,24 @@ class ToolCallExecutor:
         failed_result: dict[str, Any],
         tool_input: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """Try alternate runtime candidates instead of failing after one source.
+        """Parallel candidate verification and result synthesis.
 
-        v62 continuation bridge. This method is generic: it does not know what
-        the capability means. It extracts candidate-like evidence from runtime
-        discovery metadata, generates candidate-specific adapters, sandbox
-        verifies them, executes each adapter, and stops only after one succeeds
-        or every candidate has failed.
+        v68 upgrade. This method is domain-neutral: it does not know providers,
+        APIs, or business categories. It extracts runtime candidates, scores them,
+        prioritizes no-credential candidates, verifies several usable candidates
+        in parallel, executes successful adapters, and synthesizes the best result
+        based on evidence quality and candidate reliability. Credential-protected
+        candidates become a human-interaction choice only when no usable no-key
+        path succeeds.
         """
         initial_classification = self.result_classifier.classify(failed_result)
         if initial_classification.get("success"):
             return {"status": "success", "tool": failed_tool, "result": failed_result, "attempts": []}
 
         await event_bus.emit(run_id, {
-            "type": "MULTI_CANDIDATE_FALLBACK_STARTED",
-            "title": "Multi-candidate fallback started",
-            "message": f"Initial execution failed with category={initial_classification.get('category')}; trying alternate candidates.",
+            "type": "PARALLEL_CANDIDATE_EVALUATION_STARTED",
+            "title": "Parallel candidate evaluation started",
+            "message": f"Initial execution failed with category={initial_classification.get('category')}; evaluating alternate candidates.",
             "node_id": node_id,
             "step_id": step_id,
             "result": {"initial_failure": initial_classification},
@@ -1640,242 +1692,262 @@ class ToolCallExecutor:
         await event_bus.emit(run_id, {
             "type": "CANDIDATE_STRATEGY_SELECTION_DONE",
             "title": "Candidate strategy selection completed",
-            "message": f"Scored {len(candidates)} API/Web candidate(s).",
+            "message": f"Scored {len(candidates)} candidate(s).",
             "node_id": node_id,
             "step_id": step_id,
-            "result": {"candidates": candidates[:10]},
+            "result": {"candidates": candidates[:12]},
         })
         if not candidates:
-            await event_bus.emit(run_id, {
-                "type": "MULTI_CANDIDATE_FALLBACK_UNAVAILABLE",
-                "title": "No fallback candidates available",
-                "message": "No alternate candidate evidence was available for this capability.",
-                "node_id": node_id,
-                "step_id": step_id,
-                "result": {"api_discovery": api_discovery},
-            })
             return {"status": "no_candidates", "attempts": []}
 
+        credential_candidates = [c for c in candidates if self._candidate_requires_credential(c)]
+        no_key_candidates = [c for c in candidates if not self._candidate_requires_credential(c)]
+        max_parallel = 4
+        max_total = 8
+        attempt_candidates = no_key_candidates[:max_parallel]
+        credential_attempts = [self._credential_skip_attempt(i + 1, c) for i, c in enumerate(credential_candidates[:max_total])]
+
+        await event_bus.emit(run_id, {
+            "type": "CANDIDATE_PARALLEL_PLAN_READY",
+            "title": "Candidate parallel plan ready",
+            "message": f"no_key={len(no_key_candidates)} credential_required={len(credential_candidates)} parallel={len(attempt_candidates)}",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": {
+                "no_key_candidates": no_key_candidates[:max_parallel],
+                "credential_candidates": credential_candidates[:4],
+                "policy": "no_key_first_parallel_then_credential_choice",
+            },
+        })
+
+        tasks = [
+            self._attempt_runtime_candidate(
+                run_id=run_id,
+                node_id=node_id,
+                step_id=step_id,
+                capability=capability,
+                step=step,
+                state=state,
+                tool_input=tool_input,
+                candidate=candidate,
+                attempt_index=index,
+                api_discovery=api_discovery or {},
+                external_discovery=external_discovery or {},
+                failed_result=failed_result,
+                initial_classification=initial_classification,
+            )
+            for index, candidate in enumerate(attempt_candidates, start=1)
+        ]
         attempts: list[dict[str, Any]] = []
-        max_candidates = 5
-        for attempt_index, candidate in enumerate(candidates[:max_candidates], start=1):
+        if tasks:
+            gathered = await asyncio.gather(*tasks, return_exceptions=True)
+            for index, item in enumerate(gathered, start=1):
+                if isinstance(item, BaseException):
+                    candidate = attempt_candidates[index - 1]
+                    attempt = {"attempt_index": index, "candidate": candidate, "status": "exception", "error": {"message": str(item)}}
+                else:
+                    attempt = item
+                if isinstance(attempt, dict):
+                    attempts.append(attempt)
+                    candidate = attempt.get("candidate") if isinstance(attempt.get("candidate"), dict) else {}
+                    classification = attempt.get("classification") if isinstance(attempt.get("classification"), dict) else {}
+                    self.provider_reliability.record_attempt(candidate=candidate, status=str(attempt.get("status") or "unknown"), classification=classification)
+
+        attempts.extend(credential_attempts)
+        synthesized = self.candidate_synthesizer.choose(attempts)
+        if synthesized and synthesized.get("status") == "success":
+            selected_attempt = next((a for a in attempts if a.get("attempt_index") == ((synthesized.get("result") or {}).get("fallback") or {}).get("parallel_candidate_evaluation", {}).get("selected_attempt_index")), None)
+            self.strategy_memory.record_success(capability=capability, step=step, attempt=selected_attempt, result=synthesized.get("result") or {})
             await event_bus.emit(run_id, {
-                "type": "CANDIDATE_ATTEMPT_STARTED",
-                "title": "Candidate attempt started",
-                "message": f"Attempt {attempt_index}/{min(len(candidates), max_candidates)}",
+                "type": "PARALLEL_CANDIDATE_SYNTHESIS_DONE",
+                "title": "Parallel candidate synthesis completed",
+                "message": "Selected best successful candidate result.",
                 "node_id": node_id,
                 "step_id": step_id,
-                "result": {"candidate": candidate},
+                "result": {"attempts": self._compact_attempts(attempts), "selected": ((synthesized.get("result") or {}).get("fallback") or {}).get("parallel_candidate_evaluation")},
             })
+            return synthesized
 
-            if self._candidate_requires_credential(candidate):
-                attempt_record = {
-                    "attempt_index": attempt_index,
-                    "candidate": candidate,
-                    "status": "credential_required_skipped_by_default",
-                    "classification": {"success": False, "category": "credential_required"},
-                    "error": {"code": "credential_required", "message": "Candidate requires a credential. No-credential candidates are tried first."},
-                }
-                attempts.append(attempt_record)
-                await event_bus.emit(run_id, {
-                    "type": "CANDIDATE_REQUIRES_CREDENTIAL",
-                    "title": "Candidate requires credential",
-                    "message": "Credential-protected candidate skipped by default while no-credential candidates remain.",
-                    "node_id": node_id,
-                    "step_id": step_id,
-                    "result": attempt_record,
-                })
-                continue
-
-            generation_request = {
-                "request_type": "runtime_tool_artifact_generation_candidate_fallback",
-                "capability": capability,
-                "step": step,
-                "user_input": state.get("input", ""),
-                "tool_input": tool_input,
-                "candidate_attempt": {
-                    "attempt_index": attempt_index,
-                    "candidate": candidate,
-                    "tool_type": candidate.get("tool_type"),
-                    "score": candidate.get("score"),
-                    "light_verification": candidate.get("light_verification"),
-                    "previous_failure": failed_result,
-                    "previous_failure_classification": initial_classification,
-                },
-                "candidate_strategy": {
-                    "tool_type": candidate.get("tool_type"),
-                    "score": candidate.get("score"),
-                    "score_reasons": candidate.get("score_reasons", []),
-                    "light_verification": candidate.get("light_verification"),
-                    "selection_policy": "highest_score_first_then_fallback",
-                },
-                "api_discovery": api_discovery or {},
-                "external_solution_discovery": external_discovery or {},
-                "documentation_understanding": (api_discovery.get("result") or {}).get("documentation_understanding", {}) if isinstance(api_discovery, dict) else {},
-                "constraints": {
-                    "must_generate_adapter_for_this_candidate_only": True,
-                    "must_not_stop_after_first_external_failure": True,
-                    "must_define_network_timeout": True,
-                    "must_return_error_instead_of_raising": True,
-                    "must_return_json_serializable_dict": True,
-                    "must_not_use_mock_data": True,
-                    "must_include_source_provenance": True,
-                    "must_not_claim_success_when_response_contains_error": True,
-                    "must_expose_entrypoint_run_payload_dict": True,
-                    "must_use_standard_library_unless_requirements_declared": True,
-                    "must_not_return_error_payload_as_success": True,
-                    "must_map_extracted_or_api_data_to_output_schema": True,
-                    "must_include_valid_implementation_metadata": True,
-                    "must_define_run_payload_entrypoint": True,
-                    "must_generate_tool_py_file": True,
-                    "if_candidate_returns_html_generate_extraction_adapter": True,
-                    "if_candidate_requires_unavailable_authentication_skip_with_structured_error": True,
-                },
-                "expected_contract": {
-                    "tool_id": "string",
-                    "manifest": "tool.json compatible object",
-                    "files": {"tool.py": "python source code exposing run(payload: dict) -> dict"},
-                },
-            }
-
-            try:
-                artifact = await self.artifact_generator.generate_artifact(
-                    run_id=run_id,
-                    node_id=node_id,
-                    generation_request=generation_request,
-                )
-                if not isinstance(artifact, dict) or not artifact.get("files"):
-                    artifact = self._build_generic_web_extract_artifact(
-                        capability=capability, step=step, candidate=candidate,
-                        api_discovery=api_discovery or {}, external_discovery=external_discovery or {},
-                        reason="llm_candidate_artifact_empty",
-                    )
-
-                verification = self.sandbox_verifier.verify_tool_artifact(
-                    artifact=artifact,
-                    test_input=tool_input,
-                    allow_network=True,
-                )
-                attempt_record = {
-                    "attempt_index": attempt_index,
-                    "candidate": candidate,
-                    "verification": verification,
-                }
-                if not verification.get("safe_to_register") and verification.get("status") != "passed":
-                    deterministic_artifact = self._build_generic_web_extract_artifact(
-                        capability=capability, step=step, candidate=candidate,
-                        api_discovery=api_discovery or {}, external_discovery=external_discovery or {},
-                        reason="llm_candidate_sandbox_failed",
-                    )
-                    deterministic_verification = self.sandbox_verifier.verify_tool_artifact(
-                        artifact=deterministic_artifact,
-                        test_input=tool_input,
-                        allow_network=True,
-                    )
-                    attempt_record["deterministic_verification"] = deterministic_verification
-                    if deterministic_verification.get("safe_to_register") or deterministic_verification.get("status") == "passed":
-                        artifact = deterministic_artifact
-                        verification = deterministic_verification
-                        attempt_record["verification"] = verification
-                        attempt_record["used_deterministic_generic_web_extract"] = True
-                    else:
-                        attempt_record["status"] = "sandbox_verification_failed"
-                        attempts.append(attempt_record)
-                        await event_bus.emit(run_id, {
-                            "type": "CANDIDATE_ATTEMPT_FAILED",
-                            "title": "Candidate attempt failed",
-                            "message": "Sandbox verification failed for candidate adapter.",
-                            "node_id": node_id,
-                            "step_id": step_id,
-                            "result": attempt_record,
-                        })
-                        continue
-
-                installed = self.artifact_installer.install_artifact(
-                    artifact=artifact,
-                    capability=capability,
-                    source_step=step,
-                    user_input=state.get("input", ""),
-                )
-                result = self.tool_runner.run_tool(
-                    installed,
-                    tool_input,
-                    run_id=run_id,
-                    node_id=node_id,
-                    step_id=step_id,
-                    capability=capability,
-                )
-                result = self._enforce_evidence_quality(result, tool_input)
-                classification = self.result_classifier.classify(result)
-                attempt_record.update({
-                    "status": "success" if classification.get("success") else "failed",
-                    "classification": classification,
-                    "tool": self._public_tool_spec(installed),
-                    "result": result,
-                })
-                attempts.append(attempt_record)
-
-                await event_bus.emit(run_id, {
-                    "type": "CANDIDATE_ATTEMPT_DONE",
-                    "title": "Candidate attempt completed",
-                    "message": f"status={attempt_record['status']} category={classification.get('category')}",
-                    "node_id": node_id,
-                    "step_id": step_id,
-                    "result": attempt_record,
-                })
-
-                if classification.get("success"):
-                    result.setdefault("fallback", {})["multi_candidate"] = {
-                        "selected_attempt_index": attempt_index,
-                        "attempt_count": len(attempts),
-                    }
-                    return {"status": "success", "tool": installed, "result": result, "attempts": attempts}
-
-            except Exception as exc:
-                attempt_record = {
-                    "attempt_index": attempt_index,
-                    "candidate": candidate,
-                    "status": "exception",
-                    "error": {"message": str(exc)},
-                }
-                attempts.append(attempt_record)
-                await event_bus.emit(run_id, {
-                    "type": "CANDIDATE_ATTEMPT_EXCEPTION",
-                    "title": "Candidate attempt raised an exception",
-                    "message": str(exc),
-                    "node_id": node_id,
-                    "step_id": step_id,
-                    "result": attempt_record,
-                })
-                continue
-
-        credential_attempts = [a for a in attempts if isinstance(a, dict) and a.get("status") == "credential_required_skipped_by_default"]
-        non_credential_attempts = [a for a in attempts if isinstance(a, dict) and a.get("status") != "credential_required_skipped_by_default"]
-        if credential_attempts and not non_credential_attempts:
+        if credential_candidates and not any(a.get("status") == "success" for a in attempts):
             return {
                 "status": "human_interaction_required",
                 "attempts": attempts,
                 "human_interaction": {
                     "type": "choose_credential_or_skip",
-                    "reason": "Only credential-protected candidates were available.",
+                    "reason": "No no-credential candidate produced a validated result. Credential-protected candidates are available.",
                     "fields": {"credential": {"label": "Credential", "secret": True, "required": False}},
                     "options": [
                         {"id": "provide_credential", "label": "Provide credential and retry protected candidate"},
-                        {"id": "skip_protected_candidates", "label": "Skip protected candidates and report no usable no-key method"},
+                        {"id": "skip_protected_candidates", "label": "Skip protected candidates and continue/report no usable method"},
                     ],
+                    "candidates": [self._compact_candidate_for_interaction(c) for c in credential_candidates[:5]],
                 },
             }
 
         await event_bus.emit(run_id, {
-            "type": "MULTI_CANDIDATE_FALLBACK_EXHAUSTED",
-            "title": "All fallback candidates failed",
-            "message": f"Tried {len(attempts)} candidate(s); none succeeded.",
+            "type": "PARALLEL_CANDIDATE_EVALUATION_EXHAUSTED",
+            "title": "All evaluated candidates failed",
+            "message": f"Evaluated {len(attempts)} candidate attempt(s); none produced validated output.",
             "node_id": node_id,
             "step_id": step_id,
-            "result": {"attempts": attempts},
+            "result": {"attempts": self._compact_attempts(attempts)},
         })
         return {"status": "all_candidates_failed", "attempts": attempts}
 
+    async def _attempt_runtime_candidate(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        step_id: str,
+        capability: str,
+        step: dict[str, Any],
+        state: dict[str, Any],
+        tool_input: dict[str, Any],
+        candidate: dict[str, Any],
+        attempt_index: int,
+        api_discovery: dict[str, Any],
+        external_discovery: dict[str, Any],
+        failed_result: dict[str, Any],
+        initial_classification: dict[str, Any],
+    ) -> dict[str, Any]:
+        await event_bus.emit(run_id, {
+            "type": "CANDIDATE_ATTEMPT_STARTED",
+            "title": "Candidate attempt started",
+            "message": f"Parallel attempt {attempt_index}",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": {"candidate": candidate},
+        })
+        generation_request = {
+            "request_type": "runtime_tool_artifact_generation_candidate_parallel",
+            "capability": capability,
+            "step": step,
+            "user_input": state.get("input", ""),
+            "tool_input": tool_input,
+            "candidate_attempt": {
+                "attempt_index": attempt_index,
+                "candidate": candidate,
+                "tool_type": candidate.get("tool_type"),
+                "score": candidate.get("score"),
+                "light_verification": candidate.get("light_verification"),
+                "previous_failure": failed_result,
+                "previous_failure_classification": initial_classification,
+            },
+            "candidate_strategy": {
+                "tool_type": candidate.get("tool_type"),
+                "score": candidate.get("score"),
+                "score_reasons": candidate.get("score_reasons", []),
+                "light_verification": candidate.get("light_verification"),
+                "selection_policy": "parallel_no_key_first_evidence_scored",
+            },
+            "api_discovery": api_discovery or {},
+            "external_solution_discovery": external_discovery or {},
+            "documentation_understanding": (api_discovery.get("result") or {}).get("documentation_understanding", {}) if isinstance(api_discovery, dict) else {},
+            "constraints": {
+                "must_generate_adapter_for_this_candidate_only": True,
+                "must_define_network_timeout": True,
+                "must_return_error_instead_of_raising": True,
+                "must_return_json_serializable_dict": True,
+                "must_not_use_mock_data": True,
+                "must_include_source_provenance": True,
+                "must_not_claim_success_when_response_contains_error": True,
+                "must_expose_entrypoint_run_payload_dict": True,
+                "must_use_standard_library_unless_requirements_declared": True,
+                "must_not_return_error_payload_as_success": True,
+                "must_map_extracted_or_api_data_to_output_schema": True,
+                "must_include_valid_implementation_metadata": True,
+                "must_define_run_payload_entrypoint": True,
+                "must_generate_tool_py_file": True,
+                "if_candidate_returns_html_generate_extraction_adapter": True,
+                "if_candidate_requires_unavailable_authentication_skip_with_structured_error": True,
+            },
+            "expected_contract": {
+                "tool_id": "string",
+                "manifest": "tool.json compatible object",
+                "files": {"tool.py": "python source code exposing run(payload: dict) -> dict"},
+            },
+        }
+        attempt_record: dict[str, Any] = {"attempt_index": attempt_index, "candidate": candidate}
+        try:
+            artifact = await self.artifact_generator.generate_artifact(run_id=run_id, node_id=node_id, generation_request=generation_request)
+            if not self._artifact_has_valid_contract_shape(artifact):
+                artifact = self._build_generic_web_extract_artifact(
+                    capability=capability, step=step, candidate=candidate,
+                    api_discovery=api_discovery or {}, external_discovery=external_discovery or {},
+                    reason="llm_candidate_artifact_contract_invalid",
+                )
+
+            verification = self.sandbox_verifier.verify_tool_artifact(artifact=artifact, test_input=tool_input, allow_network=True)
+            attempt_record["verification"] = verification
+            if not verification.get("safe_to_register") and verification.get("status") != "passed":
+                deterministic_artifact = self._build_generic_web_extract_artifact(
+                    capability=capability, step=step, candidate=candidate,
+                    api_discovery=api_discovery or {}, external_discovery=external_discovery or {},
+                    reason="sandbox_or_contract_failed",
+                )
+                deterministic_verification = self.sandbox_verifier.verify_tool_artifact(artifact=deterministic_artifact, test_input=tool_input, allow_network=True)
+                attempt_record["deterministic_verification"] = deterministic_verification
+                if deterministic_verification.get("safe_to_register") or deterministic_verification.get("status") == "passed":
+                    artifact = deterministic_artifact
+                    verification = deterministic_verification
+                    attempt_record["verification"] = verification
+                    attempt_record["used_deterministic_adapter"] = True
+                else:
+                    attempt_record.update({"status": "sandbox_verification_failed", "classification": {"success": False, "category": "sandbox_verification_failed"}})
+                    return attempt_record
+
+            installed = self.artifact_installer.install_artifact(artifact=artifact, capability=capability, source_step=step, user_input=state.get("input", ""))
+            result = self.tool_runner.run_tool(installed, tool_input, run_id=run_id, node_id=node_id, step_id=step_id, capability=capability)
+            result = self._enforce_evidence_quality(result, tool_input)
+            classification = self.result_classifier.classify(result)
+            attempt_record.update({
+                "status": "success" if classification.get("success") else "failed",
+                "classification": classification,
+                "tool": self._public_tool_spec(installed),
+                "installed_tool": installed,
+                "result": result,
+            })
+            await event_bus.emit(run_id, {
+                "type": "CANDIDATE_ATTEMPT_DONE",
+                "title": "Candidate attempt completed",
+                "message": f"status={attempt_record['status']} category={classification.get('category')}",
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": {**attempt_record, "installed_tool": self._public_tool_spec(installed)},
+            })
+            return attempt_record
+        except Exception as exc:
+            attempt_record.update({"status": "exception", "classification": {"success": False, "category": "exception"}, "error": {"message": str(exc)}})
+            return attempt_record
+
+    def _credential_skip_attempt(self, attempt_index: int, candidate: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "attempt_index": attempt_index,
+            "candidate": candidate,
+            "status": "credential_required_skipped_by_default",
+            "classification": {"success": False, "category": "credential_required"},
+            "error": {"code": "credential_required", "message": "Candidate requires a credential. No-credential candidates are evaluated first."},
+        }
+
+    def _compact_candidate_for_interaction(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        return make_json_safe({
+            "name": candidate.get("name"),
+            "url": candidate.get("url") or candidate.get("official_documentation_url"),
+            "source": candidate.get("source"),
+            "tool_type": candidate.get("tool_type"),
+            "score": candidate.get("score"),
+            "score_reasons": candidate.get("score_reasons"),
+        })
+
+    def _artifact_has_valid_contract_shape(self, artifact: Any) -> bool:
+        if not isinstance(artifact, dict):
+            return False
+        files = artifact.get("files") if isinstance(artifact.get("files"), dict) else {}
+        manifest = artifact.get("manifest") if isinstance(artifact.get("manifest"), dict) else {}
+        implementation = manifest.get("implementation") if isinstance(manifest.get("implementation"), dict) else {}
+        code = str(files.get("tool.py") or "")
+        return bool(code.strip() and "def run(" in code and implementation.get("function") == "run" and implementation.get("type"))
 
     def _enforce_evidence_quality(self, result: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         """Convert low-quality success payloads into retryable structured errors.

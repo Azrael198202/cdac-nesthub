@@ -11,6 +11,7 @@ from typing import Any
 
 from ai_core.config.paths import RUNTIME_TRACES
 from ai_core.utils.safe_json import safe_json_dumps
+from ai_core.research.endpoint_resolver import EndpointResolver
 
 
 @dataclass
@@ -39,19 +40,24 @@ class EndpointVerifier:
     def __init__(self) -> None:
         self.trace_dir = RUNTIME_TRACES / "endpoint_checks"
         self.trace_dir.mkdir(parents=True, exist_ok=True)
+        self.endpoint_resolver = EndpointResolver()
 
     def verify_discovery(self, discovery: dict[str, Any]) -> dict[str, Any]:
         result = discovery.get("result") if isinstance(discovery.get("result"), dict) else {}
         urls = self._candidate_urls(discovery)
-        checks = [self.verify_url(url) for url in urls[:8]]
+        resolved_endpoints = self.endpoint_resolver.resolve_from_discovery(discovery)
+        resolved_urls = [item.get("url") for item in resolved_endpoints if isinstance(item, dict) and item.get("url")]
+        ordered_urls = self._dedupe_urls(resolved_urls + urls)
+        checks = [self.verify_url(url) for url in ordered_urls[:12]]
         verified_json = next((check for check in checks if check.supports_json and check.status == "success"), None)
         html_candidate = next((check for check in checks if check.is_html and check.status in {"success", "html_page"}), None)
 
         recommendation = {
             "verified_json_api": verified_json is not None,
-            "recommended_tool_type": "api" if verified_json else ("web_extract" if html_candidate else "external_solution_discovery"),
+            "recommended_tool_type": "json_api" if verified_json else ("web_extract" if html_candidate else "external_solution_discovery"),
             "selected_verified_endpoint": asdict(verified_json) if verified_json else None,
             "selected_document_page": asdict(html_candidate) if html_candidate else None,
+            "resolved_endpoint_candidates": resolved_endpoints[:20],
             "checks": [asdict(check) for check in checks],
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -153,6 +159,17 @@ class EndpointVerifier:
         output: list[str] = []
         for url in urls:
             normalized = self._normalize_url(url)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            output.append(normalized)
+        return output
+
+    def _dedupe_urls(self, urls: list[str]) -> list[str]:
+        seen: set[str] = set()
+        output: list[str] = []
+        for url in urls:
+            normalized = self._normalize_url(str(url or ""))
             if not normalized or normalized in seen:
                 continue
             seen.add(normalized)

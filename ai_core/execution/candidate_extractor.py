@@ -59,6 +59,34 @@ class CandidateExtractor:
                     "evidence": item,
                 })
 
+        endpoint_verification = discovery.get("endpoint_verification") if isinstance(discovery.get("endpoint_verification"), dict) else {}
+        runtime_endpoint_verification = result.get("runtime_endpoint_verification") if isinstance(result.get("runtime_endpoint_verification"), dict) else {}
+        for verification in (endpoint_verification, runtime_endpoint_verification):
+            selected_endpoint = verification.get("selected_verified_endpoint") if isinstance(verification.get("selected_verified_endpoint"), dict) else None
+            if selected_endpoint and selected_endpoint.get("url"):
+                output.append({
+                    "name": str(selected_endpoint.get("url")),
+                    "url": str(selected_endpoint.get("url")),
+                    "official_documentation_url": str(selected_endpoint.get("url")),
+                    "rank": 50,
+                    "source": "verified_endpoint",
+                    "supports_json": True,
+                    "requires_api_key": bool(selected_endpoint.get("requires_authentication")),
+                    "evidence": {"endpoint_verification": selected_endpoint},
+                })
+            for idx, endpoint in enumerate(verification.get("resolved_endpoint_candidates") or [], start=60):
+                if isinstance(endpoint, dict) and endpoint.get("url"):
+                    output.append({
+                        "name": str(endpoint.get("url")),
+                        "url": str(endpoint.get("url")),
+                        "official_documentation_url": str(endpoint.get("url")),
+                        "rank": idx,
+                        "source": "resolved_endpoint_candidate",
+                        "supports_json": True,
+                        "requires_api_key": False,
+                        "evidence": {"resolved_endpoint": endpoint},
+                    })
+
         # External solution discovery documents are also candidate pages. They
         # may be API documentation, static HTML pages, or pages that require a
         # browser extractor. Keep them in the same candidate pool so runtime
