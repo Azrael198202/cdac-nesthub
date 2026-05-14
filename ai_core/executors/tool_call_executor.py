@@ -136,6 +136,7 @@ class ToolCallExecutor:
         execution_steps: list[dict[str, Any]] = []
         blocked_steps: list[dict[str, Any]] = []
         human_interactions: list[dict[str, Any]] = []
+        optional_human_interactions: list[dict[str, Any]] = []
         missing_tools: list[dict[str, Any]] = []
         safety_holds: list[dict[str, Any]] = []
         generated_modules: list[dict[str, Any]] = []
@@ -337,21 +338,16 @@ class ToolCallExecutor:
                         if fallback_execution and fallback_execution.get("status") in {"human_interaction_required", "optional_human_interaction_available"}:
                             interaction = fallback_execution.get("human_interaction") or {}
                             interaction_required = bool(interaction.get("required", fallback_execution.get("status") == "human_interaction_required"))
-                            # Optional credential/API-key upgrades must not pause the workflow when
-                            # no-key evidence paths have already been attempted. Record them as
-                            # metadata on the blocked step only; required interactions are the only
-                            # ones that enter human_interactions and change the final state to waiting.
+                            interaction_payload = self._build_credential_interaction_payload(
+                                interaction=interaction,
+                                step_id=step_id,
+                                step=step,
+                                required=interaction_required,
+                            )
                             if interaction_required:
-                                human_interactions.append({
-                                    "step_id": step_id,
-                                    "type": interaction.get("type") or "choose_credential_or_skip",
-                                    "required": True,
-                                    "objective": step.get("objective"),
-                                    "fields": interaction.get("fields") or {},
-                                    "options": interaction.get("options") or [],
-                                    "reason": interaction.get("reason") or "A candidate requires credentials. Provide them or skip to another method.",
-                                    "source_step": step,
-                                })
+                                human_interactions.append(interaction_payload)
+                            else:
+                                optional_human_interactions.append(interaction_payload)
                         blocked_steps.append({
                             "step_id": step_id,
                             "status": generated_tool.get("status", "runtime_discovery_blocked"),
@@ -589,24 +585,33 @@ class ToolCallExecutor:
                     tool_result.setdefault("fallback_attempts", self._compact_attempts(fallback_execution.get("attempts", [])))
                 elif fallback_execution and fallback_execution.get("status") in {"human_interaction_required", "optional_human_interaction_available"}:
                     interaction = fallback_execution.get("human_interaction") or {}
-                    human_interactions.append({
-                        "step_id": step_id,
-                        "type": interaction.get("type") or "choose_credential_or_skip",
-                                "required": bool(interaction.get("required", True)),
-                        "objective": step.get("objective"),
-                        "fields": interaction.get("fields") or {},
-                        "options": interaction.get("options") or [],
-                        "reason": interaction.get("reason") or "A candidate requires credentials. Provide them or skip to another method.",
-                        "source_step": step,
-                    })
-                    tool_result = {
-                        "status": "error",
-                        "error": {"code": "credential_choice_required", "message": "Credential-protected candidates require a user choice."},
-                        "data": {},
-                        "source": "multi_candidate_fallback",
-                        "requires_human_confirmation": False,
-                        "fallback_attempts": self._compact_attempts(fallback_execution.get("attempts", [])),
-                    }
+                    interaction_required = bool(interaction.get("required", fallback_execution.get("status") == "human_interaction_required"))
+                    interaction_payload = self._build_credential_interaction_payload(
+                        interaction=interaction,
+                        step_id=step_id,
+                        step=step,
+                        required=interaction_required,
+                    )
+                    if interaction_required:
+                        human_interactions.append(interaction_payload)
+                        tool_result = {
+                            "status": "error",
+                            "error": {"code": "credential_choice_required", "message": "Credential-protected candidates require a user choice."},
+                            "data": {},
+                            "source": "multi_candidate_fallback",
+                            "requires_human_confirmation": False,
+                            "fallback_attempts": self._compact_attempts(fallback_execution.get("attempts", [])),
+                        }
+                    else:
+                        optional_human_interactions.append(interaction_payload)
+                        tool_result = {
+                            "status": "error",
+                            "error": {"code": "optional_credential_available", "message": "A credential-protected candidate is available as an optional upgrade."},
+                            "data": {"optional_human_interaction": interaction_payload},
+                            "source": "multi_candidate_fallback",
+                            "requires_human_confirmation": False,
+                            "fallback_attempts": self._compact_attempts(fallback_execution.get("attempts", [])),
+                        }
                 elif fallback_execution and fallback_execution.get("attempts"):
                     tool_result.setdefault("fallback_attempts", self._compact_attempts(fallback_execution.get("attempts", [])))
 
@@ -639,7 +644,7 @@ class ToolCallExecutor:
                     "tool_result": tool_result,
                 })
 
-        status = self._overall_status(execution_steps, blocked_steps, human_interactions, missing_tools, safety_holds)
+        status = self._overall_status(execution_steps, blocked_steps, human_interactions, missing_tools, safety_holds, optional_human_interactions)
         result = {
             "_executor_type": "tool_call",
             "_node_id": node_id,
@@ -647,6 +652,7 @@ class ToolCallExecutor:
             "execution_steps": execution_steps,
             "blocked_steps": blocked_steps,
             "human_interactions": human_interactions,
+            "optional_human_interactions": optional_human_interactions,
             "missing_tools": missing_tools,
             "generated_modules": generated_modules,
             "safety_holds": safety_holds,
@@ -657,6 +663,7 @@ class ToolCallExecutor:
                 "failed": len([step for step in execution_steps if step.get("status") in {"tool_execution_failed", "module_execution_failed"}]),
                 "blocked": len(blocked_steps),
                 "human_interactions": len(human_interactions),
+                "optional_human_interactions": len(optional_human_interactions),
                 "missing_tools": len(missing_tools),
                 "generated_modules": len(generated_modules),
                 "safety_holds": len(safety_holds),
@@ -1806,14 +1813,22 @@ class ToolCallExecutor:
                 "status": "optional_human_interaction_available",
                 "attempts": attempts,
                 "human_interaction": {
-                    "type": "optional_api_key_upgrade",
-                    "reason": "No no-credential candidate produced a validated executable result. You may provide a credential for protected candidates, or skip and report the best no-key evidence/error summary.",
+                    "type": "credential_optional_upgrade",
+                    "title": "Optional API Key Available",
+                    "message": "A credential-protected provider may improve the result. You can provide an API key or continue without it.",
+                    "reason": "No no-credential candidate produced a validated executable result. You may provide a credential for protected candidates, or continue without an API key using the best available no-key evidence or error summary.",
                     "required": False,
-                    "fields": {"credential": {"label": "API Key / Credential", "secret": True, "required": False, "placeholder": "Paste key here, or choose continue_without_key"}},
+                    "fields": {"credential": {"label": "API Key / Credential", "secret": True, "required": False, "placeholder": "Paste API key here"}},
+                    "secret_fields": [
+                        {"name": "credential", "label": "API Key / Credential", "interaction_type": "secret", "required": False, "placeholder": "Paste API key here"}
+                    ],
+                    "actions": [
+                        {"id": "continue_without_key", "label": "Continue without API key"},
+                        {"id": "provide_credential", "label": "Provide API key and continue"},
+                    ],
                     "options": [
                         {"id": "continue_without_key", "label": "Continue without API key"},
-                        {"id": "provide_credential", "label": "Provide API key and retry protected candidate"},
-                        {"id": "skip_protected_candidates", "label": "Skip protected candidates"},
+                        {"id": "provide_credential", "label": "Provide API key and continue"},
                     ],
                     "candidates": [self._compact_candidate_for_interaction(c) for c in credential_candidates[:5]],
                 },
@@ -2172,9 +2187,50 @@ class ToolCallExecutor:
     def _missing_fields(self, step: dict[str, Any]) -> list[str]:
         return self.state_consistency.missing_fields(step)
 
-    def _overall_status(self, execution_steps, blocked_steps, human_interactions, missing_tools, safety_holds) -> str:
+    def _build_credential_interaction_payload(self, *, interaction: dict[str, Any], step_id: str, step: dict[str, Any], required: bool) -> dict[str, Any]:
+        """Build an English UI contract for optional credential input.
+
+        Credential-protected candidates are treated as optional upgrades unless
+        the runtime has no no-key path and cannot continue without user choice.
+        The UI always offers two choices: provide a secret or continue without it.
+        """
+        fields = interaction.get("fields") if isinstance(interaction.get("fields"), dict) else {}
+        candidates = interaction.get("candidates") if isinstance(interaction.get("candidates"), list) else []
+        return {
+            "step_id": step_id,
+            "type": "credential_optional_upgrade",
+            "required": bool(required),
+            "title": interaction.get("title") or "Optional API Key Available",
+            "message": interaction.get("message") or "A credential-protected provider may improve the result. You can provide an API key or continue without it.",
+            "objective": step.get("objective"),
+            "reason": interaction.get("reason") or "Credential-protected candidates are optional upgrades and must not block no-key execution paths.",
+            "fields": fields,
+            "secret_fields": interaction.get("secret_fields") or [
+                {
+                    "name": "credential",
+                    "label": "API Key / Credential",
+                    "interaction_type": "secret",
+                    "required": False,
+                    "placeholder": "Paste API key here",
+                }
+            ],
+            "actions": interaction.get("actions") or [
+                {"id": "continue_without_key", "label": "Continue without API key"},
+                {"id": "provide_credential", "label": "Provide API key and continue"},
+            ],
+            "options": interaction.get("options") or [
+                {"id": "continue_without_key", "label": "Continue without API key"},
+                {"id": "provide_credential", "label": "Provide API key and continue"},
+            ],
+            "candidates": candidates,
+            "source_step": step,
+        }
+
+    def _overall_status(self, execution_steps, blocked_steps, human_interactions, missing_tools, safety_holds, optional_human_interactions=None) -> str:
         if any(bool(item.get("required", True)) for item in human_interactions if isinstance(item, dict)):
             return "waiting_for_human_information"
+        if optional_human_interactions and not any(step.get("status") == "executed" for step in execution_steps):
+            return "waiting_optional_upgrade"
         if missing_tools:
             return "missing_tool_implementation"
         if safety_holds:

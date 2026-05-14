@@ -35,6 +35,15 @@ class ContinuationEngine:
                     "result": result,
                 }
 
+        optional_interactions = result.get("optional_human_interactions") or []
+        if optional_interactions:
+            return {
+                "kind": "optional_credential_choice",
+                "node_id": node_id,
+                "request": self._build_optional_credential_request(optional_interactions),
+                "result": result,
+            }
+
         missing_tools = result.get("missing_tools") or []
         if missing_tools:
             return {
@@ -56,6 +65,33 @@ class ContinuationEngine:
             }
 
         return None
+
+    def _build_optional_credential_request(self, interactions: list[dict[str, Any]]) -> dict[str, Any]:
+        first = interactions[0] if interactions and isinstance(interactions[0], dict) else {}
+        return {
+            "type": "credential_optional_upgrade",
+            "title": first.get("title") or "Optional API Key Available",
+            "message": first.get("message") or "A credential-protected provider may improve the result. You can provide an API key or continue without it.",
+            "required": False,
+            "secret_fields": first.get("secret_fields") or [
+                {
+                    "name": "credential",
+                    "label": "API Key / Credential",
+                    "interaction_type": "secret",
+                    "required": False,
+                    "placeholder": "Paste API key here",
+                }
+            ],
+            "actions": first.get("actions") or [
+                {"id": "continue_without_key", "label": "Continue without API key"},
+                {"id": "provide_credential", "label": "Provide API key and continue"},
+            ],
+            "options": first.get("options") or [
+                {"id": "continue_without_key", "label": "Continue without API key"},
+                {"id": "provide_credential", "label": "Provide API key and continue"},
+            ],
+            "interactions": interactions,
+        }
 
     def _detect_language(self, state: dict[str, Any]) -> str | None:
         results = state.get("results", {}) if isinstance(state, dict) else {}

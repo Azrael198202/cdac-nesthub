@@ -203,6 +203,57 @@ class WorkflowRuntime:
             await self._continue(state)
             return
 
+        if pending.get("kind") == "optional_credential_choice":
+            action = decision
+            if modified_result and isinstance(modified_result, dict):
+                action = str(modified_result.get("action") or modified_result.get("choice") or decision)
+
+            node_id = pending.get("node_id")
+            retry_index = pending.get("retry_node_index")
+            if retry_index is None and node_id:
+                retry_index = self._node_index_by_id(state.get("workflow", {}), node_id)
+
+            if action in {"provide_credential", "approve"}:
+                secret_value = None
+                secret_key = "runtime_optional_credential"
+                if modified_result and isinstance(modified_result, dict):
+                    secret_value = modified_result.get("credential") or modified_result.get("api_key") or modified_result.get("value")
+                    secret_key = str(modified_result.get("secret_key") or modified_result.get("provider") or secret_key)
+                if not secret_value:
+                    await self._emit(run_id, {
+                        "type": "OPTIONAL_CREDENTIAL_INPUT_INVALID",
+                        "title": "API key was not provided",
+                        "message": "Please provide an API key or choose Continue without API key.",
+                    })
+                    self.checkpoints.save(run_id, state)
+                    return
+                from ai_core.secrets.secret_store import SecretStore
+                SecretStore().set(secret_key, str(secret_value))
+                state.setdefault("runtime_credentials", {})[secret_key] = "***"
+                state.setdefault("runtime_execution_preferences", {})["credential_mode"] = "provided"
+                await self._emit(run_id, {
+                    "type": "OPTIONAL_CREDENTIAL_SAVED",
+                    "title": "API key saved",
+                    "message": "API key saved. Resuming workflow with the credential-protected candidate available.",
+                    "progress": state.get("progress", 0),
+                })
+            else:
+                state.setdefault("runtime_execution_preferences", {})["credential_mode"] = "skip"
+                state.setdefault("runtime_execution_preferences", {})["skip_credential_candidates"] = True
+                await self._emit(run_id, {
+                    "type": "OPTIONAL_CREDENTIAL_SKIPPED",
+                    "title": "Continuing without API key",
+                    "message": "Credential-protected candidates were skipped. Runtime will continue with no-key or evidence-based methods when available.",
+                    "progress": state.get("progress", 0),
+                })
+
+            if node_id:
+                state.get("results", {}).pop(node_id, None)
+                state["node_index"] = int(retry_index if retry_index is not None else self._node_index_by_id(state.get("workflow", {}), node_id))
+
+            await self._continue(state)
+            return
+
         if pending.get("kind") == "secret_input":
             if decision != "approve" or not modified_result:
                 await self._emit(run_id, {
@@ -571,6 +622,20 @@ class WorkflowRuntime:
                         "node_id": node_id,
                         "attempt_number": attempt_number,
                         "message": continuation_action.get("message"),
+                        "result": result,
+                        "run_id": run_id,
+                        "progress": done,
+                    })
+                    return
+
+                if continuation_action.get("kind") == "optional_credential_choice":
+                    await self._emit(run_id, {
+                        "type": "OPTIONAL_CREDENTIAL_CHOICE",
+                        "title": "Optional API Key Available",
+                        "node_id": node_id,
+                        "attempt_number": attempt_number,
+                        "message": continuation_action.get("request", {}).get("message"),
+                        "request": continuation_action.get("request"),
                         "result": result,
                         "run_id": run_id,
                         "progress": done,

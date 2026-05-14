@@ -50,7 +50,25 @@ class OutputExecutor:
         blocked_steps = execution.get("blocked_steps") if isinstance(execution.get("blocked_steps"), list) else []
         safety_holds = execution.get("safety_holds") if isinstance(execution.get("safety_holds"), list) else []
         human_interactions = execution.get("human_interactions") if isinstance(execution.get("human_interactions"), list) else []
+        optional_human_interactions = execution.get("optional_human_interactions") if isinstance(execution.get("optional_human_interactions"), list) else []
         missing_tools = execution.get("missing_tools") if isinstance(execution.get("missing_tools"), list) else []
+
+        if status == "waiting_optional_upgrade":
+            request = self._optional_upgrade_request(optional_human_interactions)
+            message = request.get("message") or "Optional API key input is available."
+            return {
+                "_executor_type": "output",
+                "_node_id": node_config.get("node_id", "output"),
+                "status": "waiting_optional_upgrade",
+                "message": message,
+                "execution_status": status,
+                "interaction_request": request,
+                "executed_steps": len(execution_steps),
+                "blocked_steps": blocked_steps,
+                "optional_human_interactions": optional_human_interactions,
+                "final_answer": message,
+                "previous_result_keys": list(results.keys()),
+            }
 
         if status in self.WAITING_STATUSES or (blocked_steps and not execution_steps):
             message = self._waiting_message(status, human_interactions, safety_holds, missing_tools, blocked_steps)
@@ -104,6 +122,32 @@ class OutputExecutor:
             "executed_steps": len(execution_steps),
             "blocked_steps": blocked_steps,
             "previous_result_keys": list(results.keys()),
+        }
+
+    def _optional_upgrade_request(self, interactions: list[dict[str, Any]]) -> dict[str, Any]:
+        first = interactions[0] if interactions and isinstance(interactions[0], dict) else {}
+        return {
+            "type": "credential_optional_upgrade",
+            "title": first.get("title") or "Optional API Key Available",
+            "message": first.get("message") or "A credential-protected provider may improve the result. You can provide an API key or continue without it.",
+            "required": False,
+            "secret_fields": first.get("secret_fields") or [
+                {
+                    "name": "credential",
+                    "label": "API Key / Credential",
+                    "interaction_type": "secret",
+                    "required": False,
+                    "placeholder": "Paste API key here",
+                }
+            ],
+            "actions": first.get("actions") or [
+                {"id": "continue_without_key", "label": "Continue without API key"},
+                {"id": "provide_credential", "label": "Provide API key and continue"},
+            ],
+            "options": first.get("options") or [
+                {"id": "continue_without_key", "label": "Continue without API key"},
+                {"id": "provide_credential", "label": "Provide API key and continue"},
+            ],
         }
 
     def _trust_summary(self, provenance_records: list[dict[str, Any]]) -> dict[str, Any]:
