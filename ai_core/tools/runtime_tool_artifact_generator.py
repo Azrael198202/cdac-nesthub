@@ -94,6 +94,9 @@ class RuntimeToolArtifactGenerator:
                 "Do not use blocked primitives such as eval, exec, compile, __import__, input, open, subprocess, os, pty, socketserver, ftplib, telnetlib, or shutil. "
                 "Prefer Python standard library network access such as urllib.request so sandbox tests can run without installing third-party packages. "
                 "If endpoint verification says verified_json_api=false or recommended_tool_type=web_extract, do not generate a JSON API client; generate a generic webpage extraction adapter using documented HTML evidence. "
+                "For web extraction adapters, use the candidate URL/page evidence supplied in candidate_attempt or endpoint verification. Fetch with a browser-like User-Agent and timeout, strip HTML safely, select snippets using payload.known / payload.parameters.known values, and return extracted_text plus evidence_snippets under data. "
+                "If live fetch fails but verified page evidence was supplied in the generation request, use that evidence as the extraction source and mark retrieval.used_live_fetch=false; this is verified runtime evidence, not mock data. "
+                "A web extraction sandbox test should succeed when it can extract non-empty relevant evidence from either live fetch or supplied verified evidence. "
                 "Avoid top-level network calls. Put side effects inside the callable. "
                 "Return code and metadata only inside the artifact JSON."
             ),

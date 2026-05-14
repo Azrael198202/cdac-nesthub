@@ -16,6 +16,7 @@ from ai_core.workflow.execution_state_repair import ExecutionStateRepair
 from ai_core.tools.generic_tool_runner import GenericToolRunner
 from ai_core.tools.runtime_tool_artifact_generator import RuntimeToolArtifactGenerator
 from ai_core.tools.runtime_generated_tool_installer import RuntimeGeneratedToolInstaller
+from ai_core.tools.generic_web_extract_artifact import GenericWebExtractArtifactFactory
 from ai_core.research.api_discovery import ApiDiscoveryEngine
 from ai_core.research.external_solution_discovery import ExternalSolutionDiscoveryEngine
 from ai_core.sandbox.verified_sandbox_runtime import VerifiedSandboxRuntime
@@ -59,6 +60,7 @@ class ToolCallExecutor:
         self.candidate_extractor = CandidateExtractor()
         self.candidate_scorer = CandidateStrategyScorer()
         self.capability_resolution = CapabilityResolutionDecision()
+        self.generic_web_extract_factory = GenericWebExtractArtifactFactory()
 
     async def execute(
         self,
@@ -1273,13 +1275,19 @@ class ToolCallExecutor:
                 node_id=node_id,
                 generation_request=fallback_request,
             )
+            tool_input = self._build_tool_input(
+                step=step, run_id=run_id, node_id=node_id, step_id=step_id, user_input=state.get("input", "")
+            )
             if not isinstance(artifact, dict) or not artifact.get("files"):
-                return None
+                deterministic = await self._build_and_verify_generic_web_extract_tool(
+                    run_id=run_id, node_id=node_id, step_id=step_id, capability=capability,
+                    step=step, state=state, api_discovery=api_discovery, external_discovery=external_discovery,
+                    candidate=None, tool_input=tool_input, reason="llm_fallback_artifact_empty",
+                )
+                return deterministic
             verification = self.sandbox_verifier.verify_tool_artifact(
                 artifact=artifact,
-                test_input=self._build_tool_input(
-                    step=step, run_id=run_id, node_id=node_id, step_id=step_id, user_input=state.get("input", "")
-                ),
+                test_input=tool_input,
                 allow_network=True,
             )
             artifact.setdefault("verification", {})["fallback_sandbox_verification"] = verification
@@ -1292,7 +1300,12 @@ class ToolCallExecutor:
                 "result": verification,
             })
             if not verification.get("safe_to_register") and verification.get("status") != "passed":
-                return None
+                deterministic = await self._build_and_verify_generic_web_extract_tool(
+                    run_id=run_id, node_id=node_id, step_id=step_id, capability=capability,
+                    step=step, state=state, api_discovery=api_discovery, external_discovery=external_discovery,
+                    candidate=None, tool_input=tool_input, reason="llm_fallback_sandbox_failed",
+                )
+                return deterministic
             installed = self.artifact_installer.install_artifact(
                 artifact=artifact,
                 capability=capability,
@@ -1318,6 +1331,122 @@ class ToolCallExecutor:
                 "step_id": step_id,
             })
             return None
+
+
+    async def _build_and_verify_generic_web_extract_tool(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        step_id: str,
+        capability: str,
+        step: dict[str, Any],
+        state: dict[str, Any],
+        api_discovery: dict[str, Any],
+        external_discovery: dict[str, Any],
+        candidate: dict[str, Any] | None,
+        tool_input: dict[str, Any],
+        reason: str,
+    ) -> dict[str, Any] | None:
+        """Build a deterministic generic HTML/text extraction tool and verify it.
+
+        This is a generic safety net for cases where the LLM-generated adapter
+        is structurally invalid. It does not contain business logic. It only
+        uses candidate URL/evidence and already-parsed runtime parameters.
+        """
+        selected = candidate or self._select_generic_web_candidate(api_discovery, external_discovery)
+        if not selected:
+            return None
+        artifact = self._build_generic_web_extract_artifact(
+            capability=capability,
+            step=step,
+            candidate=selected,
+            api_discovery=api_discovery,
+            external_discovery=external_discovery,
+            reason=reason,
+        )
+        verification = self.sandbox_verifier.verify_tool_artifact(
+            artifact=artifact,
+            test_input=tool_input,
+            allow_network=True,
+        )
+        artifact.setdefault("verification", {})["generic_web_extract_sandbox_verification"] = verification
+        await event_bus.emit(run_id, {
+            "type": "GENERIC_WEB_EXTRACT_SANDBOX_DONE",
+            "title": "Generic web extraction sandbox completed",
+            "message": f"status={verification.get('status')}",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": {"candidate": selected, "verification": verification},
+        })
+        if not verification.get("safe_to_register") and verification.get("status") != "passed":
+            return None
+        installed = self.artifact_installer.install_artifact(
+            artifact=artifact,
+            capability=capability,
+            source_step=step,
+            user_input=state.get("input", ""),
+        )
+        installed.setdefault("runtime_fallback", {})["strategy"] = "deterministic_generic_web_extract"
+        await event_bus.emit(run_id, {
+            "type": "GENERIC_WEB_EXTRACT_REGISTERED",
+            "title": "Generic web extraction tool registered",
+            "message": f"Registered generic web extraction runtime tool for capability={capability}",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": self._public_tool_spec(installed),
+        })
+        return installed
+
+
+    def _select_generic_web_candidate(self, api_discovery: dict[str, Any], external_discovery: dict[str, Any]) -> dict[str, Any] | None:
+        raw = self.candidate_extractor.extract(api_discovery or {}, external_discovery or {})
+        candidates = self.candidate_scorer.score_candidates(raw)
+        for candidate in candidates:
+            if str(candidate.get("tool_type") or "") in {"html_extract", "browser_extract"}:
+                return candidate
+        return candidates[0] if candidates else None
+
+
+    def _build_generic_web_extract_artifact(
+        self,
+        *,
+        capability: str,
+        step: dict[str, Any],
+        candidate: dict[str, Any],
+        api_discovery: dict[str, Any],
+        external_discovery: dict[str, Any],
+        reason: str,
+    ) -> dict[str, Any]:
+        evidence_text = self._candidate_evidence_text(candidate)
+        artifact = self.generic_web_extract_factory.build_artifact(
+            capability=capability,
+            candidate=candidate,
+            source_step=step,
+            evidence_text=evidence_text,
+        )
+        artifact.setdefault("manifest", {})["api_discovery"] = make_json_safe(api_discovery or {})
+        artifact.setdefault("manifest", {})["external_solution_discovery"] = make_json_safe(external_discovery or {})
+        artifact.setdefault("manifest", {})["runtime_fallback_reason"] = reason
+        artifact.setdefault("verification", {})["runtime_fallback_reason"] = reason
+        return artifact
+
+
+    def _candidate_evidence_text(self, candidate: dict[str, Any]) -> str:
+        evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
+        chunks: list[str] = []
+        for container in (evidence, evidence.get("document") if isinstance(evidence.get("document"), dict) else {}, evidence.get("source_search_result") if isinstance(evidence.get("source_search_result"), dict) else {}):
+            if not isinstance(container, dict):
+                continue
+            for key in ("text_excerpt", "snippet", "sample", "title", "description"):
+                value = container.get(key)
+                if isinstance(value, str) and value.strip():
+                    chunks.append(value.strip())
+        light = candidate.get("light_verification") if isinstance(candidate.get("light_verification"), dict) else {}
+        sample = light.get("sample")
+        if isinstance(sample, str) and sample.strip():
+            chunks.append(sample.strip())
+        return "\n".join(chunks)[:60000]
 
 
     async def _try_repair_executable_tool(
@@ -1574,8 +1703,11 @@ class ToolCallExecutor:
                     generation_request=generation_request,
                 )
                 if not isinstance(artifact, dict) or not artifact.get("files"):
-                    attempts.append({"attempt_index": attempt_index, "candidate": candidate, "status": "artifact_generation_failed"})
-                    continue
+                    artifact = self._build_generic_web_extract_artifact(
+                        capability=capability, step=step, candidate=candidate,
+                        api_discovery=api_discovery or {}, external_discovery=external_discovery or {},
+                        reason="llm_candidate_artifact_empty",
+                    )
 
                 verification = self.sandbox_verifier.verify_tool_artifact(
                     artifact=artifact,
@@ -1588,17 +1720,34 @@ class ToolCallExecutor:
                     "verification": verification,
                 }
                 if not verification.get("safe_to_register") and verification.get("status") != "passed":
-                    attempt_record["status"] = "sandbox_verification_failed"
-                    attempts.append(attempt_record)
-                    await event_bus.emit(run_id, {
-                        "type": "CANDIDATE_ATTEMPT_FAILED",
-                        "title": "Candidate attempt failed",
-                        "message": "Sandbox verification failed for candidate adapter.",
-                        "node_id": node_id,
-                        "step_id": step_id,
-                        "result": attempt_record,
-                    })
-                    continue
+                    deterministic_artifact = self._build_generic_web_extract_artifact(
+                        capability=capability, step=step, candidate=candidate,
+                        api_discovery=api_discovery or {}, external_discovery=external_discovery or {},
+                        reason="llm_candidate_sandbox_failed",
+                    )
+                    deterministic_verification = self.sandbox_verifier.verify_tool_artifact(
+                        artifact=deterministic_artifact,
+                        test_input=tool_input,
+                        allow_network=True,
+                    )
+                    attempt_record["deterministic_verification"] = deterministic_verification
+                    if deterministic_verification.get("safe_to_register") or deterministic_verification.get("status") == "passed":
+                        artifact = deterministic_artifact
+                        verification = deterministic_verification
+                        attempt_record["verification"] = verification
+                        attempt_record["used_deterministic_generic_web_extract"] = True
+                    else:
+                        attempt_record["status"] = "sandbox_verification_failed"
+                        attempts.append(attempt_record)
+                        await event_bus.emit(run_id, {
+                            "type": "CANDIDATE_ATTEMPT_FAILED",
+                            "title": "Candidate attempt failed",
+                            "message": "Sandbox verification failed for candidate adapter.",
+                            "node_id": node_id,
+                            "step_id": step_id,
+                            "result": attempt_record,
+                        })
+                        continue
 
                 installed = self.artifact_installer.install_artifact(
                     artifact=artifact,
