@@ -13,6 +13,7 @@ from ai_core.events.event_bus import event_bus
 from ai_core.research.web_research_tool import GenericWebResearchTool
 from ai_core.research.model_candidate_evaluator import ModelCandidateEvaluator
 from ai_core.research.repository_analyzer import GitHubRepositoryAnalyzer
+from ai_core.utils.safe_json import safe_json_dumps
 
 
 @dataclass
@@ -351,7 +352,7 @@ class ExternalSolutionDiscoveryEngine:
             "trace_id": trace_id,
             "trace_path": str(trace_path),
         }
-        trace_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        trace_path.write_text(safe_json_dumps(record, indent=2), encoding="utf-8")
         return record
 
     def _dedupe_by_url(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:

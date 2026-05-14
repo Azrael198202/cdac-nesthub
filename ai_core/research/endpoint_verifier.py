@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ai_core.config.paths import RUNTIME_TRACES
+from ai_core.utils.safe_json import safe_json_dumps
 
 
 @dataclass
@@ -58,7 +59,7 @@ class EndpointVerifier:
         trace_id = "endpoint_check_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
         trace_path = self.trace_dir / f"{trace_id}.json"
         trace_payload = {"discovery_trace": discovery.get("trace_id"), "recommendation": recommendation}
-        trace_path.write_text(json.dumps(trace_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        trace_path.write_text(safe_json_dumps(trace_payload, indent=2), encoding="utf-8")
         recommendation["trace_id"] = trace_id
         recommendation["trace_path"] = str(trace_path)
 

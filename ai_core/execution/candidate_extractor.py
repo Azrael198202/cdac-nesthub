@@ -59,6 +59,35 @@ class CandidateExtractor:
                     "evidence": item,
                 })
 
+        # External solution discovery documents are also candidate pages. They
+        # may be API documentation, static HTML pages, or pages that require a
+        # browser extractor. Keep them in the same candidate pool so runtime
+        # scoring can choose the best strategy.
+        for idx, item in enumerate(source.get("documents") or [], start=300):
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            if url:
+                output.append({
+                    "name": str(item.get("title") or url),
+                    "url": url,
+                    "official_documentation_url": url,
+                    "rank": idx,
+                    "source": "external_document",
+                    "evidence": item,
+                })
+
+        for idx, item in enumerate(source.get("web_results") or [], start=400):
+            if isinstance(item, dict) and item.get("url"):
+                output.append({
+                    "name": str(item.get("title") or item.get("url")),
+                    "url": str(item.get("url")),
+                    "official_documentation_url": str(item.get("url")),
+                    "rank": idx,
+                    "source": "external_web_result",
+                    "evidence": item,
+                })
+
     def _candidate(self, value: dict[str, Any], *, rank: int, source: str) -> dict[str, Any]:
         url = str(value.get("official_documentation_url") or value.get("url") or value.get("endpoint") or "").strip()
         return {

@@ -10,6 +10,7 @@ from ai_core.events.event_bus import event_bus
 from ai_core.llm.provider_router import ProviderRouter
 from ai_core.research.web_research_tool import GenericWebResearchTool
 from ai_core.research.endpoint_verifier import EndpointVerifier
+from ai_core.utils.safe_json import safe_json_dumps
 
 
 class ApiDiscoveryEngine:
@@ -278,7 +279,7 @@ class ApiDiscoveryEngine:
             "trace_id": trace_id,
             "trace_path": str(trace_path),
         }
-        trace_path.write_text(json.dumps(discovery, ensure_ascii=False, indent=2), encoding="utf-8")
+        trace_path.write_text(safe_json_dumps(discovery, indent=2), encoding="utf-8")
         return discovery
 
     async def _emit_done(self, run_id: str, node_id: str, discovery: dict[str, Any]) -> None:

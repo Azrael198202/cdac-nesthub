@@ -6,6 +6,7 @@ from typing import Any
 
 from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_KNOWLEDGE
+from ai_core.utils.safe_json import safe_json_dumps
 
 
 class RuntimeTemplateGenerator:
@@ -119,7 +120,7 @@ class RuntimeTemplateGenerator:
 
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         with self.evolution_log.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+            f.write(safe_json_dumps(event) + "\n")
 
         return event
 

@@ -92,17 +92,39 @@ class VerifiedSandboxRuntime:
             else:
                 result = self._run_in_venv(root, runner, timeout_seconds=timeout_seconds)
             checks.extend(result.get("checks", []))
-            passed = result.get("returncode") == 0
+            sandbox_error = self._sandbox_stdout_error(result.get("stdout", ""))
+            if sandbox_error:
+                checks.append({"name": "sandbox_result_error_classifier", "result": sandbox_error})
+            passed = result.get("returncode") == 0 and not sandbox_error
             return asdict(VerifiedSandboxResult(
                 status="passed" if passed else "failed",
                 mode=result.get("mode", "unknown"),
                 checks=checks,
                 safe_to_register=passed,
                 requires_human_review=not passed,
-                reason="Sandbox execution test passed." if passed else "Sandbox execution test failed.",
+                reason="Sandbox execution test passed." if passed else (sandbox_error.get("message") if sandbox_error else "Sandbox execution test failed."),
                 stdout=result.get("stdout", ""),
                 stderr=result.get("stderr", ""),
             ))
+
+    def _sandbox_stdout_error(self, stdout: str) -> dict[str, Any] | None:
+        """Treat structured error output as sandbox failure even with exit code 0."""
+        text = str(stdout or "").strip()
+        if not text:
+            return None
+        last_line = text.splitlines()[-1].strip()
+        try:
+            payload = json.loads(last_line)
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("status") in {"failed", "error", "failure"}:
+            return {"status": "failed", "message": "Sandbox runner reported failure.", "payload": make_json_safe(payload)}
+        result = payload.get("result")
+        if isinstance(result, dict) and result.get("error"):
+            return {"status": "failed", "message": "Sandbox result contains error output.", "payload": make_json_safe(result)}
+        return None
 
     def _summarize_static_failure(self, static_result: dict[str, Any]) -> str:
         checks = static_result.get("checks") if isinstance(static_result.get("checks"), list) else []

@@ -74,17 +74,24 @@ class GenericToolRunner:
                     "requires_human_confirmation": False,
                 }
             output = self._normalize_tool_output(output, source=str(tool_spec.get("tool_id") or "runtime_tool"))
-            output_validation = self.schema_validator.validate_output(tool_spec.get("output_schema"), output)
+            if not self._is_success(output):
+                trace = self.provenance.finish(trace, output=output, status="error", error=output.get("error"))
+                return self.provenance.attach(output, trace)
+
+            output_schema = tool_spec.get("output_schema")
+            output_validation = self.schema_validator.validate_output(output_schema, output)
             if not output_validation.get("valid"):
-                result = self._error("tool_output_schema_validation_failed", "; ".join(output_validation.get("errors", [])))
-                trace = self.provenance.finish(trace, output=result, status="error", error=result.get("error"))
-                return self.provenance.attach(result, trace)
-            final_status = "success" if self._is_success(output) else "error"
+                data_payload = output.get("data") if isinstance(output.get("data"), dict) else None
+                data_validation = self.schema_validator.validate_output(output_schema, data_payload) if data_payload is not None else {"valid": False, "errors": output_validation.get("errors", [])}
+                if not data_validation.get("valid"):
+                    result = self._error("tool_output_schema_validation_failed", "; ".join(output_validation.get("errors", [])))
+                    trace = self.provenance.finish(trace, output=result, status="error", error=result.get("error"))
+                    return self.provenance.attach(result, trace)
             trace = self.provenance.finish(
                 trace,
                 output=output,
-                status=final_status,
-                error=output.get("error") if final_status != "success" else None,
+                status="success",
+                error=None,
             )
             return self.provenance.attach(output, trace)
         except Exception as exc:

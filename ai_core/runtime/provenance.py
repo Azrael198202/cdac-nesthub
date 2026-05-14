@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_core.config.paths import RUNTIME_TRACES
+from ai_core.utils.safe_json import make_json_safe, safe_json_dumps
 
 
 class ExecutionProvenanceRecorder:
@@ -166,17 +167,13 @@ class ExecutionProvenanceRecorder:
         }
 
     def _safe_json(self, value: Any) -> Any:
-        try:
-            json.dumps(value, ensure_ascii=False)
-            return value
-        except Exception:
-            return repr(value)
+        return make_json_safe(value)
 
     def _write(self, trace: dict[str, Any]) -> None:
         path = Path(str(trace.get("trace_path") or self.trace_dir / "execution_trace.json"))
         path.parent.mkdir(parents=True, exist_ok=True)
         public_copy = {k: v for k, v in trace.items() if k != "_started_monotonic"}
-        path.write_text(json.dumps(public_copy, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(safe_json_dumps(public_copy, indent=2), encoding="utf-8")
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()

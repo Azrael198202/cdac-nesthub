@@ -274,189 +274,56 @@ Booking actions require human confirmation.
 Need more missing_information fields.
 
 
-INTENT_RECOGNITION_PROMPT = """
-Regenerate intent_recognition as executable orchestration state.
+intent
+
+Please regenerate this node output as executable orchestration state, not as explanation.
 
 Requirements:
-
-1. Return valid JSON only.
-2. Do not generate explanations, markdown, or natural-language summaries.
-3. Do not place missing information inside reason or description fields.
-4. All missing information must be represented structurally.
-5. tasks must be an array of task objects.
-6. Each task object must include:
-
-   * task_id
-   * task_type
-   * capability_action
-   * parameters
-
-     * known
-     * missing_required
-     * optional
-   * depends_on
-   * requires_human_confirmation
-   * execution_ready
-7. task_type must use hierarchical dot notation such as:
-
-   * weather.forecast.query
-   * travel.flight.booking
-   * finance.expense.record
-8. Irreversible or externally committed actions must set:
-   requires_human_confirmation=true
-   Examples:
-
-   * booking
-   * payment
-   * purchase
-   * reservation
-   * deletion
-9. If required parameters are missing:
-
-   * execution_ready must be false
-10. human_review must be structured:
-
-* required
-* reason_codes
-* review_items
-
-11. confidence must be structured:
-
-* overall
-* intent
-* execution_readiness
-
-12. Preserve semantic modifiers from the user request when relevant.
-    Examples:
-
-* detailed
-* urgent
-* cheapest
-* nearby
-
-13. Do not infer unavailable required parameters.
-14. Focus on executable orchestration state, not conversational explanation.
-    """
-
-workflow_plannning
-
-WORKFLOW_PLANNING_PROMPT = """
-Regenerate workflow_planning as executable workflow state.
-
-Requirements:
-
-1. Return valid JSON only.
-2. Do not explain the workflow in natural language.
-3. planned_steps must describe executable orchestration steps.
-4. Do not simply copy tasks from intent_recognition.
-5. Each planned step must include:
-
-   * step_id
-   * step_type
-   * objective
-   * input_from
-   * required_capability
-   * execution_ready
-   * human_interaction
-   * next_action
-6. workflow_planning must transform intent tasks into execution-oriented workflow steps.
-7. If executable capability is unavailable:
-
-   * create capability_discovery steps
-   * create external_solution_discovery steps
-   * create sandbox_validation steps if runtime code generation is required
-8. Weather or information queries may proceed immediately to:
-
-   * capability discovery
-   * external API discovery
-   * execution
-     if required parameters are available.
-9. Booking, payment, reservation, purchase, or destructive actions must include:
-
-   * collect_missing_information
-   * confirm_before_execution
-   * execution_pending_confirmation
-10. blocking_missing_information must be grouped by task_id.
-11. required_capabilities must include:
-
-* capability_action
-* purpose
-* status
-
-12. execution_ready=true only if:
-
-* required parameters exist
-* required capability is available or discoverable
-
-13. Workflow steps may dynamically include:
-
-* model_discovery
-* github_solution_discovery
-* runtime_tool_generation
-* docker_sandbox_execution
-* verification
-
-14. Focus on executable orchestration planning, not static task description.
-    """
-
-
-
-Check whether missing_required contains only optional refinement fields.
-If yes, call execution_state_repair before marking the step as blocked.
-Do not block information retrieval tasks because of optional fields such as:
-time_range
-output_format
-detail_level
-language
-sorting_preference
-Block only when execution is impossible or unsafe.
-If required_capability.status is available and execution_ready is true, execute the step.
-If capability is unavailable, start capability discovery instead of returning blocked.
-
-
-# workflow 1.0 
-
-Reject & Retry input_parsing.
-
-Required fixes:
-1. Return valid JSON only.
-2. tasks must be a string array according to the current schema.
-3. Do not output tasks as objects.
-4. required_capabilities must be a string array according to the current schema.
-5. Extract location from the original input.
-6. Extract the relative date expression from the original input.
-7. Preserve semantic modifiers such as "detailed".
-8. If the schema supports parsed_entities, include:
-   - location
-   - date_expression
-   - date
-   - semantic_modifiers
-9. Preserve the original temporal expression as date_expression.
-10. Normalize the temporal expression into date using runtime_context.current_date and runtime_context.timezone.
-11. The normalized date must use ISO format: YYYY-MM-DD.
-12. If date_expression is resolvable, do not place date in missing_information.
-13. Do not add missing_information if location and date are present or resolvable from the original input.
-14. Do not add fields that are not accepted by the current schema.
-
-
-Reject & Retry intent_recognition.
-
-Required fixes:
-1. Return valid JSON only.
-2. confidence must be an object, not a string.
-3. confidence must include:
+1. Do not put missing information inside reason.
+2. Output missing information as structured fields.
+3. tasks must be an array of objects.
+4. Each task must include:
+   - task_id
+   - task_type using dot notation, such as weather.forecast.query or travel.flight.booking
+   - capability_action
+   - parameters.known
+   - parameters.missing_required
+   - parameters.optional
+   - depends_on
+   - requires_human_confirmation
+   - execution_ready
+5. Booking, payment, purchase, reservation, and irreversible actions must set requires_human_confirmation=true.
+6. If required parameters are missing, execution_ready must be false.
+7. Use human_review object instead of plain requires_human_review boolean.
+8. Confidence should be structured:
    - overall
    - intent
    - execution_readiness
-4. parameters.known must include normalized execution parameters.
-5. If the user provided a relative temporal expression, keep both:
-   - date_expression
-   - date
-6. date must use ISO format: YYYY-MM-DD.
-7. Do not output only date_expression if downstream execution requires date.
-8. missing_required should be an array if required by schema. If the schema allows object, keep it empty.
-9. If date can be resolved from runtime_context, do not place it in missing_required.
-10. Keep execution_ready=true because required parameters are available.
-11. Return valid JSON only.
+9. Do not explain the correction in reason.
+10. Return valid JSON only.
 
-workflow OK
+workflow_plannning
+
+Regenerate workflow_planning as executable workflow state.
+
+Requirements:
+1. Do not simply copy tasks from intent_recognition.
+2. planned_steps must describe workflow execution steps, not original tasks.
+3. Each step must include:
+   - step_id
+   - step_type
+   - objective
+   - input_from
+   - required_capability
+   - execution_ready
+   - human_interaction
+   - next_action
+4. Split flight booking into:
+   - collect_missing_information
+   - confirm_booking_before_execution
+   - booking_execution_pending
+5. Weather query can be executable immediately.
+6. Flight booking must not execute because required information is missing.
+7. blocking_missing_information must be grouped by task_id.
+8. required_capabilities must include capability purpose and status.
+9. Return valid JSON only.

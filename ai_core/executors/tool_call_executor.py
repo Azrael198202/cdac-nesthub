@@ -22,6 +22,9 @@ from ai_core.sandbox.verified_sandbox_runtime import VerifiedSandboxRuntime
 from ai_core.execution.state_consistency_validator import ExecutionStateConsistencyValidator
 from ai_core.execution.result_classifier import ResultClassifier
 from ai_core.execution.candidate_extractor import CandidateExtractor
+from ai_core.execution.candidate_strategy_scorer import CandidateStrategyScorer
+from ai_core.execution.capability_resolution_decision import CapabilityResolutionDecision
+from ai_core.utils.safe_json import make_json_safe
 
 
 class ToolCallExecutor:
@@ -54,6 +57,8 @@ class ToolCallExecutor:
         self.state_consistency = ExecutionStateConsistencyValidator()
         self.result_classifier = ResultClassifier()
         self.candidate_extractor = CandidateExtractor()
+        self.candidate_scorer = CandidateStrategyScorer()
+        self.capability_resolution = CapabilityResolutionDecision()
 
     async def execute(
         self,
@@ -506,9 +511,9 @@ class ToolCallExecutor:
                 if fallback_execution and fallback_execution.get("status") == "success":
                     tool = fallback_execution.get("tool") or tool
                     tool_result = fallback_execution.get("result") or tool_result
-                    tool_result.setdefault("fallback_attempts", fallback_execution.get("attempts", []))
+                    tool_result.setdefault("fallback_attempts", self._compact_attempts(fallback_execution.get("attempts", [])))
                 elif fallback_execution and fallback_execution.get("attempts"):
-                    tool_result.setdefault("fallback_attempts", fallback_execution.get("attempts", []))
+                    tool_result.setdefault("fallback_attempts", self._compact_attempts(fallback_execution.get("attempts", [])))
 
             if isinstance(tool_result, dict) and tool_result.get("provenance"):
                 await event_bus.emit(run_id, {
@@ -1030,6 +1035,22 @@ class ToolCallExecutor:
             step=step,
             user_input=state.get("input", ""),
         )
+        resolution_decision = self.capability_resolution.decide(
+            has_registered_tool=False,
+            has_registered_module=False,
+            requires_external_data=True,
+            api_discovery=api_discovery,
+            external_discovery=external_discovery,
+        )
+        await event_bus.emit(run_id, {
+            "type": "CAPABILITY_RESOLUTION_DECISION",
+            "title": "Capability resolution decision",
+            "message": f"resolution_type={resolution_decision.get('resolution_type')} strategy={resolution_decision.get('candidate_strategy')}",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": resolution_decision,
+        })
+
         if api_discovery.get("status") != "success" and not external_discovery.get("documents") and not external_discovery.get("repositories"):
             await event_bus.emit(run_id, {
                 "type": "RUNTIME_TOOL_GENERATION_BLOCKED",
@@ -1054,6 +1075,7 @@ class ToolCallExecutor:
             "runtime_request_semantics": api_discovery.get("request", {}).get("runtime_request_semantics", {}),
             "api_discovery": api_discovery,
             "external_solution_discovery": external_discovery,
+            "capability_resolution_decision": resolution_decision,
             "documentation_understanding": (api_discovery.get("result") or {}).get("documentation_understanding", {}),
             "multi_candidate_policy": {
                 "must_not_stop_after_first_external_failure": True,
@@ -1447,7 +1469,16 @@ class ToolCallExecutor:
         except Exception as exc:
             external_discovery = {"status": "external_discovery_failed", "error": {"message": str(exc)}}
 
-        candidates = self.candidate_extractor.extract(api_discovery or {}, failed_tool or {})
+        raw_candidates = self.candidate_extractor.extract(api_discovery or {}, external_discovery or {}, failed_tool or {})
+        candidates = self.candidate_scorer.score_candidates(raw_candidates)
+        await event_bus.emit(run_id, {
+            "type": "CANDIDATE_STRATEGY_SELECTION_DONE",
+            "title": "Candidate strategy selection completed",
+            "message": f"Scored {len(candidates)} API/Web candidate(s).",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": {"candidates": candidates[:10]},
+        })
         if not candidates:
             await event_bus.emit(run_id, {
                 "type": "MULTI_CANDIDATE_FALLBACK_UNAVAILABLE",
@@ -1480,8 +1511,18 @@ class ToolCallExecutor:
                 "candidate_attempt": {
                     "attempt_index": attempt_index,
                     "candidate": candidate,
+                    "tool_type": candidate.get("tool_type"),
+                    "score": candidate.get("score"),
+                    "light_verification": candidate.get("light_verification"),
                     "previous_failure": failed_result,
                     "previous_failure_classification": initial_classification,
+                },
+                "candidate_strategy": {
+                    "tool_type": candidate.get("tool_type"),
+                    "score": candidate.get("score"),
+                    "score_reasons": candidate.get("score_reasons", []),
+                    "light_verification": candidate.get("light_verification"),
+                    "selection_policy": "highest_score_first_then_fallback",
                 },
                 "api_discovery": api_discovery or {},
                 "external_solution_discovery": external_discovery or {},
@@ -1495,6 +1536,10 @@ class ToolCallExecutor:
                     "must_not_use_mock_data": True,
                     "must_include_source_provenance": True,
                     "must_not_claim_success_when_response_contains_error": True,
+                    "must_expose_entrypoint_run_payload_dict": True,
+                    "must_use_standard_library_unless_requirements_declared": True,
+                    "must_not_return_error_payload_as_success": True,
+                    "must_map_extracted_or_api_data_to_output_schema": True,
                     "if_candidate_returns_html_generate_extraction_adapter": True,
                     "if_candidate_requires_unavailable_authentication_skip_with_structured_error": True,
                 },
@@ -1604,6 +1649,40 @@ class ToolCallExecutor:
             "result": {"attempts": attempts},
         })
         return {"status": "all_candidates_failed", "attempts": attempts}
+
+
+    def _compact_attempts(self, attempts: Any) -> list[dict[str, Any]]:
+        """Return non-recursive attempt summaries safe for result/provenance output."""
+        if not isinstance(attempts, list):
+            return []
+        compact: list[dict[str, Any]] = []
+        for item in attempts:
+            if not isinstance(item, dict):
+                continue
+            candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+            classification = item.get("classification") if isinstance(item.get("classification"), dict) else {}
+            verification = item.get("verification") if isinstance(item.get("verification"), dict) else {}
+            error = item.get("error") if isinstance(item.get("error"), dict) else None
+            compact.append(make_json_safe({
+                "attempt_index": item.get("attempt_index"),
+                "status": item.get("status"),
+                "candidate": {
+                    "name": candidate.get("name"),
+                    "url": candidate.get("url") or candidate.get("official_documentation_url"),
+                    "source": candidate.get("source"),
+                    "tool_type": candidate.get("tool_type"),
+                    "score": candidate.get("score"),
+                    "score_reasons": candidate.get("score_reasons"),
+                },
+                "verification": {
+                    "status": verification.get("status"),
+                    "safe_to_register": verification.get("safe_to_register"),
+                    "reason": verification.get("reason"),
+                },
+                "classification": classification,
+                "error": error,
+            }))
+        return compact
 
     def _requires_confirmation(self, step: dict[str, Any], tool: dict[str, Any], state: dict[str, Any]) -> bool:
         confirmations = state.get("human_confirmations") if isinstance(state, dict) else []

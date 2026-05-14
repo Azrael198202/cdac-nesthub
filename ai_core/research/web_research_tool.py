@@ -13,6 +13,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from ai_core.config.paths import RUNTIME_TRACES
+from ai_core.utils.safe_json import safe_json_dumps
 
 
 @dataclass
@@ -112,7 +113,7 @@ class GenericWebResearchTool:
             "payload": payload,
             "trace_path": str(path),
         }
-        path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(safe_json_dumps(record, indent=2), encoding="utf-8")
         payload["web_research_trace"] = {"trace_id": trace_id, "trace_path": str(path)}
         return payload
 
