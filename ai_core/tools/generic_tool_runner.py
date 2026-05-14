@@ -73,17 +73,56 @@ class GenericToolRunner:
                     "source": tool_spec.get("tool_id", "runtime_tool"),
                     "requires_human_confirmation": False,
                 }
+            output = self._normalize_tool_output(output, source=str(tool_spec.get("tool_id") or "runtime_tool"))
             output_validation = self.schema_validator.validate_output(tool_spec.get("output_schema"), output)
             if not output_validation.get("valid"):
                 result = self._error("tool_output_schema_validation_failed", "; ".join(output_validation.get("errors", [])))
                 trace = self.provenance.finish(trace, output=result, status="error", error=result.get("error"))
                 return self.provenance.attach(result, trace)
-            trace = self.provenance.finish(trace, output=output, status="success")
+            final_status = "success" if self._is_success(output) else "error"
+            trace = self.provenance.finish(
+                trace,
+                output=output,
+                status=final_status,
+                error=output.get("error") if final_status != "success" else None,
+            )
             return self.provenance.attach(output, trace)
         except Exception as exc:
             result = self._error("tool_execution_failed", str(exc))
             trace = self.provenance.finish(trace, output=result, status="error", error=result.get("error"))
             return self.provenance.attach(result, trace)
+
+    def _normalize_tool_output(self, output: dict[str, Any], *, source: str) -> dict[str, Any]:
+        raw_status = str(output.get("status", "")).lower().strip()
+        has_error = bool(output.get("error"))
+        if raw_status in {"error", "failed", "failure"} or has_error:
+            error = output.get("error")
+            if not isinstance(error, dict):
+                error = {"message": str(error or "Runtime tool returned an error.")}
+            return {
+                "status": "error",
+                "error": error,
+                "data": output.get("data") if isinstance(output.get("data"), dict) else {},
+                "source": output.get("source") or source,
+                "requires_human_confirmation": bool(output.get("requires_human_confirmation", False)),
+            }
+        if raw_status in {"success", "ok", "executed"}:
+            normalized = dict(output)
+            normalized["status"] = "success"
+            normalized.setdefault("source", source)
+            normalized.setdefault("data", {})
+            normalized.setdefault("requires_human_confirmation", False)
+            return normalized
+        # Plain dict with no explicit status is treated as successful data.
+        return {
+            "status": "success",
+            "data": output.get("data") if isinstance(output.get("data"), dict) else output,
+            "source": output.get("source") or source,
+            "requires_human_confirmation": bool(output.get("requires_human_confirmation", False)),
+        }
+
+    def _is_success(self, output: dict[str, Any]) -> bool:
+        return isinstance(output, dict) and str(output.get("status", "")).lower().strip() in {"success", "ok", "executed"} and not output.get("error")
 
     def _first_capability(self, tool_spec: dict[str, Any]) -> str | None:
         capability = tool_spec.get("capability")

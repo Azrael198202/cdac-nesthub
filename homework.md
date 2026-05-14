@@ -429,21 +429,34 @@ Required fixes:
 8. If the schema supports parsed_entities, include:
    - location
    - date_expression
+   - date
    - semantic_modifiers
-9. Do not add missing_information if location and date are present in the original input.
-10. Do not add fields that are not accepted by the current schema.
+9. Preserve the original temporal expression as date_expression.
+10. Normalize the temporal expression into date using runtime_context.current_date and runtime_context.timezone.
+11. The normalized date must use ISO format: YYYY-MM-DD.
+12. If date_expression is resolvable, do not place date in missing_information.
+13. Do not add missing_information if location and date are present or resolvable from the original input.
+14. Do not add fields that are not accepted by the current schema.
 
 
 Reject & Retry intent_recognition.
 
 Required fixes:
-1. confidence must be an object, not a string.
-2. confidence must include:
+1. Return valid JSON only.
+2. confidence must be an object, not a string.
+3. confidence must include:
    - overall
    - intent
    - execution_readiness
-3. missing_required should be an array if required by schema. If the schema allows object, keep it empty.
-4. Keep execution_ready=true because required parameters are available.
-5. Return valid JSON only.
+4. parameters.known must include normalized execution parameters.
+5. If the user provided a relative temporal expression, keep both:
+   - date_expression
+   - date
+6. date must use ISO format: YYYY-MM-DD.
+7. Do not output only date_expression if downstream execution requires date.
+8. missing_required should be an array if required by schema. If the schema allows object, keep it empty.
+9. If date can be resolved from runtime_context, do not place it in missing_required.
+10. Keep execution_ready=true because required parameters are available.
+11. Return valid JSON only.
 
 workflow OK
