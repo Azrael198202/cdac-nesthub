@@ -25,6 +25,7 @@ from ai_core.execution.result_classifier import ResultClassifier
 from ai_core.execution.candidate_extractor import CandidateExtractor
 from ai_core.execution.candidate_strategy_scorer import CandidateStrategyScorer
 from ai_core.execution.capability_resolution_decision import CapabilityResolutionDecision
+from ai_core.execution.evidence_quality_validator import EvidenceQualityValidator
 from ai_core.utils.safe_json import make_json_safe
 
 
@@ -61,6 +62,7 @@ class ToolCallExecutor:
         self.candidate_scorer = CandidateStrategyScorer()
         self.capability_resolution = CapabilityResolutionDecision()
         self.generic_web_extract_factory = GenericWebExtractArtifactFactory()
+        self.evidence_quality = EvidenceQualityValidator()
 
     async def execute(
         self,
@@ -485,6 +487,7 @@ class ToolCallExecutor:
                 step_id=step_id,
                 capability=required_capability,
             )
+            tool_result = self._enforce_evidence_quality(tool_result, tool_input)
 
             if tool_result.get("status") != "success":
                 repaired_tool = await self._try_repair_executable_tool(
@@ -507,6 +510,7 @@ class ToolCallExecutor:
                         step_id=step_id,
                         capability=required_capability,
                     )
+                    tool_result = self._enforce_evidence_quality(tool_result, tool_input)
 
             if tool_result.get("status") != "success":
                 fallback_execution = await self._try_multi_candidate_fallback_execution(
@@ -524,6 +528,25 @@ class ToolCallExecutor:
                     tool = fallback_execution.get("tool") or tool
                     tool_result = fallback_execution.get("result") or tool_result
                     tool_result.setdefault("fallback_attempts", self._compact_attempts(fallback_execution.get("attempts", [])))
+                elif fallback_execution and fallback_execution.get("status") == "human_interaction_required":
+                    interaction = fallback_execution.get("human_interaction") or {}
+                    human_interactions.append({
+                        "step_id": step_id,
+                        "type": interaction.get("type") or "choose_credential_or_skip",
+                        "objective": step.get("objective"),
+                        "fields": interaction.get("fields") or {},
+                        "options": interaction.get("options") or [],
+                        "reason": interaction.get("reason") or "A candidate requires credentials. Provide them or skip to another method.",
+                        "source_step": step,
+                    })
+                    tool_result = {
+                        "status": "error",
+                        "error": {"code": "credential_choice_required", "message": "Credential-protected candidates require a user choice."},
+                        "data": {},
+                        "source": "multi_candidate_fallback",
+                        "requires_human_confirmation": False,
+                        "fallback_attempts": self._compact_attempts(fallback_execution.get("attempts", [])),
+                    }
                 elif fallback_execution and fallback_execution.get("attempts"):
                     tool_result.setdefault("fallback_attempts", self._compact_attempts(fallback_execution.get("attempts", [])))
 
@@ -1645,6 +1668,25 @@ class ToolCallExecutor:
                 "result": {"candidate": candidate},
             })
 
+            if self._candidate_requires_credential(candidate):
+                attempt_record = {
+                    "attempt_index": attempt_index,
+                    "candidate": candidate,
+                    "status": "credential_required_skipped_by_default",
+                    "classification": {"success": False, "category": "credential_required"},
+                    "error": {"code": "credential_required", "message": "Candidate requires a credential. No-credential candidates are tried first."},
+                }
+                attempts.append(attempt_record)
+                await event_bus.emit(run_id, {
+                    "type": "CANDIDATE_REQUIRES_CREDENTIAL",
+                    "title": "Candidate requires credential",
+                    "message": "Credential-protected candidate skipped by default while no-credential candidates remain.",
+                    "node_id": node_id,
+                    "step_id": step_id,
+                    "result": attempt_record,
+                })
+                continue
+
             generation_request = {
                 "request_type": "runtime_tool_artifact_generation_candidate_fallback",
                 "capability": capability,
@@ -1763,6 +1805,7 @@ class ToolCallExecutor:
                     step_id=step_id,
                     capability=capability,
                 )
+                result = self._enforce_evidence_quality(result, tool_input)
                 classification = self.result_classifier.classify(result)
                 attempt_record.update({
                     "status": "success" if classification.get("success") else "failed",
@@ -1806,6 +1849,23 @@ class ToolCallExecutor:
                 })
                 continue
 
+        credential_attempts = [a for a in attempts if isinstance(a, dict) and a.get("status") == "credential_required_skipped_by_default"]
+        non_credential_attempts = [a for a in attempts if isinstance(a, dict) and a.get("status") != "credential_required_skipped_by_default"]
+        if credential_attempts and not non_credential_attempts:
+            return {
+                "status": "human_interaction_required",
+                "attempts": attempts,
+                "human_interaction": {
+                    "type": "choose_credential_or_skip",
+                    "reason": "Only credential-protected candidates were available.",
+                    "fields": {"credential": {"label": "Credential", "secret": True, "required": False}},
+                    "options": [
+                        {"id": "provide_credential", "label": "Provide credential and retry protected candidate"},
+                        {"id": "skip_protected_candidates", "label": "Skip protected candidates and report no usable no-key method"},
+                    ],
+                },
+            }
+
         await event_bus.emit(run_id, {
             "type": "MULTI_CANDIDATE_FALLBACK_EXHAUSTED",
             "title": "All fallback candidates failed",
@@ -1816,6 +1876,49 @@ class ToolCallExecutor:
         })
         return {"status": "all_candidates_failed", "attempts": attempts}
 
+
+    def _enforce_evidence_quality(self, result: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        """Convert low-quality success payloads into retryable structured errors.
+
+        This is generic: it only checks that answer material covers runtime
+        parameters already present in the payload and is not just sample/demo
+        material. It does not know any business-specific terms.
+        """
+        if not isinstance(result, dict) or result.get("status") != "success":
+            return result
+        quality = self.evidence_quality.validate_result(result, payload)
+        result.setdefault("quality", {})["evidence"] = quality
+        if quality.get("passed"):
+            data = result.get("data") if isinstance(result.get("data"), dict) else {}
+            if isinstance(data, dict):
+                data.setdefault("answer_material_quality", quality)
+            return result
+        return {
+            "status": "error",
+            "error": {
+                "code": "answer_material_quality_failed",
+                "message": "Extracted answer material did not cover the runtime parameters or looked like sample/demo data.",
+                "details": quality,
+            },
+            "data": result.get("data") if isinstance(result.get("data"), dict) else {},
+            "source": result.get("source") or "runtime_quality_gate",
+            "requires_human_confirmation": False,
+            "quality": {"evidence": quality},
+            "previous_result_status": "success",
+        }
+
+    def _candidate_requires_credential(self, candidate: dict[str, Any]) -> bool:
+        if not isinstance(candidate, dict):
+            return False
+        if candidate.get("requires_api_key") is True or candidate.get("requires_authentication") is True:
+            return True
+        text = " ".join(str(candidate.get(k) or "") for k in ("name", "title", "url", "official_documentation_url", "notes")).lower()
+        reasons = " ".join(str(x) for x in candidate.get("score_reasons", []) if isinstance(x, str)).lower()
+        verification = candidate.get("light_verification") if isinstance(candidate.get("light_verification"), dict) else {}
+        if verification.get("requires_authentication") is True:
+            return True
+        markers = ("api key", "your_api_key", "appid", "requires api key", "authentication_required", "api_key_required")
+        return any(marker in text or marker in reasons for marker in markers)
 
     def _compact_attempts(self, attempts: Any) -> list[dict[str, Any]]:
         """Return non-recursive attempt summaries safe for result/provenance output."""

@@ -46,6 +46,13 @@ class CandidateStrategyScorer:
 
         requires_key = bool(candidate.get("requires_api_key") or candidate.get("requires_authentication"))
         supports_json_declared = bool(candidate.get("supports_json"))
+        candidate_text = " ".join(str(candidate.get(k) or "") for k in ("name", "title", "url", "official_documentation_url", "notes")).lower()
+        evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
+        evidence_text = str(evidence.get("text_excerpt") or evidence.get("snippet") or evidence.get("sample") or "").lower()
+        looks_like_doc_page = any(marker in candidate_text for marker in ("api", "docs", "documentation", "developers"))
+        key_markers = ("api key", "your_api_key", "appid", "requires api key", "sign up", "get api key")
+        if any(marker in candidate_text or marker in evidence_text for marker in key_markers):
+            requires_key = True
 
         if check is not None:
             if check.supports_json and check.status == "success":
@@ -82,8 +89,14 @@ class CandidateStrategyScorer:
                 reasons.append("url_available_not_verified")
 
         if requires_key:
-            score -= 35
+            score -= 80
             reasons.append("api_key_required")
+        else:
+            score += 25
+            reasons.append("no_api_key_required_or_not_detected")
+        if looks_like_doc_page and tool_type in {"html_extract", "browser_extract"}:
+            score -= 35
+            reasons.append("documentation_page_not_data_endpoint")
         if str(candidate.get("source") or "") in {"web_evidence", "documentation_evidence"}:
             score += 10
             reasons.append("evidence_based_candidate")

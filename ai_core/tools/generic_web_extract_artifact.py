@@ -11,7 +11,8 @@ class GenericWebExtractArtifactFactory:
     This factory is intentionally domain-neutral. It does not know what the
     target page means. It only creates a small adapter that can fetch or reuse
     verified page evidence, strip HTML, select snippets using already-parsed
-    runtime parameters, and return a JSON-serializable payload.
+    runtime parameters, validate that the material covers those parameters, and
+    return a JSON-serializable payload.
     """
 
     def build_artifact(
@@ -38,11 +39,7 @@ class GenericWebExtractArtifactFactory:
                 "capability": capability,
                 "capabilities": [capability],
                 "status": "enabled",
-                "implementation": {
-                    "type": "python_function",
-                    "function": "run",
-                    "module_path": "tool.py",
-                },
+                "implementation": {"type": "python_function", "function": "run", "module_path": "tool.py"},
                 "input_schema": {"type": "object", "additionalProperties": True},
                 "output_schema": {"type": "object", "additionalProperties": True},
                 "safety": {
@@ -64,6 +61,7 @@ class GenericWebExtractArtifactFactory:
                     "strategy": "deterministic_generic_web_extract",
                     "created_at": datetime.utcnow().isoformat(),
                     "source_candidate": self._compact_candidate(candidate),
+                    "quality_gate": "dynamic_runtime_parameter_coverage",
                 },
                 "source_provenance": [{
                     "name": name,
@@ -82,6 +80,7 @@ class GenericWebExtractArtifactFactory:
             "verification": {
                 "deterministic_artifact_factory": True,
                 "source_candidate": self._compact_candidate(candidate),
+                "quality_gate": "dynamic_runtime_parameter_coverage",
             },
         }
 
@@ -100,18 +99,20 @@ class GenericWebExtractArtifactFactory:
         return safe[:96] or "generic_web_extract_tool"
 
     def _tool_source(self, *, url: str, name: str, evidence_text: str) -> str:
-        # json.dumps safely quotes arbitrary page text into the generated source.
         return f'''from __future__ import annotations
 
 import html
 import json
 import re
 import urllib.request
-import urllib.error
 
 CANDIDATE_URL = {json.dumps(url, ensure_ascii=False)}
 CANDIDATE_NAME = {json.dumps(name, ensure_ascii=False)}
 EMBEDDED_EVIDENCE_TEXT = {json.dumps((evidence_text or "")[:60000], ensure_ascii=False)}
+NON_EVIDENCE_KEYS = {{
+    "detail", "details", "detail_level", "semantic_modifiers", "format",
+    "language", "locale", "unit", "units", "timezone", "time_zone",
+}}
 
 
 def run(payload: dict) -> dict:
@@ -125,27 +126,28 @@ def run(payload: dict) -> dict:
     plain_text = _to_text(source_text)
     snippets = _select_snippets(plain_text, known)
     if not snippets:
-        snippets = _fallback_snippets(plain_text)
+        snippets = _fallback_snippets(plain_text, known)
+    quality = _quality(snippets, known)
     if not snippets:
         return _error("no_relevant_snippets", "Page content was available but no useful text could be extracted.", fetch)
+    if not quality.get("passed"):
+        return _error(
+            "answer_material_quality_failed",
+            "Extracted material did not cover runtime parameters or looked like sample/demo material.",
+            {{"quality": quality, "retrieval": fetch}},
+        )
+    text = "\\n".join(snippets)
     return {{
         "status": "success",
         "data": {{
             "source_name": CANDIDATE_NAME,
             "source_url": CANDIDATE_URL,
-            "retrieval": {{
-                "used_live_fetch": bool(fetch.get("ok")),
-                "http_status": fetch.get("status_code"),
-                "error": fetch.get("error"),
-            }},
+            "retrieval": {{"used_live_fetch": bool(fetch.get("ok")), "http_status": fetch.get("status_code"), "error": fetch.get("error")}},
             "query_parameters": known,
-            "extracted_text": "\\n".join(snippets),
+            "extracted_text": text,
             "evidence_snippets": snippets,
-            "answer_material": {{
-                "summary_input": "\\n".join(snippets),
-                "source_url": CANDIDATE_URL,
-                "source_name": CANDIDATE_NAME,
-            }},
+            "answer_material_quality": quality,
+            "answer_material": {{"summary_input": text, "source_url": CANDIDATE_URL, "source_name": CANDIDATE_NAME}},
         }},
         "source": CANDIDATE_URL or CANDIDATE_NAME or "generic_web_extract",
         "requires_human_confirmation": False,
@@ -175,18 +177,11 @@ def _fetch_text(url: str) -> dict:
     if not url:
         return {{"ok": False, "error": "missing_url", "text": ""}}
     try:
-        req = urllib.request.Request(
-            url,
-            headers={{
-                "User-Agent": "Mozilla/5.0 (compatible; RuntimeWebExtract/1.0)",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            }},
-        )
+        req = urllib.request.Request(url, headers={{"User-Agent": "Mozilla/5.0 (compatible; RuntimeWebExtract/1.0)", "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}})
         with urllib.request.urlopen(req, timeout=15) as response:
             raw = response.read(900000)
             charset = response.headers.get_content_charset() or "utf-8"
-            text = raw.decode(charset, errors="replace")
-            return {{"ok": True, "status_code": getattr(response, "status", None), "text": text}}
+            return {{"ok": True, "status_code": getattr(response, "status", None), "text": raw.decode(charset, errors="replace")}}
     except Exception as exc:
         return {{"ok": False, "error": str(exc), "text": ""}}
 
@@ -206,72 +201,111 @@ def _to_text(raw: str) -> str:
     return text.strip()
 
 
-def _tokens(known: dict) -> list[str]:
+def _aliases(value) -> list[str]:
     out = []
-    def add(value):
-        if value is None:
+    def add(v):
+        if v is None:
             return
-        if isinstance(value, (list, tuple, set)):
-            for item in value:
-                add(item)
+        if isinstance(v, dict):
+            for vv in v.values(): add(vv)
             return
-        if isinstance(value, dict):
-            for item in value.values():
-                add(item)
+        if isinstance(v, (list, tuple, set)):
+            for vv in v: add(vv)
             return
-        s = str(value).strip()
+        s = str(v).strip()
         if not s:
             return
         out.append(s)
-        if re.match(r"^\d{{4}}-\d{{2}}-\d{{2}}$", s):
-            y, m, d = s.split("-")
-            out.extend([f"{{y}}/{{m}}/{{d}}", f"{{int(m)}}/{{int(d)}}", f"{{int(m)}}-{{int(d)}}", f"{{int(d)}}"])
-    for value in known.values():
-        add(value)
-    return [x.lower() for x in out if len(x.strip()) >= 2]
+        m = re.match(r"^(\d{{4}})-(\d{{2}})-(\d{{2}})$", s)
+        if m:
+            y, mo, d = m.groups(); mi = int(mo); di = int(d)
+            months = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+            mon = months[mi]
+            out.extend([f"{{y}}/{{mo}}/{{d}}", f"{{y}}.{{mo}}.{{d}}", f"{{mi}}/{{di}}", f"{{mi}}-{{di}}", f"{{di}}. {{mi}}.", f"{{mon}} {{di}}", f"{{mon}} {{di}}, {{y}}", f"{{di}} {{mon}}", f"{{di}} {{mon}} {{y}}", f"{{mo}}/{{d}}", f"{{mo}}-{{d}}"])
+    add(value)
+    return list(dict.fromkeys(out))
+
+
+def _required_terms(known: dict) -> dict:
+    terms = {{}}
+    for key, value in known.items():
+        k = str(key).strip().lower()
+        if not k or k in NON_EVIDENCE_KEYS:
+            continue
+        aliases = [a for a in _aliases(value) if len(str(a).strip()) >= 2]
+        if aliases:
+            terms[k] = aliases[:20]
+    return terms
 
 
 def _select_snippets(text: str, known: dict) -> list[str]:
-    tokens = _tokens(known)
+    terms = _required_terms(known)
+    aliases = [a.lower() for values in terms.values() for a in values]
     chunks = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if len(line) < 8:
-            continue
+    lines = [line.strip() for line in text.splitlines() if len(line.strip()) >= 8]
+    for i, line in enumerate(lines):
         line_l = line.lower()
-        score = 0
-        for token in tokens:
-            if token and token in line_l:
-                score += 1
+        score = sum(1 for alias in aliases if alias and alias in line_l)
         if score:
-            chunks.append((score, line))
+            context = " ".join(lines[max(0, i-1): min(len(lines), i+2)])
+            chunks.append((score, context[:1600]))
     chunks.sort(key=lambda item: (-item[0], len(item[1])))
-    selected = []
-    seen = set()
+    selected, seen = [], set()
     for _score, line in chunks:
         key = line[:180]
         if key in seen:
             continue
         seen.add(key)
-        selected.append(line[:1200])
+        selected.append(line)
         if len(selected) >= 12:
             break
     return selected
 
 
-def _fallback_snippets(text: str) -> list[str]:
+def _fallback_snippets(text: str, known: dict) -> list[str]:
+    # Fallback is deliberately conservative: return only if the compact page
+    # itself contains all required runtime terms. This avoids treating API docs
+    # examples as final answer material.
     compact = " ".join(part.strip() for part in text.splitlines() if part.strip())
     if not compact:
+        return []
+    terms = _required_terms(known)
+    compact_l = compact.lower()
+    if terms and not all(any(alias.lower() in compact_l for alias in aliases) for aliases in terms.values()):
         return []
     return [compact[:4000]]
 
 
+def _quality(snippets: list[str], known: dict) -> dict:
+    material = "\\n".join(snippets + [CANDIDATE_NAME, CANDIDATE_URL])
+    material_l = material.lower()
+    terms = _required_terms(known)
+    matched, missing = {{}}, []
+    for key, aliases in terms.items():
+        hits = [a for a in aliases if a.lower() in material_l]
+        if hits:
+            matched[key] = hits[:5]
+        else:
+            missing.append(key)
+    example_like = _looks_like_example(material, known)
+    passed = bool(snippets) and not missing and not example_like
+    return {{"passed": passed, "required_terms": terms, "matched_terms": matched, "missing_keys": missing, "example_like": example_like}}
+
+
+def _looks_like_example(material: str, known: dict) -> bool:
+    text = (material or "").lower()
+    markers = ["example", "sample", "demo", "api_key", "your_api_key", "appid", "date_epoch", "time_epoch"]
+    count = sum(1 for marker in markers if marker in text)
+    if count >= 2:
+        return True
+    years = set(re.findall(r"\b(20\d{{2}}|19\d{{2}})\b", text))
+    known_years = set()
+    for aliases in _required_terms(known).values():
+        for alias in aliases:
+            known_years.update(re.findall(r"\b(20\d{{2}}|19\d{{2}})\b", alias))
+    return bool(years and known_years and years.isdisjoint(known_years) and count >= 1)
+
+
 def _error(code: str, message: str, details: dict | None = None) -> dict:
-    return {{
-        "status": "error",
-        "error": {{"code": code, "message": message, "details": details or {{}}}},
-        "data": {{}},
-        "source": CANDIDATE_URL or CANDIDATE_NAME or "generic_web_extract",
-        "requires_human_confirmation": False,
-    }}
+    return {{"status": "error", "error": {{"code": code, "message": message, "details": details or {{}}}}, "data": {{}}, "source": CANDIDATE_URL or CANDIDATE_NAME or "generic_web_extract", "requires_human_confirmation": False}}
 '''
