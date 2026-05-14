@@ -105,6 +105,7 @@ import html
 import json
 import re
 import urllib.request
+from datetime import datetime
 
 CANDIDATE_URL = {json.dumps(url, ensure_ascii=False)}
 CANDIDATE_NAME = {json.dumps(name, ensure_ascii=False)}
@@ -112,6 +113,7 @@ EMBEDDED_EVIDENCE_TEXT = {json.dumps((evidence_text or "")[:60000], ensure_ascii
 NON_EVIDENCE_KEYS = {{
     "detail", "details", "detail_level", "semantic_modifiers", "format",
     "language", "locale", "unit", "units", "timezone", "time_zone",
+    "date_expression", "relative_date", "text",
 }}
 
 
@@ -220,8 +222,22 @@ def _aliases(value) -> list[str]:
         if m:
             y, mo, d = m.groups(); mi = int(mo); di = int(d)
             months = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
-            mon = months[mi]
-            out.extend([f"{{y}}/{{mo}}/{{d}}", f"{{y}}.{{mo}}.{{d}}", f"{{mi}}/{{di}}", f"{{mi}}-{{di}}", f"{{di}}. {{mi}}.", f"{{mon}} {{di}}", f"{{mon}} {{di}}, {{y}}", f"{{di}} {{mon}}", f"{{di}} {{mon}} {{y}}", f"{{mo}}/{{d}}", f"{{mo}}-{{d}}"])
+            months_short = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+            weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+            mon = months[mi]; mon_s = months_short[mi]
+            try:
+                weekday = weekdays[datetime(int(y), mi, di).weekday()]
+            except Exception:
+                weekday = ""
+            out.extend([
+                f"{{y}}/{{mo}}/{{d}}", f"{{y}}.{{mo}}.{{d}}", f"{{y}}/{{mi}}/{{di}}",
+                f"{{mi}}/{{di}}", f"{{mi}}-{{di}}", f"{{mo}}/{{d}}", f"{{mo}}-{{d}}",
+                f"{{di}}. {{mi}}.", f"{{di}}.{{mi}}.", f"{{di}}/{{mi}}",
+                f"{{mon}} {{di}}", f"{{mon}} {{di}}, {{y}}", f"{{di}} {{mon}}", f"{{di}} {{mon}} {{y}}",
+                f"{{mon_s}} {{di}}", f"{{mon_s}} {{di}}, {{y}}", f"{{di}} {{mon_s}}", f"{{di}} {{mon_s}} {{y}}",
+            ])
+            if weekday:
+                out.extend([weekday, weekday[:3], f"{{weekday}} {{di}}", f"{{weekday[:3]}} {{di}}", f"{{weekday}}, {{mon}} {{di}}", f"{{weekday[:3]}} {{mon_s}} {{di}}"])
     add(value)
     return list(dict.fromkeys(out))
 
@@ -247,8 +263,8 @@ def _select_snippets(text: str, known: dict) -> list[str]:
         line_l = line.lower()
         score = sum(1 for alias in aliases if alias and alias in line_l)
         if score:
-            context = " ".join(lines[max(0, i-1): min(len(lines), i+2)])
-            chunks.append((score, context[:1600]))
+            context = " ".join(lines[max(0, i-2): min(len(lines), i+3)])
+            chunks.append((score, context[:1800]))
     chunks.sort(key=lambda item: (-item[0], len(item[1])))
     selected, seen = [], set()
     for _score, line in chunks:
@@ -259,7 +275,9 @@ def _select_snippets(text: str, known: dict) -> list[str]:
         selected.append(line)
         if len(selected) >= 12:
             break
-    return selected
+    if selected:
+        return selected
+    return _fallback_snippets(text, known)
 
 
 def _fallback_snippets(text: str, known: dict) -> list[str]:

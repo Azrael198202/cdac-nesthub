@@ -336,16 +336,22 @@ class ToolCallExecutor:
                             continue
                         if fallback_execution and fallback_execution.get("status") in {"human_interaction_required", "optional_human_interaction_available"}:
                             interaction = fallback_execution.get("human_interaction") or {}
-                            human_interactions.append({
-                                "step_id": step_id,
-                                "type": interaction.get("type") or "choose_credential_or_skip",
-                                "required": bool(interaction.get("required", True)),
-                                "objective": step.get("objective"),
-                                "fields": interaction.get("fields") or {},
-                                "options": interaction.get("options") or [],
-                                "reason": interaction.get("reason") or "A candidate requires credentials. Provide them or skip to another method.",
-                                "source_step": step,
-                            })
+                            interaction_required = bool(interaction.get("required", fallback_execution.get("status") == "human_interaction_required"))
+                            # Optional credential/API-key upgrades must not pause the workflow when
+                            # no-key evidence paths have already been attempted. Record them as
+                            # metadata on the blocked step only; required interactions are the only
+                            # ones that enter human_interactions and change the final state to waiting.
+                            if interaction_required:
+                                human_interactions.append({
+                                    "step_id": step_id,
+                                    "type": interaction.get("type") or "choose_credential_or_skip",
+                                    "required": True,
+                                    "objective": step.get("objective"),
+                                    "fields": interaction.get("fields") or {},
+                                    "options": interaction.get("options") or [],
+                                    "reason": interaction.get("reason") or "A candidate requires credentials. Provide them or skip to another method.",
+                                    "source_step": step,
+                                })
                         blocked_steps.append({
                             "step_id": step_id,
                             "status": generated_tool.get("status", "runtime_discovery_blocked"),
@@ -2167,7 +2173,7 @@ class ToolCallExecutor:
         return self.state_consistency.missing_fields(step)
 
     def _overall_status(self, execution_steps, blocked_steps, human_interactions, missing_tools, safety_holds) -> str:
-        if human_interactions:
+        if any(bool(item.get("required", True)) for item in human_interactions if isinstance(item, dict)):
             return "waiting_for_human_information"
         if missing_tools:
             return "missing_tool_implementation"

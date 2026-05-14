@@ -108,15 +108,21 @@ class EvidenceDirectAnswerBuilder:
             if isinstance(value, str):
                 parts.append(value)
         evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
-        for key in ("text_excerpt", "snippet", "sample", "title", "url"):
-            value = evidence.get(key)
-            if isinstance(value, str):
-                parts.append(value)
+        containers = [evidence]
+        for nested_key in ("document", "source_search_result", "endpoint_verification", "resolved_endpoint", "light_verification"):
+            nested = evidence.get(nested_key) if isinstance(evidence.get(nested_key), dict) else None
+            if nested:
+                containers.append(nested)
         document = candidate.get("document") if isinstance(candidate.get("document"), dict) else {}
-        for key in ("text_excerpt", "snippet", "sample", "title", "url"):
-            value = document.get(key)
-            if isinstance(value, str):
-                parts.append(value)
+        if document:
+            containers.append(document)
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            for key in ("text_excerpt", "snippet", "sample", "title", "url", "description", "notes"):
+                value = container.get(key)
+                if isinstance(value, str):
+                    parts.append(value)
         return "\n".join(p for p in parts if p).strip()
 
     def _coverage_score(self, text: str, known: dict[str, Any]) -> float:

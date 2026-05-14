@@ -1,0 +1,38 @@
+# Runtime policy only. ai_core reads this as configuration and does not hardcode domain logic.
+optional_refinement_fields:
+  - time_range
+  - output_format
+  - formatting_style
+  - output_language
+  - language
+  - detail_preferences
+  - presentation_style
+  - sorting_preference
+  - verbosity
+  - tone
+read_only_action_hints:
+  - query
+  - search
+  - retrieve
+  - read
+  - lookup
+  - analyze
+  - summarize
+  - inspect
+  - check
+  - compare
+irreversible_action_hints:
+  - create
+  - update
+  - delete
+  - remove
+  - send
+  - submit
+  - commit
+  - execute
+  - install
+  - download
+  - purchase
+  - pay
+  - book
+  - reserve
