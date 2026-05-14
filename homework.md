@@ -412,3 +412,6 @@ sorting_preference
 Block only when execution is impossible or unsafe.
 If required_capability.status is available and execution_ready is true, execute the step.
 If capability is unavailable, start capability discovery instead of returning blocked.
+
+
+# workflow 1.0 

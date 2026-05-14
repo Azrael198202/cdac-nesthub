@@ -18,6 +18,7 @@ from ai_core.tools.runtime_generated_tool_installer import RuntimeGeneratedToolI
 from ai_core.research.api_discovery import ApiDiscoveryEngine
 from ai_core.research.external_solution_discovery import ExternalSolutionDiscoveryEngine
 from ai_core.sandbox.verified_sandbox_runtime import VerifiedSandboxRuntime
+from ai_core.execution.state_consistency_validator import ExecutionStateConsistencyValidator
 
 
 class ToolCallExecutor:
@@ -46,6 +47,7 @@ class ToolCallExecutor:
         self.api_discovery = ApiDiscoveryEngine()
         self.external_discovery = ExternalSolutionDiscoveryEngine()
         self.sandbox_verifier = VerifiedSandboxRuntime()
+        self.state_consistency = ExecutionStateConsistencyValidator()
 
     async def execute(
         self,
@@ -121,10 +123,11 @@ class ToolCallExecutor:
             # from bypassing the global repair stage. The logic remains generic and
             # only uses runtime-configured structural policies.
             step = self._repair_single_step_before_execution(step, state)
+            step = self.state_consistency.repair_step(step)
             required_capability = self._capability_name(step.get("required_capability"))
             human_interaction = self._normalize_human_interaction(step.get("human_interaction"))
             execution_ready = bool(step.get("execution_ready", False))
-            requires_confirmation = bool(step.get("requires_human_confirmation", False))
+            requires_confirmation = self.state_consistency.should_request_confirmation(step)
 
             await event_bus.emit(run_id, {
                 "type": "EXECUTION_STEP_ANALYZING",
@@ -134,27 +137,30 @@ class ToolCallExecutor:
                 "step_id": step_id,
             })
 
-            explicit_interaction_required = bool(human_interaction.get("required"))
             missing_fields = self._missing_fields(step)
+            if self.state_consistency.should_request_human_information(step, human_interaction):
+                fields = human_interaction.get("fields") or missing_fields
+                if fields:
+                    interaction = {
+                        "step_id": step_id,
+                        "type": human_interaction.get("type") or "collect_missing_information",
+                        "objective": step.get("objective"),
+                        "fields": fields,
+                        "reason": "Required information is missing or human interaction is required.",
+                        "source_step": step,
+                    }
+                    human_interactions.append(interaction)
+                    blocked_steps.append({
+                        "step_id": step_id,
+                        "status": "missing_required_information",
+                        "missing_fields": missing_fields,
+                        "reason": interaction["reason"],
+                        "source_step": step,
+                    })
+                    continue
+                # Empty interaction contracts are non-actionable and must not
+                # pause the workflow. Continue to readiness/capability routing.
 
-            if explicit_interaction_required or missing_fields:
-                interaction = {
-                    "step_id": step_id,
-                    "type": human_interaction.get("type") or "collect_missing_information",
-                    "objective": step.get("objective"),
-                    "fields": human_interaction.get("fields") or missing_fields,
-                    "reason": "Required information is missing or human interaction is required.",
-                    "source_step": step,
-                }
-                human_interactions.append(interaction)
-                blocked_steps.append({
-                    "step_id": step_id,
-                    "status": "missing_required_information" if missing_fields else "waiting_for_human_interaction",
-                    "missing_fields": missing_fields,
-                    "reason": interaction["reason"],
-                    "source_step": step,
-                })
-                continue
 
             if not execution_ready:
                 blocked_steps.append({
@@ -1156,25 +1162,30 @@ class ToolCallExecutor:
         if isinstance(value, bool):
             return {"required": value}
         if isinstance(value, dict):
-            return {"required": bool(value.get("required", True)), **value}
-        return {"required": False}
+            normalized = dict(value)
+            fields = normalized.get("fields")
+            has_fields = bool(fields) if isinstance(fields, (list, dict)) else False
+            interaction_type = str(normalized.get("type") or "").lower().strip()
+            confirmation_like = interaction_type in {"confirmation", "human_confirmation", "approval"}
+
+            # Do not treat unrelated metadata such as
+            # {"requires_confirmation": false} as a human-input request.
+            if "required" in normalized:
+                required = bool(normalized.get("required"))
+            elif confirmation_like:
+                required = bool(normalized.get("requires_confirmation", True))
+            else:
+                required = has_fields
+
+            normalized["required"] = required
+            if not required and not has_fields:
+                normalized.setdefault("fields", {})
+                normalized.setdefault("type", "none")
+            return normalized
+        return {"required": False, "type": "none", "fields": {}}
 
     def _missing_fields(self, step: dict[str, Any]) -> list[str]:
-        explicit = step.get("missing_fields")
-        if isinstance(explicit, list) and explicit:
-            return list(dict.fromkeys(str(x) for x in explicit if str(x).strip()))
-
-        params = step.get("parameters", {})
-        missing: list[str] = []
-        if isinstance(params, dict):
-            raw = params.get("missing_required")
-            if isinstance(raw, list):
-                missing.extend([str(x) for x in raw if str(x).strip()])
-            elif isinstance(raw, dict):
-                for key, value in raw.items():
-                    if value in [None, "", [], {}]:
-                        missing.append(str(key))
-        return list(dict.fromkeys(missing))
+        return self.state_consistency.missing_fields(step)
 
     def _overall_status(self, execution_steps, blocked_steps, human_interactions, missing_tools, safety_holds) -> str:
         if human_interactions:

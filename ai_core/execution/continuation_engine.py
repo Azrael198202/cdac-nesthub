@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ai_core.interaction.question_generator import QuestionGenerator
+from ai_core.interaction.interaction_contract_validator import InteractionContractValidator
 
 
 class ContinuationEngine:
@@ -10,6 +11,7 @@ class ContinuationEngine:
 
     def __init__(self) -> None:
         self.question_generator = QuestionGenerator()
+        self.contract_validator = InteractionContractValidator()
 
     def build_pending_action(self, node_id: str, result: dict[str, Any], state: dict[str, Any] | None = None) -> dict[str, Any] | None:
         if not isinstance(result, dict):
@@ -24,12 +26,14 @@ class ContinuationEngine:
                 user_input=str(state.get("input", "")),
                 language=language,
             )
-            return {
-                "kind": "human_information_required",
-                "node_id": node_id,
-                "request": request,
-                "result": result,
-            }
+            request = self.contract_validator.validate_or_none(request)
+            if request is not None:
+                return {
+                    "kind": "human_information_required",
+                    "node_id": node_id,
+                    "request": request,
+                    "result": result,
+                }
 
         missing_tools = result.get("missing_tools") or []
         if missing_tools:
