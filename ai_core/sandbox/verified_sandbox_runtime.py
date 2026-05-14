@@ -103,6 +103,33 @@ class VerifiedSandboxRuntime:
                 stderr=result.get("stderr", ""),
             ))
 
+
+    def verify_module_artifact(
+        self,
+        *,
+        artifact: dict[str, Any],
+        test_input: dict[str, Any] | None = None,
+        allow_network: bool = False,
+        timeout_seconds: int = 60,
+    ) -> dict[str, Any]:
+        """Verify a runtime module artifact with the same generic sandbox path.
+
+        Module artifacts use module.py/run by convention. The implementation is
+        domain-neutral and delegates to the shared artifact sandbox runner.
+        """
+        manifest = artifact.get("manifest") if isinstance(artifact.get("manifest"), dict) else {}
+        implementation = manifest.get("implementation") if isinstance(manifest.get("implementation"), dict) else {}
+        implementation.setdefault("module_path", "module.py")
+        implementation.setdefault("function", "run")
+        manifest["implementation"] = implementation
+        artifact["manifest"] = manifest
+        return self.verify_tool_artifact(
+            artifact=artifact,
+            test_input=test_input,
+            allow_network=allow_network,
+            timeout_seconds=timeout_seconds,
+        )
+
     def _write_artifact(self, root: Path, artifact: dict[str, Any]) -> None:
         files = artifact.get("files") if isinstance(artifact.get("files"), dict) else {}
         if not files:

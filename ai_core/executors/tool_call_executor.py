@@ -7,6 +7,7 @@ from ai_core.runtime.provenance import ExecutionProvenanceRecorder
 from ai_core.tools.runtime_tool_registry import RuntimeToolRegistry
 from ai_core.modules.module_builder import RuntimeModuleBuilder
 from ai_core.modules.module_loader import RuntimeModuleLoader
+from ai_core.modules.autonomous_codegen_executor import AutonomousCodegenExecutor
 from ai_core.modules.module_artifact_generator import RuntimeModuleArtifactGenerator
 from ai_core.modules.runtime_generated_module_installer import RuntimeGeneratedModuleInstaller
 from ai_core.workflow.workflow_normalizer import WorkflowNormalizer
@@ -35,6 +36,7 @@ class ToolCallExecutor:
         self.tool_registry = RuntimeToolRegistry()
         self.module_builder = RuntimeModuleBuilder()
         self.module_loader = RuntimeModuleLoader()
+        self.autonomous_codegen = AutonomousCodegenExecutor()
         self.module_artifact_generator = RuntimeModuleArtifactGenerator()
         self.module_installer = RuntimeGeneratedModuleInstaller()
         self.normalizer = WorkflowNormalizer()
@@ -375,14 +377,58 @@ class ToolCallExecutor:
                             })
                             continue
 
-                        missing_tools.append({"step_id": step_id, "capability": required_capability, "generated_tool_spec": generated_spec, "generated_module": module_blueprint})
+                        # v59: do not stop at a generated codegen request. Try to
+                        # execute the pending runtime code-generation request, verify
+                        # the result in sandbox, enable the registry record, and then
+                        # immediately resume the same step by executing the enabled
+                        # module. This remains generic: only request files, manifests,
+                        # sandbox status, and capability metadata are used.
+                        codegen_result = await self._try_autonomous_codegen_and_execute(
+                            run_id=run_id,
+                            node_id=node_id,
+                            step_id=step_id,
+                            capability=required_capability or "unknown_capability",
+                            step=step,
+                            state=state,
+                            module_blueprint=module_blueprint,
+                        )
+                        if codegen_result and codegen_result.get("execution"):
+                            module_result = codegen_result["execution"].get("result", {})
+                            execution_steps.append({
+                                "step_id": step_id,
+                                "status": "executed" if self._is_success_result(module_result) else "module_execution_failed",
+                                "module": codegen_result.get("registry_record"),
+                                "input": codegen_result["execution"].get("input"),
+                                "result": module_result,
+                                "provenance": module_result.get("provenance") if isinstance(module_result, dict) else None,
+                                "source_step": step,
+                                "autonomous_codegen": codegen_result.get("codegen"),
+                            })
+                            generated_modules.append({
+                                "step_id": step_id,
+                                "capability": required_capability,
+                                "generated_module": codegen_result.get("registry_record"),
+                                "autonomous_codegen": codegen_result.get("codegen"),
+                            })
+                            if not self._is_success_result(module_result):
+                                blocked_steps.append({
+                                    "step_id": step_id,
+                                    "status": "module_execution_failed",
+                                    "capability": required_capability,
+                                    "reason": self._result_error_message(module_result, "Module execution failed after autonomous codegen."),
+                                    "source_step": step,
+                                    "module_result": module_result,
+                                })
+                            continue
+
+                        missing_tools.append({"step_id": step_id, "capability": required_capability, "generated_tool_spec": generated_spec, "generated_module": module_blueprint, "autonomous_codegen": codegen_result})
                         await event_bus.emit(run_id, {
                             "type": "TOOL_AND_MODULE_REQUEST_GENERATED",
                             "title": "Tool/module request generated",
                             "message": f"Generated request for capability={required_capability or 'unknown_capability'}",
                             "node_id": node_id,
                             "step_id": step_id,
-                            "result": {"tool": generated_spec, "module": module_blueprint},
+                            "result": {"tool": generated_spec, "module": module_blueprint, "autonomous_codegen": codegen_result},
                         })
                         blocked_steps.append({"step_id": step_id, "status": "missing_tool_implementation", "capability": required_capability, "source_step": step})
                         continue
@@ -502,6 +548,102 @@ class ToolCallExecutor:
             "result": result,
         })
         return result
+
+    async def _try_autonomous_codegen_and_execute(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        step_id: str,
+        capability: str,
+        step: dict[str, Any],
+        state: dict[str, Any],
+        module_blueprint: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Generate, sandbox-verify, enable, and execute a pending module.
+
+        v59 continuation bridge. The executor first looks for the concrete
+        codegen request emitted by the module builder. If present, it invokes the
+        autonomous codegen runner. If successful, it reloads the enabled module
+        and executes the original step without another user action.
+        """
+        request_path = self._codegen_request_path(module_blueprint or {})
+        module_input = self._build_tool_input(
+            step=step,
+            run_id=run_id,
+            node_id=node_id,
+            step_id=step_id,
+            user_input=state.get("input", ""),
+        )
+        try:
+            if request_path:
+                codegen = await self.autonomous_codegen.execute_request_file(
+                    request_path=request_path,
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    test_input=module_input,
+                )
+            else:
+                codegen = await self.autonomous_codegen.execute_latest_pending_for_capability(
+                    capability=capability,
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    test_input=module_input,
+                )
+        except Exception as exc:
+            await event_bus.emit(run_id, {
+                "type": "AUTONOMOUS_CODEGEN_FAILED",
+                "title": "Autonomous codegen failed",
+                "message": str(exc),
+                "node_id": node_id,
+                "step_id": step_id,
+            })
+            return {"status": "autonomous_codegen_failed", "error": {"message": str(exc)}}
+
+        if not codegen or not codegen.get("enabled"):
+            return codegen if isinstance(codegen, dict) else None
+
+        executed = await self._execute_registered_module(
+            run_id=run_id,
+            node_id=node_id,
+            step_id=step_id,
+            capability=capability,
+            step=step,
+            state=state,
+            component_type="runtime_autonomous_codegen_module",
+        )
+        if not executed:
+            return {"status": "enabled_module_not_executable", "codegen": codegen}
+
+        return {
+            "status": "autonomous_codegen_executed",
+            "codegen": codegen,
+            "registry_record": executed.get("registry_record") or codegen.get("registry_record"),
+            "execution": executed,
+        }
+
+    def _codegen_request_path(self, module_blueprint: dict[str, Any]) -> str | None:
+        if not isinstance(module_blueprint, dict):
+            return None
+        candidates: list[Any] = []
+        candidates.append(module_blueprint.get("codegen_request"))
+        generated = module_blueprint.get("generated_module")
+        if isinstance(generated, dict):
+            candidates.append(generated.get("codegen_request"))
+        for item in candidates:
+            if isinstance(item, dict):
+                path = item.get("request_path")
+                if isinstance(path, str) and path.strip():
+                    return path
+                nested = item.get("request")
+                if isinstance(nested, dict):
+                    nested_path = nested.get("request_path")
+                    if isinstance(nested_path, str) and nested_path.strip():
+                        return nested_path
+        return None
+
 
     async def _execute_registered_module(
         self,
