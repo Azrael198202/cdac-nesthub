@@ -327,3 +327,210 @@ Requirements:
 7. blocking_missing_information must be grouped by task_id.
 8. required_capabilities must include capability purpose and status.
 9. Return valid JSON only.
+
+
+
+## input_parsing
+Reject & Retry input_parsing.
+
+Required fixes:
+1. Return valid JSON only.
+2. tasks must remain a string array according to the current schema.
+3. Do not output natural-language task descriptions.
+4. tasks should contain normalized executable task identifiers, for example:
+   - "weather_forecast.query"
+   - "weather_forecast.detailed_query"
+5. Extract entities from the original input:
+   - location
+   - date_expression
+   - semantic_modifiers
+6. Preserve semantic modifiers such as "detailed".
+7. Normalize relative temporal expressions using runtime_context.current_date and runtime_context.timezone.
+8. If the schema supports parsed_entities, include:
+   - location
+   - date_expression
+   - date
+   - semantic_modifiers
+9. date must use ISO format YYYY-MM-DD.
+10. Do not add missing_information if location and date are already present or resolvable.
+11. required_capabilities must remain a string array according to the current schema.
+12. required_capabilities should describe generalized runtime capabilities, not implementation-specific APIs.
+13. Replace implementation-specific values like:
+   - "weather_forecast_api"
+   with generalized capabilities such as:
+   - "weather_forecast"
+   - "external_information_lookup"
+14. Do not add fields that are not accepted by the current schema.
+
+
+## intent
+Reject & Retry intent_recognition.
+
+Required fixes:
+1. tasks may remain a string array if required by the current schema.
+2. Do not use natural-language task descriptions.
+3. Add parsed_entities if supported by the schema.
+4. parsed_entities should include:
+   - location
+   - date_expression
+   - date
+   - semantic_modifiers
+5. Preserve both:
+   - original temporal expression
+   - normalized ISO date
+6. confidence must be a structured object including:
+   - overall
+   - intent
+   - execution_readiness
+7. Do not force workflow_planning to re-extract entities already resolved in intent_recognition.
+8. Return valid JSON only.
+
+## workflow
+Reject & Retry workflow_planning.
+
+Required fixes:
+1. Return valid JSON only.
+2. planned_steps must be an array of executable step objects, not strings.
+3. Do not output planned_steps like:
+   "weather_forecast.detailed_query"
+4. Do not create human_interaction fields for information already available from input_parsing or intent_recognition.
+5. If location, date/date_expression, and semantic_modifiers are already known, human_interaction.required must be false.
+6. Each planned step must include:
+   - step_id
+   - step_type
+   - objective
+   - input_from
+   - required_capability
+   - parameters
+   - execution_ready
+   - human_interaction
+   - next_action
+7. parameters must include:
+   - known
+   - missing_required
+   - optional
+8. parameters.known must include:
+   - location
+   - date_expression
+   - date
+   - semantic_modifiers
+9. If missing_required is empty, execution_ready must be true.
+10. next_action should be capability_resolution_or_execute.
+11. Return no human input request unless required fields are actually missing.
+
+
+当input_parsing改好了生成正确的json之后，
+{
+  "language": "en",
+  "intent_type": "weather_forecast",
+  "tasks": [
+    "get detailed weather forecast for fukuoka tomorrow"
+  ],
+  "missing_information": [],
+  "required_capabilities": [
+    "weather_forecast_access"
+  ],
+  "safety_notes": [],
+  "original_input": "could you please check the detailed weather forecast for fukuoka tomorrow?",
+  "_executor_type": "llm_json",
+  "_node_id": "input_parsing",
+  "_adapter_id": "input_parsing_adapter"
+}
+
+
+调整后的
+{
+  "language": "en",
+  "intent_type": "weather_forecast",
+  "tasks": [
+    {
+      "task_id": "weather_forecast.detailed_query",
+      "task_type": "weather_forecast",
+      "action": "query",
+      "parameters": {
+        "location": "Fukuoka",
+        "date_expression": "tomorrow",
+        "date": "2023-10-06",
+        "semantic_modifiers": [
+          "detailed"
+        ]
+      }
+    }
+  ],
+  "missing_information": [],
+  "required_capabilities": [
+    "weather_forecast"
+  ],
+  "original_input": "could you please check the detailed weather forecast for fukuoka tomorrow?",
+  "_executor_type": "llm_json",
+  "_node_id": "input_parsing",
+  "_adapter_id": "input_parsing_adapter"
+}
+
+
+为什么intent又需要调整呢，例如task
+
+有问题的intent
+{
+  "intent_type": "weather_forecast",
+  "confidence": 0.95,
+  "tasks": [
+    "weather_forecast.detailed_query"
+  ],
+  "requires_human_review": false,
+  "reason": "The intent to retrieve a detailed weather forecast for Fukuoka tomorrow is clear and correctly categorized.",
+  "parsed_entities": {
+    "location": "Fukuoka",
+    "date_expression": "tomorrow",
+    "date": "2023-10-06",
+    "semantic_modifiers": [
+      "detailed"
+    ]
+  },
+  "required_capabilities": [
+    "weather_forecast"
+  ],
+  "_executor_type": "llm_json",
+  "_node_id": "intent_recognition",
+  "_adapter_id": "intent_recognition_adapter"
+}
+
+重新生成的
+{
+  "intent_type": "weather_forecast",
+  "confidence": {
+    "overall": 0.95,
+    "intent": 0.95,
+    "execution_readiness": 0.95
+  },
+  "tasks": [
+    {
+      "task_id": "weather_forecast.detailed_query",
+      "task_type": "weather_forecast",
+      "action": "query",
+      "parameters": {
+        "location": "Fukuoka",
+        "date_expression": "tomorrow",
+        "date": "2023-10-06",
+        "semantic_modifiers": [
+          "detailed"
+        ]
+      }
+    }
+  ],
+  "requires_human_review": false,
+  "parsed_entities": {
+    "location": "Fukuoka",
+    "date_expression": "tomorrow",
+    "date": "2023-10-06",
+    "semantic_modifiers": [
+      "detailed"
+    ]
+  },
+  "required_capabilities": [
+    "weather_forecast"
+  ],
+  "_executor_type": "llm_json",
+  "_node_id": "intent_recognition",
+  "_adapter_id": "intent_recognition_adapter"
+}
