@@ -415,3 +415,42 @@ If capability is unavailable, start capability discovery instead of returning bl
 
 
 # workflow 1.0 
+
+Reject & Retry input_parsing.
+
+Required fixes:
+1. Extract location from the original input.
+2. Extract the relative date expression from the original input.
+3. Preserve semantic modifiers such as "detailed".
+4. Do not add missing_information if location and date are present in the input.
+5. Keep tasks as a string array if required by the current schema.
+6. Keep required_capabilities as a string array if required by the current schema.
+7. If the schema supports parsed_entities, include:
+   - location
+   - date_expression
+   - semantic_modifiers
+8. Return valid JSON only.
+
+Reject & Retry input_parsing.
+
+Required fixes:
+1. tasks must be a string array according to the current schema.
+2. Do not output tasks as objects.
+3. Preserve extracted entities using parsed_entities if schema supports it.
+4. Keep required_capabilities as a string array.
+5. Return valid JSON only.
+
+
+Reject & Retry intent_recognition.
+
+Required fixes:
+1. confidence must be an object, not a string.
+2. confidence must include:
+   - overall
+   - intent
+   - execution_readiness
+3. missing_required should be an array if required by schema. If the schema allows object, keep it empty.
+4. Keep execution_ready=true because required parameters are available.
+5. Return valid JSON only.
+
+workflow OK
