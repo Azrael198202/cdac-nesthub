@@ -30,6 +30,7 @@ from ai_core.execution.evidence_quality_validator import EvidenceQualityValidato
 from ai_core.execution.candidate_result_synthesizer import CandidateResultSynthesizer
 from ai_core.execution.runtime_strategy_memory import RuntimeStrategyMemory
 from ai_core.execution.provider_reliability import ProviderReliabilityTracker
+from ai_core.execution.evidence_direct_answer import EvidenceDirectAnswerBuilder
 from ai_core.utils.safe_json import make_json_safe
 
 
@@ -70,6 +71,7 @@ class ToolCallExecutor:
         self.candidate_synthesizer = CandidateResultSynthesizer()
         self.strategy_memory = RuntimeStrategyMemory()
         self.provider_reliability = ProviderReliabilityTracker()
+        self.evidence_direct_answer = EvidenceDirectAnswerBuilder()
 
     async def execute(
         self,
@@ -332,11 +334,12 @@ class ToolCallExecutor:
                                 "source_step": step,
                             })
                             continue
-                        if fallback_execution and fallback_execution.get("status") == "human_interaction_required":
+                        if fallback_execution and fallback_execution.get("status") in {"human_interaction_required", "optional_human_interaction_available"}:
                             interaction = fallback_execution.get("human_interaction") or {}
                             human_interactions.append({
                                 "step_id": step_id,
                                 "type": interaction.get("type") or "choose_credential_or_skip",
+                                "required": bool(interaction.get("required", True)),
                                 "objective": step.get("objective"),
                                 "fields": interaction.get("fields") or {},
                                 "options": interaction.get("options") or [],
@@ -578,11 +581,12 @@ class ToolCallExecutor:
                     tool = fallback_execution.get("tool") or tool
                     tool_result = fallback_execution.get("result") or tool_result
                     tool_result.setdefault("fallback_attempts", self._compact_attempts(fallback_execution.get("attempts", [])))
-                elif fallback_execution and fallback_execution.get("status") == "human_interaction_required":
+                elif fallback_execution and fallback_execution.get("status") in {"human_interaction_required", "optional_human_interaction_available"}:
                     interaction = fallback_execution.get("human_interaction") or {}
                     human_interactions.append({
                         "step_id": step_id,
                         "type": interaction.get("type") or "choose_credential_or_skip",
+                                "required": bool(interaction.get("required", True)),
                         "objective": step.get("objective"),
                         "fields": interaction.get("fields") or {},
                         "options": interaction.get("options") or [],
@@ -1768,17 +1772,42 @@ class ToolCallExecutor:
             })
             return synthesized
 
+        direct_result = self.evidence_direct_answer.build(
+            candidates=no_key_candidates,
+            payload=tool_input,
+            capability=capability,
+            attempts=attempts,
+        )
+        if direct_result and self.result_classifier.classify(direct_result).get("success"):
+            direct_result.setdefault("fallback", {})["no_key_evidence_direct_answer"] = {
+                "reason": "Code-generated adapters failed, but no-credential verified evidence covered the runtime parameters.",
+                "attempts": self._compact_attempts(attempts),
+                "credential_candidates_available": len(credential_candidates),
+                "api_key_interaction_required": False,
+            }
+            await event_bus.emit(run_id, {
+                "type": "NO_KEY_EVIDENCE_DIRECT_ANSWER_SELECTED",
+                "title": "No-key evidence answer selected",
+                "message": "Using verified no-credential evidence instead of requesting an API key.",
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": {"result": direct_result, "attempts": self._compact_attempts(attempts)},
+            })
+            return {"status": "success", "tool": {"id": "evidence_direct_answer", "source": "runtime_research_evidence"}, "result": direct_result, "attempts": attempts}
+
         if credential_candidates and not any(a.get("status") == "success" for a in attempts):
             return {
-                "status": "human_interaction_required",
+                "status": "optional_human_interaction_available",
                 "attempts": attempts,
                 "human_interaction": {
-                    "type": "choose_credential_or_skip",
-                    "reason": "No no-credential candidate produced a validated result. Credential-protected candidates are available.",
-                    "fields": {"credential": {"label": "Credential", "secret": True, "required": False}},
+                    "type": "optional_api_key_upgrade",
+                    "reason": "No no-credential candidate produced a validated executable result. You may provide a credential for protected candidates, or skip and report the best no-key evidence/error summary.",
+                    "required": False,
+                    "fields": {"credential": {"label": "API Key / Credential", "secret": True, "required": False, "placeholder": "Paste key here, or choose continue_without_key"}},
                     "options": [
-                        {"id": "provide_credential", "label": "Provide credential and retry protected candidate"},
-                        {"id": "skip_protected_candidates", "label": "Skip protected candidates and continue/report no usable method"},
+                        {"id": "continue_without_key", "label": "Continue without API key"},
+                        {"id": "provide_credential", "label": "Provide API key and retry protected candidate"},
+                        {"id": "skip_protected_candidates", "label": "Skip protected candidates"},
                     ],
                     "candidates": [self._compact_candidate_for_interaction(c) for c in credential_candidates[:5]],
                 },
