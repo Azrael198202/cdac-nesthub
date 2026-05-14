@@ -183,6 +183,16 @@ class ToolCallExecutor:
                 continue
 
             tool = self.tool_registry.find_by_capability(required_capability) if required_capability else None
+            if tool and not self._has_executable_implementation(tool):
+                await event_bus.emit(run_id, {
+                    "type": "NON_EXECUTABLE_TOOL_RECORD_SKIPPED",
+                    "title": "Non-executable tool record skipped",
+                    "message": "A registry record matched the capability but did not declare a valid executable implementation.",
+                    "node_id": node_id,
+                    "step_id": step_id,
+                    "result": self._public_tool_spec(tool),
+                })
+                tool = None
             if not tool and required_capability:
                 existing_module = self.module_loader.load_by_capability(required_capability)
                 if existing_module is not None:
@@ -1101,6 +1111,10 @@ class ToolCallExecutor:
                 "must_include_live_verification_metadata": True,
                 "must_generate_parameter_mapping_from_runtime_semantics": True,
                 "must_not_assume_fixed_domain_fields": True,
+                "must_include_valid_implementation_metadata": True,
+                "must_define_run_payload_entrypoint": True,
+                "must_generate_tool_py_file": True,
+                "must_not_register_blueprint_as_executable": True,
                 "no_mock_data": True,
             },
             "expected_contract": {
@@ -1540,6 +1554,9 @@ class ToolCallExecutor:
                     "must_use_standard_library_unless_requirements_declared": True,
                     "must_not_return_error_payload_as_success": True,
                     "must_map_extracted_or_api_data_to_output_schema": True,
+                    "must_include_valid_implementation_metadata": True,
+                    "must_define_run_payload_entrypoint": True,
+                    "must_generate_tool_py_file": True,
                     "if_candidate_returns_html_generate_extraction_adapter": True,
                     "if_candidate_requires_unavailable_authentication_skip_with_structured_error": True,
                 },
@@ -1712,10 +1729,20 @@ class ToolCallExecutor:
 
 
     def _has_executable_implementation(self, tool: dict[str, Any]) -> bool:
+        status = str(tool.get("status", "")).lower().strip()
+        if status in {"missing_implementation_blueprint_generated", "blueprint_generated", "pending", "draft", "disabled"}:
+            return False
         implementation = tool.get("implementation")
-        return isinstance(implementation, dict) and bool(
-            implementation.get("module_path") or implementation.get("path")
-        )
+        if not isinstance(implementation, dict):
+            return False
+        impl_type = str(implementation.get("type") or "").lower().strip()
+        if impl_type not in {"python_function", "python_module", "runtime_python"}:
+            return False
+        if not (implementation.get("module_path") or implementation.get("path")):
+            return False
+        if not (implementation.get("function") or implementation.get("callable") or "run"):
+            return False
+        return True
 
     def _public_tool_spec(self, tool: dict[str, Any]) -> dict[str, Any]:
         public = dict(tool)

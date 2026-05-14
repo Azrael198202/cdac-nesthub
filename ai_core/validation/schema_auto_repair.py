@@ -72,10 +72,15 @@ class SchemaAutoRepair:
             if self._ensure_property(repaired, "human_review", human_review_schema):
                 changes.append("schema.human_review.object")
 
-        # Common executable task object evolution.
-        if isinstance(result, dict) and isinstance(result.get("tasks"), list):
+        # Stage-boundary protection: early understanding nodes must not evolve
+        # toward executable tasks. Executable work belongs to workflow_planning.
+        if node_id in {"input_parsing", "intent_recognition"}:
+            if self._forbid_property(repaired, "tasks"):
+                changes.append("schema.tasks.forbidden_for_stage")
+        elif isinstance(result, dict) and isinstance(result.get("tasks"), list):
             tasks = result.get("tasks") or []
             if any(isinstance(x, dict) for x in tasks):
+                # Compatibility only for legacy/custom planner-like nodes.
                 task_schema = {
                     "type": "array",
                     "items": {
@@ -93,7 +98,6 @@ class SchemaAutoRepair:
                         "additionalProperties": True,
                     },
                 }
-                # Do not require all keys here; automatic repair should be compatibility-oriented.
                 if self._make_property_compatible(repaired, "tasks", task_schema):
                     changes.append("schema.tasks.object_array_compatible")
 
@@ -124,6 +128,21 @@ class SchemaAutoRepair:
             return m.group(1)
 
         return None
+
+    def _forbid_property(self, schema: dict[str, Any], field: str) -> bool:
+        changed = False
+        props = schema.setdefault("properties", {})
+        if field in props:
+            props.pop(field, None)
+            changed = True
+        required = schema.get("required")
+        if isinstance(required, list) and field in required:
+            schema["required"] = [x for x in required if x != field]
+            changed = True
+        if schema.get("not") != {"required": [field]}:
+            schema["not"] = {"required": [field]}
+            changed = True
+        return changed
 
     def _infer_schema(self, value: Any) -> dict[str, Any]:
         if isinstance(value, bool):

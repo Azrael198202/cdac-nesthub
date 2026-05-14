@@ -130,7 +130,7 @@ class ToolBlueprintBuilder:
         return (
             f'"""Runtime generated placeholder for {tool_id}."""\n\n'
             "from typing import Any\n\n\n"
-            "def run(input_data: dict[str, Any]) -> dict[str, Any]:\n"
+            "def run(payload: dict[str, Any]) -> dict[str, Any]:\n"
             "    return {\n"
             '        "status": "not_implemented",\n'
             f'        "tool_id": "{tool_id}",\n'
@@ -159,7 +159,12 @@ class ToolBlueprintBuilder:
             "status": "blueprint_generated",
             "tool_dir": str(tool_dir),
             "spec_path": str(tool_dir / "tool.json"),
-            "implementation_path": str(tool_dir / "tool.py"),
+            "implementation": {
+                "type": "runtime_blueprint_pending_generation",
+                "function": "run",
+                "module_path": str(tool_dir / "tool.py"),
+            },
+            "executable": False,
         }
         self.registry_path.write_text(json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
 

@@ -254,44 +254,91 @@ class RuntimeBootstrap:
         prompts = {
             "input_parsing": {
                 "id": "input_parsing_prompt",
-                "version": "1.0",
+                "version": "2.0",
                 "executor_type": "llm_json",
-                "system": "You are a generic input parsing engine. Return JSON only according to the output schema. Do not execute tools.",
-                "user_template": "User input: {{ user_input }}\nPrevious results: {{ previous_results }}\nCorrection memory: {{ correction_memory }}",
+                "system": (
+                    "You are a generic input parsing engine. Return JSON only according to the output schema. "
+                    "Only parse the raw input. Do not generate tasks, workflow, tools, APIs, providers, or execution decisions."
+                ),
+                "user_template": (
+                    "User input: {{ user_input }}\n"
+                    "Runtime context: {{ runtime_context }}\n"
+                    "Previous results: {{ previous_results }}\n"
+                    "Correction memory: {{ correction_memory }}"
+                ),
+                "runtime_rules": [
+                    "Only output fields needed for input parsing.",
+                    "Do not output top-level tasks.",
+                    "Do not output planned_steps, required_capabilities, tool names, API names, provider names, or execution decisions.",
+                    "Extract parsed_entities, semantic modifiers, constraints, and temporal expressions from the original input.",
+                    "If runtime_context can safely normalize a relative expression, include the normalized value as parsed data while preserving the original expression.",
+                ],
                 "output_contract": {
                     "language": "string",
-                    "intent_type": "string",
-                    "tasks": "array",
+                    "original_input": "string",
+                    "parsed_entities": "object",
+                    "semantic_modifiers": "array",
+                    "constraints": "object",
+                    "temporal_expressions": "array",
                     "missing_information": "array",
-                    "required_capabilities": "array",
-                    "safety_notes": "array",
-                    "original_input": "string"
+                    "safety_notes": "array"
                 }
             },
             "intent_recognition": {
                 "id": "intent_recognition_prompt",
-                "version": "1.0",
+                "version": "2.0",
                 "executor_type": "llm_json",
-                "system": "You are a generic intent recognition engine. Use previous node results and return JSON only.",
-                "user_template": "User input: {{ user_input }}\nPrevious results: {{ previous_results }}\nCorrection memory: {{ correction_memory }}",
+                "system": (
+                    "You are a generic intent recognition engine. Return JSON only. "
+                    "Only classify and summarize intent. Do not generate tasks, workflow, tools, APIs, providers, or execution decisions."
+                ),
+                "user_template": (
+                    "User input: {{ user_input }}\n"
+                    "Runtime context: {{ runtime_context }}\n"
+                    "Previous results: {{ previous_results }}\n"
+                    "Correction memory: {{ correction_memory }}"
+                ),
+                "runtime_rules": [
+                    "Only output fields needed for intent recognition.",
+                    "Do not output top-level tasks.",
+                    "Do not output planned_steps, required_capabilities, tool names, API names, provider names, or execution decisions.",
+                    "Use input_parsing results when available instead of re-parsing the raw input.",
+                    "Do not ask human questions unless intent itself is ambiguous.",
+                ],
                 "output_contract": {
                     "intent_type": "string",
-                    "confidence": "number",
-                    "tasks": "array",
-                    "requires_human_review": "boolean",
-                    "reason": "string"
+                    "intent_summary": "string",
+                    "normalized_intent": "object",
+                    "confidence": "object",
+                    "human_review": "object"
                 }
             },
             "workflow_planning": {
                 "id": "workflow_planning_prompt",
-                "version": "1.0",
+                "version": "2.0",
                 "executor_type": "llm_json",
-                "system": "You are a generic workflow planner. Produce a plan from previous structured results. Return JSON only.",
-                "user_template": "User input: {{ user_input }}\nPrevious results: {{ previous_results }}\nCorrection memory: {{ correction_memory }}",
+                "system": (
+                    "You are a generic workflow planner. Produce executable planned_steps from previous structured results. "
+                    "Return JSON only. Use generic capabilities only; do not choose concrete tools, APIs, providers, libraries, repositories, or implementation files."
+                ),
+                "user_template": (
+                    "User input: {{ user_input }}\n"
+                    "Runtime context: {{ runtime_context }}\n"
+                    "Previous results: {{ previous_results }}\n"
+                    "Correction memory: {{ correction_memory }}"
+                ),
+                "runtime_rules": [
+                    "Only workflow_planning may create planned_steps.",
+                    "planned_steps must be executable step objects, not strings.",
+                    "Copy normalized entities from upstream nodes; do not invent stale values or re-normalize already resolved values.",
+                    "Choose generic required_capability values only; execution resolves actual tools later.",
+                    "Do not request human_interaction for data already available from upstream nodes.",
+                ],
                 "output_contract": {
                     "planned_steps": "array",
                     "blocking_missing_information": "array",
-                    "required_capabilities": "array"
+                    "required_capabilities": "array",
+                    "human_interaction": "object"
                 }
             },
             "context_awareness": {"id": "context_awareness_prompt", "version": "1.0", "executor_type": "static_transform"},
@@ -308,27 +355,47 @@ class RuntimeBootstrap:
         schemas = {
             "input_parsing": {
                 "type": "object",
-                "required": ["language", "intent_type", "tasks", "missing_information", "required_capabilities", "original_input"],
+                "required": ["language", "original_input", "parsed_entities", "missing_information"],
                 "properties": {
                     "language": {"type": "string"},
-                    "intent_type": {"type": "string"},
-                    "tasks": {"type": "array"},
-                    "missing_information": {"type": "array"},
-                    "required_capabilities": {"type": "array"},
-                    "safety_notes": {"type": "array"},
-                    "original_input": {"type": "string"}
-                }
+                    "original_input": {"type": "string"},
+                    "parsed_entities": {"type": "object", "additionalProperties": True},
+                    "semantic_modifiers": {"type": "array", "items": {"type": "string"}},
+                    "constraints": {"type": "object", "additionalProperties": True},
+                    "temporal_expressions": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+                    "missing_information": {"type": "array", "items": {"type": "string"}},
+                    "safety_notes": {"type": "array", "items": {"type": "string"}}
+                },
+                "not": {"required": ["tasks"]},
+                "additionalProperties": True
             },
             "intent_recognition": {
                 "type": "object",
-                "required": ["intent_type", "confidence", "tasks"],
+                "required": ["intent_type", "confidence"],
                 "properties": {
                     "intent_type": {"type": "string"},
-                    "confidence": {"type": "number"},
-                    "tasks": {"type": "array"},
-                    "requires_human_review": {"type": "boolean"},
+                    "intent_summary": {"type": "string"},
+                    "normalized_intent": {"type": "object", "additionalProperties": True},
+                    "confidence": {
+                        "oneOf": [
+                            {"type": "number"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "overall": {"type": "number"},
+                                    "intent": {"type": "number"},
+                                    "parameter_understanding": {"type": "number"},
+                                    "execution_readiness": {"type": "number"}
+                                },
+                                "additionalProperties": True
+                            }
+                        ]
+                    },
+                    "human_review": {"type": "object", "additionalProperties": True},
                     "reason": {"type": "string"}
-                }
+                },
+                "not": {"required": ["tasks"]},
+                "additionalProperties": True
             },
             "workflow_planning": {
                 "type": "object",
@@ -339,26 +406,38 @@ class RuntimeBootstrap:
                         "items": {
                             "type": "object",
                             "required": [
-                                "task_id", "task_type", "action", "objective",
+                                "step_id", "step_type", "objective", "input_from",
                                 "parameters", "required_capability", "execution_ready",
-                                "depends_on", "requires_human_confirmation"
+                                "human_interaction", "next_action"
                             ],
                             "properties": {
-                                "task_id": {"type": "string"},
                                 "step_id": {"type": "string"},
+                                "step_type": {"type": "string"},
+                                "task_id": {"type": "string"},
                                 "task_type": {"type": "string"},
                                 "action": {"type": "string"},
                                 "objective": {"type": "string"},
-                                "parameters": {"type": "object", "additionalProperties": True},
+                                "input_from": {"type": "array", "items": {"type": "string"}},
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "known": {"type": "object", "additionalProperties": True},
+                                        "optional": {"type": "object", "additionalProperties": True},
+                                        "missing_required": {"oneOf": [{"type": "array"}, {"type": "object"}]}
+                                    },
+                                    "additionalProperties": True
+                                },
                                 "required_capability": {"oneOf": [{"type": "string"}, {"type": "object"}]},
                                 "execution_ready": {"type": "boolean"},
+                                "human_interaction": {"type": "object", "additionalProperties": True},
+                                "next_action": {"type": "string"},
                                 "depends_on": {"type": "array"},
                                 "requires_human_confirmation": {"type": "boolean"}
                             },
                             "additionalProperties": True
                         }
                     },
-                    "blocking_missing_information": {"type": "array"},
+                    "blocking_missing_information": {"oneOf": [{"type": "array"}, {"type": "object"}]},
                     "required_capabilities": {"type": "array"},
                     "human_interaction": {"type": "object"}
                 },

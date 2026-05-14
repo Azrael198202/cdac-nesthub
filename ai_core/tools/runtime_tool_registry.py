@@ -48,25 +48,45 @@ class RuntimeToolRegistry:
         matches: list[dict[str, Any]] = []
         for tool in registry.values():
             if capability in tool.get("capabilities", []) or tool.get("capability") == capability:
-                matches.append(tool)
+                if self._is_executable_tool_record(tool):
+                    matches.append(tool)
 
         if not matches:
             return None
 
         def score(tool: dict[str, Any]) -> int:
-            implementation = tool.get("implementation")
-            has_impl = isinstance(implementation, dict) and bool(implementation.get("module_path") or implementation.get("path"))
             status = str(tool.get("status", "")).lower()
             value = 0
             if status in {"enabled", "active", "approved", "ready"}:
                 value += 100
-            if has_impl:
-                value += 50
-            if status in {"missing_implementation_blueprint_generated", "blueprint_generated", "pending"}:
-                value -= 25
+            if bool((tool.get("verification") or {}).get("sandbox_verification")):
+                value += 10
             return value
 
         return sorted(matches, key=score, reverse=True)[0]
+
+    def _is_executable_tool_record(self, tool: dict[str, Any]) -> bool:
+        """Return True only for records that can be passed to the generic runner.
+
+        Blueprint or pending records are useful for audit/review, but they are
+        not executable tools. Keeping this filter in the runtime registry avoids
+        routing half-generated records into execution and producing errors such
+        as unsupported implementation type None.
+        """
+        status = str(tool.get("status", "")).lower().strip()
+        if status in {"missing_implementation_blueprint_generated", "blueprint_generated", "pending", "draft", "disabled"}:
+            return False
+        implementation = tool.get("implementation")
+        if not isinstance(implementation, dict):
+            return False
+        impl_type = str(implementation.get("type") or "").lower().strip()
+        if impl_type not in {"python_function", "python_module", "runtime_python"}:
+            return False
+        if not (implementation.get("module_path") or implementation.get("path")):
+            return False
+        if not (implementation.get("function") or implementation.get("callable") or "run"):
+            return False
+        return True
 
 
     def create_missing_tool_spec(

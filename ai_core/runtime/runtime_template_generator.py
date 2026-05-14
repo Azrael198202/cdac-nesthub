@@ -60,25 +60,37 @@ class RuntimeTemplateGenerator:
         changes: list[str] = []
         feedback_l = (feedback or "").lower()
 
-        # Generic structural detection: the node output had a list of strings where structured object array was requested.
-        if self._needs_task_object_schema(feedback_l, original_output):
-            if self._enforce_object_array_field(schema, "tasks", ["task_id", "task_type", "action", "parameters"]):
-                changes.append("schema.tasks.object_array")
+        # Stage-boundary rule: input_parsing and intent_recognition must not evolve
+        # toward executable tasks. Only workflow_planning owns executable steps.
+        if node_id in {"input_parsing", "intent_recognition"}:
+            if self._forbid_top_level_field(schema, "tasks"):
+                changes.append("schema.tasks.forbidden_for_stage")
             if self._add_runtime_rules(prompt, [
-                "tasks MUST be an array of objects, not an array of strings.",
-                "Each task object MUST include task_id, task_type, action, and parameters.",
-                "parameters MUST be an object containing extracted task parameters.",
+                "Do not output top-level tasks in this node.",
+                "Do not output executable steps, workflow, tool selection, provider selection, or implementation decisions in this node.",
+                "Keep this node output limited to its stage responsibility.",
             ]):
-                changes.append("prompt.tasks_object_rules")
+                changes.append("prompt.stage_boundary.no_tasks")
+        elif self._needs_task_object_schema(feedback_l, original_output):
+            if self._add_runtime_rules(prompt, [
+                "Executable work items belong in planned_steps, not top-level tasks.",
+                "planned_steps MUST be an array of executable objects, not an array of strings.",
+                "Each planned step object MUST include parameters and required_capability when the schema requires them.",
+            ]):
+                changes.append("prompt.planned_steps_object_rules")
 
         if self._needs_human_confirmation(feedback_l):
-            if self._ensure_field_in_array_items(schema, "tasks", "requires_human_confirmation", {"type": "boolean"}):
-                changes.append("schema.tasks.requires_human_confirmation")
-            if self._add_runtime_rules(prompt, [
-                "Any irreversible or externally mutating action MUST include requires_human_confirmation=true unless runtime policy explicitly allows it.",
-                "Do not finalize externally mutating actions without explicit human approval.",
-            ]):
-                changes.append("prompt.human_confirmation_rules")
+            if node_id in {"input_parsing", "intent_recognition"}:
+                if self._add_runtime_rules(prompt, [
+                    "Do not decide human confirmation for execution in this node; preserve possible safety signals only in this node's own allowed fields.",
+                ]):
+                    changes.append("prompt.human_confirmation.stage_boundary")
+            else:
+                if self._add_runtime_rules(prompt, [
+                    "Any irreversible or externally mutating planned step MUST include requires_human_confirmation=true unless runtime policy explicitly allows it.",
+                    "Do not finalize externally mutating actions without explicit human approval.",
+                ]):
+                    changes.append("prompt.human_confirmation_rules")
 
         if self._needs_human_review_object(feedback_l):
             if self._evolve_human_review_schema(schema):
@@ -125,13 +137,15 @@ class RuntimeTemplateGenerator:
         return event
 
     def _default_prompt(self, node_id: str, executor_type: str) -> dict[str, Any]:
+        stage_rules = self._stage_boundary_rules(node_id)
         return {
             "id": f"{node_id}_prompt",
-            "version": "1.0",
+            "version": "2.0",
             "executor_type": executor_type,
             "system": (
                 f"You are a generic runtime node executor for node '{node_id}'. "
                 "Return JSON only according to the output schema. "
+                "Perform only this node's stage responsibility. "
                 "Do not execute external tools unless this node explicitly requires it."
             ),
             "user_template": (
@@ -145,42 +159,68 @@ class RuntimeTemplateGenerator:
                 "Return one valid JSON object only.",
                 "Follow the JSON schema strictly.",
                 "Use human feedback and correction memory as higher-priority guidance than previous failed outputs.",
-                "When required information is missing, include structured missing_required metadata and, when possible, generate a human_interaction.fields contract with user-friendly labels, questions, placeholders, and examples in the user's language.",
-                "Relative expressions already present in the user input are known information, not missing information. Resolve them using runtime_context when a concrete value is needed, and also preserve the original expression.",
-                "Preserve user modifiers, qualifiers, constraints, requested specificity, and completeness expectations as runtime semantics because they may affect execution and output formatting.",
-                "For workflow_planning, produce at least one executable planned_step when the request requires an external/read-only capability and all required parameters can be extracted or resolved from user input and runtime_context.",
-                "For workflow_planning, when a planned step requires external real-world data, describe the needed capability generically and preserve runtime semantics; do not choose a specific API provider in the plan unless the user supplied one.",
-                "Each planned_step should include task_id, task_type, action, objective, parameters.known, parameters.optional, parameters.missing_required, required_capability, execution_ready, depends_on, and requires_human_confirmation.",
+                "Keep the output minimal: include only fields needed by this node's responsibility and schema.",
+                "Do not duplicate previous node outputs unless this node must reference them structurally.",
+                "Do not choose a concrete tool, API provider, library, repository, or implementation unless this node is an execution/capability resolution node.",
+                "Relative expressions already present in the user input are known semantic information, not missing information. Resolve them only when this node schema requires a concrete normalized value, and preserve the original expression when included.",
+                "Preserve user modifiers, qualifiers, constraints, requested specificity, and completeness expectations as runtime semantics when this node is responsible for parsing or planning them.",
                 "Do not rely on ai_core for business wording. Interaction wording should be generated from user input, task context, and runtime metadata.",
-            ],
+            ] + stage_rules,
             "output_contract": self._default_contract(node_id),
         }
+
+    def _stage_boundary_rules(self, node_id: str) -> list[str]:
+        if node_id == "input_parsing":
+            return [
+                "Stage responsibility: parse the user's raw input into language, original_input, parsed_entities, semantic_modifiers, constraints, temporal_expressions, missing_information, and safety_notes only.",
+                "Do not generate tasks, planned_steps, workflow, required_capabilities, tool names, API names, provider names, or execution decisions.",
+                "If a relative temporal expression appears, preserve it under temporal_expressions and, when runtime_context is available, include a normalized ISO value under parsed_entities without deciding execution readiness.",
+                "missing_information should only contain information required to understand the input text itself; do not ask for execution details that later nodes can infer or plan.",
+            ]
+        if node_id == "intent_recognition":
+            return [
+                "Stage responsibility: classify intent from parsed input and summarize the user's request semantics only.",
+                "Do not generate tasks, planned_steps, workflow, required_capabilities, tool names, API names, provider names, or execution decisions.",
+                "Do not re-parse raw text when input_parsing already produced structured entities; reference or copy only minimal normalized_intent fields needed by downstream planning.",
+                "confidence must be structured when the schema allows it; include overall, intent, and parameter_understanding scores.",
+            ]
+        if node_id == "workflow_planning":
+            return [
+                "Stage responsibility: convert parsed input and recognized intent into executable planned_steps.",
+                "planned_steps must be executable step objects, not strings.",
+                "Workflow planning may choose generic required capabilities, but must not choose concrete tools, APIs, providers, libraries, repositories, or implementation files.",
+                "Each planned step should include step_id, step_type, objective, input_from, required_capability, parameters.known, parameters.optional, parameters.missing_required, execution_ready, human_interaction, next_action, depends_on, and requires_human_confirmation when allowed by the schema.",
+                "Copy normalized entities from upstream nodes; do not invent stale dates or re-normalize already resolved values.",
+                "Only request human_interaction when required fields are actually missing.",
+            ]
+        return []
 
     def _default_contract(self, node_id: str) -> dict[str, str]:
         if node_id == "input_parsing":
             return {
                 "language": "string",
-                "intent_type": "string",
-                "tasks": "array",
-                "missing_information": "array",
-                "required_capabilities": "array",
-                "safety_notes": "array",
                 "original_input": "string",
+                "parsed_entities": "object",
+                "semantic_modifiers": "array",
+                "constraints": "object",
+                "temporal_expressions": "array",
+                "missing_information": "array",
+                "safety_notes": "array",
             }
         if node_id == "intent_recognition":
             return {
                 "intent_type": "string",
-                "confidence": "number",
-                "tasks": "array",
-                "requires_human_review": "boolean",
-                "reason": "string",
+                "intent_summary": "string",
+                "normalized_intent": "object",
+                "confidence": "object",
+                "human_review": "object",
             }
         if node_id == "workflow_planning":
             return {
                 "planned_steps": "array",
                 "blocking_missing_information": "array",
                 "required_capabilities": "array",
-                "human_interaction": "object optional; generate user-friendly fields when required information is missing",
+                "human_interaction": "object optional; generate user-friendly fields only when required information is missing",
             }
         return {"status": "string", "data": "object"}
 
@@ -188,30 +228,59 @@ class RuntimeTemplateGenerator:
         if node_id == "input_parsing":
             return {
                 "type": "object",
-                "required": ["language", "intent_type", "tasks", "missing_information", "required_capabilities", "original_input"],
+                "required": ["language", "original_input", "parsed_entities", "missing_information"],
                 "properties": {
                     "language": {"type": "string"},
-                    "intent_type": {"type": "string"},
-                    "tasks": {"type": "array"},
-                    "missing_information": {"type": "array", "items": {"type": "string"}},
-                    "required_capabilities": {"type": "array", "items": {"type": "string"}},
-                    "safety_notes": {"type": "array", "items": {"type": "string"}},
                     "original_input": {"type": "string"},
+                    "parsed_entities": {"type": "object", "additionalProperties": True},
+                    "semantic_modifiers": {"type": "array", "items": {"type": "string"}},
+                    "constraints": {"type": "object", "additionalProperties": True},
+                    "temporal_expressions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "text": {"type": "string"},
+                                "normalized_value": {"type": "string"},
+                                "value_type": {"type": "string"},
+                            },
+                            "additionalProperties": True,
+                        },
+                    },
+                    "missing_information": {"type": "array", "items": {"type": "string"}},
+                    "safety_notes": {"type": "array", "items": {"type": "string"}},
                 },
+                "not": {"required": ["tasks"]},
                 "additionalProperties": True,
             }
 
         if node_id == "intent_recognition":
             return {
                 "type": "object",
-                "required": ["intent_type", "confidence", "tasks"],
+                "required": ["intent_type", "confidence"],
                 "properties": {
                     "intent_type": {"type": "string"},
-                    "confidence": {"type": "number"},
-                    "tasks": {"type": "array"},
-                    "requires_human_review": {"type": "boolean"},
+                    "intent_summary": {"type": "string"},
+                    "normalized_intent": {"type": "object", "additionalProperties": True},
+                    "confidence": {
+                        "oneOf": [
+                            {"type": "number"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "overall": {"type": "number"},
+                                    "intent": {"type": "number"},
+                                    "parameter_understanding": {"type": "number"},
+                                    "execution_readiness": {"type": "number"},
+                                },
+                                "additionalProperties": True,
+                            },
+                        ]
+                    },
+                    "human_review": {"type": "object", "additionalProperties": True},
                     "reason": {"type": "string"},
                 },
+                "not": {"required": ["tasks"]},
                 "additionalProperties": True,
             }
 
@@ -225,40 +294,39 @@ class RuntimeTemplateGenerator:
                         "items": {
                             "type": "object",
                             "required": [
-                                "task_id", "task_type", "action", "objective",
+                                "step_id", "step_type", "objective", "input_from",
                                 "parameters", "required_capability", "execution_ready",
-                                "depends_on", "requires_human_confirmation"
+                                "human_interaction", "next_action"
                             ],
                             "properties": {
-                                "task_id": {"type": "string"},
                                 "step_id": {"type": "string"},
+                                "step_type": {"type": "string"},
+                                "task_id": {"type": "string"},
                                 "task_type": {"type": "string"},
                                 "action": {"type": "string"},
                                 "objective": {"type": "string"},
+                                "input_from": {"type": "array", "items": {"type": "string"}},
                                 "parameters": {
                                     "type": "object",
                                     "properties": {
-                                        "known": {"type": "object"},
-                                        "optional": {"type": "object"},
-                                        "missing_required": {
-                                            "oneOf": [{"type": "object"}, {"type": "array"}]
-                                        },
+                                        "known": {"type": "object", "additionalProperties": True},
+                                        "optional": {"type": "object", "additionalProperties": True},
+                                        "missing_required": {"oneOf": [{"type": "object"}, {"type": "array"}]}
                                     },
                                     "additionalProperties": True,
                                 },
-                                "required_capability": {
-                                    "oneOf": [{"type": "string"}, {"type": "object"}]
-                                },
+                                "required_capability": {"oneOf": [{"type": "string"}, {"type": "object"}]},
                                 "execution_ready": {"type": "boolean"},
+                                "human_interaction": {"type": "object", "additionalProperties": True},
+                                "next_action": {"type": "string"},
                                 "depends_on": {"type": "array"},
                                 "requires_human_confirmation": {"type": "boolean"},
-                                "human_interaction": {"type": "object"},
                                 "missing_fields": {"type": "array"},
                             },
                             "additionalProperties": True,
                         },
                     },
-                    "blocking_missing_information": {"type": "array"},
+                    "blocking_missing_information": {"oneOf": [{"type": "array"}, {"type": "object"}]},
                     "required_capabilities": {"type": "array"},
                     "human_interaction": {"type": "object"},
                 },
@@ -322,6 +390,21 @@ class RuntimeTemplateGenerator:
             return False
         props[field] = new_schema
         return True
+
+    def _forbid_top_level_field(self, schema: dict[str, Any], field: str) -> bool:
+        changed = False
+        props = schema.setdefault("properties", {})
+        if field in props:
+            props.pop(field, None)
+            changed = True
+        required = schema.get("required")
+        if isinstance(required, list) and field in required:
+            schema["required"] = [x for x in required if x != field]
+            changed = True
+        if schema.get("not") != {"required": [field]}:
+            schema["not"] = {"required": [field]}
+            changed = True
+        return changed
 
     def _ensure_field_in_array_items(self, schema: dict[str, Any], array_field: str, field: str, field_schema: dict[str, Any]) -> bool:
         props = schema.setdefault("properties", {})

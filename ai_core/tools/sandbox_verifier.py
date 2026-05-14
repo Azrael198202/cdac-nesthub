@@ -132,7 +132,7 @@ class SandboxVerifier:
     def _check_entrypoint(self, source: str, artifact: dict[str, Any] | None = None) -> dict[str, Any]:
         expected = self._expected_entrypoint(artifact)
         tree = ast.parse(source)
-        functions = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        functions = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
         if expected not in functions:
             return {
                 "name": "runtime_entrypoint",
@@ -140,6 +140,22 @@ class SandboxVerifier:
                 "expected_function": expected,
                 "available_functions": sorted(functions),
                 "message": f"Generated artifact must define callable entrypoint {expected}(payload: dict) -> dict.",
+            }
+        fn = functions[expected]
+        positional_args = list(fn.args.posonlyargs) + list(fn.args.args)
+        if len(positional_args) != 1:
+            return {
+                "name": "runtime_entrypoint",
+                "status": "failed",
+                "expected_function": expected,
+                "message": f"Generated artifact entrypoint {expected} must accept exactly one payload argument.",
+            }
+        if positional_args[0].arg != "payload":
+            return {
+                "name": "runtime_entrypoint",
+                "status": "failed",
+                "expected_function": expected,
+                "message": f"Generated artifact entrypoint {expected} must name its argument payload.",
             }
         return {"name": "runtime_entrypoint", "status": "passed", "expected_function": expected}
 

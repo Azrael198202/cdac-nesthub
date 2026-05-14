@@ -137,7 +137,16 @@ class RuntimeToolArtifactGenerator:
                         "capability": {"type": "string"},
                         "capabilities": {"type": "array", "items": {"type": "string"}},
                         "status": {"type": "string"},
-                        "implementation": {"type": "object"},
+                        "implementation": {
+                            "type": "object",
+                            "required": ["type", "function", "module_path"],
+                            "properties": {
+                                "type": {"type": "string", "enum": ["python_function", "python_module", "runtime_python"]},
+                                "function": {"type": "string", "const": "run"},
+                                "module_path": {"type": "string"}
+                            },
+                            "additionalProperties": True
+                        },
                         "input_schema": {"type": "object"},
                         "output_schema": {"type": "object"},
                         "safety": {"type": "object"},
@@ -153,6 +162,8 @@ class RuntimeToolArtifactGenerator:
                 },
                 "files": {
                     "type": "object",
+                    "required": ["tool.py"],
+                    "properties": {"tool.py": {"type": "string"}},
                     "additionalProperties": {"type": "string"},
                 },
                 "real_execution": {"type": "boolean"},
