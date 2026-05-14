@@ -12,6 +12,7 @@ from typing import Any
 
 from ai_core.security.dependency_scanner import DependencyScanner
 from ai_core.tools.sandbox_verifier import SandboxVerifier
+from ai_core.utils.safe_json import make_json_safe, safe_json_dumps
 
 
 @dataclass
@@ -153,7 +154,7 @@ class VerifiedSandboxRuntime:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(str(content), encoding="utf-8")
         manifest = artifact.get("manifest") if isinstance(artifact.get("manifest"), dict) else {}
-        (root / "artifact_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        (root / "artifact_manifest.json").write_text(safe_json_dumps(manifest, indent=2), encoding="utf-8")
 
     def _safe_child_path(self, base: Path, relative_name: str) -> Path:
         pure = PurePosixPath(relative_name.replace("\\", "/"))
@@ -174,21 +175,60 @@ class VerifiedSandboxRuntime:
 
     def _write_runner(self, root: Path, callable_info: dict[str, str], test_input: dict[str, Any]) -> Path:
         payload_path = root / "sandbox_input.json"
-        payload_path.write_text(json.dumps(test_input, ensure_ascii=False), encoding="utf-8")
+        payload_path.write_text(safe_json_dumps(test_input), encoding="utf-8")
         runner = root / "sandbox_runner.py"
         runner.write_text(
-            "import importlib.util, json, pathlib, sys\n"
+            "import dataclasses, importlib.util, json, pathlib, sys\n"
             "root = pathlib.Path(__file__).parent\n"
             f"module_path = root / {callable_info['module_path']!r}\n"
             f"func_name = {callable_info['function']!r}\n"
+            "def _safe(obj, seen=None):\n"
+            "    if seen is None: seen=set()\n"
+            "    if obj is None or isinstance(obj, (str, int, float, bool)): return obj\n"
+            "    oid=id(obj)\n"
+            "    if isinstance(obj, (dict, list, tuple, set)) or dataclasses.is_dataclass(obj):\n"
+            "        if oid in seen: return {'__circular_reference__': True, 'type': type(obj).__name__}\n"
+            "        seen.add(oid)\n"
+            "        try:\n"
+            "            if dataclasses.is_dataclass(obj): return _safe(dataclasses.asdict(obj), seen)\n"
+            "            if isinstance(obj, dict): return {str(k): _safe(v, seen) for k, v in obj.items()}\n"
+            "            return [_safe(x, seen) for x in list(obj)]\n"
+            "        finally:\n"
+            "            seen.discard(oid)\n"
+            "    if isinstance(obj, pathlib.Path): return str(obj)\n"
+            "    if isinstance(obj, BaseException): return {'error_type': type(obj).__name__, 'message': str(obj)}\n"
+            "    if callable(obj): return {'__callable__': getattr(obj, '__name__', type(obj).__name__)}\n"
+            "    try:\n"
+            "        json.dumps(obj); return obj\n"
+            "    except Exception:\n"
+            "        return repr(obj)\n"
+            "def _emit(payload, code=0):\n"
+            "    print(json.dumps(_safe(payload), ensure_ascii=False))\n"
+            "    sys.exit(code)\n"
+            "if not module_path.exists():\n"
+            "    _emit({'status':'failed','error_type':'missing_module_file','message':f'Module file not found: {module_path.name}'}, 1)\n"
             "spec = importlib.util.spec_from_file_location('runtime_artifact', module_path)\n"
+            "if spec is None or spec.loader is None:\n"
+            "    _emit({'status':'failed','error_type':'module_load_failed','message':'Could not create module spec.'}, 1)\n"
             "mod = importlib.util.module_from_spec(spec)\n"
-            "assert spec and spec.loader\n"
-            "spec.loader.exec_module(mod)\n"
-            "fn = getattr(mod, func_name)\n"
+            "try:\n"
+            "    spec.loader.exec_module(mod)\n"
+            "except Exception as exc:\n"
+            "    _emit({'status':'failed','error_type':'module_import_failed','error':exc}, 1)\n"
+            "fn = getattr(mod, func_name, None)\n"
+            "if fn is None:\n"
+            "    available=[name for name in dir(mod) if callable(getattr(mod, name, None)) and not name.startswith('_')]\n"
+            "    _emit({'status':'failed','error_type':'missing_entrypoint','message':f'Generated artifact must define {func_name}(payload: dict) -> dict.','available_callables':available}, 1)\n"
+            "if not callable(fn):\n"
+            "    _emit({'status':'failed','error_type':'entrypoint_not_callable','message':f'{func_name} exists but is not callable.'}, 1)\n"
             "payload = json.loads((root / 'sandbox_input.json').read_text(encoding='utf-8'))\n"
-            "result = fn(payload)\n"
-            "print(json.dumps({'sandbox_result_type': type(result).__name__, 'result': result}, ensure_ascii=False, default=str))\n",
+            "try:\n"
+            "    result = fn(payload)\n"
+            "except Exception as exc:\n"
+            "    _emit({'status':'failed','error_type':'entrypoint_execution_failed','error':exc}, 1)\n"
+            "if not isinstance(result, dict):\n"
+            "    _emit({'status':'failed','error_type':'invalid_result_type','message':'run(payload) must return a dict.','actual_type':type(result).__name__,'result':result}, 1)\n"
+            "_emit({'status':'passed','sandbox_result_type': type(result).__name__, 'result': result}, 0)\n",
             encoding="utf-8",
         )
         return runner

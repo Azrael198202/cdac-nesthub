@@ -11,6 +11,7 @@ from ai_core.modules.module_artifact_generator import RuntimeModuleArtifactGener
 from ai_core.modules.runtime_generated_module_installer import RuntimeGeneratedModuleInstaller
 from ai_core.modules.module_loader import RuntimeModuleLoader
 from ai_core.sandbox.verified_sandbox_runtime import VerifiedSandboxRuntime
+from ai_core.utils.safe_json import safe_json_dumps
 
 
 class AutonomousCodegenExecutor:
@@ -243,6 +244,8 @@ class AutonomousCodegenExecutor:
             "safety_requirements": request.get("safety_requirements") if isinstance(request.get("safety_requirements"), list) else [],
             "constraints": {
                 "must_define_runtime_interface": ["validate_config", "health_check", "run"],
+                "must_define_entrypoint_signature": "def run(payload: dict) -> dict",
+                "entrypoint_result_must_be_json_serializable_dict": True,
                 "must_return_schema_compatible_output": True,
                 "must_not_log_secrets": True,
                 "must_not_perform_irreversible_actions_without_confirmation": True,
@@ -253,7 +256,7 @@ class AutonomousCodegenExecutor:
             "expected_contract": {
                 "module_id": "string",
                 "manifest": "module.json compatible object",
-                "files": {"module.py": "python source code"},
+                "files": {"module.py": "python source code containing def run(payload: dict) -> dict"},
             },
         }
 
@@ -305,11 +308,11 @@ class AutonomousCodegenExecutor:
             data["last_error"] = error
         if registry_record:
             data["registry_record"] = registry_record
-        request_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        request_path.write_text(safe_json_dumps(data, indent=2), encoding="utf-8")
 
     def _write_success_knowledge(self, record: dict[str, Any]) -> None:
         with self.knowledge_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            f.write(safe_json_dumps(record) + "\n")
 
     def _default_runtime_interface(self) -> dict[str, Any]:
         return {"functions": [{"name": "validate_config"}, {"name": "health_check"}, {"name": "run"}], "entrypoint": "module.py"}

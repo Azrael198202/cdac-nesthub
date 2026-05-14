@@ -71,6 +71,11 @@ class SandboxVerifier:
         if static_check["status"] != "passed":
             return SandboxVerificationResult("blocked", checks, False, True, "Static safety policy blocked the artifact.")
 
+        entrypoint_check = self._check_entrypoint(source, artifact=artifact)
+        checks.append(entrypoint_check)
+        if entrypoint_check["status"] != "passed":
+            return SandboxVerificationResult("failed", checks, False, True, entrypoint_check.get("message", "Runtime entrypoint validation failed."))
+
         compile_check = self._check_compile(source)
         checks.append(compile_check)
         if compile_check["status"] != "passed":
@@ -118,6 +123,25 @@ class SandboxVerifier:
         if findings:
             return {"name": "static_policy", "status": "blocked", "findings": findings}
         return {"name": "static_policy", "status": "passed"}
+
+    def _expected_entrypoint(self, artifact: dict[str, Any] | None) -> str:
+        manifest = (artifact or {}).get("manifest") if isinstance((artifact or {}).get("manifest"), dict) else {}
+        implementation = manifest.get("implementation") if isinstance(manifest.get("implementation"), dict) else {}
+        return str(implementation.get("function") or implementation.get("callable") or "run")
+
+    def _check_entrypoint(self, source: str, artifact: dict[str, Any] | None = None) -> dict[str, Any]:
+        expected = self._expected_entrypoint(artifact)
+        tree = ast.parse(source)
+        functions = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        if expected not in functions:
+            return {
+                "name": "runtime_entrypoint",
+                "status": "failed",
+                "expected_function": expected,
+                "available_functions": sorted(functions),
+                "message": f"Generated artifact must define callable entrypoint {expected}(payload: dict) -> dict.",
+            }
+        return {"name": "runtime_entrypoint", "status": "passed", "expected_function": expected}
 
     def _check_compile(self, source: str) -> dict[str, Any]:
         with tempfile.TemporaryDirectory() as tmp:

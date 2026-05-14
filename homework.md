@@ -419,26 +419,19 @@ If capability is unavailable, start capability discovery instead of returning bl
 Reject & Retry input_parsing.
 
 Required fixes:
-1. Extract location from the original input.
-2. Extract the relative date expression from the original input.
-3. Preserve semantic modifiers such as "detailed".
-4. Do not add missing_information if location and date are present in the input.
-5. Keep tasks as a string array if required by the current schema.
-6. Keep required_capabilities as a string array if required by the current schema.
-7. If the schema supports parsed_entities, include:
+1. Return valid JSON only.
+2. tasks must be a string array according to the current schema.
+3. Do not output tasks as objects.
+4. required_capabilities must be a string array according to the current schema.
+5. Extract location from the original input.
+6. Extract the relative date expression from the original input.
+7. Preserve semantic modifiers such as "detailed".
+8. If the schema supports parsed_entities, include:
    - location
    - date_expression
    - semantic_modifiers
-8. Return valid JSON only.
-
-Reject & Retry input_parsing.
-
-Required fixes:
-1. tasks must be a string array according to the current schema.
-2. Do not output tasks as objects.
-3. Preserve extracted entities using parsed_entities if schema supports it.
-4. Keep required_capabilities as a string array.
-5. Return valid JSON only.
+9. Do not add missing_information if location and date are present in the original input.
+10. Do not add fields that are not accepted by the current schema.
 
 
 Reject & Retry intent_recognition.
