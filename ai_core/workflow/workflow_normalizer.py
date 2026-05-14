@@ -88,7 +88,7 @@ class WorkflowNormalizer:
             if isinstance(value, str) and value.strip():
                 return value.strip()
             if isinstance(value, dict):
-                for nested_key in ["capability", "capability_id", "name", "id"]:
+                for nested_key in ["capability", "capability_id", "capability_action", "action", "name", "id"]:
                     nested = value.get(nested_key)
                     if isinstance(nested, str) and nested.strip():
                         return nested.strip()
@@ -99,7 +99,7 @@ class WorkflowNormalizer:
             if isinstance(first, str) and first.strip():
                 return first.strip()
             if isinstance(first, dict):
-                nested = first.get("capability") or first.get("capability_id") or first.get("name") or first.get("id")
+                nested = first.get("capability") or first.get("capability_id") or first.get("capability_action") or first.get("action") or first.get("name") or first.get("id")
                 if isinstance(nested, str) and nested.strip():
                     return nested.strip()
         return None
@@ -150,7 +150,7 @@ class WorkflowNormalizer:
             if isinstance(item, str) and item.strip():
                 result.append(item.strip())
             elif isinstance(item, dict):
-                candidate = item.get("capability") or item.get("capability_id") or item.get("name") or item.get("id")
+                candidate = item.get("capability") or item.get("capability_id") or item.get("capability_action") or item.get("action") or item.get("name") or item.get("id")
                 if isinstance(candidate, str) and candidate.strip():
                     result.append(candidate.strip())
         return list(dict.fromkeys(result))

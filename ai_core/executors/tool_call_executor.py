@@ -11,6 +11,7 @@ from ai_core.modules.module_artifact_generator import RuntimeModuleArtifactGener
 from ai_core.modules.runtime_generated_module_installer import RuntimeGeneratedModuleInstaller
 from ai_core.workflow.workflow_normalizer import WorkflowNormalizer
 from ai_core.workflow.planning_recovery import PlanningRecoveryService
+from ai_core.workflow.execution_state_repair import ExecutionStateRepair
 from ai_core.tools.generic_tool_runner import GenericToolRunner
 from ai_core.tools.runtime_tool_artifact_generator import RuntimeToolArtifactGenerator
 from ai_core.tools.runtime_generated_tool_installer import RuntimeGeneratedToolInstaller
@@ -37,6 +38,7 @@ class ToolCallExecutor:
         self.module_installer = RuntimeGeneratedModuleInstaller()
         self.normalizer = WorkflowNormalizer()
         self.planning_recovery = PlanningRecoveryService()
+        self.execution_state_repair = ExecutionStateRepair()
         self.tool_runner = GenericToolRunner()
         self.artifact_generator = RuntimeToolArtifactGenerator()
         self.artifact_installer = RuntimeGeneratedToolInstaller()
@@ -77,6 +79,10 @@ class ToolCallExecutor:
             user_input=state.get("input", ""),
             previous_results=previous_results,
         )
+        normalized_plan = self.execution_state_repair.repair(
+            normalized_plan,
+            runtime_context=state.get("runtime_context") if isinstance(state.get("runtime_context"), dict) else {},
+        )
         previous_results["workflow_planning"] = normalized_plan
         planned_steps = normalized_plan.get("planned_steps", [])
 
@@ -110,6 +116,11 @@ class ToolCallExecutor:
 
         for index, step in enumerate(planned_steps):
             step_id = str(step.get("step_id") or step.get("task_id") or f"step_{index + 1}")
+            # v57: perform a final per-step structural repair immediately before
+            # execution decisions. This prevents stale or over-blocked planner output
+            # from bypassing the global repair stage. The logic remains generic and
+            # only uses runtime-configured structural policies.
+            step = self._repair_single_step_before_execution(step, state)
             required_capability = self._capability_name(step.get("required_capability"))
             human_interaction = self._normalize_human_interaction(step.get("human_interaction"))
             execution_ready = bool(step.get("execution_ready", False))
@@ -1112,11 +1123,30 @@ class ToolCallExecutor:
             }
         return public
 
+    def _repair_single_step_before_execution(self, step: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Last-chance generic repair for one runtime-generated step.
+
+        This is intentionally domain-neutral. It does not decide what the task
+        means; it only applies the same runtime structural repair policy to the
+        current step and returns the repaired step when available.
+        """
+        try:
+            repaired_plan = self.execution_state_repair.repair(
+                {"planned_steps": [step]},
+                runtime_context=state.get("runtime_context") if isinstance(state.get("runtime_context"), dict) else {},
+            )
+            repaired_steps = repaired_plan.get("planned_steps")
+            if isinstance(repaired_steps, list) and repaired_steps and isinstance(repaired_steps[0], dict):
+                return repaired_steps[0]
+        except Exception:
+            return step
+        return step
+
     def _capability_name(self, value: Any) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
         if isinstance(value, dict):
-            for key in ["capability", "capability_id", "name", "id"]:
+            for key in ["capability", "capability_id", "capability_action", "action", "name", "id"]:
                 candidate = value.get(key)
                 if isinstance(candidate, str) and candidate.strip():
                     return candidate.strip()
