@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from ai_core.codegen.runtime_variable_inferencer import RuntimeVariableInferencer
+
 
 class EvidenceNoiseReducer:
     """Domain-neutral evidence cleaner and selector.
@@ -89,6 +91,9 @@ class EvidenceNoiseReducer:
                 compact[key] = self.compact_discovery(value, constraints=constraints, max_items=max_items, max_text_per_item=max_text_per_item)
             elif key == "external_solution_discovery" and isinstance(value, dict):
                 compact[key] = self.compact_discovery(value, constraints=constraints, max_items=max_items, max_text_per_item=max_text_per_item)
+        runtime_variable_contract = RuntimeVariableInferencer().infer(request)
+        compact["runtime_variables"] = runtime_variable_contract.get("runtime_variables", [])
+        compact["parameterization_policy"] = runtime_variable_contract.get("parameterization_policy", {})
         compact["evidence_selection_policy"] = {
             "coverage_required": True,
             "min_confidence": self.DEFAULT_MIN_CONFIDENCE,

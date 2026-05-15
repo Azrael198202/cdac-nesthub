@@ -6,6 +6,8 @@ import importlib.util
 from pathlib import Path
 from typing import Any
 
+from ai_core.codegen.dynamic_value_hardcode_detector import DynamicValueHardcodeDetector
+
 
 class RuntimeToolArtifactValidator:
     """Validates runtime-generated Python tool artifacts generically.
@@ -21,7 +23,7 @@ class RuntimeToolArtifactValidator:
     It does not contain business/API/provider logic.
     """
 
-    def validate_python_file(self, path: Path, *, callable_name: str = "run") -> dict[str, Any]:
+    def validate_python_file(self, path: Path, *, callable_name: str = "run", runtime_variables: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         errors: list[str] = []
         try:
             source = path.read_text(encoding="utf-8")
@@ -66,6 +68,11 @@ class RuntimeToolArtifactValidator:
                 name = node.func.id
                 if name not in available:
                     errors.append(f"undefined_callable: name '{name}' is called but not defined/imported")
+
+        dynamic_check = DynamicValueHardcodeDetector().detect(source, runtime_variables or [])
+        if not dynamic_check.get("passed"):
+            for finding in dynamic_check.get("findings", []):
+                errors.append(f"hardcoded_runtime_value: {finding.get('variable')}={finding.get('value')}")
 
         if errors:
             return {"valid": False, "errors": sorted(set(errors))}

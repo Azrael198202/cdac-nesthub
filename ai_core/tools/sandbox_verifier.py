@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from ai_core.codegen.dynamic_value_hardcode_detector import DynamicValueHardcodeDetector
+
 
 @dataclass
 class SandboxVerificationResult:
@@ -75,6 +77,11 @@ class SandboxVerifier:
         checks.append(entrypoint_check)
         if entrypoint_check["status"] != "passed":
             return SandboxVerificationResult("failed", checks, False, True, entrypoint_check.get("message", "Runtime entrypoint validation failed."))
+
+        dynamic_value_check = self._check_dynamic_value_hardcoding(source, artifact=artifact)
+        checks.append(dynamic_value_check)
+        if dynamic_value_check["status"] != "passed":
+            return SandboxVerificationResult("failed", checks, False, True, "Generated artifact hardcoded runtime values and is not reusable.")
 
         compile_check = self._check_compile(source)
         checks.append(compile_check)
@@ -158,6 +165,22 @@ class SandboxVerifier:
                 "message": f"Generated artifact entrypoint {expected} must name its argument payload.",
             }
         return {"name": "runtime_entrypoint", "status": "passed", "expected_function": expected}
+
+
+    def _runtime_variables(self, artifact: dict[str, Any] | None) -> list[dict[str, Any]]:
+        artifact = artifact or {}
+        manifest = artifact.get("manifest") if isinstance(artifact.get("manifest"), dict) else {}
+        for value in (artifact.get("runtime_variables"), manifest.get("runtime_variables")):
+            if isinstance(value, list):
+                return [x for x in value if isinstance(x, dict)]
+        return []
+
+    def _check_dynamic_value_hardcoding(self, source: str, artifact: dict[str, Any] | None = None) -> dict[str, Any]:
+        variables = self._runtime_variables(artifact)
+        result = DynamicValueHardcodeDetector().detect(source, variables)
+        if result.get("passed"):
+            return {"name": "dynamic_runtime_value_hardcoding", "status": "passed", "checked_runtime_variables": result.get("checked_runtime_variables", [])}
+        return {"name": "dynamic_runtime_value_hardcoding", "status": "failed", "findings": result.get("findings", []), "checked_runtime_variables": result.get("checked_runtime_variables", [])}
 
     def _check_compile(self, source: str) -> dict[str, Any]:
         with tempfile.TemporaryDirectory() as tmp:

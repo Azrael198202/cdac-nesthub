@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from typing import Any
+import json
 
 from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import RUNTIME_CONFIGS
+from ai_core.codegen.runtime_variable_inferencer import RuntimeVariableInferencer
 from ai_core.llm.provider_router import ProviderRouter
 
 
@@ -74,6 +76,18 @@ class RuntimeToolArtifactGenerator:
         effective_request = dict(generation_request)
         if repair_context:
             effective_request["repair_context"] = repair_context
+        runtime_variable_contract = RuntimeVariableInferencer().infer(effective_request)
+        effective_request["runtime_variables"] = runtime_variable_contract.get("runtime_variables", [])
+        effective_request["parameterization_policy"] = runtime_variable_contract.get("parameterization_policy", {})
+        effective_request["reusability_contract"] = {
+            "must_be_payload_driven": True,
+            "must_not_hardcode_runtime_values": True,
+            "runtime_values_include_all_values_from": [
+                "original_user_input", "intent", "workflow", "source_step.parameters",
+                "runtime_request_semantics", "capability_schema", "evidence"
+            ],
+            "generated_code_must_support_different_payloads_for_same_capability": True,
+        }
 
         prompt = {
             "system": (
@@ -87,8 +101,11 @@ class RuntimeToolArtifactGenerator:
                 "Do not copy or execute external code blindly; preserve source and license provenance and generate the smallest safe adapter needed. "
                 "Understand authentication, request parameters, response shape, and verification from the supplied documentation before writing code. "
                 "Map runtime request semantics dynamically from the source step; do not rely on fixed domain fields. "
-                "Generate reusable code: do not hardcode user-specific location/date/query values into URLs, selectors, or outputs. "
+                "Generate reusable code: do not hardcode ANY runtime value that appears in runtime_variables, user input, intent, workflow, semantics, schemas, or evidence. "
+                "This rule is not limited to location/date/url; it includes every dynamic keyword, entity, identifier, option, format, path, amount, range, category, language, or query term inferred at runtime. "
                 "All runtime parameters must be read from payload, payload.known, or payload.parameters.known. "
+                "Build URLs, selectors, filters, request bodies, and output labels from payload-driven variables or safe generic templates. "
+                "Do not embed current request values inside string literals, constants, URLs, default arguments, or fallback text. "
                 "When network/API access is needed, include strict timeout/retry limits, never use infinite loops, and return structured errors instead of raising uncaught exceptions. "
                 "Do not mark output status as success when any error occurred or the response could not be parsed as required. "
                 "The generated tool must expose run(payload: dict) -> dict and the manifest implementation must declare function=\"run\". "
@@ -122,8 +139,8 @@ class RuntimeToolArtifactGenerator:
         route = self._code_generation_route()
         if route:
             adapter["provider_route"] = route
-        rendered_user_prompt = str(effective_request)
-        return await self.provider_router.generate_json(
+        rendered_user_prompt = json.dumps(effective_request, ensure_ascii=False, separators=(",", ":"))
+        artifact = await self.provider_router.generate_json(
             run_id=run_id,
             node_id=node_id,
             adapter=adapter,
@@ -131,6 +148,14 @@ class RuntimeToolArtifactGenerator:
             rendered_user_prompt=rendered_user_prompt,
             schema=schema,
         )
+        if isinstance(artifact, dict):
+            artifact.setdefault("runtime_variables", effective_request.get("runtime_variables", []))
+            artifact.setdefault("parameterization_policy", effective_request.get("parameterization_policy", {}))
+            manifest = artifact.get("manifest") if isinstance(artifact.get("manifest"), dict) else {}
+            manifest.setdefault("runtime_variables", effective_request.get("runtime_variables", []))
+            manifest.setdefault("parameterization_policy", effective_request.get("parameterization_policy", {}))
+            artifact["manifest"] = manifest
+        return artifact
 
     def _code_generation_route(self) -> list[str]:
         config = self.loader.load_yaml(RUNTIME_CONFIGS / "models" / "providers.yaml")
@@ -188,6 +213,8 @@ class RuntimeToolArtifactGenerator:
                 "no_mock_data": {"type": "boolean"},
                 "uses_network": {"type": "boolean"},
                 "verification": {"type": "object"},
+                "runtime_variables": {"type": "array", "items": {"type": "object"}},
+                "parameterization_policy": {"type": "object"},
             },
             "additionalProperties": True,
         }

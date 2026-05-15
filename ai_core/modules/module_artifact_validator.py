@@ -6,13 +6,15 @@ import importlib.util
 from pathlib import Path
 from typing import Any
 
+from ai_core.codegen.dynamic_value_hardcode_detector import DynamicValueHardcodeDetector
+
 
 class RuntimeModuleArtifactValidator:
     """Domain-neutral validation for generated runtime modules."""
 
     REQUIRED_FUNCTIONS = {"validate_config", "health_check", "run"}
 
-    def validate_python_file(self, path: Path) -> dict[str, Any]:
+    def validate_python_file(self, path: Path, *, runtime_variables: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         errors: list[str] = []
         try:
             source = path.read_text(encoding="utf-8")
@@ -50,6 +52,11 @@ class RuntimeModuleArtifactValidator:
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                 if node.func.id not in available:
                     errors.append(f"undefined_callable: {node.func.id}")
+        dynamic_check = DynamicValueHardcodeDetector().detect(source, runtime_variables or [])
+        if not dynamic_check.get("passed"):
+            for finding in dynamic_check.get("findings", []):
+                errors.append(f"hardcoded_runtime_value: {finding.get('variable')}={finding.get('value')}")
+
         if errors:
             return {"valid": False, "errors": sorted(set(errors))}
 
