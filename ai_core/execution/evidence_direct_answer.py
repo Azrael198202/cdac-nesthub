@@ -127,10 +127,18 @@ class EvidenceDirectAnswerBuilder:
         for container in containers:
             if not isinstance(container, dict):
                 continue
-            for key in ("text_excerpt", "snippet", "sample", "title", "url", "description", "notes"):
+            for key in (
+                "text_excerpt", "visible_text_excerpt", "html_excerpt", "dom_evidence_text",
+                "snippet", "sample", "title", "url", "description", "notes"
+            ):
                 value = container.get(key)
                 if isinstance(value, str):
                     parts.append(value)
+            dom_items = container.get("dom_evidence_items") if isinstance(container, dict) else None
+            if isinstance(dom_items, list):
+                for entry in dom_items[:120]:
+                    if isinstance(entry, dict) and isinstance(entry.get("text"), str):
+                        parts.append(entry.get("text", ""))
         return "\n".join(p for p in parts if p).strip()
 
     def _coverage_score(self, text: str, known: dict[str, Any]) -> float:
@@ -158,13 +166,17 @@ class EvidenceDirectAnswerBuilder:
             try:
                 mi = int(m)
                 di = int(d)
+                month_names = {1: "january", 2: "february", 3: "march", 4: "april", 5: "may", 6: "june", 7: "july", 8: "august", 9: "september", 10: "october", 11: "november", 12: "december"}
+                month_short = {1: "jan", 2: "feb", 3: "mar", 4: "apr", 5: "may", 6: "jun", 7: "jul", 8: "aug", 9: "sep", 10: "oct", 11: "nov", 12: "dec"}
+                full = month_names.get(mi, "")
+                short = month_short.get(mi, "")
                 variants.extend([
-                    f"{y}/{m}/{d}",
-                    f"{di}. {mi}.",
-                    f"{mi}/{di}",
-                    f"{di} may {y}" if mi == 5 else "",
-                    f"may {di}" if mi == 5 else "",
-                    f"fri {di}" if di == 15 else "",
+                    f"{y}/{m}/{d}", f"{y}.{m}.{d}", f"{m}/{d}", f"{m}-{d}",
+                    f"{mi}/{di}", f"{mi}-{di}", f"{di}. {mi}.",
+                    f"{full} {di}" if full else "", f"{short} {di}" if short else "",
+                    f"weather for {full} {di} {y}" if full else "",
+                    f"{di} {full} {y}" if full else "", f"{di} {short} {y}" if short else "",
+                    f"{di}",
                 ])
             except Exception:
                 pass

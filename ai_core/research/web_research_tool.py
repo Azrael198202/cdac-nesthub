@@ -87,21 +87,111 @@ class GenericWebResearchTool:
             async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True, headers={"User-Agent": "AI-Core-Runtime/1.0"}) as client:
                 response = await client.get(url)
                 response.raise_for_status()
-            soup = BeautifulSoup(response.text, "html.parser")
-            for tag in soup(["script", "style", "noscript"]):
-                tag.decompose()
+            raw_html = response.text or ""
+            soup = BeautifulSoup(raw_html, "html.parser")
             title = self._clean(soup.title.get_text(" ") if soup.title else "")
-            text = self._clean(soup.get_text(" "))[:max_chars]
+
+            dom_items = self._extract_dom_evidence_items(soup, limit=260)
+            dom_text = self._clean(" ".join(item.get("text", "") for item in dom_items))[:max_chars]
+            html_excerpt = self._extract_html_excerpt(raw_html, max_chars=max_chars)
+
+            text_soup = BeautifulSoup(raw_html, "html.parser")
+            for tag in text_soup(["script", "style", "noscript"]):
+                tag.decompose()
+            visible_text = self._clean(text_soup.get_text(" "))[:max_chars]
+            # v70.16: some useful evidence appears only in DOM attributes
+            # (title/alt/aria-label/data-*), for example calendar cards. Include
+            # an attribute-derived excerpt so sufficiency checks can match dates
+            # and factual values without depending on rendered text only.
+            combined_text = self._clean(" ".join([visible_text, dom_text]))[:max_chars]
             return self._record("fetch", {
                 "status": "success",
                 "url": url,
                 "response_status": response.status_code,
                 "title": title,
-                "text_excerpt": text,
+                "text_excerpt": combined_text,
+                "visible_text_excerpt": visible_text,
+                "html_excerpt": html_excerpt,
+                "dom_evidence_text": dom_text,
+                "dom_evidence_items": dom_items[:80],
                 "fetched_at": self._now(),
             })
         except Exception as exc:
             return self._record("fetch", {"status": "error", "url": url, "error": str(exc), "fetched_at": self._now()})
+
+    def _extract_html_excerpt(self, raw_html: str, *, max_chars: int = 8000) -> str:
+        """Return a compact, attribute-preserving HTML evidence excerpt.
+
+        This is intentionally generic. It keeps tags/attributes that often carry
+        factual evidence in modern pages (calendar cards, icon alt/title, link
+        title, data-* attributes) while dropping script/style noise.
+        """
+        try:
+            soup = BeautifulSoup(raw_html or "", "html.parser")
+            for tag in soup(["script", "style", "noscript", "svg"]):
+                tag.decompose()
+            chunks: list[str] = []
+            useful_attrs = {"title", "alt", "aria-label", "datetime", "href", "src"}
+            for tag in soup.find_all(True):
+                attrs: list[str] = []
+                for key, value in (tag.attrs or {}).items():
+                    if key in useful_attrs or key.startswith("data-"):
+                        if isinstance(value, (list, tuple)):
+                            value = " ".join(str(v) for v in value)
+                        cleaned = self._clean(str(value))
+                        if cleaned:
+                            attrs.append(f'{key}="{cleaned[:160]}"')
+                text = self._clean(tag.get_text(" ", strip=True))
+                if attrs or text:
+                    chunks.append(f"<{tag.name} {' '.join(attrs)}> {text[:240]}")
+                if sum(len(c) for c in chunks) > max_chars * 1.2:
+                    break
+            return self._clean(" ".join(chunks))[:max_chars]
+        except Exception:
+            return self._clean(raw_html or "")[:max_chars]
+
+    def _extract_dom_evidence_items(self, soup: BeautifulSoup, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Extract generic DOM evidence from text and useful attributes.
+
+        The extractor is not tied to weather or any specific website. It captures
+        repeated cards/table cells/list items and attribute values that can carry
+        structured facts, such as dates, labels, icons, and numeric values.
+        """
+        items: list[dict[str, Any]] = []
+        useful_attrs = ("title", "alt", "aria-label", "datetime", "href")
+        for tag in soup.find_all(["a", "td", "th", "tr", "li", "div", "span", "img"]):
+            values: list[str] = []
+            text = self._clean(tag.get_text(" ", strip=True))
+            if text:
+                values.append(text)
+            for attr in useful_attrs:
+                value = tag.get(attr)
+                if isinstance(value, (list, tuple)):
+                    value = " ".join(str(v) for v in value)
+                if value:
+                    values.append(self._clean(str(value)))
+            for key, value in (tag.attrs or {}).items():
+                if key.startswith("data-"):
+                    if isinstance(value, (list, tuple)):
+                        value = " ".join(str(v) for v in value)
+                    if value:
+                        values.append(f"{key}={self._clean(str(value))}")
+            joined = self._clean(" ".join(v for v in values if v))
+            # Keep compact factual/label-bearing items. Pure navigation noise is
+            # naturally filtered by requiring either a digit, a degree/percent, or
+            # multiple semantic tokens.
+            if not joined:
+                continue
+            if not (re.search(r"\d|°|%", joined) or len(joined.split()) >= 3):
+                continue
+            items.append({
+                "tag": tag.name,
+                "text": joined[:500],
+                "class": " ".join(tag.get("class") or [])[:160] if tag.get("class") else "",
+            })
+            if len(items) >= limit:
+                break
+        return items
 
     def _record(self, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
         trace_id = f"{kind}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
