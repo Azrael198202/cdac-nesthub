@@ -1,47 +1,21 @@
-# CDAC NestHub v70.28
+# CDAC NestHub v70.29
 
-## Stability fix: evidence-satisfied short circuit
+## Focus
 
-This version focuses on one critical runtime bug:
+Stability fix for final answer synthesis and provider credential recovery.
 
-> When web evidence already satisfies the request, runtime must bypass generated tool/module execution and go directly to structured materialization and final synthesis.
+## Changes
 
-## Main changes
+1. Added `StructuredFactNormalizer`.
+2. Final answer synthesis now consumes normalized facts only.
+3. Raw extraction traces such as `Matched Parameter`, `Descriptors`, and `Values` are blocked from final output.
+4. Provider missing-secret errors now emit an `INTERACTION_REQUEST` so the UI can ask for an API key.
+5. If the user does not provide a key, runtime falls back to deterministic synthesis from normalized evidence.
+6. Prompt payload for final synthesis is reduced to normalized facts, not raw HTML or extraction traces.
 
-1. Added `EvidenceSatisfiedShortCircuit`.
-2. Fixed credential candidate misclassification.
-3. Web evidence strategy now performs secondary discovery if the first discovery path does not materialize a result.
-4. Runtime skips generated artifact creation when selected evidence already has sufficient coverage and confidence.
-5. Keeps ai_core / runtime generic and domain-neutral. No hardcoded business/domain keywords are added.
-
-## Verified flow
-
-Expected execution order for evidence-sufficient requests:
-
-```text
-workflow_planning
-↓
-execution_strategy = [local_knowledge, web_evidence, tool_generation]
-↓
-web_evidence
-↓
-selected_evidence coverage/confidence check
-↓
-EvidenceSatisfiedShortCircuit
-↓
-EvidenceDirectAnswerBuilder
-↓
-ResultMaterial
-↓
-FinalAnswerSynthesizer
-```
-
-Generated modules/tools are skipped when evidence is already sufficient.
-
-## Validation
+## Verification
 
 ```text
 compileall: OK
-pytest: 13 passed
-semantic scan: no prohibited domain words found in ai_core/apps
+pytest v70.29: 3 passed
 ```

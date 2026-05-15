@@ -4,20 +4,18 @@ import json
 from typing import Any
 
 from ai_core.llm.provider_router import ProviderRouter
-from ai_core.presentation.result_presenter import ResultPresenter
 from ai_core.presentation.result_sanitizer import ResultSanitizer
+from ai_core.presentation.structured_fact_normalizer import StructuredFactNormalizer
 
 
 class FinalAnswerSynthesizer:
-    """Creates the final user-facing answer from sanitized result material.
+    """Creates final user-facing answers from normalized facts only."""
 
-    Every upstream output is treated as intermediate material. Raw transport,
-    trace, source markup, and tool payloads are never returned directly.
-    """
+    DEBUG_MARKERS = ("Matched Parameter:", "Descriptors:", "Values:")
 
     def __init__(self) -> None:
         self.sanitizer = ResultSanitizer()
-        self.presenter = ResultPresenter()
+        self.normalizer = StructuredFactNormalizer()
         self.router = ProviderRouter()
 
     async def synthesize(
@@ -30,35 +28,37 @@ class FinalAnswerSynthesizer:
         trust_summary: dict[str, Any],
     ) -> dict[str, Any]:
         sanitized = self.sanitizer.sanitize_materials(materials)
-        deterministic = self._deterministic_summary(sanitized)
+        facts = self.normalizer.normalize(materials=sanitized, state=state)
+        deterministic = self._deterministic_summary(facts=facts, sanitized=sanitized, trust_summary=trust_summary)
         answer = deterministic
 
-        if self._model_synthesis_enabled(state, sanitized):
+        if self._model_synthesis_enabled(state, facts):
             generated = await self._try_model_synthesis(
                 run_id=run_id,
                 node_id=node_id,
                 state=state,
-                sanitized=sanitized,
+                facts=facts,
                 trust_summary=trust_summary,
             )
             if generated:
                 answer = generated
 
+        answer = self._assert_no_debug_material_in_final_answer(answer, fallback=deterministic)
         return {
             "answer": answer,
-            "result_material": sanitized,
+            "result_material": [{"source": "normalized_fact_pipeline", "status": "success", "content": {"normalized_facts": facts}}],
             "synthesis": {
                 "source": "model_or_rule_synthesis" if answer != deterministic else "rule_synthesis",
                 "raw_source_material_returned": False,
+                "normalized_facts_only": True,
             },
         }
 
-    def _model_synthesis_enabled(self, state: dict[str, Any], sanitized: list[dict[str, Any]]) -> bool:
+    def _model_synthesis_enabled(self, state: dict[str, Any], facts: list[dict[str, Any]]) -> bool:
         output_policy = (((state.get("runtime") or {}) if isinstance(state, dict) else {}).get("output_policy") or {})
         if output_policy.get("disable_model_synthesis") is True:
             return False
-        # Avoid an LLM call when there is no useful material.
-        return bool(sanitized)
+        return bool(facts)
 
     async def _try_model_synthesis(
         self,
@@ -66,23 +66,21 @@ class FinalAnswerSynthesizer:
         run_id: str,
         node_id: str,
         state: dict[str, Any],
-        sanitized: list[dict[str, Any]],
+        facts: list[dict[str, Any]],
         trust_summary: dict[str, Any],
     ) -> str:
         try:
-            original_input = self._original_input(state)
-            language = self._language(state)
             prompt_text = json.dumps(
                 {
-                    "user_request": original_input,
-                    "language": language,
-                    "materials": sanitized,
-                    "trust": trust_summary,
+                    "user_request": self._original_input(state),
+                    "language": self._language(state),
+                    "normalized_facts": facts[:16],
+                    "trust": self._compact_trust(trust_summary),
                     "instructions": [
                         "Create a concise user-facing answer.",
-                        "Use only the sanitized materials.",
-                        "Do not include raw markup, raw JSON, traces, debug logs, or internal field dumps.",
-                        "Mention uncertainty briefly if the material quality is limited.",
+                        "Use only normalized_facts.",
+                        "Do not include extraction traces or internal labels.",
+                        "Do not mention unavailable sources unless facts are insufficient.",
                         "Return JSON with key final_answer only.",
                     ],
                 },
@@ -92,18 +90,10 @@ class FinalAnswerSynthesizer:
                 "adapter_id": "final_answer_synthesizer",
                 "provider_route": ["ollama", "openai"],
                 "preferred_capabilities": ["structured_output", "summarization"],
-                "prompt_policy": {"max_context_tokens": 2500},
+                "prompt_policy": {"max_context_tokens": 1800},
             }
-            prompt = {
-                "id": "final_answer_synthesis",
-                "system": "You are a neutral final answer synthesizer. Return valid JSON only.",
-            }
-            schema = {
-                "type": "object",
-                "properties": {"final_answer": {"type": "string"}},
-                "required": ["final_answer"],
-                "additionalProperties": True,
-            }
+            prompt = {"id": "final_answer_synthesis", "system": "Return valid JSON only."}
+            schema = {"type": "object", "properties": {"final_answer": {"type": "string"}}, "required": ["final_answer"]}
             result = await self.router.generate_json(
                 run_id=run_id,
                 node_id=node_id,
@@ -116,75 +106,53 @@ class FinalAnswerSynthesizer:
             if isinstance(value, str) and value.strip():
                 return self.sanitizer.sanitize_value(value).strip()
         except Exception:
+            # Provider errors, missing credentials, or local model failures must not
+            # prevent deterministic synthesis from normalized facts.
             return ""
         return ""
 
-    def _deterministic_summary(self, sanitized: list[dict[str, Any]]) -> str:
-        lines: list[str] = []
-        for material in sanitized:
-            if not isinstance(material, dict):
-                continue
-            status = str(material.get("status") or "")
-            content = material.get("content")
-            if status and status not in {"success", "executed", "completed"}:
-                error_text = self._error_text(content)
-                if error_text:
-                    lines.append(error_text)
-                    continue
-            text = self._content_text(content)
-            if text:
-                lines.append(text)
-        if not lines:
-            return "The runtime completed, but no user-facing answer material was available."
-        compact: list[str] = []
-        seen: set[str] = set()
-        for line in lines:
-            value = " ".join(str(line).split())
-            if not value or value in seen:
-                continue
-            seen.add(value)
-            compact.append(value)
-        return "\n".join(compact[:8])
+    def _deterministic_summary(self, *, facts: list[dict[str, Any]], sanitized: list[dict[str, Any]], trust_summary: dict[str, Any]) -> str:
+        if facts:
+            statements = [f for f in facts if f.get("kind") == "supporting_statement"]
+            values = [f for f in facts if f.get("kind") != "supporting_statement"]
+            lines: list[str] = []
+            if statements:
+                lines.append(str(statements[0].get("value") or statements[0].get("context") or "").strip())
+            if values:
+                value_parts = []
+                for fact in values[:8]:
+                    label = str(fact.get("label") or "value").strip()
+                    value = str(fact.get("value") or "").strip()
+                    unit = str(fact.get("unit") or "").strip()
+                    if value:
+                        value_parts.append(f"{label}: {value}{unit}")
+                if value_parts:
+                    lines.append("Key values: " + "; ".join(value_parts))
+            sources = sorted({str(f.get("source_url")) for f in facts if str(f.get("source_url") or "").startswith("http")})
+            if sources:
+                lines.append("Source: " + sources[0])
+            answer = "\n".join(line for line in lines if line).strip()
+            if answer:
+                return answer
 
-    def _content_text(self, content: Any) -> str:
-        if isinstance(content, dict):
-            for key in ("final_answer", "answer", "summary", "message", "text"):
-                value = content.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-            extracted = content.get("extracted_material")
-            if isinstance(extracted, dict):
-                rows = extracted.get("records")
-                text = extracted.get("text")
-                row_text = ""
-                if isinstance(rows, list) and rows:
-                    row_lines = []
-                    for row in rows[:5]:
-                        if isinstance(row, list):
-                            row_lines.append(" | ".join(str(x) for x in row[:8]))
-                    row_text = "\n".join(row_lines)
-                if row_text:
-                    return row_text
-                if isinstance(text, str):
-                    return text.strip()
-            return self.presenter.present_data(content)
-        if isinstance(content, list):
-            parts = [self._content_text(x) for x in content[:5]]
-            return "\n".join(x for x in parts if x)
-        if content is None:
-            return ""
-        return self.sanitizer.sanitize_value(str(content))
+        # If no facts exist, return a neutral failure without leaking internals.
+        if trust_summary and trust_summary.get("verified_real_execution") is False:
+            return "I could not produce a verified answer from the available result material."
+        return "The runtime completed, but no user-facing answer material was available."
 
-    def _error_text(self, content: Any) -> str:
-        if isinstance(content, dict):
-            error = content.get("error")
-            if isinstance(error, dict):
-                msg = error.get("message") or error.get("reason")
-                if msg:
-                    return f"The step failed: {msg}"
-            if isinstance(error, str):
-                return f"The step failed: {error}"
-        return ""
+    def _assert_no_debug_material_in_final_answer(self, answer: str, *, fallback: str) -> str:
+        text = str(answer or "")
+        if any(marker in text for marker in self.DEBUG_MARKERS):
+            clean = str(fallback or "").strip()
+            if clean and not any(marker in clean for marker in self.DEBUG_MARKERS):
+                return clean
+            return "I found supporting material, but it could not be safely converted into a user-facing answer."
+        return text
+
+    def _compact_trust(self, trust_summary: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(trust_summary, dict):
+            return {}
+        return {k: trust_summary.get(k) for k in ("trust_level", "verified_real_execution", "evidence_quality_passed") if k in trust_summary}
 
     def _original_input(self, state: dict[str, Any]) -> str:
         for section_name in ("input", "request", "runtime"):
@@ -194,6 +162,8 @@ class FinalAnswerSynthesizer:
                     value = section.get(key)
                     if isinstance(value, str) and value.strip():
                         return value.strip()
+            elif section_name == "input" and isinstance(section, str):
+                return section
         results = state.get("results") if isinstance(state, dict) else None
         if isinstance(results, dict):
             input_result = results.get("input_parsing")

@@ -35,14 +35,14 @@ async def home():
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
             "Expires": "0",
-            "X-AI-Core-Version": "v70.8",
+            "X-AI-Core-Version": "v70.29",
         },
     )
 
 
 @app.get("/api/version")
 async def version():
-    return JSONResponse({"version": "v70.8", "name": "runtime_model_selector_and_module_self_healing_v70_8"})
+    return JSONResponse({"version": "v70.29", "name": "structured_fact_synthesis_and_credential_recovery_v70_29"})
 
 
 @app.post("/api/chat")

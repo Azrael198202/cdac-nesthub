@@ -148,10 +148,43 @@ class ProviderRouter:
                 })
 
                 if "MISSING_SECRET:" in str(exc):
-                    raise
+                    secret_key = str(exc).split("MISSING_SECRET:", 1)[1].strip() or "provider_secret"
+                    await self._emit_missing_secret_interaction(
+                        run_id=run_id,
+                        node_id=node_id,
+                        provider_name=provider_name,
+                        secret_key=secret_key,
+                    )
+                    continue
 
         raise ProviderUnavailableError(
             "No real LLM provider is available. "
             "Check runtime/configs/models/providers.yaml. "
             "Last error: " + str(last_error)
         )
+
+    async def _emit_missing_secret_interaction(self, *, run_id: str, node_id: str, provider_name: str, secret_key: str) -> None:
+        await event_bus.emit(run_id, {
+            "type": "INTERACTION_REQUEST",
+            "title": "Provider credential required",
+            "message": "A provider requires a credential. You can provide it or continue without this provider.",
+            "node_id": node_id,
+            "workflow_state": "waiting_optional_credential_choice",
+            "interaction_type": "optional_credential_choice",
+            "provider": provider_name,
+            "secret_key": secret_key,
+            "secret_fields": [
+                {
+                    "name": "credential",
+                    "label": "Provider API Key",
+                    "secret_key": secret_key,
+                    "interaction_type": "secret",
+                    "required": False,
+                    "placeholder": "Paste API key here",
+                }
+            ],
+            "actions": [
+                {"id": "continue_without_key", "label": "Continue without API key"},
+                {"id": "provide_credential", "label": "Provide API key"},
+            ],
+        })
