@@ -1,33 +1,88 @@
-# cdac-nesthub v68.4
+# CDAC NestHub v70.2
 
-Runtime source package with final answer synthesis and evidence-supported trust evaluation.
+## Runtime Role-Scoped Prompt Optimization
 
-# CDAC NestHub Runtime Source v68.3
+This version continues the v70 code line and pauses the v2.1 Runtime Integration OS branch.
 
-This package contains the full source tree for v68.3.
+## Main Goal
 
-## v68.3 focus
+Reduce LLM prompt size and runtime latency by selecting a compact runtime role immediately after intent/context signals are available. Downstream nodes receive only role-scoped context instead of full workflow traces, raw web pages, endpoint checks, and discovery payloads.
 
-- No-key candidates are evaluated first.
-- Credential-protected candidates are optional upgrades, not default blockers.
-- The optional API key UI contract is English-only.
-- Users can either continue without an API key or provide one and resume execution.
-- Runtime-generated artifacts are excluded from the source ZIP.
-- Historical version markdown files are excluded; only current version documentation is kept.
+## New Components
 
-See `V68_3_RELEASE_NOTES.md` for details.
+```text
+ai_core/roles/
+  role_profile_selector.py
+  prompt_pack_loader.py
+  role_scoped_context_reducer.py
 
+runtime/configs/roles/
+  prompt_packs.yaml
+```
 
-## Current Version: v69/v70 Runtime Model Governance
+## Runtime Flow
 
-This package includes the merged v69/v70 changes:
+```text
+input_parsing
+  ↓
+intent_recognition
+  ↓
+RoleProfileSelector
+  ↓
+PromptPackLoader
+  ↓
+RoleScopedContextReducer
+  ↓
+LLM node execution with compact prompt
+```
 
-- runtime context reduction
-- prompt budget management
-- generic model response cache
-- provider-neutral token usage logging
-- universal runtime-configured model adapter
-- timeout and latency telemetry
-- no provider-specific adapter files in `ai_core`
+## Generic Runtime Roles
 
-See `V69_70_RUNTIME_MODEL_GOVERNANCE_RELEASE_NOTES.md` for details.
+- information_retrieval_agent
+- code_generation_agent
+- document_writer_agent
+- data_analysis_agent
+- integration_builder_agent
+- human_interaction_agent
+- workflow_planning_agent
+- general_runtime_agent
+
+These are generic runtime roles, not business/domain agents.
+
+## What Changed from v70.1
+
+1. Added role profile selection before LLM prompt rendering.
+2. Added role-specific prompt packs and runtime rules.
+3. Added role-scoped context reduction.
+4. Replaced full `previous_results` with compact role-scoped results.
+5. Replaced full `capability_result` with compact role-scoped result.
+6. Added compact `evidence_summary` to runtime context.
+7. Added role-based prompt budget override.
+8. Prevented raw discovery JSON, full HTML, endpoint checks, and trace paths from entering ordinary LLM prompts.
+9. Added a regression test for role-scoped context reduction.
+
+## Expected Improvements
+
+- Lower prompt token usage.
+- Lower OpenAI/vLLM/Ollama latency.
+- Fewer timeout cases after sandbox fallback.
+- More stable fallback generation.
+- Cleaner LLM inputs.
+- Better separation between intent role and execution prompt.
+
+## Packaging Policy
+
+The source package keeps framework/source files and excludes runtime artifacts:
+
+```text
+runtime/generated/
+runtime/cache/
+runtime/traces/
+runtime/tmp/
+runtime/downloads/
+__pycache__/
+.pytest_cache/
+*.pyc
+```
+
+Only the current version README is kept.

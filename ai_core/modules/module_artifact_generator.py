@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from typing import Any
+import json
 
 from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import RUNTIME_CONFIGS
 from ai_core.llm.provider_router import ProviderRouter
+from ai_core.context.evidence_noise_reducer import EvidenceNoiseReducer
 
 
 class RuntimeModuleArtifactGenerator:
@@ -18,23 +20,19 @@ class RuntimeModuleArtifactGenerator:
     def __init__(self) -> None:
         self.provider_router = ProviderRouter()
         self.loader = ConfigLoader()
+        self.evidence_reducer = EvidenceNoiseReducer()
 
     async def generate_artifact(self, *, run_id: str, node_id: str, generation_request: dict[str, Any]) -> dict[str, Any]:
+        compact_request = self.evidence_reducer.compact_generation_request(generation_request)
         prompt = {
             "system": (
-                "You are a production runtime module artifact generator. Return ONLY JSON matching the schema. "
-                "Generate a safe, reusable Python module artifact from the supplied structured runtime request. "
-                "Do not include secrets. Do not use mock data or placeholder outputs. "
-                "If the request includes api_discovery, use only the discovered/evidenced connector design and official sources. "
-                "If real external data is required, module.py must perform a real network call with timeout/retry and return request/response evidence. "
-                "The module.py file must define validate_config(config), health_check(), and exactly one executable entrypoint run(payload: dict) -> dict. "
-                "Every helper function called must be defined or imported. Avoid top-level side effects. run(payload) must return a JSON-serializable dict and must not return modules, functions, response objects, exceptions, Path objects, or circular references. "
-                "Do not use blocked primitives such as eval, exec, compile, __import__, input, open, subprocess, os, pty, socketserver, ftplib, telnetlib, or shutil. "
-                "Prefer Python standard library network access such as urllib.request so sandbox tests can run without installing third-party packages. "
-                "If endpoint verification says verified_json_api=false or recommended_tool_type=web_extract, do not generate a JSON API client; generate a generic webpage extraction adapter using documented HTML evidence. "
-                "The manifest must declare execution_claims including real_execution, no_mock_data, uses_network, and live_verification_required when applicable."
+                "Return ONLY JSON matching the schema. Generate a safe reusable Python module artifact. "
+                "The module.py file must define validate_config(config), health_check(), and run(payload: dict) -> dict. "
+                "Every helper function called by run must be defined or imported. No mock data, no secrets, no top-level side effects. "
+                "Use the compact evidence packet only; do not invent endpoints. If verified_json_api is false, prefer webpage extraction. "
+                "Use standard library network access with timeout. Return JSON-serializable dicts only."
             ),
-            "user": generation_request,
+            "user": compact_request,
         }
         adapter = dict(generation_request.get("adapter") or {})
         route = self._code_generation_route()
@@ -45,9 +43,12 @@ class RuntimeModuleArtifactGenerator:
             node_id=node_id,
             adapter=adapter,
             prompt=prompt,
-            rendered_user_prompt=str(generation_request),
+            rendered_user_prompt=self._json_dumps(compact_request),
             schema=self.artifact_schema(),
         )
+
+    def _json_dumps(self, value: dict[str, Any]) -> str:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
     def _code_generation_route(self) -> list[str]:
         config = self.loader.load_yaml(RUNTIME_CONFIGS / "models" / "providers.yaml")

@@ -60,6 +60,30 @@ class UniversalModelProviderHandler:
             f"Unsupported model protocol: {protocol}. Add a runtime-generated adapter or configure protocol."
         )
 
+
+    def _fit_payload_to_budget(self, provider: dict[str, Any], payload: dict[str, Any], *, user_message_index: int | None = None) -> tuple[dict[str, Any], int, bool]:
+        budget = int(provider.get("max_request_tokens") or provider.get("max_prompt_tokens") or provider.get("prompt_budget_tokens") or 12000)
+        safety = int(provider.get("prompt_budget_safety_tokens") or 800)
+        effective_budget = max(1000, budget - safety)
+        estimated = self.estimator.estimate_obj(payload)
+        if estimated <= effective_budget or user_message_index is None:
+            return payload, estimated, False
+        messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
+        if user_message_index >= len(messages) or not isinstance(messages[user_message_index], dict):
+            return payload, estimated, False
+        content = str(messages[user_message_index].get("content") or "")
+        # Estimate non-user-message overhead and shrink the user payload to the remaining budget.
+        clone = dict(payload)
+        clone_messages = [dict(m) if isinstance(m, dict) else m for m in messages]
+        clone_messages[user_message_index] = {**clone_messages[user_message_index], "content": ""}
+        clone["messages"] = clone_messages
+        overhead = self.estimator.estimate_obj(clone)
+        available = max(1000, effective_budget - overhead)
+        max_chars = max(1000, int(available * self.estimator.CHARS_PER_TOKEN))
+        messages[user_message_index]["content"] = content[:max_chars] + "\n...[truncated by total payload budget]"
+        payload["messages"] = messages
+        return payload, self.estimator.estimate_obj(payload), True
+
     async def _call_chat_completions(self, run_id, node_id, provider_name, provider, prompt, rendered_user_prompt, schema):
         base_url = (provider.get("base_url") or "").rstrip("/")
         endpoint = provider.get("endpoint", "/v1/chat/completions")
@@ -85,6 +109,17 @@ class UniversalModelProviderHandler:
         headers = {"Content-Type": "application/json"}
         self._apply_auth(headers, provider)
 
+        payload, prompt_tokens_est, total_budget_truncated = self._fit_payload_to_budget(provider, payload, user_message_index=1)
+        if total_budget_truncated:
+            await event_bus.emit(run_id, {
+                "type": "LLM_TOTAL_PROMPT_BUDGET_APPLIED",
+                "title": "Total prompt budget applied",
+                "message": f"Reduced complete provider payload to estimated_prompt_tokens={prompt_tokens_est}",
+                "node_id": node_id,
+                "provider": provider_name,
+                "model": model,
+                "estimated_prompt_tokens": prompt_tokens_est,
+            })
         cache_key = self.cache.build_key(provider_name=provider_name, provider=provider, payload=payload)
         if provider.get("cache_enabled", True):
             cached = self.cache.get(cache_key)
@@ -99,7 +134,6 @@ class UniversalModelProviderHandler:
                 })
                 return parse_json_content(cached.get("content", "{}"))
 
-        prompt_tokens_est = self.estimator.estimate_obj(payload)
         await event_bus.emit(run_id, {
             "type": "LLM_REQUEST_SENT",
             "title": "LLM request sent",
@@ -163,6 +197,21 @@ class UniversalModelProviderHandler:
                 ],
             }
         url = base_url + endpoint
+        if isinstance(payload.get("messages"), list):
+            payload, prompt_tokens_est, total_budget_truncated = self._fit_payload_to_budget(provider, payload, user_message_index=1)
+        else:
+            prompt_tokens_est = self.estimator.estimate_obj(payload)
+            total_budget_truncated = False
+        if total_budget_truncated:
+            await event_bus.emit(run_id, {
+                "type": "LLM_TOTAL_PROMPT_BUDGET_APPLIED",
+                "title": "Total prompt budget applied",
+                "message": f"Reduced complete provider payload to estimated_prompt_tokens={prompt_tokens_est}",
+                "node_id": node_id,
+                "provider": provider_name,
+                "model": model,
+                "estimated_prompt_tokens": prompt_tokens_est,
+            })
         cache_key = self.cache.build_key(provider_name=provider_name, provider=provider, payload=payload)
         if provider.get("cache_enabled", True):
             cached = self.cache.get(cache_key)
@@ -177,7 +226,6 @@ class UniversalModelProviderHandler:
                 })
                 return parse_json_content(cached.get("content", "{}"))
 
-        prompt_tokens_est = self.estimator.estimate_obj(payload)
         await event_bus.emit(run_id, {
             "type": "LLM_REQUEST_SENT",
             "title": "LLM request sent",

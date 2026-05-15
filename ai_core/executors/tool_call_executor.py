@@ -31,6 +31,7 @@ from ai_core.execution.candidate_result_synthesizer import CandidateResultSynthe
 from ai_core.execution.runtime_strategy_memory import RuntimeStrategyMemory
 from ai_core.execution.provider_reliability import ProviderReliabilityTracker
 from ai_core.execution.evidence_direct_answer import EvidenceDirectAnswerBuilder
+from ai_core.context.evidence_noise_reducer import EvidenceNoiseReducer
 from ai_core.utils.safe_json import make_json_safe
 
 
@@ -72,6 +73,7 @@ class ToolCallExecutor:
         self.strategy_memory = RuntimeStrategyMemory()
         self.provider_reliability = ProviderReliabilityTracker()
         self.evidence_direct_answer = EvidenceDirectAnswerBuilder()
+        self.evidence_noise_reducer = EvidenceNoiseReducer()
 
     async def execute(
         self,
@@ -1351,22 +1353,36 @@ class ToolCallExecutor:
             ),
         }
 
+        tool_input = self._build_tool_input(
+            step=step, run_id=run_id, node_id=node_id, step_id=step_id, user_input=state.get("input", "")
+        )
+
+        # For page-extraction fallbacks, first try the deterministic generic
+        # adapter. This avoids sending huge discovery JSON to an external LLM
+        # when the runtime already has usable no-key evidence.
+        if recommended_type in {"web_extract", "browser_automation"}:
+            deterministic = await self._build_and_verify_generic_web_extract_tool(
+                run_id=run_id, node_id=node_id, step_id=step_id, capability=capability,
+                step=step, state=state, api_discovery=api_discovery, external_discovery=external_discovery,
+                candidate=None, tool_input=tool_input, reason="deterministic_first_for_web_fallback",
+            )
+            if deterministic:
+                return deterministic
+
+        compact_fallback_request = self.evidence_noise_reducer.compact_generation_request(fallback_request)
         await event_bus.emit(run_id, {
             "type": "RUNTIME_TOOL_FALLBACK_GENERATION_STARTED",
             "title": "Runtime fallback tool generation started",
             "message": f"Generating fallback artifact using strategy={recommended_type}",
             "node_id": node_id,
             "step_id": step_id,
-            "result": fallback_request,
+            "result": compact_fallback_request,
         })
         try:
             artifact = await self.artifact_generator.generate_artifact(
                 run_id=run_id,
                 node_id=node_id,
-                generation_request=fallback_request,
-            )
-            tool_input = self._build_tool_input(
-                step=step, run_id=run_id, node_id=node_id, step_id=step_id, user_input=state.get("input", "")
+                generation_request=compact_fallback_request,
             )
             if not isinstance(artifact, dict) or not artifact.get("files"):
                 deterministic = await self._build_and_verify_generic_web_extract_tool(
@@ -1492,6 +1508,25 @@ class ToolCallExecutor:
     def _select_generic_web_candidate(self, api_discovery: dict[str, Any], external_discovery: dict[str, Any]) -> dict[str, Any] | None:
         raw = self.candidate_extractor.extract(api_discovery or {}, external_discovery or {})
         candidates = self.candidate_scorer.score_candidates(raw)
+        constraints = self.evidence_noise_reducer.extract_required_terms({"api_discovery": api_discovery, "external_solution_discovery": external_discovery})
+        ranked: list[tuple[float, dict[str, Any]]] = []
+        for candidate in candidates:
+            if str(candidate.get("tool_type") or "") not in {"html_extract", "browser_extract", "json_api"}:
+                continue
+            evidence_text = self._candidate_evidence_text(candidate)
+            score = self.evidence_noise_reducer.score_evidence_item(
+                {"url": candidate.get("url"), "title": candidate.get("name"), "text": evidence_text, "source": candidate.get("source"), "rank": candidate.get("rank"), "status": 200},
+                constraints=constraints,
+                max_text_per_item=1200,
+            )
+            combined = float(candidate.get("score") or 0) + float(score.get("confidence") or 0) * 100 + float(score.get("coverage", {}).get("coverage_ratio") or 0) * 100
+            if score.get("coverage", {}).get("passed") or float(score.get("confidence") or 0) >= 0.45:
+                candidate = dict(candidate)
+                candidate["evidence_selection"] = score
+                ranked.append((combined, candidate))
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        if ranked:
+            return ranked[0][1]
         for candidate in candidates:
             if str(candidate.get("tool_type") or "") in {"html_extract", "browser_extract"}:
                 return candidate
@@ -1515,8 +1550,12 @@ class ToolCallExecutor:
             source_step=step,
             evidence_text=evidence_text,
         )
-        artifact.setdefault("manifest", {})["api_discovery"] = make_json_safe(api_discovery or {})
-        artifact.setdefault("manifest", {})["external_solution_discovery"] = make_json_safe(external_discovery or {})
+        compact_discovery = self.evidence_noise_reducer.compact_generation_request({
+            "api_discovery": api_discovery or {},
+            "external_solution_discovery": external_discovery or {},
+            "step": step,
+        })
+        artifact.setdefault("manifest", {})["compact_discovery"] = make_json_safe(compact_discovery)
         artifact.setdefault("manifest", {})["runtime_fallback_reason"] = reason
         artifact.setdefault("verification", {})["runtime_fallback_reason"] = reason
         return artifact

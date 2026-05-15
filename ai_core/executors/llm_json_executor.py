@@ -11,6 +11,7 @@ from ai_core.validation.result_auto_repair import ResultAutoRepair
 from ai_core.evolution.runtime_learning import RuntimeLearningService
 from ai_core.evolution.approval_learning import ApprovalLearningService
 from ai_core.context.runtime_context_reducer import RuntimeContextReducer
+from ai_core.roles import RoleProfileSelector, PromptPackLoader, RoleScopedContextReducer
 
 
 class LLMJsonExecutor:
@@ -30,6 +31,9 @@ class LLMJsonExecutor:
         self.runtime_learning = RuntimeLearningService()
         self.approval_learning = ApprovalLearningService()
         self.context_reducer = RuntimeContextReducer()
+        self.role_selector = RoleProfileSelector()
+        self.prompt_pack_loader = PromptPackLoader()
+        self.role_context_reducer = RoleScopedContextReducer()
 
     async def execute(self, workflow_node: dict, node_config: dict, state: dict, capability_result: dict) -> dict:
         run_id = state["run_id"]
@@ -63,20 +67,46 @@ class LLMJsonExecutor:
             user_input=state.get("input", ""),
         )
 
+        role_profile = self.role_selector.select(node_id=node_id, state=state, adapter=adapter).to_dict()
+        prompt_pack = self.prompt_pack_loader.load(role_profile.get("role_id", "general_runtime_agent"))
+        scoped_context = self.role_context_reducer.reduce_state(
+            state=state,
+            capability_result=capability_result,
+            role_profile=role_profile,
+        )
         runtime_context = self._build_runtime_context(state)
+        runtime_context["role_profile"] = role_profile
+        runtime_context["prompt_policy"] = role_profile.get("prompt_policy", {})
+        runtime_context["evidence_summary"] = scoped_context.get("evidence_summary")
+
+        await event_bus.emit(run_id, {
+            "type": "ROLE_PROFILE_SELECTED",
+            "title": "Runtime role profile selected",
+            "message": f"role={role_profile.get('role_id')}, policy_tokens={role_profile.get('prompt_policy', {}).get('max_context_tokens')}",
+            "node_id": node_id,
+            "role_profile": role_profile,
+        })
 
         rendered = self.template.render(prompt.get("user_template", ""), {
             "user_input": state.get("input", ""),
-            "previous_results": state.get("results", {}),
-            "capability_result": capability_result,
-            "human_feedback": state.get("human_feedback", []),
+            "previous_results": scoped_context.get("previous_results", {}),
+            "capability_result": scoped_context.get("capability_result", {}),
+            "human_feedback": scoped_context.get("human_feedback", []),
             "correction_memory": correction_memory + ("\n\n" + approval_memory if approval_memory else ""),
             "runtime_context": runtime_context,
+            "role_profile": role_profile,
+            "prompt_pack": prompt_pack,
+            "evidence_summary": scoped_context.get("evidence_summary"),
         })
 
-        runtime_rules = prompt.get("runtime_rules", [])
+        pack_system_addendum = prompt_pack.get("system_addendum")
+        if pack_system_addendum:
+            prompt = {**prompt, "system": (str(prompt.get("system", "")) + "\n\n" + str(pack_system_addendum)).strip()}
+
+        runtime_rules = list(prompt.get("runtime_rules", []) or [])
+        runtime_rules.extend(prompt_pack.get("runtime_rules", []) or [])
         if runtime_rules:
-            rendered = rendered + "\n\nRuntime rules:\n" + "\n".join(f"- {r}" for r in runtime_rules)
+            rendered = rendered + "\n\nRole-scoped runtime rules:\n" + "\n".join(f"- {r}" for r in runtime_rules)
 
         if approval_memory:
             rendered = rendered + "\n\n" + approval_memory
@@ -102,6 +132,10 @@ class LLMJsonExecutor:
             "message": f"Rendered prompt length: {len(rendered)} characters",
             "node_id": node_id,
         })
+
+        role_budget = role_profile.get("prompt_policy", {}).get("max_context_tokens")
+        if role_budget and not adapter.get("max_prompt_tokens"):
+            adapter = {**adapter, "max_prompt_tokens": int(role_budget)}
 
         result = await self.router.generate_json(
             run_id=run_id,

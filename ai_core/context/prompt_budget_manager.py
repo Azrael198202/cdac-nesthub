@@ -26,12 +26,14 @@ class PromptBudgetManager:
     def budget_for(self, provider: dict | None = None, adapter: dict | None = None) -> int:
         provider = provider or {}
         adapter = adapter or {}
-        return int(
+        raw = int(
             adapter.get("max_prompt_tokens")
             or provider.get("max_prompt_tokens")
             or provider.get("prompt_budget_tokens")
             or self.DEFAULT_BUDGET_TOKENS
         )
+        reserve = int(adapter.get("prompt_budget_safety_tokens") or provider.get("prompt_budget_safety_tokens") or 1000)
+        return max(1000, raw - reserve)
 
     def fit_text(self, text: str, *, budget_tokens: int) -> PromptBudgetResult:
         estimated = self.estimator.estimate_text(text)
