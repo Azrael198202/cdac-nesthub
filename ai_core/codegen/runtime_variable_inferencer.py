@@ -17,7 +17,7 @@ class RuntimeVariableInferencer:
     """Infer dynamic runtime variables from intent/workflow/request payloads.
 
     This class is intentionally domain-neutral. It does not hardcode business
-    fields such as weather, flight, booking, etc. Instead it walks generic
+    domain-specific fields. Instead it walks generic
     runtime structures and extracts values that came from user input,
     parsed entities, temporal expressions, workflow parameters, schemas and
     evidence metadata. Any such value is treated as runtime data and must be

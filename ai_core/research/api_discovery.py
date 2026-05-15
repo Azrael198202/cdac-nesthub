@@ -179,7 +179,7 @@ class ApiDiscoveryEngine:
             base = " ".join(part for part in [known_text, objective, action, user_input] if part)
             return [
                 base,
-                f"{known_text} {capability} forecast details".strip(),
+                f"{known_text} {capability} detailed result".strip(),
             ]
         base = " ".join(part for part in [capability, objective, action, user_input] if part)
         if not base:

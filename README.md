@@ -1,15 +1,43 @@
-# CDAC NestHub v70.16
+# CDAC NestHub v70.19
 
-Runtime answer evidence extraction fix.
+## Runtime Final Answer Synthesis
 
-## Changes
+This version changes the output contract:
 
-1. `fetch_selected_pages` now captures visible text, compact HTML evidence, and DOM attribute evidence.
-2. Answer sufficiency checks include `html_excerpt`, `dom_evidence_text`, and DOM attributes such as `title`, `alt`, `aria-label`, `datetime`, `href`, and `data-*`.
-3. Calendar/card/table style pages can satisfy runtime variables when the answer is present in HTML attributes rather than plain text.
-4. Direct evidence fallback also reads HTML/DOM evidence.
-5. Keeps v70.15 multilingual semantic sufficiency logic and v70.14 fetch-before-API/tool discovery flow.
+- Execution steps produce **result material** only.
+- Raw source payloads are sanitized before presentation.
+- Raw markup, raw JSON, traces, logs, and transport payloads are not returned directly as the final answer.
+- A final synthesis stage creates the user-facing response from sanitized material.
+- If model synthesis is unavailable, a deterministic rule-based summary is used as fallback.
+
+## Main Changes
+
+1. Added `ResultMaterialBuilder`.
+2. Added `ResultSanitizer`.
+3. Added `FinalAnswerSynthesizer`.
+4. Updated `OutputExecutor` to call final synthesis after execution.
+5. Preserved `trust_summary`, `provenance`, and `result_material` as metadata, separate from the main answer.
+6. Kept runtime evidence rules domain-neutral: no business/domain keyword hardcoding in generic output synthesis.
+
+## Output Principle
+
+```text
+runtime execution
+  -> result material
+  -> sanitizer
+  -> final answer synthesizer
+  -> user-facing answer
+```
 
 ## Packaging
 
-Runtime-generated artifacts, traces, caches, and transient directories are excluded from the ZIP package.
+Excluded:
+
+```text
+runtime/generated/
+runtime/cache/
+runtime/traces/
+runtime/tmp/
+__pycache__/
+*.pyc
+```

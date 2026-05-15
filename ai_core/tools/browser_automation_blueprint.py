@@ -29,7 +29,7 @@ class BrowserAutomationBlueprintBuilder:
       - temporal metadata extraction
       - action semantics
       - selector discovery strategy
-      - business-specific constraints
+      - domain-specific constraints
     """
 
     def __init__(self) -> None:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Any
+import re
+
 
 
 class ResultPresenter:
@@ -147,4 +149,20 @@ class ResultPresenter:
             return "None"
         if isinstance(value, bool):
             return "Yes" if value else "No"
-        return str(value)
+        text = str(value)
+        if self._looks_like_raw_markup(text):
+            return self._markup_preview(text)
+        return text
+
+    def _looks_like_raw_markup(self, text: str) -> bool:
+        sample = text[:1200].casefold()
+        return "<!doctype" in sample or "<html" in sample or sample.count("<") > 20
+
+    def _markup_preview(self, text: str) -> str:
+        clean = re.sub(r"<script\b[^>]*>.*?</script>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+        clean = re.sub(r"<style\b[^>]*>.*?</style>", " ", clean, flags=re.IGNORECASE | re.DOTALL)
+        clean = re.sub(r"<[^>]+>", " ", clean)
+        clean = " ".join(clean.split())
+        if not clean:
+            return "Structured source content was retrieved, but raw markup was omitted from the user-facing answer."
+        return clean[:1200]

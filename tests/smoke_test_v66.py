@@ -1,39 +1,12 @@
-from ai_core.tools.generic_web_extract_artifact import GenericWebExtractArtifactFactory
-from ai_core.sandbox.verified_sandbox_runtime import VerifiedSandboxRuntime
+from ai_core.execution.evidence_quality_validator import EvidenceQualityValidator
 
 
-def main() -> None:
-    artifact = GenericWebExtractArtifactFactory().build_artifact(
-        capability="external_information_access",
-        candidate={
-            "name": "Verified Example Page",
-            "url": "https://example.com/example",
-            "tool_type": "html_extract",
-            "source": "test",
-            "evidence": {
-                "document": {
-                    "text_excerpt": "Example 2026-05-15 Fukuoka detailed evidence 27 C 0 mm"
-                }
-            },
-        },
-        evidence_text="Example 2026-05-15 Fukuoka detailed evidence 27 C 0 mm",
+def test_generic_evidence_quality_accepts_runtime_parameters():
+    validator = EvidenceQualityValidator()
+    payload = {"known": {"entity": "Sample Place", "date": "2026-05-15"}}
+    result = validator.validate(
+        result={"status": "success", "data": {"extracted_text": "Sample Place result for 2026-05-15: value 27 unit, metric 0 unit."}},
+        payload=payload,
+        evidence_text="Sample Place result for 2026-05-15: value 27 unit, metric 0 unit",
     )
-    result = VerifiedSandboxRuntime().verify_tool_artifact(
-        artifact=artifact,
-        test_input={
-            "known": {
-                "location": "Fukuoka",
-                "date": "2026-05-15",
-                "detail_level": "detailed",
-            }
-        },
-        allow_network=False,
-        timeout_seconds=20,
-    )
-    assert result["status"] == "passed", result
-    assert result["safe_to_register"] is True, result
-    print("smoke_test_v66: OK")
-
-
-if __name__ == "__main__":
-    main()
+    assert result["passed"] is True

@@ -100,7 +100,7 @@ class GenericWebResearchTool:
                 tag.decompose()
             visible_text = self._clean(text_soup.get_text(" "))[:max_chars]
             # v70.16: some useful evidence appears only in DOM attributes
-            # (title/alt/aria-label/data-*), for example calendar cards. Include
+            # (title/alt/aria-label/data-*), including structured page cards. Include
             # an attribute-derived excerpt so sufficiency checks can match dates
             # and factual values without depending on rendered text only.
             combined_text = self._clean(" ".join([visible_text, dom_text]))[:max_chars]
@@ -123,7 +123,7 @@ class GenericWebResearchTool:
         """Return a compact, attribute-preserving HTML evidence excerpt.
 
         This is intentionally generic. It keeps tags/attributes that often carry
-        factual evidence in modern pages (calendar cards, icon alt/title, link
+        factual evidence in modern pages (structured cards, icon alt/title, link
         title, data-* attributes) while dropping script/style noise.
         """
         try:
@@ -153,7 +153,7 @@ class GenericWebResearchTool:
     def _extract_dom_evidence_items(self, soup: BeautifulSoup, *, limit: int = 200) -> list[dict[str, Any]]:
         """Extract generic DOM evidence from text and useful attributes.
 
-        The extractor is not tied to weather or any specific website. It captures
+        The extractor is not tied to any specific domain or website. It captures
         repeated cards/table cells/list items and attribute values that can carry
         structured facts, such as dates, labels, icons, and numeric values.
         """

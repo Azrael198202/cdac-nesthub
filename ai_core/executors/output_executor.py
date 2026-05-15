@@ -5,6 +5,8 @@ from typing import Any
 from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import PROJECT_ROOT
 from ai_core.presentation.result_presenter import ResultPresenter
+from ai_core.presentation.result_material_builder import ResultMaterialBuilder
+from ai_core.presentation.final_answer_synthesizer import FinalAnswerSynthesizer
 from ai_core.validation.schema_validator import SchemaValidator
 
 
@@ -30,9 +32,11 @@ class OutputExecutor:
         self.loader = ConfigLoader()
         self.validator = SchemaValidator()
         self.presenter = ResultPresenter()
+        self.material_builder = ResultMaterialBuilder()
+        self.final_synthesizer = FinalAnswerSynthesizer()
 
     async def execute(self, workflow_node, node_config, state, capability_result):
-        result = self._build(state, node_config)
+        result = await self._build(state, node_config)
         schema_path = node_config.get("output_schema")
         if schema_path:
             try:
@@ -44,7 +48,7 @@ class OutputExecutor:
                 pass
         return result
 
-    def _build(self, state: dict[str, Any], node_config: dict[str, Any]) -> dict[str, Any]:
+    async def _build(self, state: dict[str, Any], node_config: dict[str, Any]) -> dict[str, Any]:
         results = state.get("results", {}) if isinstance(state, dict) else {}
         execution = results.get("execution") if isinstance(results.get("execution"), dict) else {}
         status = str(execution.get("status") or "unknown")
@@ -89,9 +93,9 @@ class OutputExecutor:
                 "previous_result_keys": list(results.keys()),
             }
 
-        summaries: list[str] = []
         tool_results: list[dict[str, Any]] = []
         provenance_records: list[dict[str, Any]] = []
+        result_materials: list[dict[str, Any]] = []
         for step in execution_steps:
             if not isinstance(step, dict):
                 continue
@@ -100,14 +104,18 @@ class OutputExecutor:
             provenance = tool_result.get("provenance") if isinstance(tool_result.get("provenance"), dict) else step.get("provenance")
             if isinstance(provenance, dict):
                 provenance_records.append(provenance)
-            summaries.append(self._summarize_tool_result(step, tool_result))
-
-        if summaries:
-            final_answer = "\n\n".join(s for s in summaries if s).strip()
-        else:
-            final_answer = "Workflow finished, but no executable tool result was produced."
+            result_materials.append(self.material_builder.from_execution_step(step).to_dict())
 
         trust_summary = self._trust_summary(provenance_records, tool_results)
+        synthesized = await self.final_synthesizer.synthesize(
+            run_id=str(state.get("run_id") or state.get("id") or ""),
+            node_id=str(node_config.get("node_id", "output")),
+            state=state,
+            materials=result_materials,
+            trust_summary=trust_summary,
+        )
+        final_answer = synthesized.get("answer") or "Workflow finished, but no user-facing answer was produced."
+
         if trust_summary.get("trust_level") == "unverified_generated_result":
             final_answer = final_answer + "\n\nTrust: unverified generated result. The runtime did not confirm live network verification, no-mock execution, or evidence-supported material quality."
 
@@ -118,6 +126,8 @@ class OutputExecutor:
             "message": final_answer,
             "final_answer": final_answer,
             "execution_status": status,
+            "result_material": synthesized.get("result_material", []),
+            "synthesis": synthesized.get("synthesis", {}),
             "tool_results": tool_results,
             "provenance": provenance_records,
             "trust_summary": trust_summary,

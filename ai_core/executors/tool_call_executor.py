@@ -1153,7 +1153,7 @@ class ToolCallExecutor:
         """Normalize runtime tool/module outputs into a generic success/error contract.
 
         Runtime-generated modules are allowed to return a plain data object, for
-        example {"temperature": 25, "condition": "Sunny"}. A missing `status`
+        example {"value": 25, "label": "ok"}. A missing `status`
         field must not be treated as failure. This method stays domain-neutral:
         it only checks generic error/status shape and wraps useful payloads into
         the common result contract.
