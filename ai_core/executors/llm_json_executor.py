@@ -10,6 +10,7 @@ from ai_core.validation.schema_auto_repair import SchemaAutoRepair
 from ai_core.validation.result_auto_repair import ResultAutoRepair
 from ai_core.evolution.runtime_learning import RuntimeLearningService
 from ai_core.evolution.approval_learning import ApprovalLearningService
+from ai_core.context.runtime_context_reducer import RuntimeContextReducer
 
 
 class LLMJsonExecutor:
@@ -28,6 +29,7 @@ class LLMJsonExecutor:
         self.router = ProviderRouter()
         self.runtime_learning = RuntimeLearningService()
         self.approval_learning = ApprovalLearningService()
+        self.context_reducer = RuntimeContextReducer()
 
     async def execute(self, workflow_node: dict, node_config: dict, state: dict, capability_result: dict) -> dict:
         run_id = state["run_id"]

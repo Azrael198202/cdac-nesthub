@@ -4,6 +4,7 @@ from ai_core.config.paths import RUNTIME_CONFIGS
 from ai_core.events.event_bus import event_bus
 from ai_core.llm.provider_handler_registry import ProviderHandlerRegistry
 from ai_core.llm.provider_handlers.base import ProviderUnavailableError
+from ai_core.context.prompt_budget_manager import PromptBudgetManager
 
 
 class ProviderRouter:
@@ -16,6 +17,7 @@ class ProviderRouter:
     def __init__(self) -> None:
         self.loader = ConfigLoader()
         self.registry = ProviderHandlerRegistry()
+        self.prompt_budget = PromptBudgetManager()
 
     def _config(self) -> dict:
         return self.loader.load_yaml(RUNTIME_CONFIGS / "models" / "providers.yaml")
@@ -60,13 +62,26 @@ class ProviderRouter:
 
             try:
                 handler = self.registry.get(provider_type)
+                budget = self.prompt_budget.budget_for(provider=provider, adapter=adapter)
+                budgeted_prompt = self.prompt_budget.fit_text(rendered_user_prompt, budget_tokens=budget)
+                if budgeted_prompt.truncated:
+                    await event_bus.emit(run_id, {
+                        "type": "LLM_PROMPT_BUDGET_APPLIED",
+                        "title": "Prompt budget applied",
+                        "message": f"Prompt reduced to fit budget. estimated_tokens={budgeted_prompt.estimated_tokens}, budget_tokens={budget}",
+                        "node_id": node_id,
+                        "provider": provider_name,
+                        "model": provider.get("model"),
+                        "estimated_tokens": budgeted_prompt.estimated_tokens,
+                        "budget_tokens": budget,
+                    })
                 result = await handler.generate_json(
                     run_id=run_id,
                     node_id=node_id,
                     provider_name=provider_name,
                     provider=provider,
                     prompt=prompt,
-                    rendered_user_prompt=rendered_user_prompt,
+                    rendered_user_prompt=budgeted_prompt.text,
                     schema=schema,
                 )
 

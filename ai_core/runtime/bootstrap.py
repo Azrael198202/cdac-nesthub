@@ -76,7 +76,8 @@ class RuntimeBootstrap:
             "providers": {
                 "ollama": {
                     "enabled": True,
-                    "type": "ollama",
+                    "type": "universal_model",
+                    "protocol": "ollama_chat",
                     "base_url": "http://127.0.0.1:11434",
                     "binary": "ollama",
                     "auto_install": True,
@@ -113,28 +114,41 @@ class RuntimeBootstrap:
                 },
                 "openai": {
                     "enabled": True,
-                    "type": "openai",
-                    "api_key_env": "OPENAI_API_KEY",
+                    "type": "universal_model",
+                    "protocol": "openai_compatible",
+                    "base_url": "https://api.openai.com",
+                    "endpoint": "/v1/chat/completions",
+                    "auth_type": "bearer_env",
+                    "auth_env": "OPENAI_API_KEY",
                     "model": "gpt-4o-mini",
-                    "timeout_seconds": 120,
+                    "timeout_seconds": 60,
+                    "max_prompt_tokens": 12000,
+                    "max_schema_chars": 12000,
+                    "cache_enabled": True,
                     "interactive_key_required": True
                 },
                 "vllm": {
                     "enabled": False,
-                    "type": "openai_compatible",
+                    "type": "universal_model",
+                    "protocol": "openai_compatible",
                     "base_url": "http://127.0.0.1:8001",
                     "endpoint": "/v1/chat/completions",
                     "model": "Qwen/Qwen2.5-7B-Instruct",
-                    "timeout_seconds": 120,
+                    "timeout_seconds": 60,
+                    "max_prompt_tokens": 12000,
+                    "cache_enabled": True,
                     "response_format_json": True
                 },
                 "lmstudio": {
                     "enabled": False,
-                    "type": "openai_compatible",
+                    "type": "universal_model",
+                    "protocol": "openai_compatible",
                     "base_url": "http://127.0.0.1:1234",
                     "endpoint": "/v1/chat/completions",
                     "model": "local-model",
-                    "timeout_seconds": 120,
+                    "timeout_seconds": 60,
+                    "max_prompt_tokens": 12000,
+                    "cache_enabled": True,
                     "response_format_json": True
                 }
             },

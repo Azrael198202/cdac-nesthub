@@ -1,21 +1,28 @@
 from ai_core.llm.provider_handlers.base import ProviderUnavailableError
-from ai_core.llm.provider_handlers.ollama_handler import OllamaProviderHandler
-from ai_core.llm.provider_handlers.openai_handler import OpenAIProviderHandler
-from ai_core.llm.provider_handlers.openai_compatible_handler import OpenAICompatibleProviderHandler
+from ai_core.llm.provider_handlers.universal_model_handler import UniversalModelProviderHandler
 
 
 class ProviderHandlerRegistry:
+    """Protocol-driven provider registry.
+
+    Legacy provider type names are aliases to the universal handler. New provider
+    behavior should be configured or runtime-generated, not hardcoded as a new
+    ai_core adapter file.
+    """
+
     def __init__(self) -> None:
-        handlers = [
-            OllamaProviderHandler(),
-            OpenAIProviderHandler(),
-            OpenAICompatibleProviderHandler(),
-        ]
-        self.handlers = {handler.provider_type: handler for handler in handlers}
+        self.universal = UniversalModelProviderHandler()
+        self.handlers = {
+            "universal_model": self.universal,
+            "openai": self.universal,
+            "openai_compatible": self.universal,
+            "ollama": self.universal,
+        }
 
     def get(self, provider_type: str):
-        handler = self.handlers.get(provider_type)
+        handler = self.handlers.get(provider_type or "universal_model")
         if not handler:
-            supported = ", ".join(sorted(self.handlers.keys()))
-            raise ProviderUnavailableError(f"Unsupported provider type: {provider_type}. Supported provider types: {supported}")
+            raise ProviderUnavailableError(
+                f"Unsupported provider type: {provider_type}. Configure a universal protocol or register a runtime-generated adapter."
+            )
         return handler
