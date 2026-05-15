@@ -1,43 +1,47 @@
-# CDAC NestHub v70.19
+# CDAC NestHub v70.22
 
-## Runtime Final Answer Synthesis
+## Focus
 
-This version changes the output contract:
+This version keeps the v70 runtime line and adds an evidence-continuation fix for cases where a generated or registered runtime component is rejected as unverified.
 
-- Execution steps produce **result material** only.
-- Raw source payloads are sanitized before presentation.
-- Raw markup, raw JSON, traces, logs, and transport payloads are not returned directly as the final answer.
-- A final synthesis stage creates the user-facing response from sanitized material.
-- If model synthesis is unavailable, a deterministic rule-based summary is used as fallback.
+## Main changes
 
-## Main Changes
+1. Added `ExecutionContinuationCoordinator`.
+2. Generated or registered execution results rejected for missing evidence are no longer terminal.
+3. Runtime now continues to the generic evidence path when discovery already contains usable source candidates.
+4. Candidate extraction now preserves fetched document objects from external discovery.
+5. Direct evidence extraction now reads nested fetched documents, page excerpts, DOM evidence, and attribute evidence instead of relying only on snippets.
+6. Final synthesis remains the only user-facing answer layer; raw HTML, raw JSON, and traces are not returned as final answers.
+7. The implementation remains domain-neutral. Generic runtime files do not hardcode task-specific terms.
 
-1. Added `ResultMaterialBuilder`.
-2. Added `ResultSanitizer`.
-3. Added `FinalAnswerSynthesizer`.
-4. Updated `OutputExecutor` to call final synthesis after execution.
-5. Preserved `trust_summary`, `provenance`, and `result_material` as metadata, separate from the main answer.
-6. Kept runtime evidence rules domain-neutral: no business/domain keyword hardcoding in generic output synthesis.
-
-## Output Principle
+## Intended flow
 
 ```text
-runtime execution
-  -> result material
-  -> sanitizer
-  -> final answer synthesizer
-  -> user-facing answer
+candidate execution
+↓
+verification rejects synthetic/unverified output
+↓
+ExecutionContinuationCoordinator
+↓
+existing evidence candidates
+↓
+fetched page / DOM / structured evidence extraction
+↓
+result material
+↓
+final answer synthesis
 ```
 
 ## Packaging
 
-Excluded:
+Runtime artifacts are excluded:
 
 ```text
 runtime/generated/
 runtime/cache/
 runtime/traces/
 runtime/tmp/
+runtime/downloads/
 __pycache__/
 *.pyc
 ```

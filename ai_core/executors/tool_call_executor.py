@@ -30,7 +30,9 @@ from ai_core.execution.evidence_quality_validator import EvidenceQualityValidato
 from ai_core.execution.candidate_result_synthesizer import CandidateResultSynthesizer
 from ai_core.execution.runtime_strategy_memory import RuntimeStrategyMemory
 from ai_core.execution.provider_reliability import ProviderReliabilityTracker
+from ai_core.execution.generated_result_verifier import GeneratedResultVerifier
 from ai_core.execution.evidence_direct_answer import EvidenceDirectAnswerBuilder
+from ai_core.execution.execution_continuation_coordinator import ExecutionContinuationCoordinator
 from ai_core.context.evidence_noise_reducer import EvidenceNoiseReducer
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.utils.safe_json import make_json_safe
@@ -76,6 +78,8 @@ class ToolCallExecutor:
         self.evidence_direct_answer = EvidenceDirectAnswerBuilder()
         self.evidence_noise_reducer = EvidenceNoiseReducer()
         self.knowledge = KnowledgeService()
+        self.generated_result_verifier = GeneratedResultVerifier()
+        self.execution_continuation = ExecutionContinuationCoordinator()
 
     async def execute(
         self,
@@ -462,24 +466,66 @@ class ToolCallExecutor:
                             normalized_module_result = self._normalize_runtime_execution_result(
                                 module_result.get("result"), source="runtime_generated_module"
                             )
+                            normalized_module_result = self.generated_result_verifier.enforce(
+                                normalized_module_result,
+                                provenance=normalized_module_result.get("provenance") if isinstance(normalized_module_result, dict) else None,
+                                artifact=module_result.get("registry_record") if isinstance(module_result, dict) else None,
+                            )
+                            if self._is_success_result(normalized_module_result):
+                                execution_steps.append({
+                                    "step_id": step_id,
+                                    "status": "executed",
+                                    "module": module_result.get("registry_record"),
+                                    "input": module_input,
+                                    "result": normalized_module_result,
+                                    "provenance": normalized_module_result.get("provenance") if isinstance(normalized_module_result, dict) else None,
+                                    "source_step": step,
+                                })
+                                continue
+
+                            # v70.21: generated/installed modules that fail verification
+                            # are not terminal. A generated module is only one candidate;
+                            # if it returns synthetic or unverified material, continue with
+                            # the generic evidence path before declaring the step blocked.
+                            generated_module_fallback = await self._try_answer_evidence_fallback_after_module_failure(
+                                run_id=run_id,
+                                node_id=node_id,
+                                step_id=step_id,
+                                capability=required_capability or "unknown_capability",
+                                step=step,
+                                state=state,
+                                failed_result=normalized_module_result,
+                            )
+                            if generated_module_fallback:
+                                execution_steps.append({
+                                    "step_id": step_id,
+                                    "status": "executed",
+                                    "tool": generated_module_fallback.get("tool"),
+                                    "input": generated_module_fallback.get("input"),
+                                    "result": generated_module_fallback.get("result"),
+                                    "provenance": (generated_module_fallback.get("result") or {}).get("provenance") if isinstance(generated_module_fallback.get("result"), dict) else None,
+                                    "source_step": step,
+                                    "fallback_after_generated_module_rejection": True,
+                                })
+                                continue
+
                             execution_steps.append({
                                 "step_id": step_id,
-                                "status": "executed" if self._is_success_result(normalized_module_result) else "module_execution_failed",
+                                "status": "module_execution_failed",
                                 "module": module_result.get("registry_record"),
                                 "input": module_input,
                                 "result": normalized_module_result,
                                 "provenance": normalized_module_result.get("provenance") if isinstance(normalized_module_result, dict) else None,
                                 "source_step": step,
                             })
-                            if not self._is_success_result(normalized_module_result):
-                                blocked_steps.append({
-                                    "step_id": step_id,
-                                    "status": "module_execution_failed",
-                                    "capability": required_capability,
-                                    "reason": self._result_error_message(normalized_module_result, "Module execution failed."),
-                                    "source_step": step,
-                                    "module_result": normalized_module_result,
-                                })
+                            blocked_steps.append({
+                                "step_id": step_id,
+                                "status": "module_execution_failed",
+                                "capability": required_capability,
+                                "reason": self._result_error_message(normalized_module_result, "Module execution failed."),
+                                "source_step": step,
+                                "module_result": normalized_module_result,
+                            })
                             continue
 
                         module_blueprint = self.module_builder.ensure_module_for_capability(
@@ -506,6 +552,11 @@ class ToolCallExecutor:
                             )
                             if executed_module:
                                 module_result = executed_module.get("result", {})
+                                module_result = self.generated_result_verifier.enforce(
+                                    module_result,
+                                    provenance=module_result.get("provenance") if isinstance(module_result, dict) else None,
+                                    artifact=executed_module.get("registry_record") if isinstance(executed_module, dict) else None,
+                                )
                                 execution_steps.append({
                                     "step_id": step_id,
                                     "status": "executed" if self._is_success_result(module_result) else "module_execution_failed",
@@ -1116,6 +1167,7 @@ class ToolCallExecutor:
         try:
             raw_result = module.run(module_input)
             result = self._normalize_runtime_execution_result(raw_result, source=component_type)
+            result = self.generated_result_verifier.enforce(result, artifact=module_record)
             trace = self.provenance.finish(
                 trace,
                 output=result,
@@ -1353,6 +1405,7 @@ class ToolCallExecutor:
             )
             raw_result = module.run(module_input)
             result = self._normalize_runtime_execution_result(raw_result, source="runtime_generated_module")
+            result = self.generated_result_verifier.enforce(result, artifact=installed)
             trace = self.provenance.finish(
                 trace,
                 output=result,
@@ -2038,6 +2091,8 @@ class ToolCallExecutor:
             "result": {"failed_result": failed_result},
         })
         try:
+            if not self.execution_continuation.should_continue_with_evidence(failed_result):
+                return None
             external_discovery = await self.external_discovery.discover(
                 run_id=run_id,
                 node_id=node_id,
@@ -2045,6 +2100,8 @@ class ToolCallExecutor:
                 step=step,
                 user_input=state.get("input", ""),
             )
+            if not self.execution_continuation.has_evidence_candidates(external_discovery):
+                return None
             direct_execution = await self._try_direct_evidence_execution_from_discovery(
                 run_id=run_id,
                 node_id=node_id,

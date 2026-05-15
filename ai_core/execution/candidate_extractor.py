@@ -101,16 +101,19 @@ class CandidateExtractor:
                     })
 
         # External solution discovery documents are also candidate pages. They
-        # may be API documentation, static HTML pages, or pages that require a
-        # browser extractor. Keep them in the same candidate pool so runtime
-        # scoring can choose the best strategy.
+        # may be fetched HTML/text pages or other generic source material. Keep
+        # the fetched document object attached so downstream evidence extraction
+        # can use page text, markup excerpts, and DOM attributes instead of only
+        # search-result snippets.
         for idx, item in enumerate(source.get("documents") or [], start=300):
             if not isinstance(item, dict):
                 continue
-            url = str(item.get("url") or "").strip()
+            doc = item.get("document") if isinstance(item.get("document"), dict) else {}
+            search = item.get("source_search_result") if isinstance(item.get("source_search_result"), dict) else {}
+            url = str(doc.get("url") or search.get("url") or item.get("url") or "").strip()
             if url:
                 output.append({
-                    "name": str(item.get("title") or url),
+                    "name": str(doc.get("title") or search.get("title") or item.get("title") or url),
                     "url": url,
                     "official_documentation_url": url,
                     "rank": idx,
