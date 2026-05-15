@@ -99,7 +99,7 @@ class GenericWebExtractArtifactFactory:
         return safe[:96] or "generic_web_extract_tool"
 
     def _tool_source(self, *, url: str, name: str, evidence_text: str) -> str:
-        return f'''from __future__ import annotations
+        return rf'''from __future__ import annotations
 
 import html
 import json

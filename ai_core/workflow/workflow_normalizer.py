@@ -41,6 +41,10 @@ class WorkflowNormalizer:
             if step_capability:
                 step["required_capability"] = step_capability
 
+            if "execution_strategy" not in step or not isinstance(step.get("execution_strategy"), list):
+                plan_strategy = plan.get("execution_strategy") if isinstance(plan.get("execution_strategy"), list) else None
+                step["execution_strategy"] = plan_strategy or ["local_knowledge", "web_evidence", "tool_generation"]
+
             if "execution_ready" not in step:
                 step["execution_ready"] = not bool(step["missing_fields"])
 

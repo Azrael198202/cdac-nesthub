@@ -103,12 +103,14 @@ class ExternalSolutionDiscoveryEngine:
     def _build_request(self, *, capability: str, step: dict[str, Any], user_input: str) -> dict[str, Any]:
         request_id = "external_discovery_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
         params = step.get("parameters") if isinstance(step.get("parameters"), dict) else {}
+        execution_strategy = step.get("execution_strategy") if isinstance(step.get("execution_strategy"), list) else ["local_knowledge", "web_evidence", "tool_generation"]
         return {
             "request_id": request_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "capability": capability,
             "user_input": user_input,
             "source_step": step,
+            "execution_strategy": execution_strategy,
             "runtime_request_semantics": {
                 "objective": step.get("objective"),
                 "action": step.get("action"),
@@ -120,8 +122,9 @@ class ExternalSolutionDiscoveryEngine:
                 "output_preferences": step.get("output_preferences") or params.get("output_preferences") or {},
             },
             "discovery_goals": [
-                "find_existing_tools_or_code_examples",
-                "find_relevant_documentation_or_markdown_guides",
+                "collect_answer_evidence_when_requested_by_execution_strategy",
+                "find_existing_tools_or_code_examples_only_when_evidence_is_insufficient",
+                "find_relevant_documentation_or_markdown_guides_only_when_tool_generation_is_needed",
                 "find_candidate_models_when_model_choice_can_improve_the_task",
                 "collect_license_installation_usage_and_risk_evidence",
                 "do_not_execute_untrusted_code",
@@ -134,6 +137,17 @@ class ExternalSolutionDiscoveryEngine:
         objective = str(step.get("objective") or "").strip()
         action = str(step.get("action") or "").strip()
         user_input = str(request.get("user_input") or "").strip()
+        semantics = request.get("runtime_request_semantics") if isinstance(request.get("runtime_request_semantics"), dict) else {}
+        known = semantics.get("known_parameters") if isinstance(semantics.get("known_parameters"), dict) else {}
+        known_text = " ".join(str(v) for v in known.values() if v not in (None, ""))
+        strategy = request.get("execution_strategy") if isinstance(request.get("execution_strategy"), list) else []
+        base_answer = " ".join(x for x in [known_text, objective, user_input] if x).strip()
+        if "web_evidence" in strategy:
+            queries = [
+                base_answer or user_input or objective or "current requested information",
+                " ".join(x for x in [known_text, action, objective] if x).strip(),
+            ]
+            return [q for q in queries if q][:3]
         base = " ".join(x for x in [capability, objective, action, user_input] if x) or "runtime capability"
         return [
             f"{base} documentation guide example implementation",

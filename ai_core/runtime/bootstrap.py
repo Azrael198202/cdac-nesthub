@@ -652,13 +652,16 @@ class RuntimeBootstrap:
                     "Only workflow_planning may create planned_steps.",
                     "planned_steps must be executable step objects, not strings.",
                     "Copy normalized entities from upstream nodes; do not invent stale values or re-normalize already resolved values.",
-                    "Choose generic required_capability values only; execution resolves actual tools later.",
+                    "Prefer execution_strategy over concrete capabilities: [local_knowledge, web_evidence, tool_generation].",
+                    "Do not choose concrete tools, APIs, providers, or generated implementations in planning.",
+                    "If required_capability is retained for schema compatibility, keep it generic and do not encode provider/API names.",
                     "Do not request human_interaction for data already available from upstream nodes.",
                 ],
                 "output_contract": {
                     "planned_steps": "array",
                     "blocking_missing_information": "array",
                     "required_capabilities": "array",
+                    "execution_strategy": "array",
                     "human_interaction": "object"
                 }
             },
@@ -728,7 +731,7 @@ class RuntimeBootstrap:
                             "type": "object",
                             "required": [
                                 "step_id", "step_type", "objective", "input_from",
-                                "parameters", "required_capability", "execution_ready",
+                                "parameters", "execution_ready",
                                 "human_interaction", "next_action"
                             ],
                             "properties": {
@@ -749,6 +752,7 @@ class RuntimeBootstrap:
                                     "additionalProperties": True
                                 },
                                 "required_capability": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+                                "execution_strategy": {"type": "array", "items": {"type": "string"}},
                                 "execution_ready": {"type": "boolean"},
                                 "human_interaction": {"type": "object", "additionalProperties": True},
                                 "next_action": {"type": "string"},
@@ -760,6 +764,7 @@ class RuntimeBootstrap:
                     },
                     "blocking_missing_information": {"oneOf": [{"type": "array"}, {"type": "object"}]},
                     "required_capabilities": {"type": "array"},
+                    "execution_strategy": {"type": "array", "items": {"type": "string"}},
                     "human_interaction": {"type": "object"}
                 },
                 "additionalProperties": True

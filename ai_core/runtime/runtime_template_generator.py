@@ -75,7 +75,8 @@ class RuntimeTemplateGenerator:
             if self._add_runtime_rules(prompt, [
                 "Executable work items belong in planned_steps, not top-level tasks.",
                 "planned_steps MUST be an array of executable objects, not an array of strings.",
-                "Each planned step object MUST include parameters and required_capability when the schema requires them.",
+                "Each planned step object MUST include parameters and execution_strategy when the schema allows it.",
+                "Prefer generic execution_strategy order such as local_knowledge, web_evidence, tool_generation instead of selecting concrete tools or providers.",
             ]):
                 changes.append("prompt.planned_steps_object_rules")
 
@@ -189,7 +190,7 @@ class RuntimeTemplateGenerator:
                 "Stage responsibility: convert parsed input and recognized intent into executable planned_steps.",
                 "planned_steps must be executable step objects, not strings.",
                 "Workflow planning may choose generic required capabilities, but must not choose concrete tools, APIs, providers, libraries, repositories, or implementation files.",
-                "Each planned step should include step_id, step_type, objective, input_from, required_capability, parameters.known, parameters.optional, parameters.missing_required, execution_ready, human_interaction, next_action, depends_on, and requires_human_confirmation when allowed by the schema.",
+                "Each planned step should include step_id, step_type, objective, input_from, parameters.known, parameters.optional, parameters.missing_required, execution_strategy, execution_ready, human_interaction, next_action, depends_on, and requires_human_confirmation when allowed by the schema. Use execution_strategy such as [local_knowledge, web_evidence, tool_generation] instead of choosing concrete tools or providers.",
                 "Copy normalized entities from upstream nodes; do not invent stale dates or re-normalize already resolved values.",
                 "Only request human_interaction when required fields are actually missing.",
             ]
@@ -295,7 +296,7 @@ class RuntimeTemplateGenerator:
                             "type": "object",
                             "required": [
                                 "step_id", "step_type", "objective", "input_from",
-                                "parameters", "required_capability", "execution_ready",
+                                "parameters", "execution_ready",
                                 "human_interaction", "next_action"
                             ],
                             "properties": {
@@ -316,6 +317,7 @@ class RuntimeTemplateGenerator:
                                     "additionalProperties": True,
                                 },
                                 "required_capability": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+                                "execution_strategy": {"type": "array", "items": {"type": "string"}},
                                 "execution_ready": {"type": "boolean"},
                                 "human_interaction": {"type": "object", "additionalProperties": True},
                                 "next_action": {"type": "string"},

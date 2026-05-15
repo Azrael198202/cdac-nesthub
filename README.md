@@ -1,47 +1,24 @@
-# CDAC NestHub v70.22
+# cdac-nesthub v70.27
 
-## Focus
+Stability and verification phase.
 
-This version keeps the v70 runtime line and adds an evidence-continuation fix for cases where a generated or registered runtime component is rejected as unverified.
+## Added
 
-## Main changes
+- deterministic regression replay
+- strict execution assertions
+- structured evidence contracts
+- generated execution validation
+- runtime failure taxonomy
 
-1. Added `ExecutionContinuationCoordinator`.
-2. Generated or registered execution results rejected for missing evidence are no longer terminal.
-3. Runtime now continues to the generic evidence path when discovery already contains usable source candidates.
-4. Candidate extraction now preserves fetched document objects from external discovery.
-5. Direct evidence extraction now reads nested fetched documents, page excerpts, DOM evidence, and attribute evidence instead of relying only on snippets.
-6. Final synthesis remains the only user-facing answer layer; raw HTML, raw JSON, and traces are not returned as final answers.
-7. The implementation remains domain-neutral. Generic runtime files do not hardcode task-specific terms.
+## Verification
 
-## Intended flow
-
-```text
-candidate execution
-↓
-verification rejects synthetic/unverified output
-↓
-ExecutionContinuationCoordinator
-↓
-existing evidence candidates
-↓
-fetched page / DOM / structured evidence extraction
-↓
-result material
-↓
-final answer synthesis
+```bash
+PYTHONPATH=. python -m compileall -q ai_core apps
+PYTHONPATH=. pytest -q tests/runtime/test_v70_26_runtime_capabilities.py tests/verification/test_v70_27_stability_verification.py
 ```
 
-## Packaging
-
-Runtime artifacts are excluded:
+Expected result:
 
 ```text
-runtime/generated/
-runtime/cache/
-runtime/traces/
-runtime/tmp/
-runtime/downloads/
-__pycache__/
-*.pyc
+10 passed
 ```

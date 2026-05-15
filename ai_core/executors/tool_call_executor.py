@@ -33,6 +33,8 @@ from ai_core.execution.provider_reliability import ProviderReliabilityTracker
 from ai_core.execution.generated_result_verifier import GeneratedResultVerifier
 from ai_core.execution.evidence_direct_answer import EvidenceDirectAnswerBuilder
 from ai_core.execution.execution_continuation_coordinator import ExecutionContinuationCoordinator
+from ai_core.execution.answer_sufficiency_evaluator import AnswerSufficiencyEvaluator
+from ai_core.research.web_research_tool import GenericWebResearchTool
 from ai_core.context.evidence_noise_reducer import EvidenceNoiseReducer
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.utils.safe_json import make_json_safe
@@ -80,6 +82,8 @@ class ToolCallExecutor:
         self.knowledge = KnowledgeService()
         self.generated_result_verifier = GeneratedResultVerifier()
         self.execution_continuation = ExecutionContinuationCoordinator()
+        self.answer_sufficiency = AnswerSufficiencyEvaluator()
+        self.web_research = GenericWebResearchTool()
 
     async def execute(
         self,
@@ -227,6 +231,35 @@ class ToolCallExecutor:
                     "priority_path": "local_knowledge_first",
                 })
                 continue
+
+            # v70.23: strategy-driven execution order.  A workflow step may
+            # declare a generic execution_strategy such as
+            # ["local_knowledge", "web_evidence", "tool_generation"].  This
+            # keeps planning domain-neutral and prevents a stale generated
+            # module from blocking direct evidence retrieval.
+            strategy = self._execution_strategy(step, normalized_plan)
+            if self._strategy_prefers(strategy, "web_evidence", before="tool_generation"):
+                web_strategy_result = await self._try_strategy_web_evidence_execution(
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    capability=required_capability or "generic_information_access",
+                    step=step,
+                    state=state,
+                    reason="execution_strategy_web_evidence_before_tool_generation",
+                )
+                if web_strategy_result:
+                    execution_steps.append({
+                        "step_id": step_id,
+                        "status": "executed",
+                        "tool": web_strategy_result.get("tool"),
+                        "input": web_strategy_result.get("input"),
+                        "result": web_strategy_result.get("result"),
+                        "provenance": (web_strategy_result.get("result") or {}).get("provenance") if isinstance(web_strategy_result.get("result"), dict) else None,
+                        "source_step": step,
+                        "priority_path": "web_evidence_before_tool_generation",
+                    })
+                    continue
 
             tool = self.tool_registry.find_by_capability(required_capability) if required_capability else None
             if tool and not self._has_executable_implementation(tool):
@@ -1316,6 +1349,120 @@ class ToolCallExecutor:
         })
         return tool_input
 
+
+    def _execution_strategy(self, step: dict[str, Any], normalized_plan: dict[str, Any] | None = None) -> list[str]:
+        """Return a normalized, domain-neutral execution strategy.
+
+        The strategy controls the order of generic runtime approaches.  It does
+        not name a concrete provider, API, model, website, business domain, or
+        generated implementation.
+        """
+        raw = None
+        if isinstance(step, dict):
+            raw = step.get("execution_strategy") or step.get("strategy")
+        if raw is None and isinstance(normalized_plan, dict):
+            raw = normalized_plan.get("execution_strategy")
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            raw = ["local_knowledge", "web_evidence", "tool_generation"]
+        allowed = {"local_knowledge", "web_evidence", "tool_generation", "registered_component", "human_interaction"}
+        output: list[str] = []
+        for item in raw:
+            value = str(item or "").strip().lower().replace("-", "_")
+            if value in allowed and value not in output:
+                output.append(value)
+        if not output:
+            output = ["local_knowledge", "web_evidence", "tool_generation"]
+        return output
+
+    def _strategy_prefers(self, strategy: list[str], first: str, *, before: str) -> bool:
+        try:
+            first_index = strategy.index(first)
+        except ValueError:
+            return False
+        try:
+            before_index = strategy.index(before)
+        except ValueError:
+            return True
+        return first_index < before_index
+
+    async def _try_strategy_web_evidence_execution(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        step_id: str,
+        capability: str,
+        step: dict[str, Any],
+        state: dict[str, Any],
+        reason: str,
+    ) -> dict[str, Any] | None:
+        """Execute the generic web-evidence branch before generated components.
+
+        This method is intentionally domain-neutral.  It fetches candidate pages,
+        extracts text/DOM/attribute evidence through the generic research tool,
+        materializes structured evidence, and returns a result suitable for final
+        synthesis.  It never returns raw markup as the user-facing answer.
+        """
+        await event_bus.emit(run_id, {
+            "type": "EXECUTION_STRATEGY_WEB_EVIDENCE_STARTED",
+            "title": "Web evidence strategy started",
+            "message": "Trying generic evidence retrieval before generated component execution.",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": {"reason": reason, "strategy": self._execution_strategy(step, {})},
+        })
+        try:
+            external_discovery = await self.external_discovery.discover(
+                run_id=run_id,
+                node_id=node_id,
+                capability=capability,
+                step=step,
+                user_input=state.get("input", ""),
+            )
+            direct_execution = await self._try_direct_evidence_execution_from_discovery(
+                run_id=run_id,
+                node_id=node_id,
+                step_id=step_id,
+                capability=capability,
+                step=step,
+                state=state,
+                api_discovery={},
+                external_discovery=external_discovery,
+                reason=reason,
+            )
+            if direct_execution and direct_execution.get("status") == "success":
+                tool_input = self._build_tool_input(
+                    step=step,
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    user_input=state.get("input", ""),
+                )
+                await event_bus.emit(run_id, {
+                    "type": "EXECUTION_STRATEGY_WEB_EVIDENCE_SELECTED",
+                    "title": "Web evidence strategy selected",
+                    "message": "Generic evidence was sufficient; generated component execution was skipped.",
+                    "node_id": node_id,
+                    "step_id": step_id,
+                    "result": self._compact_direct_result_for_event(direct_execution.get("result") or {}),
+                })
+                return {
+                    "tool": direct_execution.get("tool") or {"id": "evidence_direct_answer", "source": "runtime_research_evidence"},
+                    "input": tool_input,
+                    "result": direct_execution.get("result"),
+                }
+        except Exception as exc:
+            await event_bus.emit(run_id, {
+                "type": "EXECUTION_STRATEGY_WEB_EVIDENCE_FAILED",
+                "title": "Web evidence strategy failed",
+                "message": str(exc),
+                "node_id": node_id,
+                "step_id": step_id,
+            })
+        return None
+
     async def _try_generate_executable_module(
         self,
         *,
@@ -2167,13 +2314,13 @@ class ToolCallExecutor:
         external_discovery: dict[str, Any],
         reason: str,
     ) -> dict[str, Any] | None:
-        """Return a direct evidence result before invoking LLM code generation.
+        """Execute the evidence pipeline before generated components.
 
-        This is intentionally generic. It does not know any domain fields. It
-        uses dynamic runtime parameters, candidate extraction/scoring, evidence
-        coverage and noise reduction. If the already fetched no-key evidence is
-        sufficient, execution should finish directly instead of generating a new
-        tool or sending large discovery JSON to a model.
+        v70.24 turns this method into a real state-machine branch:
+        candidate evidence -> sufficiency gate -> optional page fetch -> DOM/text
+        extraction -> structured result material.  It does not branch on any
+        domain term; all matching is based on runtime parameters and generic
+        textual/structural evidence.
         """
         tool_input = self._build_tool_input(
             step=step,
@@ -2182,35 +2329,109 @@ class ToolCallExecutor:
             step_id=step_id,
             user_input=state.get("input", ""),
         )
+        known_parameters = self._runtime_known_parameters(tool_input)
         raw_candidates = self.candidate_extractor.extract(api_discovery or {}, external_discovery or {})
         scored_candidates = self.candidate_scorer.score_candidates(raw_candidates)
         no_key_candidates = [c for c in scored_candidates if not self._candidate_requires_credential(c)]
         if not no_key_candidates:
+            await event_bus.emit(run_id, {
+                "type": "EVIDENCE_PIPELINE_NO_PUBLIC_CANDIDATES",
+                "title": "Evidence pipeline found no public candidates",
+                "message": "No non-credential candidates were available for evidence execution.",
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": {"reason": reason},
+            })
+            return None
+
+        sufficiency = self.answer_sufficiency.evaluate(
+            user_input=str(state.get("input") or ""),
+            objective=str(step.get("objective") or ""),
+            capability=str(capability or ""),
+            known_parameters=known_parameters,
+            evidence=no_key_candidates,
+        )
+        await event_bus.emit(run_id, {
+            "type": "EVIDENCE_PIPELINE_SUFFICIENCY_EVALUATED",
+            "title": "Evidence pipeline sufficiency evaluated",
+            "message": f"stage=candidates passed={sufficiency.get('passed')} next_action={sufficiency.get('next_action')}",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": self._compact_sufficiency_for_event(sufficiency),
+        })
+
+        working_candidates = no_key_candidates
+        if not sufficiency.get("passed") and sufficiency.get("next_action") == "fetch_selected_pages":
+            fetched_documents = await self._fetch_selected_pages_for_evidence(
+                run_id=run_id,
+                node_id=node_id,
+                step_id=step_id,
+                selected_evidence=sufficiency.get("selected_evidence") or no_key_candidates,
+            )
+            if fetched_documents:
+                fetched_candidates = self.candidate_extractor.extract({"documents": fetched_documents})
+                working_candidates = self.candidate_scorer.score_candidates(fetched_candidates + no_key_candidates)
+                sufficiency = self.answer_sufficiency.evaluate(
+                    user_input=str(state.get("input") or ""),
+                    objective=str(step.get("objective") or ""),
+                    capability=str(capability or ""),
+                    known_parameters=known_parameters,
+                    evidence=working_candidates,
+                )
+                await event_bus.emit(run_id, {
+                    "type": "EVIDENCE_PIPELINE_SUFFICIENCY_EVALUATED",
+                    "title": "Evidence pipeline sufficiency evaluated",
+                    "message": f"stage=fetched_pages passed={sufficiency.get('passed')} next_action={sufficiency.get('next_action')}",
+                    "node_id": node_id,
+                    "step_id": step_id,
+                    "result": self._compact_sufficiency_for_event(sufficiency),
+                })
+
+        if not sufficiency.get("passed"):
+            await event_bus.emit(run_id, {
+                "type": "EVIDENCE_PIPELINE_INSUFFICIENT",
+                "title": "Evidence pipeline insufficient",
+                "message": "Generic evidence did not cover the runtime request sufficiently; later strategies may continue.",
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": self._compact_sufficiency_for_event(sufficiency),
+            })
             return None
 
         direct_result = self.evidence_direct_answer.build(
-            candidates=no_key_candidates,
+            candidates=working_candidates,
             payload=tool_input,
             capability=capability,
             attempts=[],
         )
         if not direct_result or not self.result_classifier.classify(direct_result).get("success"):
+            await event_bus.emit(run_id, {
+                "type": "EVIDENCE_PIPELINE_MATERIALIZATION_FAILED",
+                "title": "Evidence pipeline materialization failed",
+                "message": "Evidence was sufficient, but structured answer material could not be created.",
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": self._compact_sufficiency_for_event(sufficiency),
+            })
             return None
 
+        data = direct_result.setdefault("data", {})
+        data["answer_sufficiency"] = sufficiency
+        data["structured_materialized"] = True
         direct_result.setdefault("fallback", {})["direct_evidence_before_tool_generation"] = {
             "reason": reason,
-            "candidate_count": len(no_key_candidates),
-            "policy": "answer_from_verified_no_key_evidence_before_llm_codegen",
+            "candidate_count": len(working_candidates),
+            "policy": "evidence_pipeline_before_generated_components",
         }
         await event_bus.emit(run_id, {
             "type": "DIRECT_EVIDENCE_EXECUTION_SELECTED",
             "title": "Direct evidence execution selected",
-            "message": "Using covered no-key evidence before runtime tool generation.",
+            "message": "Using evidence-backed material before generated component execution.",
             "node_id": node_id,
             "step_id": step_id,
             "result": {
                 "tool": {"id": "evidence_direct_answer", "source": "runtime_research_evidence"},
-                "candidate_count": len(no_key_candidates),
+                "candidate_count": len(working_candidates),
                 "reason": reason,
                 "result_summary": self._compact_direct_result_for_event(direct_result),
             },
@@ -2220,6 +2441,126 @@ class ToolCallExecutor:
             "status": "success",
             "tool": {"id": "evidence_direct_answer", "source": "runtime_research_evidence"},
             "result": direct_result,
+        }
+
+    async def _fetch_selected_pages_for_evidence(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        step_id: str,
+        selected_evidence: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        fetched: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        await event_bus.emit(run_id, {
+            "type": "FETCH_SELECTED_PAGES_STARTED",
+            "title": "Fetching selected evidence pages",
+            "message": f"Fetching up to {min(len(selected_evidence), 7)} selected evidence page(s).",
+            "node_id": node_id,
+            "step_id": step_id,
+        })
+        for item in selected_evidence[:7]:
+            url = self._evidence_url(item)
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            try:
+                doc = await self.web_research.fetch(url=url, max_chars=26000)
+                if isinstance(doc, dict) and doc.get("status") == "success":
+                    fetched.append({
+                        "source": "fetched_selected_page",
+                        "source_search_result": item,
+                        "document": doc,
+                    })
+                    await event_bus.emit(run_id, {
+                        "type": "FETCH_SELECTED_PAGE_DONE",
+                        "title": "Selected evidence page fetched",
+                        "message": doc.get("title") or url,
+                        "node_id": node_id,
+                        "step_id": step_id,
+                        "result": {"url": url, "trace": doc.get("web_research_trace")},
+                    })
+                else:
+                    await event_bus.emit(run_id, {
+                        "type": "FETCH_SELECTED_PAGE_SKIPPED",
+                        "title": "Selected evidence page was not usable",
+                        "message": str((doc or {}).get("error") or (doc or {}).get("status") or url),
+                        "node_id": node_id,
+                        "step_id": step_id,
+                        "result": {"url": url, "status": (doc or {}).get("status") if isinstance(doc, dict) else None},
+                    })
+            except Exception as exc:
+                await event_bus.emit(run_id, {
+                    "type": "FETCH_SELECTED_PAGE_FAILED",
+                    "title": "Selected evidence page fetch failed",
+                    "message": str(exc),
+                    "node_id": node_id,
+                    "step_id": step_id,
+                    "result": {"url": url},
+                })
+        await event_bus.emit(run_id, {
+            "type": "FETCH_SELECTED_PAGES_DONE",
+            "title": "Selected evidence page fetching completed",
+            "message": f"Fetched {len(fetched)} page(s).",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": {"fetched_count": len(fetched)},
+        })
+        return fetched
+
+    def _runtime_known_parameters(self, payload: dict[str, Any]) -> dict[str, Any]:
+        known: dict[str, Any] = {}
+        if not isinstance(payload, dict):
+            return known
+        params = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+        for source in (
+            payload.get("known") if isinstance(payload.get("known"), dict) else {},
+            params.get("known") if isinstance(params.get("known"), dict) else {},
+            payload,
+        ):
+            if not isinstance(source, dict):
+                continue
+            for key, value in source.items():
+                if key in {"context", "source_step", "parameters", "known", "optional"}:
+                    continue
+                if value is None or value == "":
+                    continue
+                if isinstance(value, (str, int, float, bool)):
+                    known[str(key)] = value
+        return known
+
+    def _evidence_url(self, item: dict[str, Any]) -> str:
+        if not isinstance(item, dict):
+            return ""
+        for key in ("url", "official_documentation_url"):
+            value = item.get(key)
+            if isinstance(value, str) and value.startswith(("http://", "https://")):
+                return value
+        for nested_key in ("evidence", "document", "source_search_result"):
+            nested = item.get(nested_key) if isinstance(item.get(nested_key), dict) else None
+            if nested:
+                value = self._evidence_url(nested)
+                if value:
+                    return value
+        return ""
+
+    def _compact_sufficiency_for_event(self, sufficiency: dict[str, Any]) -> dict[str, Any]:
+        selected = sufficiency.get("selected_evidence") if isinstance(sufficiency.get("selected_evidence"), list) else []
+        return {
+            "passed": sufficiency.get("passed"),
+            "score": sufficiency.get("score"),
+            "min_score": sufficiency.get("min_score"),
+            "aggregate_coverage": sufficiency.get("aggregate_coverage"),
+            "aggregate_answer_signal": sufficiency.get("aggregate_answer_signal"),
+            "fetch_candidate_count": sufficiency.get("fetch_candidate_count"),
+            "next_action": sufficiency.get("next_action"),
+            "reason": sufficiency.get("reason"),
+            "selected_evidence": [
+                {"url": x.get("url"), "title": x.get("title"), "score": x.get("score")}
+                for x in selected[:5]
+                if isinstance(x, dict)
+            ],
         }
 
     def _compact_direct_result_for_event(self, result: dict[str, Any]) -> dict[str, Any]:

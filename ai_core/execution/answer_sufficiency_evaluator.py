@@ -331,14 +331,26 @@ class AnswerSufficiencyEvaluator:
         fetched_or_body_count = 0
         for entry in considered:
             item = entry.get("item") if isinstance(entry.get("item"), dict) else {}
-            has_document = isinstance(item.get("document"), dict)
-            text_excerpt = ""
-            for container in (item, item.get("document") if isinstance(item.get("document"), dict) else {}, item.get("evidence") if isinstance(item.get("evidence"), dict) else {}):
-                if isinstance(container, dict) and isinstance(container.get("text_excerpt"), str):
-                    text_excerpt += container.get("text_excerpt", "")
-            if has_document or len(text_excerpt.strip()) >= 120:
+            if self._has_fetched_body(item):
                 fetched_or_body_count += 1
         return fetched_or_body_count == 0
+
+    def _has_fetched_body(self, value: Any, *, depth: int = 0) -> bool:
+        if depth > 4 or not isinstance(value, dict):
+            return False
+        if isinstance(value.get("document"), dict):
+            return True
+        body = ""
+        for key in ("text_excerpt", "visible_text_excerpt", "html_excerpt", "dom_evidence_text"):
+            if isinstance(value.get(key), str):
+                body += value.get(key, "")
+        if len(body.strip()) >= 120:
+            return True
+        for nested_key in ("evidence", "source_search_result", "document"):
+            nested = value.get(nested_key)
+            if isinstance(nested, dict) and self._has_fetched_body(nested, depth=depth + 1):
+                return True
+        return False
 
     def _public_evidence(self, item: dict[str, Any], scored: dict[str, Any]) -> dict[str, Any]:
         doc = item.get("document") if isinstance(item.get("document"), dict) else {}
