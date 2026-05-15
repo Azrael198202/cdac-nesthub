@@ -305,6 +305,21 @@ class ToolCallExecutor:
                         step=step,
                         state=state,
                     )
+                    if generated_tool and generated_tool.get("__direct_execution_result__"):
+                        tool_input = self._build_tool_input(
+                            step=step, run_id=run_id, node_id=node_id, step_id=step_id, user_input=state.get("input", "")
+                        )
+                        tool_result = generated_tool.get("result") or {"status": "error", "error": {"message": "Direct evidence result was empty."}}
+                        execution_steps.append({
+                            "step_id": step_id,
+                            "status": "executed" if self._is_success_result(tool_result) else "tool_execution_failed",
+                            "tool": {"id": "evidence_direct_answer", "source": "runtime_research_evidence"},
+                            "input": tool_input,
+                            "result": tool_result,
+                            "provenance": tool_result.get("provenance") if isinstance(tool_result, dict) else None,
+                            "source_step": step,
+                        })
+                        continue
                     if generated_tool and generated_tool.get("__runtime_blocked__"):
                         tool_input = self._build_tool_input(
                             step=step, run_id=run_id, node_id=node_id, step_id=step_id, user_input=state.get("input", "")
@@ -1155,6 +1170,20 @@ class ToolCallExecutor:
             "result": resolution_decision,
         })
 
+        direct_from_evidence = await self._try_direct_evidence_execution_from_discovery(
+            run_id=run_id,
+            node_id=node_id,
+            step_id=step_id,
+            capability=capability,
+            step=step,
+            state=state,
+            api_discovery=api_discovery,
+            external_discovery=external_discovery,
+            reason="before_runtime_tool_generation",
+        )
+        if direct_from_evidence:
+            return direct_from_evidence
+
         if api_discovery.get("status") != "success" and not external_discovery.get("documents") and not external_discovery.get("repositories"):
             await event_bus.emit(run_id, {
                 "type": "RUNTIME_TOOL_GENERATION_BLOCKED",
@@ -1217,19 +1246,20 @@ class ToolCallExecutor:
                 "files": {"tool.py": "python source code"},
             },
         }
+        compact_generation_request = self.evidence_noise_reducer.compact_generation_request(generation_request)
         await event_bus.emit(run_id, {
             "type": "RUNTIME_TOOL_GENERATION_STARTED",
             "title": "Runtime tool generation started",
             "message": f"Generating reusable tool artifact for capability={capability}",
             "node_id": node_id,
             "step_id": step_id,
-            "result": generation_request,
+            "result": compact_generation_request,
         })
         try:
             artifact = await self.artifact_generator.generate_artifact(
                 run_id=run_id,
                 node_id=node_id,
-                generation_request=generation_request,
+                generation_request=compact_generation_request,
             )
             if not isinstance(artifact, dict) or not artifact.get("files"):
                 await event_bus.emit(run_id, {
@@ -1678,6 +1708,87 @@ class ToolCallExecutor:
                 "step_id": step_id,
             })
             return None
+
+
+    async def _try_direct_evidence_execution_from_discovery(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        step_id: str,
+        capability: str,
+        step: dict[str, Any],
+        state: dict[str, Any],
+        api_discovery: dict[str, Any],
+        external_discovery: dict[str, Any],
+        reason: str,
+    ) -> dict[str, Any] | None:
+        """Return a direct evidence result before invoking LLM code generation.
+
+        This is intentionally generic. It does not know any domain fields. It
+        uses dynamic runtime parameters, candidate extraction/scoring, evidence
+        coverage and noise reduction. If the already fetched no-key evidence is
+        sufficient, execution should finish directly instead of generating a new
+        tool or sending large discovery JSON to a model.
+        """
+        tool_input = self._build_tool_input(
+            step=step,
+            run_id=run_id,
+            node_id=node_id,
+            step_id=step_id,
+            user_input=state.get("input", ""),
+        )
+        raw_candidates = self.candidate_extractor.extract(api_discovery or {}, external_discovery or {})
+        scored_candidates = self.candidate_scorer.score_candidates(raw_candidates)
+        no_key_candidates = [c for c in scored_candidates if not self._candidate_requires_credential(c)]
+        if not no_key_candidates:
+            return None
+
+        direct_result = self.evidence_direct_answer.build(
+            candidates=no_key_candidates,
+            payload=tool_input,
+            capability=capability,
+            attempts=[],
+        )
+        if not direct_result or not self.result_classifier.classify(direct_result).get("success"):
+            return None
+
+        direct_result.setdefault("fallback", {})["direct_evidence_before_tool_generation"] = {
+            "reason": reason,
+            "candidate_count": len(no_key_candidates),
+            "policy": "answer_from_verified_no_key_evidence_before_llm_codegen",
+        }
+        await event_bus.emit(run_id, {
+            "type": "DIRECT_EVIDENCE_EXECUTION_SELECTED",
+            "title": "Direct evidence execution selected",
+            "message": "Using covered no-key evidence before runtime tool generation.",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": {
+                "tool": {"id": "evidence_direct_answer", "source": "runtime_research_evidence"},
+                "candidate_count": len(no_key_candidates),
+                "reason": reason,
+                "result_summary": self._compact_direct_result_for_event(direct_result),
+            },
+        })
+        return {
+            "__direct_execution_result__": True,
+            "status": "success",
+            "tool": {"id": "evidence_direct_answer", "source": "runtime_research_evidence"},
+            "result": direct_result,
+        }
+
+    def _compact_direct_result_for_event(self, result: dict[str, Any]) -> dict[str, Any]:
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        material = str(data.get("answer_material") or "")
+        return {
+            "status": result.get("status"),
+            "source": result.get("source"),
+            "source_url": data.get("source_url"),
+            "source_title": data.get("source_title"),
+            "known_parameters": data.get("known_parameters"),
+            "answer_material_preview": material[:1000],
+        }
 
 
     async def _try_multi_candidate_fallback_execution(

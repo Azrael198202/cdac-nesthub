@@ -19,7 +19,7 @@ class OllamaProviderHandler:
         provider["_resolved_binary"] = binary
 
         base = provider.get("base_url", "http://127.0.0.1:11434").rstrip("/")
-        primary_model = provider.get("model", "qwen3:8b-think")
+        primary_model = provider.get("model", "qwen3-vl:8b-thinking")
         timeout = provider.get("timeout_seconds", 120)
 
         tags = await self._ensure_service(run_id, node_id, provider_name, provider, base)

@@ -312,7 +312,7 @@ class UniversalModelProviderHandler:
 
     async def _call_ollama(self, run_id, node_id, provider_name, provider, prompt, rendered_user_prompt, schema, protocol):
         base_url = provider.get("base_url", "http://127.0.0.1:11434").rstrip("/")
-        model = provider.get("model") or "qwen3:8b-think"
+        model = provider.get("model") or "qwen3-vl:8b-thinking"
         timeout = float(provider.get("timeout_seconds", 90))
         model = await self._ensure_ollama_model_ready(run_id, node_id, provider_name, provider, base_url, model)
         system_prompt = build_system_prompt(prompt, schema, max_schema_chars=int(provider.get("max_schema_chars", 10000)))

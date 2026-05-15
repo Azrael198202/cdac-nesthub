@@ -61,7 +61,7 @@ class RuntimeBootstrap:
         self._ensure_datasets()
 
     def _ensure_model_providers(self) -> None:
-        """Ensure provider config prefers the local base model qwen3:8b-think.
+        """Ensure provider config prefers the local base model qwen3-vl:8b-thinking.
 
         Important: older runtimes may already have runtime/configs/models/providers.yaml.
         In that case we must merge/sync the base model settings instead of returning
@@ -88,6 +88,16 @@ class RuntimeBootstrap:
                 "api_discovery_local": ["ollama"],
                 "api_discovery_external": ["ollama", "openai"],
                 "fallback": ["ollama", "openai"]
+            },
+            "role_model_preferences": {
+                "information_retrieval_agent": ["structured_extraction", "reasoning"],
+                "workflow_planning_agent": ["workflow_planning", "reasoning", "json_generation"],
+                "integration_builder_agent": ["reasoning", "structured_extraction", "json_generation"],
+                "code_generation_agent": ["reasoning", "json_generation"],
+                "data_analysis_agent": ["structured_extraction", "reasoning"],
+                "document_writer_agent": ["document_generation", "reasoning"],
+                "human_interaction_agent": ["json_generation"],
+                "vision_runtime_agent": ["vision", "screenshot_analysis", "ui_understanding", "reasoning"]
             },
             "providers": {
                 "ollama": {
@@ -117,9 +127,9 @@ class RuntimeBootstrap:
                     "endpoint_strategy": "auto",
                     "chat_endpoint": "/api/chat",
                     "generate_endpoint": "/api/generate",
-                    "model": "qwen3:8b-think",
+                    "model": "qwen3-vl:8b-thinking",
                     "fallback_models": [
-                        "qwen3:8b-think",
+                        "qwen3-vl:8b-thinking",
                         "qwen3:8b",
                         "qwen3:4b",
                         "qwen2.5:3b",
@@ -129,14 +139,32 @@ class RuntimeBootstrap:
                     ],
                     "model_tags": [
                         "reasoning",
+                        "thinking",
+                        "vision",
+                        "screenshot_analysis",
+                        "ui_understanding",
+                        "structured_extraction",
                         "planning",
                         "json_generation",
                         "tool_selection",
                         "workflow_planning"
                     ],
+                    "capabilities": [
+                        "reasoning",
+                        "vision",
+                        "screenshot_analysis",
+                        "ui_understanding",
+                        "structured_extraction",
+                        "json_generation",
+                        "workflow_planning"
+                    ],
+                    "reasoning": {
+                        "enabled": True,
+                        "effort": "medium"
+                    },
                     "timeout_seconds": 180,
-                    "max_prompt_tokens": 9000,
-                    "prompt_budget_safety_tokens": 1200,
+                    "max_prompt_tokens": 10000,
+                    "prompt_budget_safety_tokens": 1500,
                     "max_schema_chars": 8000,
                     "cache_enabled": True,
                     "auto_start": True,
@@ -161,7 +189,9 @@ class RuntimeBootstrap:
                     "max_schema_chars": 12000,
                     "cache_enabled": True,
                     "interactive_key_required": True,
-                    "role": "external_fallback"
+                    "role": "external_fallback",
+                    "model_tags": ["reasoning", "json_generation", "tool_calling", "document_generation"],
+                    "capabilities": ["reasoning", "json_generation", "tool_calling", "document_generation"]
                 },
                 "vllm": {
                     "enabled": False,
@@ -173,7 +203,9 @@ class RuntimeBootstrap:
                     "timeout_seconds": 60,
                     "max_prompt_tokens": 12000,
                     "cache_enabled": True,
-                    "response_format_json": True
+                    "response_format_json": True,
+                    "model_tags": ["local", "reasoning", "json_generation"],
+                    "capabilities": ["reasoning", "json_generation"]
                 },
                 "lmstudio": {
                     "enabled": False,
@@ -185,7 +217,9 @@ class RuntimeBootstrap:
                     "timeout_seconds": 60,
                     "max_prompt_tokens": 12000,
                     "cache_enabled": True,
-                    "response_format_json": True
+                    "response_format_json": True,
+                    "model_tags": ["local", "reasoning", "json_generation"],
+                    "capabilities": ["reasoning", "json_generation"]
                 }
             },
             "policy": {
@@ -193,7 +227,7 @@ class RuntimeBootstrap:
                 "allow_placeholder_result": False,
                 "prefer_local_base_model": True,
                 "base_model_provider": "ollama",
-                "base_model": "qwen3:8b-think",
+                "base_model": "qwen3-vl:8b-thinking",
                 "external_provider_is_fallback": True
             }
         }
@@ -206,6 +240,11 @@ class RuntimeBootstrap:
             routes[key] = value
         current["routes"] = routes
 
+        role_prefs = dict(current.get("role_model_preferences") or {})
+        for key, value in desired.get("role_model_preferences", {}).items():
+            role_prefs[key] = value
+        current["role_model_preferences"] = role_prefs
+
         providers = dict(current.get("providers") or {})
         desired_providers = desired.get("providers", {})
         for provider_id, desired_provider in desired_providers.items():
@@ -216,7 +255,7 @@ class RuntimeBootstrap:
                 # user-specific endpoint/binary/install overrides.
                 for key in [
                     "enabled", "type", "protocol", "model", "fallback_models",
-                    "model_tags", "timeout_seconds", "max_prompt_tokens",
+                    "model_tags", "capabilities", "reasoning", "timeout_seconds", "max_prompt_tokens",
                     "prompt_budget_safety_tokens", "max_schema_chars",
                     "cache_enabled", "auto_start", "auto_pull_missing_model",
                     "pull_timeout_seconds"

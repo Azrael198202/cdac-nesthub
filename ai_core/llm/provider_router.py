@@ -5,6 +5,7 @@ from ai_core.events.event_bus import event_bus
 from ai_core.llm.provider_handler_registry import ProviderHandlerRegistry
 from ai_core.llm.provider_handlers.base import ProviderUnavailableError
 from ai_core.context.prompt_budget_manager import PromptBudgetManager
+from ai_core.llm.model_capability_matcher import ModelCapabilityMatcher
 
 
 class ProviderRouter:
@@ -18,14 +19,16 @@ class ProviderRouter:
         self.loader = ConfigLoader()
         self.registry = ProviderHandlerRegistry()
         self.prompt_budget = PromptBudgetManager()
+        self.model_matcher = ModelCapabilityMatcher()
 
     def _config(self) -> dict:
         return self.loader.load_yaml(RUNTIME_CONFIGS / "models" / "providers.yaml")
 
     async def generate_json(self, run_id: str, node_id: str, adapter: dict, prompt: dict, rendered_user_prompt: str, schema: dict) -> dict:
         config = self._config()
-        route = adapter.get("provider_route") or config.get("default_route", [])
+        route = list(adapter.get("provider_route") or config.get("default_route", []))
         providers = config.get("providers", {})
+        route = self.model_matcher.rank_route(route=route, providers=providers, config=config, adapter=adapter)
         last_error = None
 
         await event_bus.emit(run_id, {
