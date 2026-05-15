@@ -32,6 +32,19 @@ class CandidateExtractor:
                 if isinstance(candidate, dict):
                     output.append(self._candidate(candidate, rank=idx, source="candidate_list"))
 
+        for idx, item in enumerate(discovery.get("selected_evidence") or [], start=80):
+            if isinstance(item, dict) and (item.get("url") or item.get("evidence")):
+                url = str(item.get("url") or "").strip()
+                output.append({
+                    "name": str(item.get("title") or url or "selected evidence"),
+                    "url": url,
+                    "official_documentation_url": url,
+                    "rank": idx,
+                    "source": "selected_answer_evidence",
+                    "score": item.get("score"),
+                    "evidence": item.get("evidence") if isinstance(item.get("evidence"), dict) else item,
+                })
+
         for idx, item in enumerate(discovery.get("documentation_evidence") or [], start=100):
             if not isinstance(item, dict):
                 continue

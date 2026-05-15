@@ -10,6 +10,7 @@ from ai_core.events.event_bus import event_bus
 from ai_core.llm.provider_router import ProviderRouter
 from ai_core.research.web_research_tool import GenericWebResearchTool
 from ai_core.research.endpoint_verifier import EndpointVerifier
+from ai_core.execution.answer_sufficiency_evaluator import AnswerSufficiencyEvaluator
 from ai_core.utils.safe_json import safe_json_dumps
 
 
@@ -27,6 +28,7 @@ class ApiDiscoveryEngine:
         self.provider_router = ProviderRouter()
         self.web = GenericWebResearchTool()
         self.endpoint_verifier = EndpointVerifier()
+        self.answer_sufficiency = AnswerSufficiencyEvaluator()
         self.request_dir = RUNTIME_GENERATED / "api_discovery_requests"
         self.trace_dir = RUNTIME_TRACES / "api_discovery"
         self.request_dir.mkdir(parents=True, exist_ok=True)
@@ -54,12 +56,47 @@ class ApiDiscoveryEngine:
         })
 
         web_evidence = await self._collect_web_evidence(run_id=run_id, node_id=node_id, request=request)
+        request["web_evidence"] = web_evidence
+
+        if request.get("request_mode") == "answer_lookup":
+            sufficiency = self._evaluate_answer_sufficiency(web_evidence, request)
+            await self._emit_answer_sufficiency(run_id, node_id, sufficiency, stage="web_search")
+            if sufficiency.get("passed"):
+                discovery = self._finalize_answer_sufficient(
+                    request=request,
+                    web_evidence=web_evidence,
+                    documentation_evidence=[],
+                    sufficiency=sufficiency,
+                    strategy="web_search_answer_sufficiency",
+                )
+                await self._emit_done(run_id, node_id, discovery)
+                return discovery
+
+            answer_evidence = await self._fetch_answer_evidence(
+                run_id=run_id,
+                node_id=node_id,
+                search_evidence=web_evidence,
+            )
+            if answer_evidence:
+                request["answer_evidence"] = answer_evidence
+                sufficiency = self._evaluate_answer_sufficiency(answer_evidence, request)
+                await self._emit_answer_sufficiency(run_id, node_id, sufficiency, stage="fetched_answer_pages")
+                if sufficiency.get("passed"):
+                    discovery = self._finalize_answer_sufficient(
+                        request=request,
+                        web_evidence=web_evidence,
+                        documentation_evidence=answer_evidence,
+                        sufficiency=sufficiency,
+                        strategy="fetched_page_answer_sufficiency",
+                    )
+                    await self._emit_done(run_id, node_id, discovery)
+                    return discovery
+
         documentation_evidence = await self._fetch_documentation_evidence(
             run_id=run_id,
             node_id=node_id,
             search_evidence=web_evidence,
         )
-        request["web_evidence"] = web_evidence
         request["documentation_evidence"] = documentation_evidence
 
         local = await self._try_model_discovery(run_id=run_id, node_id=node_id, request=request, route_name="api_discovery_local")
@@ -85,6 +122,7 @@ class ApiDiscoveryEngine:
             "user_input": user_input,
             "source_step": step,
             "runtime_request_semantics": self._extract_runtime_semantics(step=step, user_input=user_input),
+            "request_mode": self._infer_request_mode(step=step, user_input=user_input),
             "requirements": {
                 "must_use_real_network": True,
                 "no_mock_data": True,
@@ -123,6 +161,15 @@ class ApiDiscoveryEngine:
         objective = str((request.get("source_step") or {}).get("objective") or "").strip()
         action = str((request.get("source_step") or {}).get("action") or "").strip()
         user_input = str(request.get("user_input") or "").strip()
+        semantics = request.get("runtime_request_semantics") if isinstance(request.get("runtime_request_semantics"), dict) else {}
+        known = semantics.get("known_parameters") if isinstance(semantics.get("known_parameters"), dict) else {}
+        known_text = " ".join(str(v) for v in known.values() if v)
+        if request.get("request_mode") == "answer_lookup":
+            base = " ".join(part for part in [known_text, objective, action, user_input] if part)
+            return [
+                base,
+                f"{known_text} {capability} forecast details".strip(),
+            ]
         base = " ".join(part for part in [capability, objective, action, user_input] if part)
         if not base:
             base = capability or "external data"
@@ -157,6 +204,73 @@ class ApiDiscoveryEngine:
                     "result": {"query": query},
                 })
         return self._dedupe_by_url(all_results)[:10]
+
+    def _infer_request_mode(self, *, step: dict[str, Any], user_input: str) -> str:
+        text = " ".join(str(x or "") for x in [user_input, step.get("objective"), step.get("action"), step.get("next_action")]).lower()
+        explicit_integration_terms = (
+            "create tool", "generate tool", "build tool", "create api", "generate api",
+            "api documentation", "api docs", "endpoint", "adapter", "module", "codegen",
+            "generate code", "write code", "sdk", "connector",
+        )
+        if any(term in text for term in explicit_integration_terms):
+            return "api_discovery"
+        return "answer_lookup"
+
+    def _evaluate_answer_sufficiency(self, evidence: list[dict[str, Any]], request: dict[str, Any]) -> dict[str, Any]:
+        semantics = request.get("runtime_request_semantics") if isinstance(request.get("runtime_request_semantics"), dict) else {}
+        return self.answer_sufficiency.evaluate(
+            user_input=str(request.get("user_input") or ""),
+            objective=str(semantics.get("objective") or ""),
+            capability=str(request.get("capability") or ""),
+            known_parameters=semantics.get("known_parameters") if isinstance(semantics.get("known_parameters"), dict) else {},
+            evidence=evidence,
+        )
+
+    async def _emit_answer_sufficiency(self, run_id: str, node_id: str, sufficiency: dict[str, Any], *, stage: str) -> None:
+        await event_bus.emit(run_id, {
+            "type": "ANSWER_SUFFICIENCY_EVALUATED",
+            "title": "Answer sufficiency evaluated",
+            "message": f"stage={stage} passed={sufficiency.get('passed')} score={sufficiency.get('score')}",
+            "node_id": node_id,
+            "result": sufficiency,
+        })
+
+    async def _fetch_answer_evidence(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        search_evidence: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        fetched: list[dict[str, Any]] = []
+        for item in search_evidence[:5]:
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            try:
+                doc = await self.web.fetch(url=url, max_chars=10000)
+                if isinstance(doc, dict) and doc.get("status") == "success":
+                    fetched.append({
+                        "source": "fetched_answer_evidence",
+                        "source_search_result": item,
+                        "document": doc,
+                    })
+                    await event_bus.emit(run_id, {
+                        "type": "ANSWER_EVIDENCE_FETCHED",
+                        "title": "Answer evidence fetched",
+                        "message": doc.get("title") or url,
+                        "node_id": node_id,
+                        "result": {"url": url, "trace": doc.get("web_research_trace")},
+                    })
+            except Exception as exc:
+                await event_bus.emit(run_id, {
+                    "type": "ANSWER_EVIDENCE_FETCH_FAILED",
+                    "title": "Answer evidence fetch failed",
+                    "message": str(exc),
+                    "node_id": node_id,
+                    "result": {"url": url},
+                })
+        return fetched
 
     async def _fetch_documentation_evidence(
         self,
@@ -257,6 +371,46 @@ class ApiDiscoveryEngine:
             return False
         required_doc_keys = ["authentication", "request", "response", "verification_plan"]
         return all(key in docs for key in required_doc_keys)
+
+    def _finalize_answer_sufficient(
+        self,
+        *,
+        request: dict[str, Any],
+        web_evidence: list[dict[str, Any]],
+        documentation_evidence: list[dict[str, Any]],
+        sufficiency: dict[str, Any],
+        strategy: str,
+    ) -> dict[str, Any]:
+        trace_id = request.get("request_id")
+        discovery = {
+            "status": "success",
+            "strategy_used": strategy,
+            "request": request,
+            "request_mode": "answer_lookup",
+            "web_evidence": web_evidence,
+            "documentation_evidence": documentation_evidence,
+            "answer_sufficiency": sufficiency,
+            "selected_evidence": sufficiency.get("selected_evidence") or [],
+            "result": {
+                "confidence": sufficiency.get("score", 0),
+                "selected_candidate": {},
+                "candidates": [],
+                "documentation_understanding": {},
+                "verification_plan": {"method": "not_required", "description": "Existing web evidence is sufficient for direct answer."},
+            },
+            "endpoint_verification": {
+                "verified_json_api": False,
+                "recommended_tool_type": "direct_answer",
+                "selected_verified_endpoint": None,
+                "selected_document_page": {},
+                "checks": [],
+            },
+            "trace_id": trace_id,
+        }
+        trace_path = self.trace_dir / f"{trace_id}.json"
+        trace_path.write_text(safe_json_dumps(discovery, indent=2), encoding="utf-8")
+        discovery["trace_path"] = str(trace_path)
+        return discovery
 
     def _finalize(
         self,

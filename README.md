@@ -1,4 +1,4 @@
-# CDAC NestHub v70.11
+# CDAC NestHub v70.12
 
 ## Runtime Knowledge Evidence Type Filtering
 
@@ -29,3 +29,27 @@ This version fixes a critical runtime priority issue where local runtime memorie
 ### Packaging Rule
 
 Runtime generated artifacts, traces, cache, metrics, and temporary files are excluded from this package.
+
+
+## v70.12 - Answer Sufficiency Gate
+
+This version adds an Answer Sufficiency Gate after generic web research.
+
+Flow:
+
+```text
+Generic web research
+→ AnswerSufficiencyEvaluator
+→ if sufficient: direct evidence answer
+→ if insufficient: answer page fetch
+→ if still insufficient: API documentation / tool generation
+```
+
+Key changes:
+
+- `answer_lookup` mode no longer searches API documentation first.
+- Generic web search queries avoid `API documentation / JSON / no api key` terms for ordinary answer requests.
+- `ANSWER_SUFFICIENCY_EVALUATED` trace event records coverage, score, selected evidence, and next action.
+- `API_DOCUMENTATION_FETCHED` is skipped when web evidence is already enough to answer.
+- `selected_evidence` is included in candidate extraction for direct evidence execution.
+
