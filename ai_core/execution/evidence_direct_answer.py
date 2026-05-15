@@ -44,8 +44,16 @@ class EvidenceDirectAnswerBuilder:
 
         scored.sort(key=lambda item: item[0], reverse=True)
         top_score, top_candidate, text = scored[0]
+
+        # v70.9: a single evidence item may miss one parameter while another
+        # item covers it. Use aggregate coverage across high-ranked no-key
+        # evidence before giving up and entering tool/code generation.
         if top_score < 80:
-            return None
+            aggregate_text = "\n".join(item[2] for item in scored[:6])
+            aggregate_score = self._coverage_score(aggregate_text, known)
+            if aggregate_score < 1.0:
+                return None
+            text = aggregate_text
 
         compact_text = self._compact_text(text, known)
         source_url = top_candidate.get("url") or top_candidate.get("official_documentation_url")

@@ -87,6 +87,8 @@ class RuntimeToolArtifactGenerator:
                 "Do not copy or execute external code blindly; preserve source and license provenance and generate the smallest safe adapter needed. "
                 "Understand authentication, request parameters, response shape, and verification from the supplied documentation before writing code. "
                 "Map runtime request semantics dynamically from the source step; do not rely on fixed domain fields. "
+                "Generate reusable code: do not hardcode user-specific location/date/query values into URLs, selectors, or outputs. "
+                "All runtime parameters must be read from payload, payload.known, or payload.parameters.known. "
                 "When network/API access is needed, include strict timeout/retry limits, never use infinite loops, and return structured errors instead of raising uncaught exceptions. "
                 "Do not mark output status as success when any error occurred or the response could not be parsed as required. "
                 "The generated tool must expose run(payload: dict) -> dict and the manifest implementation must declare function=\"run\". "

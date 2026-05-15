@@ -24,6 +24,38 @@ class ProviderRouter:
     def _config(self) -> dict:
         return self.loader.load_yaml(RUNTIME_CONFIGS / "models" / "providers.yaml")
 
+    def _apply_runtime_model_override(self, *, provider_name: str, provider: dict, adapter: dict) -> dict:
+        """Apply user-selected local model to generic local providers only.
+
+        This keeps code-generation routes free to select coder-specialized models,
+        while allowing the UI to choose the initial/general local model used by
+        parsing, intent, planning, retrieval, and synthesis tasks.
+        """
+        selected = str(adapter.get("preferred_local_model") or "").strip()
+        if not selected:
+            return provider
+        if provider.get("protocol") != "ollama_chat":
+            return provider
+        if provider_name != "ollama":
+            return provider
+        allowed = provider.get("available_local_models") or provider.get("fallback_models") or []
+        allowed = [str(x) for x in allowed]
+        if selected not in allowed:
+            return provider
+        updated = dict(provider)
+        updated["model"] = selected
+        fallbacks = [selected] + [m for m in allowed if m != selected]
+        updated["fallback_models"] = fallbacks
+        if "vl" in selected or "vision" in selected:
+            tags = set(updated.get("model_tags") or []) | {"vision", "screenshot_analysis", "ui_understanding"}
+            caps = set(updated.get("capabilities") or []) | {"vision", "screenshot_analysis", "ui_understanding"}
+        else:
+            tags = set(updated.get("model_tags") or []) - {"vision", "screenshot_analysis", "ui_understanding"}
+            caps = set(updated.get("capabilities") or []) - {"vision", "screenshot_analysis", "ui_understanding"}
+        updated["model_tags"] = sorted(tags)
+        updated["capabilities"] = sorted(caps)
+        return updated
+
     async def generate_json(self, run_id: str, node_id: str, adapter: dict, prompt: dict, rendered_user_prompt: str, schema: dict) -> dict:
         config = self._config()
         route = list(adapter.get("provider_route") or config.get("default_route", []))
@@ -39,7 +71,8 @@ class ProviderRouter:
         })
 
         for provider_name in route:
-            provider = providers.get(provider_name, {})
+            provider = dict(providers.get(provider_name, {}) or {})
+            provider = self._apply_runtime_model_override(provider_name=provider_name, provider=provider, adapter=adapter)
             if not provider.get("enabled", False):
                 await event_bus.emit(run_id, {
                     "type": "LLM_PROVIDER_SKIPPED",

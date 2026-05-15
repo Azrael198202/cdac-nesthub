@@ -49,7 +49,7 @@ class WorkflowRuntime:
         total = sum(weights) or 1
         return int(sum(weights[:idx]) / total * 100)
 
-    async def prepare(self, message: str) -> tuple[str, dict]:
+    async def prepare(self, message: str, local_model: str | None = None) -> tuple[str, dict]:
         self.bootstrap.ensure()
         run_id = uuid.uuid4().hex[:12]
         state = {
@@ -60,6 +60,9 @@ class WorkflowRuntime:
             "results": {},
             "progress": 0,
             "node_attempts": {},
+            "runtime_options": {
+                "local_model": local_model or "qwen3:8b",
+            },
         }
         await self._emit(run_id, {
             "type": "RUN_CREATED",
@@ -67,6 +70,9 @@ class WorkflowRuntime:
             "message": "Run id created. Event stream can connect now.",
             "progress": 0,
             "node_attempts": {},
+            "runtime_options": {
+                "local_model": local_model or "qwen3:8b",
+            },
         })
         return run_id, state
 
@@ -78,6 +84,7 @@ class WorkflowRuntime:
             "message": "Starting config-driven node orchestration.",
             "progress": 0,
             "node_attempts": {},
+            "runtime_options": state.get("runtime_options", {}),
         })
         await self._continue(state)
 

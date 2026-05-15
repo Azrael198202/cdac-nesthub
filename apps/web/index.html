@@ -368,6 +368,17 @@
       z-index:900;
     }
 
+    .composer select{
+      width:210px;
+      background:#020617;
+      border:1px solid #334155;
+      color:#e5e7eb;
+      border-radius:12px;
+      padding:0 10px;
+      outline:none;
+      font-size:13px;
+    }
+
     .composer input{
       flex:1;
       border:0;
@@ -573,13 +584,22 @@
 <div class="app">
   <main class="main">
     <div id="messages" class="messages">
-      <div class="top-note">Build version: v50 / Resume redispatch runtime.</div>
+      <div class="top-note">Build version: v70.8 / Local model selector + module self-healing.</div>
       <div class="top-note">Human Review and API Key input stay fixed above the composer until resolved.</div>
     </div>
 
     <div id="stickyInteraction" class="sticky-interaction"></div>
 
     <form id="form" class="composer">
+      <select id="localModel" title="Initial local model">
+        <option value="qwen3-vl:8b-thinking">qwen3-vl:8b-thinking</option>
+        <option value="qwen3:8b" selected>qwen3:8b</option>
+        <option value="qwen3:4b">qwen3:4b</option>
+        <option value="qwen2.5:3b">qwen2.5:3b</option>
+        <option value="qwen3:1.7b">qwen3:1.7b</option>
+        <option value="llama3.2:8b">llama3.2:8b</option>
+        <option value="llama3.2:3b">llama3.2:3b</option>
+      </select>
       <input id="message" placeholder="Message AI Core..." autocomplete="off" />
       <button id="sendButton" type="submit">Send</button>
     </form>
@@ -597,6 +617,7 @@ const events = document.getElementById("events");
 const form = document.getElementById("form");
 const input = document.getElementById("message");
 const sendButton = document.getElementById("sendButton");
+const localModel = document.getElementById("localModel");
 const stickyInteraction = document.getElementById("stickyInteraction");
 
 let currentRunId = null;
@@ -650,6 +671,7 @@ function scrollMessages(){
 function setBusy(isBusy, label = ""){
   workflowBusy = isBusy;
   input.disabled = isBusy;
+  if(localModel) localModel.disabled = isBusy;
   sendButton.disabled = isBusy;
   sendButton.textContent = isBusy ? (label || "Running...") : "Send";
   input.placeholder = isBusy ? "Workflow is running. Please wait..." : "Message AI Core...";
@@ -1551,7 +1573,7 @@ form.onsubmit = async (event) => {
     const res = await fetch("/api/chat", {
       method:"POST",
       headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({message:text})
+      body:JSON.stringify({message:text, local_model: localModel ? localModel.value : "qwen3:8b"})
     });
 
     if(!res.ok){
@@ -1567,7 +1589,7 @@ form.onsubmit = async (event) => {
     addStep({
       type: "USER_INPUT",
       title: "User input",
-      message: text,
+      message: text + `\nlocal_model=${localModel ? localModel.value : "qwen3:8b"}`,
       node_id: "runtime",
       progress: 0
     });

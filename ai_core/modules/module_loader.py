@@ -19,7 +19,7 @@ class RuntimeModuleLoader:
         self.registry = RuntimeModuleRegistry()
 
     def load_by_capability(self, capability: str) -> Any | None:
-        record = self.registry.find_by_capability(capability)
+        record = self.registry.find_by_capability(capability, include_non_executable=False)
         if not record:
             return None
         if record.get("status") not in {"enabled", "approved", "active"}:

@@ -252,6 +252,9 @@ class AutonomousCodegenExecutor:
                 "must_be_sandbox_testable": True,
                 "must_generate_module_py": True,
                 "must_not_emit_explanatory_text": True,
+                "must_be_reusable_across_runtime_parameters": True,
+                "must_not_hardcode_user_specific_location_or_date": True,
+                "must_read_location_date_and_other_inputs_from_payload": True,
             },
             "expected_contract": {
                 "module_id": "string",

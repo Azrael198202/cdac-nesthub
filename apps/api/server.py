@@ -16,6 +16,7 @@ runtime = WorkflowRuntime()
 
 class ChatRequest(BaseModel):
     message: str
+    local_model: str | None = None
 
 
 class ResumeRequest(BaseModel):
@@ -34,19 +35,19 @@ async def home():
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
             "Expires": "0",
-            "X-AI-Core-Version": "v46",
+            "X-AI-Core-Version": "v70.8",
         },
     )
 
 
 @app.get("/api/version")
 async def version():
-    return JSONResponse({"version": "v46", "name": "ai_core_generic_module_execution_reliable_retry_runtime_v46"})
+    return JSONResponse({"version": "v70.8", "name": "runtime_model_selector_and_module_self_healing_v70_8"})
 
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    run_id, state = await runtime.prepare(req.message)
+    run_id, state = await runtime.prepare(req.message, local_model=req.local_model)
     asyncio.create_task(runtime.run_prepared(state))
     return {"run_id": run_id}
 

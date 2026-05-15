@@ -29,8 +29,11 @@ class RuntimeModuleArtifactGenerator:
                 "Return ONLY JSON matching the schema. Generate a safe reusable Python module artifact. "
                 "The module.py file must define validate_config(config), health_check(), and run(payload: dict) -> dict. "
                 "Every helper function called by run must be defined or imported. No mock data, no secrets, no top-level side effects. "
-                "Use the compact evidence packet only; do not invent endpoints. If verified_json_api is false, prefer webpage extraction. "
-                "Use standard library network access with timeout. Return JSON-serializable dicts only."
+                "Generate reusable code: do not hardcode user-specific location/date/query values into URLs, selectors, or output. "
+                "Read all runtime values from payload/parameters/known and build requests dynamically from verified templates only. "
+                "If verified_json_api is false, do not parse HTML as JSON and prefer webpage extraction or return evidence material. "
+                "Use the compact evidence packet only; do not invent endpoints. Use standard library network access with timeout. "
+                "Return JSON-serializable dicts only."
             ),
             "user": compact_request,
         }

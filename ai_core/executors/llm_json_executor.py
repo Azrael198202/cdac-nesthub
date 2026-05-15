@@ -134,7 +134,13 @@ class LLMJsonExecutor:
         })
 
         role_budget = role_profile.get("prompt_policy", {}).get("max_context_tokens")
-        adapter = {**adapter, "runtime_role": role_profile.get("role_id"), "required_model_capabilities": role_profile.get("required_skills", [])}
+        runtime_options = state.get("runtime_options", {}) if isinstance(state.get("runtime_options", {}), dict) else {}
+        adapter = {
+            **adapter,
+            "runtime_role": role_profile.get("role_id"),
+            "required_model_capabilities": role_profile.get("required_skills", []),
+            "preferred_local_model": runtime_options.get("local_model"),
+        }
         if role_budget and not adapter.get("max_prompt_tokens"):
             adapter = {**adapter, "max_prompt_tokens": int(role_budget)}
 

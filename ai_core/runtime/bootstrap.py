@@ -61,7 +61,7 @@ class RuntimeBootstrap:
         self._ensure_datasets()
 
     def _ensure_model_providers(self) -> None:
-        """Ensure provider config prefers the local base model qwen3-vl:8b-thinking.
+        """Ensure provider config prefers the local base model qwen3:8b.
 
         Important: older runtimes may already have runtime/configs/models/providers.yaml.
         In that case we must merge/sync the base model settings instead of returning
@@ -157,10 +157,19 @@ class RuntimeBootstrap:
                     "endpoint_strategy": "auto",
                     "chat_endpoint": "/api/chat",
                     "generate_endpoint": "/api/generate",
-                    "model": "qwen3-vl:8b-thinking",
-                    "fallback_models": [
+                    "model": "qwen3:8b",
+                    "available_local_models": [
                         "qwen3-vl:8b-thinking",
                         "qwen3:8b",
+                        "qwen3:4b",
+                        "qwen2.5:3b",
+                        "qwen3:1.7b",
+                        "llama3.2:8b",
+                        "llama3.2:3b"
+                    ],
+                    "fallback_models": [
+                        "qwen3:8b",
+                        "qwen3:4b",
                         "qwen3:4b",
                         "qwen2.5:3b",
                         "qwen3:1.7b",
@@ -249,24 +258,24 @@ class RuntimeBootstrap:
                     },
                     "priority": 8,
                     "reasoning": {
-                        "enabled": false,
+                        "enabled": False,
                         "effort": "low"
                     },
                     "timeout_seconds": 150,
                     "max_prompt_tokens": 8000,
                     "prompt_budget_safety_tokens": 1200,
                     "max_schema_chars": 7000,
-                    "cache_enabled": true,
-                    "auto_start": true,
+                    "cache_enabled": True,
+                    "auto_start": True,
                     "start_command": "{binary} serve",
                     "ready_timeout_seconds": 45,
                     "ready_poll_interval_seconds": 1,
-                    "auto_pull_missing_model": true,
+                    "auto_pull_missing_model": True,
                     "pull_command": "{binary} pull {model}",
                     "pull_timeout_seconds": 3600
                 },
                 "ollama_coder_deepseek": {
-                    "enabled": true,
+                    "enabled": True,
                     "type": "universal_model",
                     "protocol": "ollama_chat",
                     "base_url": "http://127.0.0.1:11434",
@@ -307,19 +316,19 @@ class RuntimeBootstrap:
                     },
                     "priority": 6,
                     "reasoning": {
-                        "enabled": false,
+                        "enabled": False,
                         "effort": "low"
                     },
                     "timeout_seconds": 180,
                     "max_prompt_tokens": 9000,
                     "prompt_budget_safety_tokens": 1200,
                     "max_schema_chars": 8000,
-                    "cache_enabled": true,
-                    "auto_start": true,
+                    "cache_enabled": True,
+                    "auto_start": True,
                     "start_command": "{binary} serve",
                     "ready_timeout_seconds": 45,
                     "ready_poll_interval_seconds": 1,
-                    "auto_pull_missing_model": true,
+                    "auto_pull_missing_model": True,
                     "pull_command": "{binary} pull {model}",
                     "pull_timeout_seconds": 3600
                 },
@@ -343,7 +352,7 @@ class RuntimeBootstrap:
                 },
 
                 "vllm_coder": {
-                    "enabled": false,
+                    "enabled": False,
                     "type": "universal_model",
                     "protocol": "openai_compatible",
                     "base_url": "http://127.0.0.1:8002",
@@ -351,15 +360,15 @@ class RuntimeBootstrap:
                     "model": "Qwen/Qwen2.5-Coder-7B-Instruct",
                     "timeout_seconds": 90,
                     "max_prompt_tokens": 12000,
-                    "cache_enabled": true,
-                    "response_format_json": true,
+                    "cache_enabled": True,
+                    "response_format_json": True,
                     "model_tags": ["local", "code_generation", "python_generation", "adapter_generation", "structured_output", "json_generation"],
                     "capabilities": ["code_generation", "python_generation", "adapter_generation", "structured_output", "json_generation"],
                     "quality": {"code_generation": 18, "structured_output": 8},
                     "priority": 7
                 },
                 "lmstudio_coder": {
-                    "enabled": false,
+                    "enabled": False,
                     "type": "universal_model",
                     "protocol": "openai_compatible",
                     "base_url": "http://127.0.0.1:1234",
@@ -367,8 +376,8 @@ class RuntimeBootstrap:
                     "model": "qwen2.5-coder-7b-instruct",
                     "timeout_seconds": 90,
                     "max_prompt_tokens": 12000,
-                    "cache_enabled": true,
-                    "response_format_json": true,
+                    "cache_enabled": True,
+                    "response_format_json": True,
                     "model_tags": ["local", "code_generation", "python_generation", "adapter_generation", "structured_output", "json_generation"],
                     "capabilities": ["code_generation", "python_generation", "adapter_generation", "structured_output", "json_generation"],
                     "quality": {"code_generation": 16, "structured_output": 7},

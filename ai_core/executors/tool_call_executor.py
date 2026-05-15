@@ -32,6 +32,7 @@ from ai_core.execution.runtime_strategy_memory import RuntimeStrategyMemory
 from ai_core.execution.provider_reliability import ProviderReliabilityTracker
 from ai_core.execution.evidence_direct_answer import EvidenceDirectAnswerBuilder
 from ai_core.context.evidence_noise_reducer import EvidenceNoiseReducer
+from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.utils.safe_json import make_json_safe
 
 
@@ -74,6 +75,7 @@ class ToolCallExecutor:
         self.provider_reliability = ProviderReliabilityTracker()
         self.evidence_direct_answer = EvidenceDirectAnswerBuilder()
         self.evidence_noise_reducer = EvidenceNoiseReducer()
+        self.knowledge = KnowledgeService()
 
     async def execute(
         self,
@@ -198,6 +200,30 @@ class ToolCallExecutor:
                 })
                 continue
 
+            # v70.9 priority layer: local/model knowledge first.
+            # If previous successful runtime knowledge already covers the current
+            # parameters, answer from local knowledge and avoid web/API/codegen.
+            local_knowledge_result = await self._try_local_knowledge_execution(
+                run_id=run_id,
+                node_id=node_id,
+                step_id=step_id,
+                capability=required_capability or "unknown_capability",
+                step=step,
+                state=state,
+            )
+            if local_knowledge_result:
+                execution_steps.append({
+                    "step_id": step_id,
+                    "status": "executed",
+                    "tool": {"id": "local_knowledge", "source": "runtime_knowledge"},
+                    "input": local_knowledge_result.get("input"),
+                    "result": local_knowledge_result.get("result"),
+                    "provenance": (local_knowledge_result.get("result") or {}).get("provenance") if isinstance(local_knowledge_result.get("result"), dict) else None,
+                    "source_step": step,
+                    "priority_path": "local_knowledge_first",
+                })
+                continue
+
             tool = self.tool_registry.find_by_capability(required_capability) if required_capability else None
             if tool and not self._has_executable_implementation(tool):
                 await event_bus.emit(run_id, {
@@ -260,24 +286,37 @@ class ToolCallExecutor:
                             "step_id": step_id,
                             "result": module_result.get("provenance"),
                         })
-                    execution_steps.append({
-                        "step_id": step_id,
-                        "status": "executed" if self._is_success_result(module_result) else "module_execution_failed",
-                        "module": {"capability": required_capability},
-                        "input": module_input,
-                        "result": module_result,
-                        "provenance": module_result.get("provenance") if isinstance(module_result, dict) else None,
-                        "source_step": step,
-                    })
-                    if not self._is_success_result(module_result):
-                        blocked_steps.append({
+                    if self._is_success_result(module_result):
+                        execution_steps.append({
                             "step_id": step_id,
-                            "status": "module_execution_failed",
-                            "reason": self._result_error_message(module_result, "Module execution failed."),
+                            "status": "executed",
+                            "module": {"capability": required_capability},
+                            "input": module_input,
+                            "result": module_result,
+                            "provenance": module_result.get("provenance") if isinstance(module_result, dict) else None,
                             "source_step": step,
-                            "module_result": module_result,
                         })
-                    continue
+                        continue
+
+                    # v70.9: a stale/bad registered module must not be the final stop.
+                    # Disable it for routing purposes and continue with the normal
+                    # priority chain: local knowledge already checked, then web/evidence,
+                    # then codegen only if needed.
+                    if isinstance(module_record, dict) and module_record.get("module_id"):
+                        self.module_loader.registry.update_status(
+                            str(module_record.get("module_id")),
+                            "disabled",
+                            reason=self._result_error_message(module_result, "Module execution failed."),
+                        )
+                    await event_bus.emit(run_id, {
+                        "type": "REGISTERED_MODULE_DISABLED_FOR_FALLBACK",
+                        "title": "Registered module disabled for fallback",
+                        "message": "Registered module failed execution; continuing with web/evidence/codegen fallback chain.",
+                        "node_id": node_id,
+                        "step_id": step_id,
+                        "result": {"module": module_record, "failure": module_result},
+                    })
+                    # Do not continue here; let the missing-tool path below run.
 
             if not tool:
                 generated_spec = self.tool_registry.create_missing_tool_spec(
@@ -462,15 +501,61 @@ class ToolCallExecutor:
                                     })
                                 continue
 
-                            blocked_steps.append({
+                            # v70.8: a stale registered/blueprint module must not block the workflow.
+                            # Try autonomous self-healing: reuse the original codegen request when present,
+                            # otherwise use the latest pending request for the capability. If successful,
+                            # execute the repaired module immediately.
+                            await event_bus.emit(run_id, {
+                                "type": "MODULE_SELF_HEALING_STARTED",
+                                "title": "Module self-healing started",
+                                "message": f"Registered module for capability={required_capability} is not executable. Trying regeneration/fallback.",
+                                "node_id": node_id,
                                 "step_id": step_id,
-                                "status": "registered_module_not_executable",
-                                "capability": required_capability,
-                                "reason": "A module is registered for this capability but could not be loaded or executed.",
-                                "source_step": step,
-                                "generated_module": module_blueprint,
+                                "result": {"module_blueprint": module_blueprint},
                             })
-                            continue
+                            healed_codegen = await self._try_autonomous_codegen_and_execute(
+                                run_id=run_id,
+                                node_id=node_id,
+                                step_id=step_id,
+                                capability=required_capability or "unknown_capability",
+                                step=step,
+                                state=state,
+                                module_blueprint=module_blueprint,
+                            )
+                            if healed_codegen and healed_codegen.get("execution"):
+                                healed_execution = healed_codegen.get("execution", {})
+                                healed_result = healed_execution.get("result", {})
+                                execution_steps.append({
+                                    "step_id": step_id,
+                                    "status": "executed" if self._is_success_result(healed_result) else "module_execution_failed",
+                                    "module": healed_codegen.get("registry_record") or healed_execution.get("registry_record"),
+                                    "input": healed_execution.get("input"),
+                                    "result": healed_result,
+                                    "provenance": healed_result.get("provenance") if isinstance(healed_result, dict) else None,
+                                    "source_step": step,
+                                    "self_healed": True,
+                                })
+                                if not self._is_success_result(healed_result):
+                                    blocked_steps.append({
+                                        "step_id": step_id,
+                                        "status": "module_execution_failed",
+                                        "capability": required_capability,
+                                        "reason": self._result_error_message(healed_result, "Self-healed module execution failed."),
+                                        "source_step": step,
+                                        "module_result": healed_result,
+                                    })
+                                continue
+
+                            # If regeneration could not execute, keep going into the generic missing-tool path
+                            # rather than returning registered_module_not_executable as the final answer.
+                            await event_bus.emit(run_id, {
+                                "type": "MODULE_SELF_HEALING_FAILED",
+                                "title": "Module self-healing failed",
+                                "message": "Registered module could not be repaired automatically; continuing with generic fallback generation.",
+                                "node_id": node_id,
+                                "step_id": step_id,
+                                "result": healed_codegen or {},
+                            })
 
                         # v59: do not stop at a generated codegen request. Try to
                         # execute the pending runtime code-generation request, verify
@@ -779,6 +864,12 @@ class ToolCallExecutor:
         generated = module_blueprint.get("generated_module")
         if isinstance(generated, dict):
             candidates.append(generated.get("codegen_request"))
+        module = module_blueprint.get("module")
+        if isinstance(module, dict):
+            metadata = module.get("metadata") if isinstance(module.get("metadata"), dict) else {}
+            request_path = metadata.get("codegen_request_path")
+            if isinstance(request_path, str) and request_path.strip():
+                return request_path
         for item in candidates:
             if isinstance(item, dict):
                 path = item.get("request_path")
@@ -790,6 +881,104 @@ class ToolCallExecutor:
                     if isinstance(nested_path, str) and nested_path.strip():
                         return nested_path
         return None
+
+
+    async def _try_local_knowledge_execution(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        step_id: str,
+        capability: str,
+        step: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        tool_input = self._build_tool_input(
+            step=step, run_id=run_id, node_id=node_id, step_id=step_id, user_input=state.get("input", "")
+        )
+        required_terms = self._required_terms_from_tool_input(tool_input)
+        query = " ".join([str(state.get("input") or ""), str(step.get("objective") or ""), capability])
+        await event_bus.emit(run_id, {
+            "type": "LOCAL_KNOWLEDGE_FIRST_CHECK",
+            "title": "Local knowledge first check",
+            "message": "Checking local runtime knowledge before web/API/tool generation.",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": {"required_terms": required_terms},
+        })
+        item = self.knowledge.best_covered(query, required_terms=required_terms, min_score=1.0)
+        if not item:
+            return None
+        result = {
+            "status": "success",
+            "data": {
+                "answer_material": item.get("text_excerpt"),
+                "source": item.get("source"),
+                "coverage": item.get("coverage"),
+                "known_parameters": tool_input.get("known") or (tool_input.get("parameters") or {}).get("known") or {},
+                "local_knowledge_used": True,
+            },
+            "source": "runtime_local_knowledge",
+            "requires_human_confirmation": False,
+            "provenance": {
+                "source": "runtime_knowledge",
+                "execution_claims": {
+                    "real_execution_declared": True,
+                    "no_mock_data_declared": True,
+                    "network_declared": False,
+                    "live_verification_passed": False,
+                },
+            },
+        }
+        await event_bus.emit(run_id, {
+            "type": "LOCAL_KNOWLEDGE_SELECTED",
+            "title": "Local knowledge selected",
+            "message": "Local knowledge covered the runtime parameters; web/API/codegen skipped.",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": {"coverage": item.get("coverage"), "source": item.get("source")},
+        })
+        return {"input": tool_input, "result": result}
+
+    def _required_terms_from_tool_input(self, tool_input: dict[str, Any]) -> dict[str, list[str]]:
+        known: dict[str, Any] = {}
+        if isinstance(tool_input.get("known"), dict):
+            known.update(tool_input.get("known") or {})
+        params = tool_input.get("parameters") if isinstance(tool_input.get("parameters"), dict) else {}
+        if isinstance(params.get("known"), dict):
+            known.update(params.get("known") or {})
+        for key, value in list(tool_input.items()):
+            if key in {"known", "parameters", "optional", "context", "source_step"}:
+                continue
+            if isinstance(value, (str, int, float, bool)) and value not in {"", None}:
+                known.setdefault(str(key), value)
+        ignored = {"detail_level", "semantic_modifiers", "language", "locale", "unit", "units"}
+        required: dict[str, list[str]] = {}
+        for key, value in known.items():
+            if key in ignored:
+                continue
+            aliases = self._value_aliases(value)
+            if aliases:
+                required[str(key)] = aliases
+        return required
+
+    def _value_aliases(self, value: Any) -> list[str]:
+        raw = str(value).strip()
+        if not raw:
+            return []
+        aliases = [raw]
+        if len(raw) >= 10 and raw[4:5] == "-" and raw[7:8] == "-":
+            y, m, d = raw[:4], raw[5:7], raw[8:10]
+            try:
+                mi, di = int(m), int(d)
+                aliases.extend([f"{y}/{m}/{d}", f"{mi}/{di}", f"{mi}-{di}", f"{d}"])
+                if mi == 5:
+                    aliases.extend([f"May {di}", f"{di} May", f"{di} May {y}"])
+            except Exception:
+                pass
+        if "," in raw:
+            aliases.extend([part.strip() for part in raw.split(",") if part.strip()])
+        return list(dict.fromkeys(aliases))
 
 
     async def _execute_registered_module(
@@ -1183,6 +1372,37 @@ class ToolCallExecutor:
         )
         if direct_from_evidence:
             return direct_from_evidence
+
+        endpoint_verification = api_discovery.get("endpoint_verification") if isinstance(api_discovery, dict) else {}
+        recommended_tool_type = str((endpoint_verification or {}).get("recommended_tool_type") or "").strip()
+        verified_json_api = bool((endpoint_verification or {}).get("verified_json_api"))
+        if recommended_tool_type in {"web_extract", "browser_extract", "browser_automation"} and not verified_json_api:
+            tool_input = self._build_tool_input(
+                step=step, run_id=run_id, node_id=node_id, step_id=step_id, user_input=state.get("input", "")
+            )
+            deterministic_web_tool = await self._build_and_verify_generic_web_extract_tool(
+                run_id=run_id,
+                node_id=node_id,
+                step_id=step_id,
+                capability=capability,
+                step=step,
+                state=state,
+                api_discovery=api_discovery,
+                external_discovery=external_discovery,
+                candidate=None,
+                tool_input=tool_input,
+                reason="endpoint_recommended_web_extract_before_codegen",
+            )
+            if deterministic_web_tool:
+                await event_bus.emit(run_id, {
+                    "type": "WEB_EXTRACT_SELECTED_BEFORE_CODEGEN",
+                    "title": "Web extraction selected before codegen",
+                    "message": "Endpoint verification recommended web extraction; LLM code generation was skipped.",
+                    "node_id": node_id,
+                    "step_id": step_id,
+                    "result": self._public_tool_spec(deterministic_web_tool),
+                })
+                return deterministic_web_tool
 
         if api_discovery.get("status") != "success" and not external_discovery.get("documents") and not external_discovery.get("repositories"):
             await event_bus.emit(run_id, {

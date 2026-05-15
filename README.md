@@ -1,115 +1,41 @@
-# CDAC NestHub v70.7
+# CDAC NestHub v70.9
 
-## Capability-aware code generation model routing
+## Runtime Priority Chain + Reusable Codegen Fix
 
-This version stays on the v70 runtime line. It does **not** switch to v2.1.
+This version stays on the v70 code line and does not switch to v2.1.
 
-## Main change
+## Main fixes
 
-Runtime code-generation tasks now use code-specialized models first instead of the default vision/reasoning model.
+1. Fixed module registry selection so executable modules are preferred over stale blueprint records.
+2. Added automatic disabling of failed registered modules so a bad runtime-generated module does not block execution forever.
+3. Added local runtime knowledge / RAG-first execution path before web/API/codegen.
+4. Added web/evidence-first path before code generation when endpoint verification recommends web extraction.
+5. Improved direct evidence answer with aggregate evidence coverage across multiple candidates.
+6. Strengthened code-generation prompts so generated Python must be reusable and must not hardcode user-specific location/date/query values.
+7. Kept code-specialized model routing from v70.7/v70.8.
+8. Kept local model selector UI from v70.8.
 
-Code artifact tasks include:
-
-- runtime tool generation
-- adapter generation
-- module generation
-- schema repair
-- generated tool repair
-
-## Default routing
-
-```yaml
-routes:
-  code_generation:
-    - ollama_coder_qwen25
-    - ollama_coder_deepseek
-    - vllm_coder
-    - lmstudio_coder
-    - ollama
-    - openai
-```
-
-## Added local code model providers
-
-### ollama_coder_qwen25
-
-Primary model:
+## Execution priority
 
 ```text
-qwen2.5-coder:7b
+1. Local model / local knowledge / RAG-style runtime memory
+2. Web search / web extraction / direct evidence answer
+3. Runtime-generated tool or module code generation
 ```
 
-Fallback models:
+## Why this version was needed
+
+The previous generated weather module was registered but not reusable:
 
 ```text
-qwen2.5-coder:14b
-qwen2.5-coder:3b
-qwen3:8b
-qwen3:4b
+- hardcoded URL path
+- hardcoded page structure
+- attempted to parse HTML as JSON
+- could not execute reliably
 ```
 
-Capabilities:
+v70.9 prevents this from becoming a permanent blocker by disabling failed modules and continuing through the priority chain.
 
-```text
-code_generation
-python_generation
-adapter_generation
-schema_repair
-structured_output
-json_generation
-tool_generation
-```
+## Packaging rule
 
-### ollama_coder_deepseek
-
-Primary model:
-
-```text
-deepseek-coder-v2:16b
-```
-
-Fallback models:
-
-```text
-deepseek-coder-v2:lite
-qwen2.5-coder:7b
-qwen3:8b
-```
-
-## Model selection behavior
-
-The core does not hardcode vendor-specific logic. It only passes generic capability requirements:
-
-```text
-code_generation
-python_generation
-adapter_generation
-schema_repair
-structured_output
-json_generation
-```
-
-`ModelCapabilityMatcher` then ranks runtime provider candidates by declared tags, capabilities, quality hints, and priority.
-
-## Important runtime behavior
-
-- `qwen3-vl:8b-thinking` remains available for vision / screenshot / UI-understanding tasks.
-- It is no longer preferred for pure code generation.
-- OpenAI remains an external fallback only.
-- Existing `runtime/configs/models/providers.yaml` is upgraded by bootstrap instead of being skipped.
-
-## Packaging rules
-
-The ZIP package includes source/config/schema/templates only.
-
-Excluded runtime artifacts:
-
-```text
-runtime/generated/
-runtime/cache/
-runtime/traces/
-runtime/tmp/
-runtime/downloads/
-__pycache__/
-*.pyc
-```
+Runtime-generated files, traces, cache, metrics, and transient runtime directories are excluded from release ZIPs.
