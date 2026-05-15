@@ -1,36 +1,115 @@
-# CDAC NestHub v70.6
+# CDAC NestHub v70.7
 
-## Runtime Execute Stabilization
+## Capability-aware code generation model routing
 
-This version is based on v70.5 and keeps the v70 architecture line.
+This version stays on the v70 runtime line. It does **not** switch to v2.1.
 
-## Main Fixes
+## Main change
 
-1. `execute` no longer waits silently after enough no-key web evidence has already been collected.
-2. Before runtime tool generation, the executor now tries `direct_evidence_execution`.
-3. Large `api_discovery`, `documentation_evidence`, and `endpoint_verification` JSON are no longer emitted as full UI log payloads.
-4. `RUNTIME_TOOL_GENERATION_STARTED` now emits a compact generation request only.
-5. LLM code generation receives compact evidence, not raw discovery JSON.
-6. If evidence covers runtime parameters, execution can finish through `evidence_direct_answer` without generating a tool.
-7. The execute stage keeps token usage lower and avoids unnecessary OpenAI/Ollama calls.
-8. `qwen3-vl:8b-thinking` remains the preferred local model from v70.5 configuration.
+Runtime code-generation tasks now use code-specialized models first instead of the default vision/reasoning model.
 
-## Runtime Policy
+Code artifact tasks include:
 
-Execution priority:
+- runtime tool generation
+- adapter generation
+- module generation
+- schema repair
+- generated tool repair
 
-```text
-registered tool/module
-↓
-no-key evidence direct answer
-↓
-deterministic web_extract
-↓
-compact LLM-generated tool
-↓
-optional credential interaction
+## Default routing
+
+```yaml
+routes:
+  code_generation:
+    - ollama_coder_qwen25
+    - ollama_coder_deepseek
+    - vllm_coder
+    - lmstudio_coder
+    - ollama
+    - openai
 ```
 
-## Packaging Rules
+## Added local code model providers
 
-Runtime generated artifacts, traces, cache, downloads, temporary files, and old version Markdown files are excluded from the ZIP package.
+### ollama_coder_qwen25
+
+Primary model:
+
+```text
+qwen2.5-coder:7b
+```
+
+Fallback models:
+
+```text
+qwen2.5-coder:14b
+qwen2.5-coder:3b
+qwen3:8b
+qwen3:4b
+```
+
+Capabilities:
+
+```text
+code_generation
+python_generation
+adapter_generation
+schema_repair
+structured_output
+json_generation
+tool_generation
+```
+
+### ollama_coder_deepseek
+
+Primary model:
+
+```text
+deepseek-coder-v2:16b
+```
+
+Fallback models:
+
+```text
+deepseek-coder-v2:lite
+qwen2.5-coder:7b
+qwen3:8b
+```
+
+## Model selection behavior
+
+The core does not hardcode vendor-specific logic. It only passes generic capability requirements:
+
+```text
+code_generation
+python_generation
+adapter_generation
+schema_repair
+structured_output
+json_generation
+```
+
+`ModelCapabilityMatcher` then ranks runtime provider candidates by declared tags, capabilities, quality hints, and priority.
+
+## Important runtime behavior
+
+- `qwen3-vl:8b-thinking` remains available for vision / screenshot / UI-understanding tasks.
+- It is no longer preferred for pure code generation.
+- OpenAI remains an external fallback only.
+- Existing `runtime/configs/models/providers.yaml` is upgraded by bootstrap instead of being skipped.
+
+## Packaging rules
+
+The ZIP package includes source/config/schema/templates only.
+
+Excluded runtime artifacts:
+
+```text
+runtime/generated/
+runtime/cache/
+runtime/traces/
+runtime/tmp/
+runtime/downloads/
+__pycache__/
+*.pyc
+```

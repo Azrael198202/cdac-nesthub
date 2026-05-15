@@ -84,7 +84,30 @@ class RuntimeBootstrap:
                 "intent_recognition": ["ollama", "openai"],
                 "workflow_planning": ["ollama", "openai"],
                 "reasoning": ["ollama", "openai"],
-                "code_generation": ["ollama", "openai", "vllm", "lmstudio"],
+                # Code artifact generation uses code-specialized local models first.
+                # The generic vision/reasoning model is kept later as fallback only.
+                "code_generation": [
+                    "ollama_coder_qwen25",
+                    "ollama_coder_deepseek",
+                    "vllm_coder",
+                    "lmstudio_coder",
+                    "ollama",
+                    "openai"
+                ],
+                "adapter_generation": [
+                    "ollama_coder_qwen25",
+                    "ollama_coder_deepseek",
+                    "vllm_coder",
+                    "lmstudio_coder",
+                    "ollama",
+                    "openai"
+                ],
+                "schema_repair": [
+                    "ollama_coder_qwen25",
+                    "ollama_coder_deepseek",
+                    "ollama",
+                    "openai"
+                ],
                 "api_discovery_local": ["ollama"],
                 "api_discovery_external": ["ollama", "openai"],
                 "fallback": ["ollama", "openai"]
@@ -93,7 +116,14 @@ class RuntimeBootstrap:
                 "information_retrieval_agent": ["structured_extraction", "reasoning"],
                 "workflow_planning_agent": ["workflow_planning", "reasoning", "json_generation"],
                 "integration_builder_agent": ["reasoning", "structured_extraction", "json_generation"],
-                "code_generation_agent": ["reasoning", "json_generation"],
+                "code_generation_agent": [
+                    "code_generation",
+                    "python_generation",
+                    "adapter_generation",
+                    "schema_repair",
+                    "structured_output",
+                    "json_generation"
+                ],
                 "data_analysis_agent": ["structured_extraction", "reasoning"],
                 "document_writer_agent": ["document_generation", "reasoning"],
                 "human_interaction_agent": ["json_generation"],
@@ -175,6 +205,124 @@ class RuntimeBootstrap:
                     "pull_command": "{binary} pull {model}",
                     "pull_timeout_seconds": 3600
                 },
+
+                "ollama_coder_qwen25": {
+                    "enabled": True,
+                    "type": "universal_model",
+                    "protocol": "ollama_chat",
+                    "base_url": "http://127.0.0.1:11434",
+                    "binary": "ollama",
+                    "endpoint_strategy": "auto",
+                    "chat_endpoint": "/api/chat",
+                    "generate_endpoint": "/api/generate",
+                    "model": "qwen2.5-coder:7b",
+                    "fallback_models": [
+                        "qwen2.5-coder:7b",
+                        "qwen2.5-coder:14b",
+                        "qwen2.5-coder:3b",
+                        "qwen3:8b",
+                        "qwen3:4b"
+                    ],
+                    "model_tags": [
+                        "local",
+                        "free",
+                        "code_generation",
+                        "python_generation",
+                        "adapter_generation",
+                        "schema_repair",
+                        "structured_output",
+                        "json_generation",
+                        "tool_generation"
+                    ],
+                    "capabilities": [
+                        "code_generation",
+                        "python_generation",
+                        "adapter_generation",
+                        "schema_repair",
+                        "structured_output",
+                        "json_generation",
+                        "tool_generation"
+                    ],
+                    "quality": {
+                        "code_generation": 18,
+                        "structured_output": 8
+                    },
+                    "priority": 8,
+                    "reasoning": {
+                        "enabled": false,
+                        "effort": "low"
+                    },
+                    "timeout_seconds": 150,
+                    "max_prompt_tokens": 8000,
+                    "prompt_budget_safety_tokens": 1200,
+                    "max_schema_chars": 7000,
+                    "cache_enabled": true,
+                    "auto_start": true,
+                    "start_command": "{binary} serve",
+                    "ready_timeout_seconds": 45,
+                    "ready_poll_interval_seconds": 1,
+                    "auto_pull_missing_model": true,
+                    "pull_command": "{binary} pull {model}",
+                    "pull_timeout_seconds": 3600
+                },
+                "ollama_coder_deepseek": {
+                    "enabled": true,
+                    "type": "universal_model",
+                    "protocol": "ollama_chat",
+                    "base_url": "http://127.0.0.1:11434",
+                    "binary": "ollama",
+                    "endpoint_strategy": "auto",
+                    "chat_endpoint": "/api/chat",
+                    "generate_endpoint": "/api/generate",
+                    "model": "deepseek-coder-v2:16b",
+                    "fallback_models": [
+                        "deepseek-coder-v2:16b",
+                        "deepseek-coder-v2:lite",
+                        "qwen2.5-coder:7b",
+                        "qwen3:8b"
+                    ],
+                    "model_tags": [
+                        "local",
+                        "free",
+                        "code_generation",
+                        "python_generation",
+                        "adapter_generation",
+                        "schema_repair",
+                        "structured_output",
+                        "json_generation",
+                        "tool_generation"
+                    ],
+                    "capabilities": [
+                        "code_generation",
+                        "python_generation",
+                        "adapter_generation",
+                        "schema_repair",
+                        "structured_output",
+                        "json_generation",
+                        "tool_generation"
+                    ],
+                    "quality": {
+                        "code_generation": 20,
+                        "structured_output": 7
+                    },
+                    "priority": 6,
+                    "reasoning": {
+                        "enabled": false,
+                        "effort": "low"
+                    },
+                    "timeout_seconds": 180,
+                    "max_prompt_tokens": 9000,
+                    "prompt_budget_safety_tokens": 1200,
+                    "max_schema_chars": 8000,
+                    "cache_enabled": true,
+                    "auto_start": true,
+                    "start_command": "{binary} serve",
+                    "ready_timeout_seconds": 45,
+                    "ready_poll_interval_seconds": 1,
+                    "auto_pull_missing_model": true,
+                    "pull_command": "{binary} pull {model}",
+                    "pull_timeout_seconds": 3600
+                },
                 "openai": {
                     "enabled": True,
                     "type": "universal_model",
@@ -192,6 +340,39 @@ class RuntimeBootstrap:
                     "role": "external_fallback",
                     "model_tags": ["reasoning", "json_generation", "tool_calling", "document_generation"],
                     "capabilities": ["reasoning", "json_generation", "tool_calling", "document_generation"]
+                },
+
+                "vllm_coder": {
+                    "enabled": false,
+                    "type": "universal_model",
+                    "protocol": "openai_compatible",
+                    "base_url": "http://127.0.0.1:8002",
+                    "endpoint": "/v1/chat/completions",
+                    "model": "Qwen/Qwen2.5-Coder-7B-Instruct",
+                    "timeout_seconds": 90,
+                    "max_prompt_tokens": 12000,
+                    "cache_enabled": true,
+                    "response_format_json": true,
+                    "model_tags": ["local", "code_generation", "python_generation", "adapter_generation", "structured_output", "json_generation"],
+                    "capabilities": ["code_generation", "python_generation", "adapter_generation", "structured_output", "json_generation"],
+                    "quality": {"code_generation": 18, "structured_output": 8},
+                    "priority": 7
+                },
+                "lmstudio_coder": {
+                    "enabled": false,
+                    "type": "universal_model",
+                    "protocol": "openai_compatible",
+                    "base_url": "http://127.0.0.1:1234",
+                    "endpoint": "/v1/chat/completions",
+                    "model": "qwen2.5-coder-7b-instruct",
+                    "timeout_seconds": 90,
+                    "max_prompt_tokens": 12000,
+                    "cache_enabled": true,
+                    "response_format_json": true,
+                    "model_tags": ["local", "code_generation", "python_generation", "adapter_generation", "structured_output", "json_generation"],
+                    "capabilities": ["code_generation", "python_generation", "adapter_generation", "structured_output", "json_generation"],
+                    "quality": {"code_generation": 16, "structured_output": 7},
+                    "priority": 5
                 },
                 "vllm": {
                     "enabled": False,
@@ -228,6 +409,8 @@ class RuntimeBootstrap:
                 "prefer_local_base_model": True,
                 "base_model_provider": "ollama",
                 "base_model": "qwen3-vl:8b-thinking",
+                "code_generation_provider": "ollama_coder_qwen25",
+                "code_generation_model": "qwen2.5-coder:7b",
                 "external_provider_is_fallback": True
             }
         }
@@ -250,17 +433,19 @@ class RuntimeBootstrap:
         for provider_id, desired_provider in desired_providers.items():
             existing = dict(providers.get(provider_id) or {})
             merged = {**desired_provider, **existing}
-            if provider_id == "ollama":
-                # Force the base model line requested for v70.3 while preserving
-                # user-specific endpoint/binary/install overrides.
+            if provider_id in {"ollama", "ollama_coder_qwen25", "ollama_coder_deepseek"}:
+                # Force core runtime model lines while preserving user-specific
+                # endpoint/binary/install overrides where possible.
                 for key in [
                     "enabled", "type", "protocol", "model", "fallback_models",
-                    "model_tags", "capabilities", "reasoning", "timeout_seconds", "max_prompt_tokens",
+                    "model_tags", "capabilities", "quality", "priority", "reasoning",
+                    "timeout_seconds", "max_prompt_tokens",
                     "prompt_budget_safety_tokens", "max_schema_chars",
                     "cache_enabled", "auto_start", "auto_pull_missing_model",
                     "pull_timeout_seconds"
                 ]:
-                    merged[key] = desired_provider[key]
+                    if key in desired_provider:
+                        merged[key] = desired_provider[key]
                 for key in ["base_url", "binary", "chat_endpoint", "generate_endpoint", "endpoint_strategy", "start_command", "pull_command"]:
                     merged.setdefault(key, desired_provider.get(key))
             providers[provider_id] = merged

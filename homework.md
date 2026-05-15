@@ -534,3 +534,12 @@ Required fixes:
   "_node_id": "intent_recognition",
   "_adapter_id": "intent_recognition_adapter"
 }
+
+
+
+### 新版本作业
+
+1. 运行时，根据作业的内容，咨询openai或者其他模型，给出适合作业的最好的模型，
+   加入到模型的配置文件中，并作为知识点，之后遇到类似的业务，都使用这个模型。
+2. 建立多模型的选择，特别是api的模型，需要api key的模型。特别在input_parsing, intent, workflow 等阶段。
+3. 通过强大的api 外部模型，可以对业务流程进行修改。

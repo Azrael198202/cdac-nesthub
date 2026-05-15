@@ -104,6 +104,19 @@ class RuntimeToolArtifactGenerator:
         }
         adapter = generation_request.get("adapter") if isinstance(generation_request.get("adapter"), dict) else {}
         adapter = {**adapter}
+        # Runtime tool generation is a code artifact task. Tell the provider
+        # router to prefer code-specialized models instead of generic vision or
+        # reasoning models. This remains provider-neutral: models are selected
+        # from runtime/configs/models/providers.yaml by capabilities/tags.
+        adapter.setdefault("runtime_role", "code_generation_agent")
+        adapter.setdefault("required_model_capabilities", [
+            "code_generation",
+            "python_generation",
+            "adapter_generation",
+            "schema_repair",
+            "structured_output",
+            "json_generation",
+        ])
         route = self._code_generation_route()
         if route:
             adapter["provider_route"] = route

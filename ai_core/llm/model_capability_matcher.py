@@ -14,8 +14,17 @@ class ModelCapabilityMatcher:
     DEFAULT_ROLE_PREFERENCES: dict[str, list[str]] = {
         "information_retrieval_agent": ["structured_extraction", "reasoning"],
         "workflow_planning_agent": ["workflow_planning", "reasoning", "json_generation"],
-        "integration_builder_agent": ["reasoning", "structured_extraction", "json_generation"],
-        "code_generation_agent": ["reasoning", "json_generation"],
+        "integration_builder_agent": ["integration_generation", "structured_extraction", "json_generation"],
+        # Code generation must not use the default vision/reasoning model.
+        # Prefer models tagged for code artifacts, Python, schema repair, and structured output.
+        "code_generation_agent": [
+            "code_generation",
+            "python_generation",
+            "adapter_generation",
+            "schema_repair",
+            "structured_output",
+            "json_generation",
+        ],
         "data_analysis_agent": ["structured_extraction", "reasoning"],
         "document_writer_agent": ["document_generation", "reasoning"],
         "human_interaction_agent": ["json_generation"],
@@ -56,6 +65,20 @@ class ModelCapabilityMatcher:
         for item in required:
             if item.lower() in available:
                 score += 10
+
+        # Extra routing quality hints remain provider-neutral. They do not mention
+        # specific vendors; they only reward declared fit for the requested role.
+        quality = provider.get("quality") if isinstance(provider.get("quality"), dict) else {}
+        if any(x in {"code_generation", "python_generation", "adapter_generation"} for x in [r.lower() for r in required]):
+            score += int(quality.get("code_generation", 0))
+            score += int(quality.get("structured_output", 0))
+            if "vision" in available and "code_generation" not in available:
+                # Vision models are valid, but should not outrank code models for pure codegen.
+                score -= 8
+
+        priority = provider.get("priority")
+        if isinstance(priority, int):
+            score += priority
         if provider.get("source") == "runtime_model_discovery":
             score += 1
         if provider.get("interactive_key_required") or provider.get("auth_type"):
