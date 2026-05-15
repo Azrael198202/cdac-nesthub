@@ -1,0 +1,12 @@
+v70.28 validation results
+
+compileall: OK
+pytest: 13 passed
+
+Focused tests:
+- EvidenceSatisfiedShortCircuit detects sufficient selected evidence: PASS
+- Direct evidence execution returns success before codegen: PASS
+- Regression/stability tests from v70.27: PASS
+
+Domain scan:
+- ai_core/apps: no prohibited domain/business hardcoded words found for the checked terms.

@@ -34,6 +34,7 @@ from ai_core.execution.generated_result_verifier import GeneratedResultVerifier
 from ai_core.execution.evidence_direct_answer import EvidenceDirectAnswerBuilder
 from ai_core.execution.execution_continuation_coordinator import ExecutionContinuationCoordinator
 from ai_core.execution.answer_sufficiency_evaluator import AnswerSufficiencyEvaluator
+from ai_core.execution.evidence_satisfied_short_circuit import EvidenceSatisfiedShortCircuit
 from ai_core.research.web_research_tool import GenericWebResearchTool
 from ai_core.context.evidence_noise_reducer import EvidenceNoiseReducer
 from ai_core.knowledge.knowledge_service import KnowledgeService
@@ -84,6 +85,7 @@ class ToolCallExecutor:
         self.execution_continuation = ExecutionContinuationCoordinator()
         self.answer_sufficiency = AnswerSufficiencyEvaluator()
         self.web_research = GenericWebResearchTool()
+        self.evidence_short_circuit = EvidenceSatisfiedShortCircuit()
 
     async def execute(
         self,
@@ -1432,6 +1434,33 @@ class ToolCallExecutor:
                 external_discovery=external_discovery,
                 reason=reason,
             )
+            if not direct_execution:
+                api_discovery = await self.api_discovery.discover(
+                    run_id=run_id,
+                    node_id=node_id,
+                    capability=capability,
+                    step=step,
+                    user_input=state.get("input", ""),
+                )
+                if self.evidence_short_circuit.should_bypass_generated_execution(api_discovery, external_discovery):
+                    await event_bus.emit(run_id, {
+                        "type": "EVIDENCE_SATISFIED_SHORT_CIRCUIT",
+                        "title": "Evidence satisfied before generated execution",
+                        "message": "Collected evidence already satisfies the runtime request; generated execution is bypassed.",
+                        "node_id": node_id,
+                        "step_id": step_id,
+                    })
+                direct_execution = await self._try_direct_evidence_execution_from_discovery(
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    capability=capability,
+                    step=step,
+                    state=state,
+                    api_discovery=api_discovery,
+                    external_discovery=external_discovery,
+                    reason=reason + "_with_secondary_discovery",
+                )
             if direct_execution and direct_execution.get("status") == "success":
                 tool_input = self._build_tool_input(
                     step=step,
@@ -1679,6 +1708,28 @@ class ToolCallExecutor:
                     "result": self._public_tool_spec(deterministic_web_tool),
                 })
                 return deterministic_web_tool
+
+        if self.evidence_short_circuit.should_bypass_generated_execution(api_discovery, external_discovery):
+            direct_from_short_circuit = await self._try_direct_evidence_execution_from_discovery(
+                run_id=run_id,
+                node_id=node_id,
+                step_id=step_id,
+                capability=capability,
+                step=step,
+                state=state,
+                api_discovery=api_discovery,
+                external_discovery=external_discovery,
+                reason="evidence_satisfied_short_circuit_before_generated_artifact",
+            )
+            if direct_from_short_circuit:
+                await event_bus.emit(run_id, {
+                    "type": "EVIDENCE_SATISFIED_SHORT_CIRCUIT",
+                    "title": "Evidence satisfied before generated artifact",
+                    "message": "Generated artifact creation skipped because evidence already satisfied the request.",
+                    "node_id": node_id,
+                    "step_id": step_id,
+                })
+                return direct_from_short_circuit
 
         if api_discovery.get("status") != "success" and not external_discovery.get("documents") and not external_discovery.get("repositories"):
             await event_bus.emit(run_id, {
@@ -2974,8 +3025,15 @@ class ToolCallExecutor:
         verification = candidate.get("light_verification") if isinstance(candidate.get("light_verification"), dict) else {}
         if verification.get("requires_authentication") is True:
             return True
-        markers = ("api key", "your_api_key", "appid", "requires api key", "authentication_required", "api_key_required")
-        return any(marker in text or marker in reasons for marker in markers)
+        text_markers = ("api key", "your_api_key", "appid", "requires api key")
+        if any(marker in text for marker in text_markers):
+            return True
+        # Score reasons are symbolic labels. Match them exactly so a positive
+        # label such as "no_api_key_required_or_not_detected" is not
+        # misclassified as credential-protected merely because it contains the
+        # substring "api_key_required".
+        reason_values = {str(x).strip().lower() for x in candidate.get("score_reasons", []) if isinstance(x, str)}
+        return bool(reason_values.intersection({"authentication_required", "api_key_required", "credential_required"}))
 
     def _compact_attempts(self, attempts: Any) -> list[dict[str, Any]]:
         """Return non-recursive attempt summaries safe for result/provenance output."""
