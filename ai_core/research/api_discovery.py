@@ -72,14 +72,18 @@ class ApiDiscoveryEngine:
                 await self._emit_done(run_id, node_id, discovery)
                 return discovery
 
+            # v70.14: promising search snippets are not enough for final answer,
+            # but they are enough to justify fetching those pages before any
+            # API documentation or tool/code generation path.
             answer_evidence = await self._fetch_answer_evidence(
                 run_id=run_id,
                 node_id=node_id,
-                search_evidence=web_evidence,
+                search_evidence=sufficiency.get("selected_evidence") or web_evidence,
             )
             if answer_evidence:
                 request["answer_evidence"] = answer_evidence
-                sufficiency = self._evaluate_answer_sufficiency(answer_evidence, request)
+                combined_answer_evidence = answer_evidence + web_evidence
+                sufficiency = self._evaluate_answer_sufficiency(combined_answer_evidence, request)
                 await self._emit_answer_sufficiency(run_id, node_id, sufficiency, stage="fetched_answer_pages")
                 if sufficiency.get("passed"):
                     discovery = self._finalize_answer_sufficient(
@@ -91,6 +95,13 @@ class ApiDiscoveryEngine:
                     )
                     await self._emit_done(run_id, node_id, discovery)
                     return discovery
+                await event_bus.emit(run_id, {
+                    "type": "ANSWER_EVIDENCE_INSUFFICIENT_AFTER_FETCH",
+                    "title": "Fetched answer evidence is still insufficient",
+                    "message": f"score={sufficiency.get('score')} next_action={sufficiency.get('next_action')}",
+                    "node_id": node_id,
+                    "result": sufficiency,
+                })
 
         documentation_evidence = await self._fetch_documentation_evidence(
             run_id=run_id,
@@ -243,12 +254,18 @@ class ApiDiscoveryEngine:
         search_evidence: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         fetched: list[dict[str, Any]] = []
-        for item in search_evidence[:5]:
+        for item in search_evidence[:7]:
             url = str(item.get("url") or "").strip()
+            if not url and isinstance(item.get("evidence"), dict):
+                evidence_obj = item.get("evidence") or {}
+                url = str(evidence_obj.get("url") or "").strip()
+            if not url and isinstance(item.get("source_search_result"), dict):
+                search_obj = item.get("source_search_result") or {}
+                url = str(search_obj.get("url") or "").strip()
             if not url:
                 continue
             try:
-                doc = await self.web.fetch(url=url, max_chars=10000)
+                doc = await self.web.fetch(url=url, max_chars=24000)
                 if isinstance(doc, dict) and doc.get("status") == "success":
                     fetched.append({
                         "source": "fetched_answer_evidence",

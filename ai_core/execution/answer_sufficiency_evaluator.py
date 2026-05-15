@@ -15,7 +15,13 @@ class AnswerSufficiencyEvaluator:
 
     DEFAULT_MIN_COVERAGE = 1.0
     DEFAULT_MIN_SCORE = 0.72
-    MAX_SELECTED = 5
+    MAX_SELECTED = 7
+
+    # When search results only provide title/snippet/link and no fetched page body,
+    # the evidence may look promising but cannot yet be trusted as answer material.
+    # In that case the evaluator should request page fetching instead of pushing
+    # execution into API/tool/code generation.
+    FETCHABLE_MIN_SCORE = 0.45
 
     STOPWORDS = {
         "the", "a", "an", "and", "or", "to", "for", "of", "in", "on", "at", "by", "with",
@@ -74,26 +80,43 @@ class AnswerSufficiencyEvaluator:
 
         # Aggregate coverage lets multiple evidence items combine to satisfy the request.
         aggregate_score = (aggregate_coverage["coverage_ratio"] * 0.68) + (aggregate_answer_signal * 0.32)
+        effective_score = max(best_score, aggregate_score)
+        fetch_candidates = [x for x in scored if self._needs_fetch(x)]
         passed = bool(
             scored
             and aggregate_coverage["passed"]
-            and max(best_score, aggregate_score) >= min_score
+            and effective_score >= min_score
             and aggregate_answer_signal > 0
+            and not self._aggregate_is_only_search_snippets(scored)
         )
 
-        selected = [self._public_evidence(x["item"], x) for x in scored[: self.MAX_SELECTED] if x.get("score", 0) >= 0.45]
+        selected = [
+            self._public_evidence(x["item"], x)
+            for x in scored[: self.MAX_SELECTED]
+            if x.get("score", 0) >= self.FETCHABLE_MIN_SCORE
+        ]
+        if passed:
+            reason = "sufficient_web_answer_evidence"
+            next_action = "direct_answer"
+        elif fetch_candidates:
+            reason = "promising_search_results_need_page_fetch"
+            next_action = "fetch_selected_pages"
+        else:
+            reason = "insufficient_web_answer_evidence"
+            next_action = "continue_api_or_tool_discovery"
         return {
             "passed": passed,
-            "score": round(max(best_score, aggregate_score), 3),
+            "score": round(effective_score, 3),
             "min_score": min_score,
             "aggregate_coverage": aggregate_coverage,
             "aggregate_answer_signal": round(aggregate_answer_signal, 3),
             "answer_keywords": keywords,
             "selected_evidence": selected,
+            "fetch_candidate_count": len(fetch_candidates),
             "evidence_count": len(evidence),
             "scored_count": len(scored),
-            "reason": "sufficient_web_answer_evidence" if passed else "insufficient_web_answer_evidence",
-            "next_action": "direct_answer" if passed else "continue_api_or_tool_discovery",
+            "reason": reason,
+            "next_action": next_action,
         }
 
     def _clean_known(self, known: dict[str, Any]) -> dict[str, Any]:
@@ -129,23 +152,30 @@ class AnswerSufficiencyEvaluator:
 
     def _coverage(self, text: str, known: dict[str, Any]) -> dict[str, Any]:
         if not known:
-            return {"passed": True, "coverage_ratio": 1.0, "matched": {}, "missing": []}
+            return {"passed": True, "coverage_ratio": 1.0, "matched": {}, "missing": [], "partial": {}}
         hay = text.lower()
         matched: dict[str, list[str]] = {}
+        partial: dict[str, list[str]] = {}
         missing: list[str] = []
         considered = 0
         for key, value in known.items():
-            if key in {"detail_level", "semantic_modifiers"}:
+            if key in {"detail_level", "semantic_modifiers", "specificity"}:
                 continue
             considered += 1
             variants = self._variants(value)
             hits = [v for v in variants if v and v in hay]
             if hits:
                 matched[key] = hits[:5]
+                continue
+            partial_hits = [v for v in self._partial_variants(value) if v and v in hay]
+            if partial_hits:
+                partial[key] = partial_hits[:5]
             else:
                 missing.append(key)
-        ratio = 1.0 if considered == 0 else (len(matched) / considered)
-        return {"passed": not missing, "coverage_ratio": round(ratio, 3), "matched": matched, "missing": missing}
+        # Partial coverage is not enough for final answer, but it means the
+        # search result is worth fetching before escalation. Count it as half.
+        ratio = 1.0 if considered == 0 else ((len(matched) + 0.5 * len(partial)) / considered)
+        return {"passed": not missing and not partial, "coverage_ratio": round(ratio, 3), "matched": matched, "missing": missing, "partial": partial}
 
     def _answer_keywords(self, *, user_input: str, objective: str | None, capability: str | None, known: dict[str, Any]) -> list[str]:
         raw = " ".join(str(x or "") for x in [user_input, objective, capability])
@@ -185,13 +215,72 @@ class AnswerSufficiencyEvaluator:
             try:
                 mi = int(m)
                 di = int(d)
+                month_names = {
+                    1: "jan", 2: "feb", 3: "mar", 4: "apr", 5: "may", 6: "jun",
+                    7: "jul", 8: "aug", 9: "sep", 10: "oct", 11: "nov", 12: "dec",
+                }
+                month_full = {
+                    1: "january", 2: "february", 3: "march", 4: "april", 5: "may", 6: "june",
+                    7: "july", 8: "august", 9: "september", 10: "october", 11: "november", 12: "december",
+                }
+                mon = month_names.get(mi, "")
+                full = month_full.get(mi, "")
                 variants.extend([
-                    f"{y}/{m}/{d}", f"{y}.{m}.{d}", f"{m}/{d}", f"{m}-{d}", f"{mi}/{di}", f"{mi}-{di}", str(di),
-                    f"may {di}" if mi == 5 else "", f"{di} may" if mi == 5 else "",
+                    f"{y}/{m}/{d}", f"{y}.{m}.{d}", f"{m}/{d}", f"{m}-{d}", f"{mi}/{di}", f"{mi}-{di}",
+                    f"{full} {di}" if full else "", f"{mon} {di}" if mon else "",
+                    f"{di} {full}" if full else "", f"{di} {mon}" if mon else "",
+                    f"sat {di}", f"saturday {di}", f"fri {di}", f"friday {di}", f"sun {di}", f"sunday {di}",
+                    str(di),
                 ])
             except Exception:
                 pass
         return [v for v in dict.fromkeys(variants) if v]
+
+    def _partial_variants(self, value: Any) -> list[str]:
+        raw = str(value).strip().lower()
+        variants: list[str] = []
+        if len(raw) >= 10 and raw[4:5] == "-" and raw[7:8] == "-":
+            y, m = raw[:4], raw[5:7]
+            try:
+                mi = int(m)
+                month_full = {
+                    1: "january", 2: "february", 3: "march", 4: "april", 5: "may", 6: "june",
+                    7: "july", 8: "august", 9: "september", 10: "october", 11: "november", 12: "december",
+                }
+                full = month_full.get(mi, "")
+                variants.extend([f"{full} {y}" if full else "", f"{y}-{m}", f"{y}/{m}", full])
+            except Exception:
+                pass
+        return [v for v in dict.fromkeys(variants) if v]
+
+    def _needs_fetch(self, scored: dict[str, Any]) -> bool:
+        if scored.get("score", 0) < self.FETCHABLE_MIN_SCORE:
+            return False
+        item = scored.get("item") if isinstance(scored.get("item"), dict) else {}
+        text_excerpt = ""
+        for container in (item, item.get("document") if isinstance(item.get("document"), dict) else {}, item.get("evidence") if isinstance(item.get("evidence"), dict) else {}):
+            if isinstance(container, dict) and isinstance(container.get("text_excerpt"), str):
+                text_excerpt += container.get("text_excerpt", "")
+        url = self._public_evidence(item, scored).get("url")
+        return bool(url) and len(text_excerpt.strip()) < 400
+
+    def _aggregate_is_only_search_snippets(self, scored: list[dict[str, Any]]) -> bool:
+        if not scored:
+            return False
+        considered = scored[: self.MAX_SELECTED]
+        if not considered:
+            return False
+        fetched_or_body_count = 0
+        for entry in considered:
+            item = entry.get("item") if isinstance(entry.get("item"), dict) else {}
+            has_document = isinstance(item.get("document"), dict)
+            text_excerpt = ""
+            for container in (item, item.get("document") if isinstance(item.get("document"), dict) else {}, item.get("evidence") if isinstance(item.get("evidence"), dict) else {}):
+                if isinstance(container, dict) and isinstance(container.get("text_excerpt"), str):
+                    text_excerpt += container.get("text_excerpt", "")
+            if has_document or len(text_excerpt.strip()) >= 120:
+                fetched_or_body_count += 1
+        return fetched_or_body_count == 0
 
     def _public_evidence(self, item: dict[str, Any], scored: dict[str, Any]) -> dict[str, Any]:
         doc = item.get("document") if isinstance(item.get("document"), dict) else {}

@@ -311,11 +311,36 @@ class ToolCallExecutor:
                     await event_bus.emit(run_id, {
                         "type": "REGISTERED_MODULE_DISABLED_FOR_FALLBACK",
                         "title": "Registered module disabled for fallback",
-                        "message": "Registered module failed execution; continuing with web/evidence/codegen fallback chain.",
+                        "message": "Registered module failed execution; checking web/evidence sufficiency before code generation.",
                         "node_id": node_id,
                         "step_id": step_id,
                         "result": {"module": module_record, "failure": module_result},
                     })
+                    # v70.13: a failed registered module must not become the final answer.
+                    # Before entering API documentation discovery or codegen, run the answer
+                    # sufficiency gate over fresh web evidence. If enough answer material exists,
+                    # return a direct evidence answer immediately.
+                    module_failure_fallback = await self._try_answer_evidence_fallback_after_module_failure(
+                        run_id=run_id,
+                        node_id=node_id,
+                        step_id=step_id,
+                        capability=required_capability or "unknown_capability",
+                        step=step,
+                        state=state,
+                        failed_result=module_result,
+                    )
+                    if module_failure_fallback:
+                        execution_steps.append({
+                            "step_id": step_id,
+                            "status": "executed",
+                            "tool": module_failure_fallback.get("tool"),
+                            "input": module_failure_fallback.get("input"),
+                            "result": module_failure_fallback.get("result"),
+                            "provenance": (module_failure_fallback.get("result") or {}).get("provenance") if isinstance(module_failure_fallback.get("result"), dict) else None,
+                            "source_step": step,
+                            "fallback_after_module_failure": True,
+                        })
+                        continue
                     # Do not continue here; let the missing-tool path below run.
 
             if not tool:
@@ -491,14 +516,35 @@ class ToolCallExecutor:
                                     "source_step": step,
                                 })
                                 if not self._is_success_result(module_result):
-                                    blocked_steps.append({
-                                        "step_id": step_id,
-                                        "status": "module_execution_failed",
-                                        "capability": required_capability,
-                                        "reason": self._result_error_message(module_result, "Module execution failed."),
-                                        "source_step": step,
-                                        "module_result": module_result,
-                                    })
+                                    module_failure_fallback = await self._try_answer_evidence_fallback_after_module_failure(
+                                        run_id=run_id,
+                                        node_id=node_id,
+                                        step_id=step_id,
+                                        capability=required_capability or "unknown_capability",
+                                        step=step,
+                                        state=state,
+                                        failed_result=module_result,
+                                    )
+                                    if module_failure_fallback:
+                                        execution_steps.append({
+                                            "step_id": step_id,
+                                            "status": "executed",
+                                            "tool": module_failure_fallback.get("tool"),
+                                            "input": module_failure_fallback.get("input"),
+                                            "result": module_failure_fallback.get("result"),
+                                            "provenance": (module_failure_fallback.get("result") or {}).get("provenance") if isinstance(module_failure_fallback.get("result"), dict) else None,
+                                            "source_step": step,
+                                            "fallback_after_module_failure": True,
+                                        })
+                                    else:
+                                        blocked_steps.append({
+                                            "step_id": step_id,
+                                            "status": "module_execution_failed",
+                                            "capability": required_capability,
+                                            "reason": self._result_error_message(module_result, "Module execution failed."),
+                                            "source_step": step,
+                                            "module_result": module_result,
+                                        })
                                 continue
 
                             # v70.8: a stale registered/blueprint module must not block the workflow.
@@ -1958,6 +2004,97 @@ class ToolCallExecutor:
                 "step_id": step_id,
             })
             return None
+
+
+
+    async def _try_answer_evidence_fallback_after_module_failure(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        step_id: str,
+        capability: str,
+        step: dict[str, Any],
+        state: dict[str, Any],
+        failed_result: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Try direct answer evidence after a registered module fails.
+
+        v70.13 rule:
+        - A stale or broken registered module is only one candidate.
+        - Its failure must not immediately block the workflow.
+        - For answer-lookup requests, run a lightweight web evidence path first.
+        - Only if evidence is insufficient should normal API/tool/codegen continue.
+
+        This method intentionally does not inspect domain-specific fields. It uses
+        runtime parameters and the generic evidence coverage/sufficiency machinery.
+        """
+        await event_bus.emit(run_id, {
+            "type": "MODULE_FAILURE_EVIDENCE_FALLBACK_STARTED",
+            "title": "Module failure evidence fallback started",
+            "message": "Registered module failed; checking answer evidence before API/code generation.",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": {"failed_result": failed_result},
+        })
+        try:
+            external_discovery = await self.external_discovery.discover(
+                run_id=run_id,
+                node_id=node_id,
+                capability=capability,
+                step=step,
+                user_input=state.get("input", ""),
+            )
+            direct_execution = await self._try_direct_evidence_execution_from_discovery(
+                run_id=run_id,
+                node_id=node_id,
+                step_id=step_id,
+                capability=capability,
+                step=step,
+                state=state,
+                api_discovery={},
+                external_discovery=external_discovery,
+                reason="after_registered_module_failure_before_api_discovery",
+            )
+            if direct_execution and direct_execution.get("status") == "success":
+                tool_input = self._build_tool_input(
+                    step=step,
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    user_input=state.get("input", ""),
+                )
+                await event_bus.emit(run_id, {
+                    "type": "MODULE_FAILURE_EVIDENCE_FALLBACK_SELECTED",
+                    "title": "Module failure evidence fallback selected",
+                    "message": "Using answer evidence instead of blocking on a failed registered module.",
+                    "node_id": node_id,
+                    "step_id": step_id,
+                    "result": self._compact_direct_result_for_event(direct_execution.get("result") or {}),
+                })
+                return {
+                    "tool": direct_execution.get("tool") or {"id": "evidence_direct_answer", "source": "runtime_research_evidence"},
+                    "input": tool_input,
+                    "result": direct_execution.get("result"),
+                }
+        except Exception as exc:
+            await event_bus.emit(run_id, {
+                "type": "MODULE_FAILURE_EVIDENCE_FALLBACK_FAILED",
+                "title": "Module failure evidence fallback failed",
+                "message": str(exc),
+                "node_id": node_id,
+                "step_id": step_id,
+            })
+            return None
+
+        await event_bus.emit(run_id, {
+            "type": "MODULE_FAILURE_EVIDENCE_FALLBACK_INSUFFICIENT",
+            "title": "Module failure evidence fallback insufficient",
+            "message": "Answer evidence was insufficient; continuing with normal API/tool/codegen path.",
+            "node_id": node_id,
+            "step_id": step_id,
+        })
+        return None
 
 
     async def _try_direct_evidence_execution_from_discovery(

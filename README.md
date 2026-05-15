@@ -1,55 +1,44 @@
-# CDAC NestHub v70.12
+# CDAC NestHub v70.14
 
-## Runtime Knowledge Evidence Type Filtering
+## Answer Evidence Fetch Before API / Tool Discovery
 
-This version fixes a critical runtime priority issue where local runtime memories such as workflow success patterns or prompt optimization records could be incorrectly treated as final answer evidence.
+This version refines the v70 execution pipeline after generic web research.
 
-### Main Changes
+### Key Fixes
 
-1. Added final-answer eligibility classification in `KnowledgeService`.
-2. `success_pattern`, `prompt_optimization`, `workflow_template`, and internal workflow memories are now hint-only.
-3. Local knowledge may only finish execution when it is classified as final answer evidence.
-4. Eligible final answer memory types include:
-   - `factual_observation`
-   - `verified_web_evidence`
-   - `tool_execution_result`
-   - `user_provided_document_fact`
-   - `answer_result`
-   - `verified_result`
-5. Matching workflow-planning memories can still be used as prompt/runtime hints, but they no longer stop execution.
-6. If local knowledge is only a hint, execution continues to web/API/tool execution.
-7. Prevents `prompt_optimization_memory.jsonl` content from being shown as the final answer.
+1. Generic web search results are no longer treated as final answer material when they only contain title/snippet/link.
+2. If search results look promising but lack full page text, the runtime now fetches selected pages first.
+3. Answer sufficiency is re-evaluated after fetching page content.
+4. Only after fetched evidence is still insufficient does the runtime continue to API documentation discovery or tool/code generation.
+5. Date matching is improved for multiple formats:
+   - `2026-05-16`
+   - `5/16`
+   - `5-16`
+   - `May 16`
+   - `16 May`
+   - `Sat 16`
+   - `Saturday 16`
+6. Month-level matches such as `May 2026` are treated as partial coverage, causing page fetch rather than failure.
+7. Answer sufficiency trace now reports `next_action=fetch_selected_pages` for promising snippets.
 
-### Validation
-
-- `compileall`: OK
-- `success_pattern` classification: hint-only
-- `verified_web_evidence` classification: final-answer evidence
-
-### Packaging Rule
-
-Runtime generated artifacts, traces, cache, metrics, and temporary files are excluded from this package.
-
-
-## v70.12 - Answer Sufficiency Gate
-
-This version adds an Answer Sufficiency Gate after generic web research.
-
-Flow:
+### Execution Priority
 
 ```text
-Generic web research
-→ AnswerSufficiencyEvaluator
-→ if sufficient: direct evidence answer
-→ if insufficient: answer page fetch
-→ if still insufficient: API documentation / tool generation
+local factual knowledge / verified RAG
+↓
+generic web search
+↓
+answer sufficiency evaluation
+↓
+fetch selected pages if promising but incomplete
+↓
+answer sufficiency re-evaluation
+↓
+direct evidence answer if sufficient
+↓
+API documentation / tool generation only if still insufficient
 ```
 
-Key changes:
+### Packaging
 
-- `answer_lookup` mode no longer searches API documentation first.
-- Generic web search queries avoid `API documentation / JSON / no api key` terms for ordinary answer requests.
-- `ANSWER_SUFFICIENCY_EVALUATED` trace event records coverage, score, selected evidence, and next action.
-- `API_DOCUMENTATION_FETCHED` is skipped when web evidence is already enough to answer.
-- `selected_evidence` is included in candidate extraction for direct evidence execution.
-
+Runtime-generated artifacts, traces, cache, metrics, and temporary files are excluded from the source ZIP.
