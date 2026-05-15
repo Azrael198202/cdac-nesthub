@@ -906,8 +906,31 @@ class ToolCallExecutor:
             "step_id": step_id,
             "result": {"required_terms": required_terms},
         })
-        item = self.knowledge.best_covered(query, required_terms=required_terms, min_score=1.0)
+        hint_item = self.knowledge.best_hint(query, required_terms=required_terms)
+        if hint_item:
+            await event_bus.emit(run_id, {
+                "type": "LOCAL_KNOWLEDGE_HINT_SELECTED",
+                "title": "Local knowledge hint selected",
+                "message": "A matching local memory was found, but it is hint-only and will not be used as final answer evidence.",
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": {
+                    "source": hint_item.get("source"),
+                    "classification": hint_item.get("classification"),
+                    "coverage": hint_item.get("coverage"),
+                },
+            })
+
+        item = self.knowledge.best_covered(query, required_terms=required_terms, min_score=1.0, final_answer_only=True)
         if not item:
+            await event_bus.emit(run_id, {
+                "type": "LOCAL_KNOWLEDGE_NO_FINAL_EVIDENCE",
+                "title": "No final-answer local knowledge",
+                "message": "Local knowledge did not contain eligible final-answer evidence; continuing to web/API/tool execution.",
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": {"hint_available": bool(hint_item)},
+            })
             return None
         result = {
             "status": "success",
@@ -917,6 +940,12 @@ class ToolCallExecutor:
                 "coverage": item.get("coverage"),
                 "known_parameters": tool_input.get("known") or (tool_input.get("parameters") or {}).get("known") or {},
                 "local_knowledge_used": True,
+                "local_knowledge_classification": item.get("classification"),
+                "answer_material_quality": {
+                    "passed": True,
+                    "reason": "eligible_final_answer_local_knowledge",
+                    "source": item.get("source"),
+                },
             },
             "source": "runtime_local_knowledge",
             "requires_human_confirmation": False,
@@ -927,6 +956,7 @@ class ToolCallExecutor:
                     "no_mock_data_declared": True,
                     "network_declared": False,
                     "live_verification_passed": False,
+                    "evidence_quality_passed": True,
                 },
             },
         }
