@@ -61,17 +61,33 @@ class RuntimeBootstrap:
         self._ensure_datasets()
 
     def _ensure_model_providers(self) -> None:
+        """Ensure provider config prefers the local base model qwen3:8b-think.
+
+        Important: older runtimes may already have runtime/configs/models/providers.yaml.
+        In that case we must merge/sync the base model settings instead of returning
+        early; otherwise existing projects keep using qwen3:4b or OpenAI-first routes.
+        """
         p = RUNTIME_CONFIGS / "models" / "providers.yaml"
+        desired = self._default_model_providers_config()
         if p.exists():
+            current = self.loader.load_yaml(p) or {}
+            merged = self._merge_model_provider_defaults(current, desired)
+            self.loader.save_yaml(p, merged)
             return
-        self.loader.save_yaml(p, {
+        self.loader.save_yaml(p, desired)
+
+    def _default_model_providers_config(self) -> dict:
+        return {
             "default_route": ["ollama", "openai"],
             "routes": {
-                "code_generation": ["openai", "vllm", "lmstudio", "ollama"],
-                "api_discovery_local": ["ollama"],
-                "api_discovery_external": ["openai"],
+                "input_parsing": ["ollama", "openai"],
+                "intent_recognition": ["ollama", "openai"],
+                "workflow_planning": ["ollama", "openai"],
                 "reasoning": ["ollama", "openai"],
-                "fallback": ["openai"]
+                "code_generation": ["ollama", "openai", "vllm", "lmstudio"],
+                "api_discovery_local": ["ollama"],
+                "api_discovery_external": ["ollama", "openai"],
+                "fallback": ["ollama", "openai"]
             },
             "providers": {
                 "ollama": {
@@ -101,12 +117,31 @@ class RuntimeBootstrap:
                     "endpoint_strategy": "auto",
                     "chat_endpoint": "/api/chat",
                     "generate_endpoint": "/api/generate",
-                    "model": "qwen3:4b",
-                    "fallback_models": ["qwen2.5:3b", "qwen3:1.7b", "llama3.2:3b"],
-                    "timeout_seconds": 120,
+                    "model": "qwen3:8b-think",
+                    "fallback_models": [
+                        "qwen3:8b-think",
+                        "qwen3:8b",
+                        "qwen3:4b",
+                        "qwen2.5:3b",
+                        "qwen3:1.7b",
+                        "llama3.2:8b",
+                        "llama3.2:3b"
+                    ],
+                    "model_tags": [
+                        "reasoning",
+                        "planning",
+                        "json_generation",
+                        "tool_selection",
+                        "workflow_planning"
+                    ],
+                    "timeout_seconds": 180,
+                    "max_prompt_tokens": 9000,
+                    "prompt_budget_safety_tokens": 1200,
+                    "max_schema_chars": 8000,
+                    "cache_enabled": True,
                     "auto_start": True,
                     "start_command": "{binary} serve",
-                    "ready_timeout_seconds": 30,
+                    "ready_timeout_seconds": 45,
                     "ready_poll_interval_seconds": 1,
                     "auto_pull_missing_model": True,
                     "pull_command": "{binary} pull {model}",
@@ -125,7 +160,8 @@ class RuntimeBootstrap:
                     "max_prompt_tokens": 12000,
                     "max_schema_chars": 12000,
                     "cache_enabled": True,
-                    "interactive_key_required": True
+                    "interactive_key_required": True,
+                    "role": "external_fallback"
                 },
                 "vllm": {
                     "enabled": False,
@@ -154,9 +190,47 @@ class RuntimeBootstrap:
             },
             "policy": {
                 "require_real_provider": True,
-                "allow_placeholder_result": False
+                "allow_placeholder_result": False,
+                "prefer_local_base_model": True,
+                "base_model_provider": "ollama",
+                "base_model": "qwen3:8b-think",
+                "external_provider_is_fallback": True
             }
-        })
+        }
+
+    def _merge_model_provider_defaults(self, current: dict, desired: dict) -> dict:
+        current = dict(current or {})
+        current["default_route"] = desired["default_route"]
+        routes = dict(current.get("routes") or {})
+        for key, value in desired.get("routes", {}).items():
+            routes[key] = value
+        current["routes"] = routes
+
+        providers = dict(current.get("providers") or {})
+        desired_providers = desired.get("providers", {})
+        for provider_id, desired_provider in desired_providers.items():
+            existing = dict(providers.get(provider_id) or {})
+            merged = {**desired_provider, **existing}
+            if provider_id == "ollama":
+                # Force the base model line requested for v70.3 while preserving
+                # user-specific endpoint/binary/install overrides.
+                for key in [
+                    "enabled", "type", "protocol", "model", "fallback_models",
+                    "model_tags", "timeout_seconds", "max_prompt_tokens",
+                    "prompt_budget_safety_tokens", "max_schema_chars",
+                    "cache_enabled", "auto_start", "auto_pull_missing_model",
+                    "pull_timeout_seconds"
+                ]:
+                    merged[key] = desired_provider[key]
+                for key in ["base_url", "binary", "chat_endpoint", "generate_endpoint", "endpoint_strategy", "start_command", "pull_command"]:
+                    merged.setdefault(key, desired_provider.get(key))
+            providers[provider_id] = merged
+        current["providers"] = providers
+
+        policy = dict(current.get("policy") or {})
+        policy.update(desired.get("policy", {}))
+        current["policy"] = policy
+        return current
 
     def _ensure_workflow(self) -> None:
         p = RUNTIME_CONFIGS / "workflows" / "base_orchestration.yaml"

@@ -629,14 +629,26 @@ class WorkflowRuntime:
                     return
 
                 if continuation_action.get("kind") == "optional_credential_choice":
+                    request = continuation_action.get("request") or {}
                     await self._emit(run_id, {
-                        "type": "OPTIONAL_CREDENTIAL_CHOICE",
-                        "title": "Optional API Key Available",
+                        "type": "INTERACTION_REQUEST",
+                        "interaction_type": "optional_credential_choice",
+                        "workflow_state": "waiting_optional_credential_choice",
+                        "title": request.get("title") or "Optional API Key Available",
                         "node_id": node_id,
                         "attempt_number": attempt_number,
-                        "message": continuation_action.get("request", {}).get("message"),
-                        "request": continuation_action.get("request"),
+                        "message": request.get("message") or "A credential-protected provider may improve the result. You can provide an API key or continue without it.",
+                        "request": request,
                         "result": result,
+                        "run_id": run_id,
+                        "progress": done,
+                    })
+                    await self._emit(run_id, {
+                        "type": "RUN_PAUSED",
+                        "workflow_state": "waiting_optional_credential_choice",
+                        "title": "Workflow paused for optional API key choice",
+                        "node_id": node_id,
+                        "message": "Please choose whether to continue without an API key or provide one.",
                         "run_id": run_id,
                         "progress": done,
                     })

@@ -1184,6 +1184,113 @@ function showStickyHumanInputRequired(ev){
   stickyInteraction.scrollIntoView({block:"end", behavior:"smooth"});
 }
 
+
+function showStickyOptionalCredentialChoice(ev){
+  const nodeId = nodeIdFromEvent(ev) || "execution";
+  const card = ensureNodeCard(nodeId, ev);
+  const key = card.dataset.visualKey;
+  const request = ev.request || {};
+  const secretFields = Array.isArray(request.secret_fields) && request.secret_fields.length
+    ? request.secret_fields
+    : [{name:"credential", label:"API Key / Credential", placeholder:"Paste API key here", required:false}];
+
+  pausedNodeKeys.add(key);
+  card.classList.add("paused");
+  const pill = card.querySelector(".status-pill");
+  pill.className = "status-pill paused";
+  pill.textContent = "waiting";
+
+  const body = card.querySelector(".workflow-body");
+  const placeholder = document.createElement("div");
+  placeholder.className = "step waiting";
+  placeholder.innerHTML = `
+    <div class="step-title">
+      <span class="step-type">OPTIONAL_CREDENTIAL_CHOICE</span>
+      <span>Waiting for optional API key choice</span>
+    </div>
+    <div class="interaction-placeholder">
+      Optional API key choice is pinned at the bottom. Continue without a key or provide one.
+    </div>
+  `;
+  body.appendChild(placeholder);
+
+  workflowPaused = true;
+  activeInteraction = {type:"optional_credential", nodeId, key, event:ev};
+  document.body.classList.add("has-sticky-interaction");
+  setBusy(false);
+
+  const secretInputs = secretFields.map((field, idx) => {
+    const name = field.name || field.field_name || `credential_${idx}`;
+    const label = field.label || toHumanLabel(name);
+    const placeholder = field.placeholder || "Paste API key here";
+    return `
+      <div class="human-input-field optional-secret-field" style="display:none">
+        <label for="optionalCredential_${idx}">${esc(label)}</label>
+        <input id="optionalCredential_${idx}" data-field="${esc(name)}" type="password" placeholder="${esc(placeholder)}" />
+        <div class="hint">This value will be treated as a secret and should not be shown in logs.</div>
+      </div>
+    `;
+  }).join("");
+
+  stickyInteraction.innerHTML = `
+    <div class="sticky-title">
+      <div><span class="spinner"></span>${esc(request.title || ev.title || "Optional API Key Available")}</div>
+      <div class="badge">optional</div>
+    </div>
+    <div class="sticky-body">
+      <div>${esc(request.message || ev.message || "A credential-protected provider may improve the result. You can provide an API key or continue without it.")}</div>
+      <div class="human-input-grid">${secretInputs}</div>
+      <details>
+        <summary style="cursor:pointer;color:#fde68a;margin-top:8px">Request JSON</summary>
+        <div class="sticky-json">${esc(JSON.stringify(request, null, 2))}</div>
+      </details>
+      <div class="sticky-actions">
+        <button id="optionalContinueWithoutKey" class="approve" type="button">Continue without API key</button>
+        <button id="optionalShowCredential" type="button">Provide API key</button>
+        <button id="optionalSubmitCredential" class="approve" type="button" style="display:none">Save API key & Continue</button>
+      </div>
+    </div>
+  `;
+  stickyInteraction.classList.add("active");
+
+  document.getElementById("optionalContinueWithoutKey").onclick = async () => {
+    stickyInteraction.querySelectorAll("button,input,select,textarea").forEach(b => b.disabled = true);
+    markCurrentInteractionResolved("Continuing without API key...");
+    await resume("continue_without_key", {action:"continue_without_key", choice:"continue_without_key", interaction_request:request}, "continue without optional api key");
+  };
+
+  document.getElementById("optionalShowCredential").onclick = () => {
+    stickyInteraction.querySelectorAll(".optional-secret-field").forEach(el => el.style.display = "block");
+    document.getElementById("optionalShowCredential").style.display = "none";
+    document.getElementById("optionalSubmitCredential").style.display = "inline-block";
+    const first = stickyInteraction.querySelector(".optional-secret-field input");
+    if(first) first.focus();
+  };
+
+  document.getElementById("optionalSubmitCredential").onclick = async () => {
+    const payload = {action:"provide_credential", choice:"provide_credential", interaction_request:request};
+    let firstValue = "";
+    secretFields.forEach((field, idx) => {
+      const name = field.name || field.field_name || `credential_${idx}`;
+      const el = document.getElementById(`optionalCredential_${idx}`);
+      const value = el ? String(el.value || "").trim() : "";
+      if(!firstValue && value) firstValue = value;
+      payload[name] = value;
+    });
+    payload.credential = firstValue;
+    payload.value = firstValue;
+    if(!firstValue){
+      alert("Please enter the API key or choose Continue without API key.");
+      return;
+    }
+    stickyInteraction.querySelectorAll("button,input,select,textarea").forEach(b => b.disabled = true);
+    markCurrentInteractionResolved("API key saved. Continuing workflow...");
+    await resume("provide_credential", payload, "optional credential provided");
+  };
+
+  stickyInteraction.scrollIntoView({block:"end", behavior:"smooth"});
+}
+
 function showStickySecretRequired(ev){
   const nodeId = nodeIdFromEvent(ev) || "runtime";
   const card = ensureNodeCard(nodeId, ev);
@@ -1326,6 +1433,9 @@ function handleEvent(ev, fromBuffer=false){
   if(ev.type === "RUN_PAUSED"){
     addStep({...ev, node_id:nodeIdFromEvent(ev) || "runtime"});
     setBusy(false);
+    if(ev.workflow_state === "waiting_optional_credential_choice" || activeInteraction){
+      return;
+    }
     if(source) source.close();
     return;
   }
@@ -1341,6 +1451,16 @@ function handleEvent(ev, fromBuffer=false){
   if(ev.type === "NODE_RETRY_STARTED"){
     addStep(ev);
     setBusy(true, "Retrying...");
+    return;
+  }
+
+  if(ev.type === "INTERACTION_REQUEST" && ev.interaction_type === "optional_credential_choice"){
+    showStickyOptionalCredentialChoice(ev);
+    return;
+  }
+
+  if(ev.type === "OPTIONAL_CREDENTIAL_CHOICE"){
+    showStickyOptionalCredentialChoice(ev);
     return;
   }
 

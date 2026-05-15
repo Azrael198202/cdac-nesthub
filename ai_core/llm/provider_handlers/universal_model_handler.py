@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -172,10 +173,148 @@ class UniversalModelProviderHandler:
             self.cache.set(cache_key, {"content": content, "usage": usage, "latency_seconds": elapsed})
         return parse_json_content(content)
 
+    async def _ensure_ollama_model_ready(self, run_id, node_id, provider_name, provider, base_url: str, primary_model: str) -> str:
+        """Ensure an Ollama model is available using runtime config.
+
+        This is protocol-level lifecycle handling for ollama_chat/ollama_generate.
+        It respects auto_start, auto_pull_missing_model, fallback_models, binary,
+        start_command, pull_command, and timeout settings from providers.yaml.
+        """
+        tags = await self._ollama_tags(base_url)
+        if tags is None and provider.get("auto_start", True):
+            await self._start_ollama_service(run_id, node_id, provider_name, provider)
+            timeout = int(provider.get("ready_timeout_seconds", 45))
+            interval = float(provider.get("ready_poll_interval_seconds", 1.0))
+            attempts = max(1, int(timeout / interval))
+            for _ in range(attempts):
+                await asyncio.sleep(interval)
+                tags = await self._ollama_tags(base_url)
+                if tags is not None:
+                    break
+        if tags is None:
+            raise ProviderUnavailableError(f"{provider_name}: Ollama service is not reachable at {base_url}")
+
+        candidates = [primary_model] + [m for m in provider.get("fallback_models", []) if m and m != primary_model]
+        for idx, model in enumerate(candidates):
+            if self._ollama_model_exists(tags, model):
+                await event_bus.emit(run_id, {
+                    "type": "LLM_MODEL_READY",
+                    "title": "Ollama model ready",
+                    "message": model,
+                    "node_id": node_id,
+                    "provider": provider_name,
+                    "model": model,
+                })
+                return model
+            if not provider.get("auto_pull_missing_model", True):
+                continue
+            await event_bus.emit(run_id, {
+                "type": "LLM_MODEL_MISSING" if idx == 0 else "LLM_MODEL_FALLBACK",
+                "title": "Ollama model missing" if idx == 0 else "Trying fallback model",
+                "message": f"Model '{model}' was not found. Pulling it now.",
+                "node_id": node_id,
+                "provider": provider_name,
+                "model": model,
+            })
+            ok = await self._pull_ollama_model(run_id, node_id, provider_name, provider, model)
+            tags = await self._ollama_tags(base_url) or tags
+            if ok and self._ollama_model_exists(tags, model):
+                return model
+        raise ProviderUnavailableError(
+            f"{provider_name}: no configured Ollama model is available. Tried: {', '.join(candidates)}"
+        )
+
+    async def _ollama_tags(self, base_url: str) -> dict[str, Any] | None:
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                response = await client.get(base_url.rstrip("/") + "/api/tags")
+                response.raise_for_status()
+                return response.json()
+        except Exception:
+            return None
+
+    def _ollama_model_exists(self, tags: dict[str, Any], model: str) -> bool:
+        requested = model.strip()
+        for item in tags.get("models", []):
+            name = str(item.get("name") or item.get("model") or "").strip()
+            if name == requested:
+                return True
+        return False
+
+    def _format_provider_command(self, provider: dict[str, Any], template: str, **kwargs: Any) -> str:
+        command = template.replace("{binary}", provider.get("binary", "ollama"))
+        for key, value in kwargs.items():
+            command = command.replace("{" + key + "}", str(value))
+        return command
+
+    async def _start_ollama_service(self, run_id, node_id, provider_name, provider) -> None:
+        command = self._format_provider_command(provider, provider.get("start_command", "{binary} serve"))
+        await event_bus.emit(run_id, {
+            "type": "LLM_PROVIDER_AUTOSTART",
+            "title": "Starting provider service",
+            "message": command,
+            "node_id": node_id,
+            "provider": provider_name,
+        })
+        await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+
+    async def _pull_ollama_model(self, run_id, node_id, provider_name, provider, model: str) -> bool:
+        command = self._format_provider_command(provider, provider.get("pull_command", "{binary} pull {model}"), model=model)
+        timeout = int(provider.get("pull_timeout_seconds", 3600))
+        await event_bus.emit(run_id, {
+            "type": "LLM_MODEL_PULL_START",
+            "title": "Pulling Ollama model",
+            "message": command,
+            "node_id": node_id,
+            "provider": provider_name,
+            "model": model,
+        })
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            if proc.returncode == 0:
+                await event_bus.emit(run_id, {
+                    "type": "LLM_MODEL_PULL_DONE",
+                    "title": "Ollama model pull completed",
+                    "message": model,
+                    "node_id": node_id,
+                    "provider": provider_name,
+                    "model": model,
+                })
+                return True
+            await event_bus.emit(run_id, {
+                "type": "LLM_MODEL_PULL_FAILED",
+                "title": "Ollama model pull failed",
+                "message": (stderr or stdout or b"").decode(errors="ignore")[-2000:],
+                "node_id": node_id,
+                "provider": provider_name,
+                "model": model,
+            })
+            return False
+        except Exception as exc:
+            await event_bus.emit(run_id, {
+                "type": "LLM_MODEL_PULL_FAILED",
+                "title": "Ollama model pull failed",
+                "message": str(exc),
+                "node_id": node_id,
+                "provider": provider_name,
+                "model": model,
+            })
+            return False
+
     async def _call_ollama(self, run_id, node_id, provider_name, provider, prompt, rendered_user_prompt, schema, protocol):
         base_url = provider.get("base_url", "http://127.0.0.1:11434").rstrip("/")
-        model = provider.get("model")
+        model = provider.get("model") or "qwen3:8b-think"
         timeout = float(provider.get("timeout_seconds", 90))
+        model = await self._ensure_ollama_model_ready(run_id, node_id, provider_name, provider, base_url, model)
         system_prompt = build_system_prompt(prompt, schema, max_schema_chars=int(provider.get("max_schema_chars", 10000)))
         if protocol == "ollama_generate":
             endpoint = provider.get("generate_endpoint", "/api/generate")
