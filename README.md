@@ -115,13 +115,13 @@ status: blocked
 executed_steps: 0
 blocked step: collect_missing_info
 reason: execution_ready is false
-missing_required: duration, specific_interests
+missing_required: field_alpha, field_beta
 ```
 
 ### Fix Implemented
 
 1. Added a domain-neutral execution-state repair rule.
-2. For information-only/read-only steps, generic refinement fields such as duration, scope, constraints, interests, preferences, style, detail level, and similar suffix-based fields are moved from `missing_required` to `optional`.
+2. For read-only steps, missing refinement fields are moved from `missing_required` to `optional` by structural policy, not by business-specific names.
 3. If no truly blocking field remains, the step is marked `execution_ready=true`.
 4. Non-actionable `human_interaction` metadata is changed to `required=false`.
 5. Irreversible/action steps still require confirmation or required inputs when structurally necessary.
@@ -143,18 +143,57 @@ PYTHONPATH=. pytest -q
 ### User Test Question
 
 ```text
-介绍福冈景点，并整理一个一天观光路线。
+请介绍某个地点，并整理一个一天内的访问计划。
 ```
 
 Expected behavior after this fix:
 
 ```text
-1. Runtime must not stop at collect_missing_info only because duration or interests are missing.
-2. Duration/interests are treated as optional refinements unless the user explicitly requires exact constraints.
+1. Runtime must not stop at collect_missing_info only because refinement fields are missing.
+2. Refinement fields are treated as optional unless the step performs an irreversible action or explicitly requires confirmation.
 3. Runtime should continue to retrieval/planning/synthesis steps.
-4. Final answer should state assumed defaults, for example one-day route and general interests, instead of blocking.
+4. Final answer should state any assumed defaults instead of blocking.
 ```
 
 ## Next Target: V2.2
 
 V2.2 should connect these contracts into the actual end-to-end `WorkflowRuntime` path, so normal user requests automatically pass through decomposition, parallel retrieval, evidence verification, route/sequence optimization, and stable synthesis.
+
+
+## V2.1.2 Update - Evidence Alignment and Semantic Boundary Hardening
+
+### Goal
+
+Prevent low-relevance pages from being selected only because they contain a runtime variable and many numbers. Keep ai_core domain-neutral by removing hard-coded business/task vocabulary from repair and provenance paths.
+
+### Implemented
+
+1. `AnswerSufficiencyEvaluator` now requires lexical alignment between the original request/objective and evidence text. Numeric density alone no longer proves sufficiency.
+2. Short opaque values that do not appear in the original request/objective are ignored as probable extraction artifacts during sufficiency checks.
+3. `EvidenceDirectAnswerBuilder` now ranks candidates by runtime-variable coverage plus request/evidence alignment, preventing unrelated evidence from winning only by coverage.
+4. `StructuredFactNormalizer` converts extraction-debug material into sanitized user material before fact extraction and does not expose debug labels as facts.
+5. `ExecutionStateRepair` no longer hard-codes concrete refinement field names in ai_core. Read-only continuation is handled structurally.
+6. `ExecutionProvenanceRecorder` now records elapsed-time metadata with a neutral key that cannot be confused with user request variables.
+7. Runtime generated content remains cleared; only `.gitkeep` is kept.
+
+### Verification
+
+```text
+PYTHONPATH=. pytest -q
+22 passed
+```
+
+### User Test Question
+
+```text
+请介绍某个地点，并整理一个一天内的访问计划。
+```
+
+Expected behavior:
+
+```text
+1. The system should not use unrelated pages merely because the location name appears.
+2. Evidence must align with the request terms and requested output structure.
+3. If the top candidate is off-topic, it should be rejected or down-ranked.
+4. If evidence is insufficient, runtime should retry retrieval or continue discovery instead of producing a false negative answer.
+```

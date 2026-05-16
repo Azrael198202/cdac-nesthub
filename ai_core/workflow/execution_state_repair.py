@@ -18,58 +18,14 @@ class ExecutionStateRepair:
     rules and runtime-configured refinement-field policies.
     """
 
-    DEFAULT_OPTIONAL_REFINEMENT_FIELDS = {
-        "time_range",
-        "output_format",
-        "formatting_style",
-        "output_language",
-        "language",
-        "detail_preferences",
-        "presentation_style",
-        "sorting_preference",
-        "verbosity",
-        "tone",
-        "duration",
-        "time_budget",
-        "scope",
-        "constraints",
-        "interests",
-        "specific_interests",
-        "preference",
-        "preferences",
-    }
+    # Default policies are intentionally structural rather than domain or
+    # task specific. Runtime-generated configuration may add concrete field
+    # names, but ai_core must not hard-code business vocabulary.
+    DEFAULT_OPTIONAL_REFINEMENT_FIELDS: set[str] = set()
 
-    DEFAULT_READ_ONLY_ACTION_HINTS = {
-        "query",
-        "search",
-        "retrieve",
-        "read",
-        "lookup",
-        "analyze",
-        "summarize",
-        "inspect",
-        "check",
-        "compare",
-        "plan",
-        "synthesize",
-        "compose",
-        "draft",
-        "recommend",
-        "organize",
-    }
+    DEFAULT_READ_ONLY_ACTION_HINTS: set[str] = set()
 
-    DEFAULT_IRREVERSIBLE_ACTION_HINTS = {
-        "create",
-        "update",
-        "delete",
-        "remove",
-        "send",
-        "submit",
-        "commit",
-        "execute",
-        "install",
-        "download",
-    }
+    DEFAULT_IRREVERSIBLE_ACTION_HINTS: set[str] = set()
 
     def __init__(self, config_path: Path | None = None) -> None:
         self.config_path = config_path or (RUNTIME_DIR / "configs" / "orchestration" / "execution_state_repair.yaml")
@@ -109,7 +65,10 @@ class ExecutionStateRepair:
             # generic refinement-field names, not on task/business vocabulary.
             if self._is_information_only_step(step):
                 for name in missing_names:
-                    if name not in optional_like and self._is_non_blocking_information_field(name):
+                    # For read-only steps, missing refinements should not block
+                    # execution. The runtime may continue with neutral
+                    # assumptions and record them as optional inputs.
+                    if name not in optional_like:
                         optional_like.append(name)
 
             genuinely_missing = [name for name in missing_names if name not in optional_like]
@@ -137,10 +96,8 @@ class ExecutionStateRepair:
                 step["execution_ready"] = True
                 human_interaction = step.get("human_interaction")
                 if isinstance(human_interaction, dict) and human_interaction.get("required"):
-                    fields = human_interaction.get("fields")
-                    if self._human_interaction_only_optional(fields):
-                        step["human_interaction"] = {"required": False, "type": "none", "fields": {}}
-                        repair_notes["human_interaction_removed"].append({"step_id": step_id})
+                    step["human_interaction"] = {"required": False, "type": "none", "fields": {}}
+                    repair_notes["human_interaction_removed"].append({"step_id": step_id})
 
             if self._requires_confirmation_by_structure(step):
                 step["requires_human_confirmation"] = True
@@ -185,15 +142,14 @@ class ExecutionStateRepair:
         normalized = field_name.strip().lower()
         if normalized in self.optional_refinement_fields:
             return True
-        return (
-            normalized.endswith("_preference")
-            or normalized.endswith("_preferences")
-            or normalized.endswith("_style")
-            or normalized.endswith("_interest")
-            or normalized.endswith("_interests")
-            or normalized.endswith("_scope")
-            or normalized.endswith("_constraints")
-        )
+        tokens = self._tokens(normalized.replace("_", " "))
+        if not tokens:
+            return False
+        # Structural optionality: compound names ending in broad modifier nouns
+        # are refinements, not execution blockers. Concrete nouns are supplied
+        # by runtime config, not by ai_core.
+        modifier_suffixes = {"preference", "preferences", "style", "format", "scope", "constraint", "constraints", "detail", "details", "level"}
+        return len(tokens) >= 2 and bool(tokens.intersection(modifier_suffixes))
 
     def _is_information_only_step(self, step: dict[str, Any]) -> bool:
         text = " ".join(
@@ -213,13 +169,9 @@ class ExecutionStateRepair:
         normalized = field_name.strip().lower()
         if normalized in self.optional_refinement_fields:
             return True
-        generic_parts = {
-            "preference", "preferences", "interest", "interests",
-            "style", "format", "scope", "constraint", "constraints",
-            "duration", "range", "level", "detail", "details",
-        }
         tokens = self._tokens(normalized.replace("_", " "))
-        return bool(tokens.intersection(generic_parts))
+        generic_parts = {"preference", "preferences", "style", "format", "scope", "constraint", "constraints", "level", "detail", "details"}
+        return len(tokens) >= 2 and bool(tokens.intersection(generic_parts))
 
     def _can_mark_ready(self, step: dict[str, Any]) -> bool:
         if bool(step.get("requires_human_confirmation")):

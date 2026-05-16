@@ -10,14 +10,14 @@ def test_information_request_with_refinement_fields_does_not_block_execution():
                 "objective": "Gather required details before planning",
                 "parameters": {
                     "known": {},
-                    "missing_required": ["duration", "specific_interests"],
+                    "missing_required": ["field_alpha", "field_beta"],
                     "optional": {},
                 },
                 "execution_ready": False,
                 "human_interaction": {
                     "required": True,
                     "prompt": "Please provide refinements.",
-                    "fields": ["duration", "specific_interests"],
+                    "fields": ["field_alpha", "field_beta"],
                 },
                 "next_action": "generate_candidate_list",
                 "requires_human_confirmation": False,
@@ -32,6 +32,6 @@ def test_information_request_with_refinement_fields_does_not_block_execution():
 
     assert step["execution_ready"] is True
     assert step["parameters"]["missing_required"] == []
-    assert set(step["parameters"]["optional"].keys()) == {"duration", "specific_interests"}
+    assert set(step["parameters"]["optional"].keys()) == {"field_alpha", "field_beta"}
     assert step["human_interaction"]["required"] is False
     assert repaired["blocking_missing_information"] == {}
