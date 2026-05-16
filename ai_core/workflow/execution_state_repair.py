@@ -29,6 +29,14 @@ class ExecutionStateRepair:
         "sorting_preference",
         "verbosity",
         "tone",
+        "duration",
+        "time_budget",
+        "scope",
+        "constraints",
+        "interests",
+        "specific_interests",
+        "preference",
+        "preferences",
     }
 
     DEFAULT_READ_ONLY_ACTION_HINTS = {
@@ -42,6 +50,12 @@ class ExecutionStateRepair:
         "inspect",
         "check",
         "compare",
+        "plan",
+        "synthesize",
+        "compose",
+        "draft",
+        "recommend",
+        "organize",
     }
 
     DEFAULT_IRREVERSIBLE_ACTION_HINTS = {
@@ -87,6 +101,17 @@ class ExecutionStateRepair:
 
             missing_names = self._missing_names(missing_required)
             optional_like = [name for name in missing_names if self._is_optional_refinement(name)]
+
+            # For read-only/informational steps, unresolved preference-like fields
+            # must not stop execution. The runtime can proceed with neutral
+            # assumptions and expose those assumptions in trace/final synthesis.
+            # This rule is domain-neutral: it relies on structural action hints and
+            # generic refinement-field names, not on task/business vocabulary.
+            if self._is_information_only_step(step):
+                for name in missing_names:
+                    if name not in optional_like and self._is_non_blocking_information_field(name):
+                        optional_like.append(name)
+
             genuinely_missing = [name for name in missing_names if name not in optional_like]
 
             if optional_like:
@@ -160,7 +185,41 @@ class ExecutionStateRepair:
         normalized = field_name.strip().lower()
         if normalized in self.optional_refinement_fields:
             return True
-        return normalized.endswith("_preference") or normalized.endswith("_preferences") or normalized.endswith("_style")
+        return (
+            normalized.endswith("_preference")
+            or normalized.endswith("_preferences")
+            or normalized.endswith("_style")
+            or normalized.endswith("_interest")
+            or normalized.endswith("_interests")
+            or normalized.endswith("_scope")
+            or normalized.endswith("_constraints")
+        )
+
+    def _is_information_only_step(self, step: dict[str, Any]) -> bool:
+        text = " ".join(
+            str(step.get(k, ""))
+            for k in ["task_type", "action", "step_type", "next_action", "objective"]
+        ).lower()
+        tokens = self._tokens(text)
+        has_read_only = bool(tokens.intersection(self.read_only_action_hints))
+        has_irreversible = bool(tokens.intersection(self.irreversible_action_hints))
+        strategies = step.get("execution_strategy") if isinstance(step.get("execution_strategy"), list) else []
+        strategy_text = " ".join(str(x) for x in strategies).lower()
+        strategy_tokens = self._tokens(strategy_text)
+        has_read_strategy = bool(strategy_tokens.intersection({"local", "knowledge", "evidence", "research", "retrieval", "web"}))
+        return (has_read_only or has_read_strategy) and not has_irreversible
+
+    def _is_non_blocking_information_field(self, field_name: str) -> bool:
+        normalized = field_name.strip().lower()
+        if normalized in self.optional_refinement_fields:
+            return True
+        generic_parts = {
+            "preference", "preferences", "interest", "interests",
+            "style", "format", "scope", "constraint", "constraints",
+            "duration", "range", "level", "detail", "details",
+        }
+        tokens = self._tokens(normalized.replace("_", " "))
+        return bool(tokens.intersection(generic_parts))
 
     def _can_mark_ready(self, step: dict[str, Any]) -> bool:
         if bool(step.get("requires_human_confirmation")):

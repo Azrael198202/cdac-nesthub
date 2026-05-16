@@ -104,6 +104,57 @@ Expected runtime behavior:
 3. No domain-specific schema fields are required by core code.
 ```
 
+## V2.1.1 Hotfix - Non-blocking Refinement Repair
+
+### Problem Found
+
+A generated workflow could stop before tool execution when the planner classified refinement information as mandatory human input. Example output:
+
+```text
+status: blocked
+executed_steps: 0
+blocked step: collect_missing_info
+reason: execution_ready is false
+missing_required: duration, specific_interests
+```
+
+### Fix Implemented
+
+1. Added a domain-neutral execution-state repair rule.
+2. For information-only/read-only steps, generic refinement fields such as duration, scope, constraints, interests, preferences, style, detail level, and similar suffix-based fields are moved from `missing_required` to `optional`.
+3. If no truly blocking field remains, the step is marked `execution_ready=true`.
+4. Non-actionable `human_interaction` metadata is changed to `required=false`.
+5. Irreversible/action steps still require confirmation or required inputs when structurally necessary.
+
+### Updated Source
+
+```text
+ai_core/workflow/execution_state_repair.py
+tests/runtime/test_v21_1_non_blocking_information_repair.py
+```
+
+### Verification
+
+```text
+PYTHONPATH=. pytest -q
+22 passed
+```
+
+### User Test Question
+
+```text
+介绍福冈景点，并整理一个一天观光路线。
+```
+
+Expected behavior after this fix:
+
+```text
+1. Runtime must not stop at collect_missing_info only because duration or interests are missing.
+2. Duration/interests are treated as optional refinements unless the user explicitly requires exact constraints.
+3. Runtime should continue to retrieval/planning/synthesis steps.
+4. Final answer should state assumed defaults, for example one-day route and general interests, instead of blocking.
+```
+
 ## Next Target: V2.2
 
 V2.2 should connect these contracts into the actual end-to-end `WorkflowRuntime` path, so normal user requests automatically pass through decomposition, parallel retrieval, evidence verification, route/sequence optimization, and stable synthesis.
