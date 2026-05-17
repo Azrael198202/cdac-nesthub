@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from ai_core.utils.safe_json import make_json_safe
+from ai_core.utils.semantic_surface import RuntimeSemanticSurfaceNormalizer
 
 
 class EvidenceDirectAnswerBuilder:
@@ -17,6 +18,9 @@ class EvidenceDirectAnswerBuilder:
 
     MAX_TEXT_CHARS = 6000
     MAX_FINAL_CHARS = 1800
+
+    def __init__(self) -> None:
+        self.semantic_surface = RuntimeSemanticSurfaceNormalizer()
 
     def build(
         self,
@@ -117,9 +121,13 @@ class EvidenceDirectAnswerBuilder:
                     continue
                 if isinstance(value, (str, int, float, bool)):
                     value_text = str(value).strip()
-                    if source_text and self._normalize_text(value_text) not in self._normalize_text(source_text) and self._looks_like_opaque_runtime_artifact(value_text):
+                    surface_value = self.semantic_surface.canonical_or_surface(value_text, source_text)
+                    if surface_value is None:
                         continue
-                    known[key] = value
+                    surface_text = str(surface_value).strip()
+                    if source_text and self._normalize_text(surface_text) not in self._normalize_text(source_text) and self._looks_like_opaque_runtime_artifact(surface_text):
+                        continue
+                    known[key] = surface_value
         return known
 
     def _request_text(self, payload: dict[str, Any], capability: str) -> str:

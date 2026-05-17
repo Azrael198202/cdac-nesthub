@@ -5,6 +5,8 @@ import re
 import unicodedata
 from typing import Any
 
+from ai_core.utils.semantic_surface import RuntimeSemanticSurfaceNormalizer
+
 
 class RuntimeSemanticSignalEvaluator:
     """Language-neutral semantic signal scorer for answer evidence.
@@ -127,6 +129,7 @@ class AnswerSufficiencyEvaluator:
 
     def __init__(self, semantic_evaluator: RuntimeSemanticSignalEvaluator | None = None) -> None:
         self.semantic = semantic_evaluator or RuntimeSemanticSignalEvaluator()
+        self.semantic_surface = RuntimeSemanticSurfaceNormalizer()
 
     def evaluate(
         self,
@@ -235,12 +238,16 @@ class AnswerSufficiencyEvaluator:
                 continue
             if isinstance(value, (str, int, float, bool)):
                 value_text = str(value).strip()
+                surface_value = self.semantic_surface.canonical_or_surface(value_text, source_text)
+                if surface_value is None:
+                    continue
+                surface_text = str(surface_value).strip()
                 # Values not present in the original request/objective may be
                 # artifacts copied from retrieved pages. Keep long natural text
                 # only when it looks intentional; reject short opaque tokens.
-                if source_norm and self._normalize(value_text) not in source_norm and self._looks_like_opaque_runtime_artifact(value_text):
+                if source_norm and self._normalize(surface_text) not in source_norm and self._looks_like_opaque_runtime_artifact(surface_text):
                     continue
-                output[str(key)] = value
+                output[str(key)] = surface_value
         return output
 
     def _looks_like_opaque_runtime_artifact(self, value: str) -> bool:
@@ -306,6 +313,9 @@ class AnswerSufficiencyEvaluator:
         return {"passed": not missing and not partial, "coverage_ratio": round(ratio, 3), "matched": matched, "missing": missing, "partial": partial}
 
     def _variants(self, value: Any) -> list[str]:
+        temporal_aliases = self.semantic_surface.semantic_aliases(value)
+        if temporal_aliases and self.semantic_surface.is_compact_artifact(value):
+            return [self._normalize(v) for v in temporal_aliases if v]
         raw = self._normalize(str(value).strip())
         variants = [raw]
         if "," in raw:
@@ -315,14 +325,9 @@ class AnswerSufficiencyEvaluator:
             try:
                 mi = int(m)
                 di = int(d)
-                month_names = {1: "jan", 2: "feb", 3: "mar", 4: "apr", 5: "may", 6: "jun", 7: "jul", 8: "aug", 9: "sep", 10: "oct", 11: "nov", 12: "dec"}
-                month_full = {1: "january", 2: "february", 3: "march", 4: "april", 5: "may", 6: "june", 7: "july", 8: "august", 9: "september", 10: "october", 11: "november", 12: "december"}
-                mon = month_names.get(mi, "")
-                full = month_full.get(mi, "")
                 variants.extend([
-                    f"{y}/{m}/{d}", f"{y}.{m}.{d}", f"{m}/{d}", f"{m}-{d}", f"{mi}/{di}", f"{mi}-{di}",
-                    f"{full} {di}" if full else "", f"{mon} {di}" if mon else "",
-                    f"{di} {full}" if full else "", f"{di} {mon}" if mon else "",
+                    f"{y}/{m}/{d}", f"{y}.{m}.{d}", f"{y}/{mi}/{di}",
+                    f"{m}/{d}", f"{m}-{d}", f"{mi}/{di}", f"{mi}-{di}",
                     f"{di}",
                 ])
             except Exception:
@@ -335,10 +340,7 @@ class AnswerSufficiencyEvaluator:
         if len(raw) >= 10 and raw[4:5] == "-" and raw[7:8] == "-":
             y, m = raw[:4], raw[5:7]
             try:
-                mi = int(m)
-                month_full = {1: "january", 2: "february", 3: "march", 4: "april", 5: "may", 6: "june", 7: "july", 8: "august", 9: "september", 10: "october", 11: "november", 12: "december"}
-                full = month_full.get(mi, "")
-                variants.extend([f"{full} {y}" if full else "", f"{y}-{m}", f"{y}/{m}", full])
+                variants.extend([f"{y}-{m}", f"{y}/{m}"])
             except Exception:
                 pass
         return [v for v in dict.fromkeys(variants) if v]

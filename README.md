@@ -197,3 +197,83 @@ Expected behavior:
 3. If the top candidate is off-topic, it should be rejected or down-ranked.
 4. If evidence is insufficient, runtime should retry retrieval or continue discovery instead of producing a false negative answer.
 ```
+
+## V2.1.3 Update - Compact Runtime Value Surface Normalization
+
+### Goal
+
+Prevent compact machine-format values from being used as direct semantic evidence terms. Runtime may still receive compact temporal values, but ai_core must convert them to user-surface terms or drop them from evidence matching when the user did not provide a matching surface form.
+
+### Implemented
+
+1. Added `RuntimeTemporalSurfaceNormalizer`, a domain-neutral utility for compact temporal value handling.
+2. Compact temporal tokens are no longer matched directly against evidence text.
+3. When the original request contains a matching surface form, the compact value is converted to that surface form before known-parameter coverage and direct-answer synthesis.
+4. When the original request does not contain a matching surface form, the compact value is ignored as unsafe for semantic evidence coverage.
+5. Evidence aliases use non-compact surface variants only.
+6. Updated sufficiency evaluation, direct evidence answer building, evidence noise reduction, and fact graph coverage to share this normalization rule.
+7. Runtime generated content remains cleared; only `.gitkeep` is kept.
+
+### Verification
+
+```text
+PYTHONPATH=. pytest -q
+29 passed
+```
+
+### User Test Question
+
+```text
+Please prepare a 3-day plan for AlphaPlace with ordered stops.
+```
+
+Expected behavior:
+
+```text
+1. The runtime must not treat the compact value as a user-facing semantic term.
+2. Evidence containing only the compact token should not satisfy the period requirement.
+3. Evidence containing the request-surface form should satisfy the period requirement.
+4. Final data should expose the surface value rather than the compact token.
+```
+
+## V2.4 Update - Runtime-Generated Semantic Surface Packs
+
+### Goal
+
+Move fixed semantic surface knowledge out of `ai_core`. Core should not keep built-in unit or calendar vocabularies such as fixed temporal units. Instead, runtime analyzes the request and generated values, then creates semantic surface packs under `runtime/generated/semantic_packs/` when such handling is needed.
+
+### Implemented
+
+1. Removed `ai_core/utils/temporal_surface.py`.
+2. Added `ai_core/utils/semantic_surface.py` as a generic compact-artifact normalizer.
+3. Core no longer maps compact values through built-in unit-name lists.
+4. Compact artifacts such as `P3D` / `P5D` are never used directly for evidence matching.
+5. If the original request contains a matching surface span such as `3-day` / `5-day`, runtime uses that request-surface span.
+6. If no user-surface span exists, the compact artifact is dropped from semantic coverage instead of becoming a false match.
+7. Added runtime semantic pack generation under `runtime/generated/semantic_packs/`.
+8. Removed fixed calendar word-list aliases from core evidence matching paths.
+9. Added tests to ensure the old fixed surface module does not return and core does not contain fixed calendar word lists.
+10. Runtime generated content is cleared before packaging; only `.gitkeep` is kept.
+
+### Verification
+
+```text
+PYTHONPATH=. pytest -q
+32 passed
+```
+
+### User Test Question
+
+```text
+Please prepare a 3-day plan for AlphaPlace with ordered stops.
+```
+
+Expected behavior:
+
+```text
+1. `P3D` must not be used as a direct semantic evidence term.
+2. Evidence containing only `P3D` must not satisfy the runtime variable contract.
+3. Evidence containing the user-surface span `3-day` may satisfy the contract.
+4. The final known parameter should expose `3-day`, not `P3D`.
+5. Any unit/surface knowledge needed for a specific request should be generated under runtime/generated/semantic_packs/ rather than stored as fixed core logic.
+```
