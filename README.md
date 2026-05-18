@@ -89,3 +89,10 @@ The package keeps only source code and base configuration. Runtime workspace con
 - ai_core owns participant execution, tool planning/execution, checkpoint continuation, and final synthesis.
 - Save & Continue stores the secret, then calls resume-run; resume-run continues the blocked primary-runtime node instead of re-running completed participants.
 - runtime workspace is intentionally excluded from the source package except runtime/.gitkeep.
+
+## V2.8.9 Runtime Telemetry Bridge
+
+- Primary runtime node events are mirrored into delegation run progress.
+- Agent Studio can show whether the primary runtime is executing, waiting, failed, or completed at node level.
+- Durable resume keeps the same delegation run and continues from checkpoint while preserving visible progress events.
+- Runtime workspace is excluded from source packages; only `runtime/.gitkeep` is kept.

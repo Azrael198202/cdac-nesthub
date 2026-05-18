@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Any
 
 from ai_core.orchestration.workflow_runtime import WorkflowRuntime
@@ -40,12 +41,18 @@ class PrimaryBrainDelegationClient:
     def __init__(self, runtime: WorkflowRuntime | None = None) -> None:
         self.runtime = runtime or WorkflowRuntime()
 
-    async def execute_agent_request(self, request: AgentExecutionRequest) -> AgentExecutionResult:
+    async def execute_agent_request(self, request: AgentExecutionRequest, progress_callback: Callable[[dict[str, Any]], Any] | None = None) -> AgentExecutionResult:
         message = self._build_agent_message(request)
         core_run_id, state = await self.runtime.prepare(message)
         state.setdefault("runtime_options", {})["delegation_mode"] = True
         state.setdefault("runtime_options", {})["auto_approve_reviews"] = True
-        await self.runtime.run_prepared(state)
+        if progress_callback:
+            self.runtime.add_event_listener(core_run_id, progress_callback)
+        try:
+            await self.runtime.run_prepared(state)
+        finally:
+            if progress_callback:
+                self.runtime.remove_event_listener(core_run_id, progress_callback)
         final_answer = self._extract_final_answer(state)
         status = self._extract_status(state)
         pending_action = state.get("pending_action") if isinstance(state, dict) else None
@@ -61,7 +68,7 @@ class PrimaryBrainDelegationClient:
         )
 
 
-    async def resume_agent_request(self, result_payload: dict[str, Any]) -> AgentExecutionResult:
+    async def resume_agent_request(self, result_payload: dict[str, Any], progress_callback: Callable[[dict[str, Any]], Any] | None = None) -> AgentExecutionResult:
         """Resume a paused primary-runtime participant run from its saved checkpoint.
 
         This is a durable continuation path: the auxiliary layer passes the
@@ -92,8 +99,14 @@ class PrimaryBrainDelegationClient:
             )
 
         pending = state.get("pending_action") if isinstance(state, dict) else None
-        if isinstance(pending, dict):
-            await self._resume_state_direct(core_run_id, state, pending)
+        if progress_callback:
+            self.runtime.add_event_listener(core_run_id, progress_callback)
+        try:
+            if isinstance(pending, dict):
+                await self._resume_state_direct(core_run_id, state, pending)
+        finally:
+            if progress_callback:
+                self.runtime.remove_event_listener(core_run_id, progress_callback)
         final_state = state
 
         return AgentExecutionResult(

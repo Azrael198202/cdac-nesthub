@@ -69,7 +69,14 @@ class AgentDelegationRuntime:
                 f"Primary runtime executing participant: {participant_name}",
                 "running",
             )
-            result = await self.primary_client.execute_agent_request(request)
+            result = await self._execute_agent_request_with_progress(
+                request,
+                self._build_primary_runtime_progress_bridge(
+                    run_payload,
+                    participant_index=index + 1,
+                    participant_name=participant_name,
+                ),
+            )
             result_payload = result.__dict__
             agent_results.append(result)
             run_payload["agent_results"].append(result_payload)
@@ -151,7 +158,15 @@ class AgentDelegationRuntime:
             if resumed_index is None and status in {"requires_key", "requires_input", "paused"}:
                 resumed_index = idx
                 self._record_progress(run_payload, f"participant_{idx + 1}_resume", f"Resuming participant from checkpoint: {payload.get('participant_name') or 'participant'}", "running")
-                resumed = await self.primary_client.resume_agent_request(payload)
+                resumed = await self._resume_agent_request_with_progress(
+                    payload,
+                    self._build_primary_runtime_progress_bridge(
+                        run_payload,
+                        participant_index=idx + 1,
+                        participant_name=str(payload.get("participant_name") or "participant"),
+                        resume=True,
+                    ),
+                )
                 resumed_payload = resumed.__dict__
                 existing_results[idx] = resumed_payload
                 agent_results.append(resumed)
@@ -198,7 +213,14 @@ class AgentDelegationRuntime:
                 community_id=community_id,
                 shared_context={"task_graph_id": task_graph.get("graph_id"), "participant_count": len(selected)},
             )
-            result = await self.primary_client.execute_agent_request(request)
+            result = await self._execute_agent_request_with_progress(
+                request,
+                self._build_primary_runtime_progress_bridge(
+                    run_payload,
+                    participant_index=index + 1,
+                    participant_name=participant_name,
+                ),
+            )
             payload = result.__dict__
             existing_results.append(payload)
             agent_results.append(result)
@@ -245,6 +267,135 @@ class AgentDelegationRuntime:
         })
         self.store.write_json(f"generated/results/{run_id}.json", run_payload)
         return run_payload
+
+    async def _execute_agent_request_with_progress(self, request, progress_callback):
+        try:
+            return await self.primary_client.execute_agent_request(
+                request,
+                progress_callback=progress_callback,
+            )
+        except TypeError as exc:
+            if "progress_callback" not in str(exc):
+                raise
+            return await self.primary_client.execute_agent_request(request)
+
+    async def _resume_agent_request_with_progress(self, payload, progress_callback):
+        try:
+            return await self.primary_client.resume_agent_request(
+                payload,
+                progress_callback=progress_callback,
+            )
+        except TypeError as exc:
+            if "progress_callback" not in str(exc):
+                raise
+            return await self.primary_client.resume_agent_request(payload)
+
+    def _build_primary_runtime_progress_bridge(
+        self,
+        run_payload: dict[str, Any],
+        *,
+        participant_index: int,
+        participant_name: str,
+        resume: bool = False,
+    ):
+        """Mirror primary-runtime node telemetry into the delegation run.
+
+        The auxiliary layer still does not execute tools or reason over content.
+        It only records primary-runtime node status so Agent Studio can show
+        whether the primary runtime is parsing, planning, executing, waiting,
+        failed, or completed for each delegated participant.
+        """
+
+        def bridge(event: dict[str, Any]) -> None:
+            mapped = self._map_primary_runtime_event(
+                event,
+                participant_index=participant_index,
+                participant_name=participant_name,
+                resume=resume,
+            )
+            if not mapped:
+                return
+            self._record_progress(
+                run_payload,
+                mapped["stage"],
+                mapped["label"],
+                mapped["status"],
+            )
+            run_payload.setdefault("primary_runtime_events", []).append({
+                "participant_index": participant_index,
+                "participant_name": participant_name,
+                "core_run_id": event.get("run_id"),
+                "event_type": event.get("type"),
+                "node_id": event.get("node_id"),
+                "status": mapped["status"],
+                "label": mapped["label"],
+                "at": self._now(),
+            })
+            self.store.write_json(f"generated/results/{run_payload['run_id']}.json", run_payload)
+
+        return bridge
+
+    def _map_primary_runtime_event(
+        self,
+        event: dict[str, Any],
+        *,
+        participant_index: int,
+        participant_name: str,
+        resume: bool,
+    ) -> dict[str, str] | None:
+        event_type = str(event.get("type") or "")
+        node_id = str(event.get("node_id") or "runtime")
+        stage_prefix = f"participant_{participant_index}_ai_core"
+
+        if event_type == "NODE_STARTED":
+            return {
+                "stage": f"{stage_prefix}_{node_id}",
+                "label": f"Primary runtime node started: {node_id}",
+                "status": "running",
+            }
+        if event_type == "NODE_EXECUTING":
+            return {
+                "stage": f"{stage_prefix}_{node_id}",
+                "label": f"Primary runtime executing node: {node_id}",
+                "status": "running",
+            }
+        if event_type == "NODE_RESULT":
+            return {
+                "stage": f"{stage_prefix}_{node_id}",
+                "label": f"Primary runtime node completed: {node_id}",
+                "status": "completed",
+            }
+        if event_type in {"SECRET_REQUIRED", "INTERACTION_REQUEST", "HUMAN_INPUT_REQUIRED"}:
+            return {
+                "stage": f"{stage_prefix}_{node_id}_waiting_input",
+                "label": f"Primary runtime waiting for required input at: {node_id}",
+                "status": "waiting",
+            }
+        if event_type in {"RUN_PAUSED"}:
+            return {
+                "stage": f"{stage_prefix}_paused",
+                "label": "Primary runtime paused and saved checkpoint",
+                "status": "waiting",
+            }
+        if event_type in {"DURABLE_RESUME_STARTED"}:
+            return {
+                "stage": f"{stage_prefix}_{node_id}_resume",
+                "label": f"Primary runtime resumed from checkpoint: {node_id}",
+                "status": "running",
+            }
+        if event_type in {"RUN_FAILED"}:
+            return {
+                "stage": f"{stage_prefix}_failed",
+                "label": "Primary runtime failed",
+                "status": "failed",
+            }
+        if event_type in {"RUN_COMPLETED"}:
+            return {
+                "stage": f"{stage_prefix}_completed",
+                "label": f"Primary runtime completed participant: {participant_name}",
+                "status": "completed",
+            }
+        return None
 
     def _record_progress(self, run_payload: dict[str, Any], stage: str, label: str, status: str) -> None:
         run_payload["current_stage"] = stage

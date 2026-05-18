@@ -1,4 +1,6 @@
 import uuid
+import inspect
+from collections.abc import Callable
 from typing import Dict, Any
 
 from ai_core.config.loader import ConfigLoader
@@ -35,6 +37,7 @@ class WorkflowRuntime:
         self.correction_learning = RuntimeLearningService()
         self.continuation_engine = ContinuationEngine()
         self.workflow_state_merger = WorkflowStateMerger()
+        self._event_listeners: dict[str, list[Callable[[dict], Any]]] = {}
 
     def _load_workflow(self) -> Dict[str, Any]:
         return self.loader.load_yaml(RUNTIME_CONFIGS / "workflows" / "base_orchestration.yaml")
@@ -803,6 +806,26 @@ class WorkflowRuntime:
                 return index
         return max(0, int(workflow.get("node_index", 0) or 0))
 
+    def add_event_listener(self, run_id: str, listener: Callable[[dict], Any]) -> None:
+        self._event_listeners.setdefault(run_id, []).append(listener)
+
+    def remove_event_listener(self, run_id: str, listener: Callable[[dict], Any]) -> None:
+        listeners = self._event_listeners.get(run_id, [])
+        if listener in listeners:
+            listeners.remove(listener)
+        if not listeners and run_id in self._event_listeners:
+            self._event_listeners.pop(run_id, None)
+
     async def _emit(self, run_id: str, event: dict) -> None:
         self.trace.write(run_id, event)
+        enriched = dict(event)
+        enriched.setdefault("run_id", run_id)
+        enriched.setdefault("origin", "ai_core")
+        for listener in list(self._event_listeners.get(run_id, [])):
+            try:
+                result = listener(enriched)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                pass
         await event_bus.emit(run_id, event)
