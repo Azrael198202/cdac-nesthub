@@ -464,28 +464,51 @@ class WorkflowRuntime:
 
             if not ok:
                 if cap_result.get("approval_required"):
-                    state["pending_action"] = {
-                        "kind": cap_result.get("pending_kind"),
-                        "node_id": node_id,
-                        "spec": cap_result.get("spec")
-                    }
-                    self.checkpoints.save(run_id, state)
+                    auto_approve_reviews = bool(
+                        state.get("runtime_options", {}).get("auto_approve_reviews")
+                        or state.get("runtime_options", {}).get("delegation_mode")
+                    )
+                    pending_kind = cap_result.get("pending_kind")
+                    if auto_approve_reviews and pending_kind not in {"secret_input", "optional_credential_choice", "human_information_required"}:
+                        state.setdefault("approved_generation_requests", []).append({
+                            "node_id": node_id,
+                            "missing_tools": cap_result.get("missing_tools", []),
+                            "feedback": "auto-approved by non-interactive delegated execution policy",
+                        })
+                        await self._emit(run_id, {
+                            "type": "CAPABILITY_REVIEW_AUTO_APPROVED",
+                            "title": "Capability review auto-approved",
+                            "message": "Capability approval gate bypassed for delegated primary-runtime execution.",
+                            "node_id": node_id,
+                            "origin": "ai_core",
+                            "progress": progress,
+                        })
+                    else:
+                        state["pending_action"] = {
+                            "kind": pending_kind,
+                            "node_id": node_id,
+                            "spec": cap_result.get("spec"),
+                            "request": cap_result.get("request"),
+                            "message": cap_result.get("message"),
+                        }
+                        self.checkpoints.save(run_id, state)
+                        await self._emit(run_id, {
+                            "type": "HUMAN_REVIEW",
+                            "title": "Capability approval required",
+                            "message": cap_result.get("message"),
+                            "spec": cap_result.get("spec"),
+                            "run_id": run_id,
+                            "progress": progress
+                        })
+                        return
+
+                else:
                     await self._emit(run_id, {
-                        "type": "HUMAN_REVIEW",
-                        "title": "Capability approval required",
-                        "message": cap_result.get("message"),
-                        "spec": cap_result.get("spec"),
-                        "run_id": run_id,
-                        "progress": progress
+                        "type": "RUN_FAILED",
+                        "title": "Capability unavailable",
+                        "message": cap_result.get("message", "")
                     })
                     return
-
-                await self._emit(run_id, {
-                    "type": "RUN_FAILED",
-                    "title": "Capability unavailable",
-                    "message": cap_result.get("message", "")
-                })
-                return
 
             await self._emit(run_id, {
                 "type": "NODE_EXECUTING",
@@ -583,10 +606,53 @@ class WorkflowRuntime:
             if continuation_action:
                 continuation_action.setdefault("node_id", node_id)
                 continuation_action.setdefault("retry_node_index", idx)
+                auto_approve_reviews = bool(
+                    state.get("runtime_options", {}).get("auto_approve_reviews")
+                    or state.get("runtime_options", {}).get("delegation_mode")
+                )
+                action_kind = continuation_action.get("kind")
+
+                if auto_approve_reviews and action_kind == "generated_capability_review":
+                    state.setdefault("approved_generation_requests", []).append({
+                        "node_id": node_id,
+                        "missing_tools": continuation_action.get("missing_tools", []),
+                        "feedback": "auto-approved by non-interactive delegated execution policy",
+                    })
+                    state.get("results", {}).pop(node_id, None)
+                    state["node_index"] = int(continuation_action.get("retry_node_index", idx))
+                    await self._emit(run_id, {
+                        "type": "GENERATION_REQUEST_AUTO_APPROVED",
+                        "title": "Generated capability request auto-approved",
+                        "node_id": node_id,
+                        "attempt_number": attempt_number,
+                        "message": "Generated capability review was auto-approved for delegated primary-runtime execution.",
+                        "missing_tools": continuation_action.get("missing_tools", []),
+                        "origin": "ai_core",
+                        "progress": done,
+                    })
+                    continue
+
+                if auto_approve_reviews and action_kind == "human_confirmation_required":
+                    state.setdefault("human_confirmations", []).append({
+                        "node_id": node_id,
+                        "safety_holds": continuation_action.get("safety_holds", []),
+                        "feedback": "auto-confirmed by non-interactive delegated execution policy",
+                    })
+                    await self._emit(run_id, {
+                        "type": "HUMAN_CONFIRMATION_AUTO_APPROVED",
+                        "title": "Human confirmation auto-approved",
+                        "node_id": node_id,
+                        "attempt_number": attempt_number,
+                        "message": "Confirmation gate bypassed for delegated primary-runtime execution.",
+                        "origin": "ai_core",
+                        "progress": done,
+                    })
+                    continue
+
                 state["pending_action"] = continuation_action
                 self.checkpoints.save(run_id, state)
 
-                if continuation_action.get("kind") == "human_information_required":
+                if action_kind == "human_information_required":
                     await self._emit(run_id, {
                         "type": "HUMAN_INPUT_REQUIRED",
                         "title": "Additional information required",
@@ -599,7 +665,7 @@ class WorkflowRuntime:
                     })
                     return
 
-                if continuation_action.get("kind") == "generated_capability_review":
+                if action_kind == "generated_capability_review":
                     await self._emit(run_id, {
                         "type": "CAPABILITY_GENERATION_REQUESTED",
                         "title": "Missing capability request generated",
@@ -622,7 +688,7 @@ class WorkflowRuntime:
                     })
                     return
 
-                if continuation_action.get("kind") == "human_confirmation_required":
+                if action_kind == "human_confirmation_required":
                     await self._emit(run_id, {
                         "type": "HUMAN_REVIEW",
                         "title": "Human confirmation required",
@@ -635,7 +701,7 @@ class WorkflowRuntime:
                     })
                     return
 
-                if continuation_action.get("kind") == "optional_credential_choice":
+                if action_kind == "optional_credential_choice":
                     request = continuation_action.get("request") or {}
                     await self._emit(run_id, {
                         "type": "INTERACTION_REQUEST",

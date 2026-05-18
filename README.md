@@ -31,3 +31,12 @@ http://127.0.0.1:8000/agent-studio
 ## Source Clean Rule
 
 The package keeps only source code and base configuration. Runtime workspace content is excluded from the source package.
+
+## V2.8.2 Agent Studio Execution Policy Fix
+
+- `/` keeps the manual review loop for direct ai_core testing.
+- `/agent-studio` uses delegated non-interactive execution.
+- Delegated executions auto-approve review and confirmation gates inside ai_core.
+- Secret/key or required-input pauses are returned to Agent Studio as `missing_inputs`.
+- auxiliary_brain remains limited to agent/task/community management, delegation coordination, state persistence, and delivery storage.
+- ai_core remains responsible for input parsing, intent recognition, workflow planning, tool selection, execution, evidence handling, and synthesis.

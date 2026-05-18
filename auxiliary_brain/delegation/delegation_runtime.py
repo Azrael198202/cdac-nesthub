@@ -53,6 +53,15 @@ class AgentDelegationRuntime:
             agent_results.append(result)
             run_payload["agent_results"].append(result_payload)
             self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+            if result.status in {"requires_key", "requires_input", "paused"}:
+                run_payload.update({
+                    "status": result.status,
+                    "pending_action": result.pending_action,
+                    "missing_inputs": result.missing_inputs or [],
+                    "completed_at": self._now(),
+                })
+                self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+                return run_payload
 
         synthesis = await self.primary_client.synthesize_delegated_results(
             task_name=task_name,

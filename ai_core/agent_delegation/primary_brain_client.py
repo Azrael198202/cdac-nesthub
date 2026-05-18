@@ -28,6 +28,8 @@ class AgentExecutionResult:
     final_answer: str
     workflow_results: dict[str, Any]
     origin: str = "ai_core"
+    pending_action: dict[str, Any] | None = None
+    missing_inputs: list[dict[str, Any]] | None = None
 
 
 class PrimaryBrainDelegationClient:
@@ -48,6 +50,7 @@ class PrimaryBrainDelegationClient:
         await self.runtime.run_prepared(state)
         final_answer = self._extract_final_answer(state)
         status = self._extract_status(state)
+        pending_action = state.get("pending_action") if isinstance(state, dict) else None
         return AgentExecutionResult(
             participant_id=request.participant_id,
             participant_name=request.participant_name,
@@ -55,6 +58,8 @@ class PrimaryBrainDelegationClient:
             status=status,
             final_answer=final_answer,
             workflow_results=state.get("results", {}),
+            pending_action=pending_action if isinstance(pending_action, dict) else None,
+            missing_inputs=self._extract_missing_inputs(state),
         )
 
     async def synthesize_delegated_results(
@@ -130,8 +135,41 @@ class PrimaryBrainDelegationClient:
         return "The primary runtime completed without a user-facing final answer."
 
     def _extract_status(self, state: dict[str, Any]) -> str:
+        pending = state.get("pending_action") if isinstance(state, dict) else None
+        if isinstance(pending, dict):
+            kind = str(pending.get("kind") or "pending")
+            if kind in {"secret_input", "optional_credential_choice"}:
+                return "requires_key"
+            if kind == "human_information_required":
+                return "requires_input"
+            return "paused"
         results = state.get("results", {}) if isinstance(state, dict) else {}
         output = results.get("output") if isinstance(results, dict) else None
         if isinstance(output, dict):
             return str(output.get("status") or output.get("execution_status") or "completed")
         return "completed"
+
+    def _extract_missing_inputs(self, state: dict[str, Any]) -> list[dict[str, Any]]:
+        pending = state.get("pending_action") if isinstance(state, dict) else None
+        if not isinstance(pending, dict):
+            return []
+        kind = str(pending.get("kind") or "")
+        if kind == "secret_input":
+            return [{
+                "kind": "secret_input",
+                "field": str(pending.get("secret_key") or "runtime_access_key"),
+                "message": "A runtime access key is required to continue this delegated execution.",
+            }]
+        if kind == "optional_credential_choice":
+            request = pending.get("request") if isinstance(pending.get("request"), dict) else {}
+            return [{
+                "kind": "optional_credential_choice",
+                "field": str(request.get("secret_key") or request.get("provider") or "runtime_access_key"),
+                "message": str(request.get("message") or pending.get("message") or "A runtime access key can improve this execution."),
+            }]
+        if kind == "human_information_required":
+            request = pending.get("request") if isinstance(pending.get("request"), dict) else {}
+            fields = request.get("fields") or request.get("missing_fields") or []
+            if isinstance(fields, list):
+                return [{"kind": "human_information_required", "field": str(f), "message": str(request.get("message") or "Additional information is required.")} for f in fields]
+        return []

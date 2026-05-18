@@ -123,15 +123,21 @@ class AgentStudioService:
         selected_ids = set(task_graph.get("selected_participant_ids") or [])
         participants = [p for p in all_participants if p.get("participant_id") in selected_ids] or all_participants
         result = await self.delegation_runtime.execute_task(task_graph, participants)
-        return {
+        status = result.get("status", "completed")
+        response = {
             "action": "execute_task_graph",
             "origin": "auxiliary_brain",
-            "status": result.get("status", "completed"),
+            "status": status,
             "task_name": task_name,
             "run_id": result.get("run_id"),
             "final_answer": (result.get("synthesis") or {}).get("final_answer"),
             "delivery": result.get("delivery"),
         }
+        if status in {"requires_key", "requires_input", "paused"}:
+            response["missing_inputs"] = result.get("missing_inputs", [])
+            response["pending_action"] = result.get("pending_action")
+            response["message"] = "Delegated primary-runtime execution is waiting for required input."
+        return response
 
     def _ensure_community(self) -> str:
         existing = self.store.list_json("generated/communities")
