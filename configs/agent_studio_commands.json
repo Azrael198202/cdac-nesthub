@@ -1,0 +1,121 @@
+{
+  "version": "v2.7-runtime-workflow-executor",
+  "description": "Runtime-facing command phrases and interaction profiles for the agent studio. Source code reads this file and does not embed these phrases.",
+  "runtime_inputs": [
+    {
+      "input_id": "external_model_access",
+      "label": "External model access key",
+      "placeholder": "Paste an access key only when runtime requests it",
+      "secret": true,
+      "env_keys": [
+        "OPENAI_API_KEY"
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "action": "create_participant",
+      "patterns": [
+        "创建agent",
+        "创建Agent",
+        "创建智能体",
+        "create agent",
+        "add agent",
+        "new agent",
+        "create a agent",
+        "create an agent",
+        "create a participant"
+      ],
+      "default_capabilities": [
+        "runtime_generated_capability"
+      ],
+      "default_tools": [],
+      "required_runtime_inputs": [
+        {
+          "input_id": "external_model_access",
+          "label": "External model access key",
+          "placeholder": "Paste an access key if this action should use an external model",
+          "secret": true,
+          "env_keys": [
+            "OPENAI_API_KEY"
+          ],
+          "message_patterns": [
+            "use external",
+            "external model",
+            "外部模型"
+          ],
+          "reason": "required_by_selected_runtime_profile"
+        }
+      ],
+      "name_extractors": [
+        "(?i)\\b(?:named|called)\\s+([A-Za-z0-9 _-]{2,80}?)(?:\\s+to\\b|\\s+for\\b|[.!?]|$)"
+      ],
+      "instruction_extractors": [
+        "(?i)\\b(?:to|for)\\s+(.{3,500}?)(?:[.!?]|$)"
+      ]
+    },
+    {
+      "action": "create_task_graph",
+      "patterns": [
+        "创建任务",
+        "新建任务",
+        "create task",
+        "new task",
+        "add task",
+        "create a task",
+        "make a task",
+        "schedule task"
+      ],
+      "default_activation_mode": "scheduled_or_manual",
+      "default_timezone": "Asia/Tokyo",
+      "name_extractors": [
+        "(?i)\\b(?:named|called)\\s+([A-Za-z0-9 _-]{1,80}?)(?:\\s*,|\\s+which\\b|\\s+that\\b|\\s+to\\b|[.!?]|$)"
+      ]
+    },
+    {
+      "action": "start_task_graph",
+      "patterns": [
+        "启动任务",
+        "开始任务",
+        "start task",
+        "run task"
+      ],
+      "target_status": "running"
+    },
+    {
+      "action": "stop_task_graph",
+      "patterns": [
+        "停止任务",
+        "暂停任务",
+        "stop task",
+        "pause task"
+      ],
+      "target_status": "stopped"
+    },
+    {
+      "action": "execute_task_graph",
+      "patterns": [
+        "execute task",
+        "run named task",
+        "run task named",
+        "execute"
+      ],
+      "target_status": "executed",
+      "name_extractors": [
+        "(?i)\\b(?:execute|run)\\s+([A-Za-z0-9 _-]{1,80}?)(?:[.!?]|$)"
+      ]
+    },
+    {
+      "action": "show_state",
+      "patterns": [
+        "查看",
+        "显示",
+        "show",
+        "list",
+        "status"
+      ],
+      "target_status": "view"
+    }
+  ],
+  "fallback_action": "create_participant"
+}

@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from ai_core.utils.safe_json import make_json_safe
+from ai_core.utils.semantic_surface import RuntimeSemanticSurfaceNormalizer
 
 
 class EvidenceDirectAnswerBuilder:
@@ -18,6 +19,9 @@ class EvidenceDirectAnswerBuilder:
     MAX_TEXT_CHARS = 6000
     MAX_FINAL_CHARS = 1800
 
+    def __init__(self) -> None:
+        self.semantic_surface = RuntimeSemanticSurfaceNormalizer()
+
     def build(
         self,
         *,
@@ -26,7 +30,9 @@ class EvidenceDirectAnswerBuilder:
         capability: str,
         attempts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
-        known = self._known_parameters(payload)
+        request_text = self._request_text(payload, capability)
+        known = self._known_parameters(payload, source_text=request_text)
+        query_terms = self._query_terms(request_text, known)
         scored: list[tuple[float, dict[str, Any], str]] = []
         for candidate in candidates:
             if not isinstance(candidate, dict):
@@ -35,10 +41,11 @@ class EvidenceDirectAnswerBuilder:
             if not text:
                 continue
             score = self._coverage_score(text, known)
-            if score <= 0:
+            lexical = self._lexical_score(text, query_terms)
+            if score <= 0 or lexical < 0.2:
                 continue
             base_score = float(candidate.get("score") or 0)
-            total = score * 100 + min(max(base_score, -100), 100)
+            total = score * 60 + lexical * 70 + min(max(base_score, -100), 100)
             scored.append((total, candidate, text))
 
         if not scored:
@@ -47,7 +54,7 @@ class EvidenceDirectAnswerBuilder:
         scored.sort(key=lambda item: item[0], reverse=True)
         top_score, top_candidate, text = scored[0]
 
-        if top_score < 80:
+        if top_score < 65:
             aggregate_text = "\n".join(item[2] for item in scored[:6])
             aggregate_score = self._coverage_score(aggregate_text, known)
             if aggregate_score < 1.0:
@@ -97,7 +104,7 @@ class EvidenceDirectAnswerBuilder:
             },
         })
 
-    def _known_parameters(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _known_parameters(self, payload: dict[str, Any], *, source_text: str = "") -> dict[str, Any]:
         if not isinstance(payload, dict):
             return {}
         known: dict[str, Any] = {}
@@ -108,17 +115,75 @@ class EvidenceDirectAnswerBuilder:
             param_known = params.get("known") or {}
         for source in (direct_known, param_known, payload):
             for key, value in source.items():
-                if key in {"context", "source_step", "parameters", "known", "optional"}:
+                if key in {"context", "source_step", "parameters", "known", "optional", "step_id", "task_id", "step_type", "task_type", "objective", "required_capability", "execution_ready", "depends_on", "next_action", "action", "human_interaction", "execution_strategy"}:
                     continue
                 if value is None or value == "":
                     continue
                 if isinstance(value, (str, int, float, bool)):
-                    known[key] = value
+                    value_text = str(value).strip()
+                    surface_value = self.semantic_surface.canonical_or_surface(value_text, source_text)
+                    if surface_value is None:
+                        continue
+                    surface_text = str(surface_value).strip()
+                    if source_text and self._normalize_text(surface_text) not in self._normalize_text(source_text) and self._looks_like_opaque_runtime_artifact(surface_text):
+                        continue
+                    known[key] = surface_value
         return known
+
+    def _request_text(self, payload: dict[str, Any], capability: str) -> str:
+        parts = [capability or ""]
+        if isinstance(payload, dict):
+            for key in ("objective", "user_input", "original_input", "message", "query", "request"):
+                value = payload.get(key)
+                if isinstance(value, str):
+                    parts.append(value)
+            params = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+            for key in ("objective", "user_input", "original_input", "message", "query", "request"):
+                value = params.get(key)
+                if isinstance(value, str):
+                    parts.append(value)
+            context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+            source_step = payload.get("source_step") if isinstance(payload.get("source_step"), dict) else {}
+            for source in (context, source_step):
+                for key in ("objective", "user_input", "original_input", "message", "query", "request"):
+                    value = source.get(key)
+                    if isinstance(value, str):
+                        parts.append(value)
+        return " ".join(parts)
+
+    def _query_terms(self, request_text: str, known: dict[str, Any]) -> list[str]:
+        clean = self._normalize_text(request_text)
+        for value in known.values():
+            clean = clean.replace(self._normalize_text(value), " ")
+        return self._dedupe_keep_order(re.findall(r"[\w+-]{2,}|[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]{1,}", clean))[:18]
+
+    def _lexical_score(self, text: str, query_terms: list[str]) -> float:
+        if not query_terms:
+            return 0.5 if len(text.strip()) > 160 else 0.0
+        hay = self._normalize_text(text)
+        hits = 0
+        considered = 0
+        for term in query_terms[:10]:
+            if len(term) < 2:
+                continue
+            considered += 1
+            if term in hay:
+                hits += 1
+        return 0.0 if considered == 0 else min(1.0, hits / max(1, min(considered, 5)))
+
+    def _looks_like_opaque_runtime_artifact(self, value: Any) -> bool:
+        compact = re.sub(r"[^A-Za-z0-9]", "", str(value or ""))
+        if not compact:
+            return True
+        if len(compact) <= 4 and re.search(r"[A-Za-z]", compact) and re.search(r"\d", compact):
+            return True
+        if len(compact) <= 3 and compact.isupper():
+            return True
+        return False
 
     def _candidate_text(self, candidate: dict[str, Any]) -> str:
         parts: list[str] = []
-        for key in ("title", "name", "snippet", "notes", "url", "official_documentation_url"):
+        for key in ("title", "name", "snippet", "description", "text_excerpt", "visible_text_excerpt", "notes", "url", "official_documentation_url"):
             value = candidate.get(key)
             if isinstance(value, str):
                 parts.append(value)
@@ -178,10 +243,18 @@ class EvidenceDirectAnswerBuilder:
             try:
                 mi = int(m)
                 di = int(d)
-                # Core only emits numeric variants. Named/locale surfaces are runtime-generated.
+                month_names = {1: "january", 2: "february", 3: "march", 4: "april", 5: "may", 6: "june", 7: "july", 8: "august", 9: "september", 10: "october", 11: "november", 12: "december"}
+                month_short = {1: "jan", 2: "feb", 3: "mar", 4: "apr", 5: "may", 6: "jun", 7: "jul", 8: "aug", 9: "sep", 10: "oct", 11: "nov", 12: "dec"}
+                full = month_names.get(mi, "")
+                short = month_short.get(mi, "")
                 variants.extend([
                     f"{y}/{m}/{d}", f"{y}.{m}.{d}", f"{m}/{d}", f"{m}-{d}",
-                    f"{mi}/{di}", f"{mi}-{di}", f"{di}. {mi}.", f"{di}",
+                    f"{mi}/{di}", f"{mi}-{di}", f"{di}. {mi}.",
+                    f"{full} {di}" if full else "", f"{short} {di}" if short else "",
+                    f"{full} {di} {y}" if full else "",
+                    f"{di} {full} {y}" if full else "", f"{di} {short} {y}" if short else "",
+                    f"{di} {full}" if full else "", f"{di} {short}" if short else "",
+                    f"{di}",
                 ])
             except Exception:
                 pass
@@ -237,9 +310,9 @@ class EvidenceDirectAnswerBuilder:
         record: dict[str, Any] = {}
         date_value = self._matched_value(markup + " " + plain, [v for value in known.values() if self._looks_like_date(value) for v in self._variants(value)])
         if date_value:
-            record["matched_parameter"] = date_value
+            record["reference"] = date_value
         else:
-            record["matched_parameter"] = plain[:80]
+            record["reference"] = plain[:80]
         attributes = self._extract_attributes(markup)
         descriptive_values = []
         for name, value in attributes.items():

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+
+from ai_core.utils.semantic_surface import RuntimeSemanticSurfaceNormalizer
 import re
 
 
@@ -45,6 +47,9 @@ class StructuredFactGraph:
         r"\b[A-Za-z]{3,12}\s+\d{1,2}\b",
     ]
     VALUE_PATTERN = re.compile(r"(?P<value>-?\d+(?:\.\d+)?)\s*(?P<unit>[%°A-Za-z/]+)?")
+
+    def __init__(self) -> None:
+        self.semantic_surface = RuntimeSemanticSurfaceNormalizer()
 
     def build(self, *, evidence_items: list[dict[str, Any]], known_parameters: dict[str, Any] | None = None) -> dict[str, Any]:
         facts: list[StructuredFact] = []
@@ -111,7 +116,7 @@ class StructuredFactGraph:
         return None
 
     def _looks_temporal(self, value: str) -> bool:
-        return bool(re.search(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}", value, flags=re.I))
+        return bool(re.search(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\b(today|tomorrow|yesterday)\b", value, flags=re.I))
 
     def _nearby_label(self, text: str, index: int) -> str | None:
         left = text[max(0, index - 80):index]
@@ -125,10 +130,11 @@ class StructuredFactGraph:
         matched = []
         missing = []
         for key, value in known.items():
-            needle = str(value).strip().lower()
-            if not needle:
+            aliases = self.semantic_surface.semantic_aliases(value)
+            needles = [str(v).strip().lower() for v in (aliases if aliases else [value]) if str(v).strip()]
+            if not needles:
                 continue
-            if needle in hay or any(part and part in hay for part in re.split(r"[,\s/|;]+", needle)):
+            if any(needle in hay for needle in needles) or any(part and part in hay for needle in needles for part in re.split(r"[,\s/|;]+", needle)):
                 matched.append(key)
             else:
                 missing.append(key)

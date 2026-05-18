@@ -1133,7 +1133,7 @@ class ToolCallExecutor:
             y, m, d = raw[:4], raw[5:7], raw[8:10]
             try:
                 mi, di = int(m), int(d)
-                aliases.extend([f"{y}/{m}/{d}", f"{mi}/{di}", f"{mi}-{di}", f"{d}"])
+                aliases.extend([f"{y}/{m}/{d}", f"{y}.{m}.{d}", f"{mi}/{di}", f"{mi}-{di}", f"{d}"])
             except Exception:
                 pass
         if "," in raw:
