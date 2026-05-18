@@ -104,10 +104,6 @@ class StructuredFactNormalizer:
         compact = " ".join(str(text or "").split())
         if not compact:
             return []
-        if self.reject_debug_text(compact):
-            compact = self._debug_text_to_user_material(compact)
-            if not compact:
-                return []
         relevant_windows = self._relevant_windows(compact, runtime_variables)
         if not relevant_windows:
             relevant_windows = [compact[:600]]
@@ -140,22 +136,6 @@ class StructuredFactNormalizer:
                     source_url=source_url,
                 ))
         return facts
-
-    def _debug_text_to_user_material(self, text: str) -> str:
-        material: list[str] = []
-        for m in re.finditer(r"Text:\s*([^;]+)", text, flags=re.IGNORECASE):
-            value = m.group(1).strip()
-            if value:
-                material.append(value)
-        for m in re.finditer(r"Values:\s*\[([^\]]+)\]", text, flags=re.IGNORECASE):
-            values = re.findall(r"['\"]([^'\"]+)['\"]", m.group(1))
-            material.extend(v for v in values if v)
-        if not material:
-            cleaned = text
-            for marker in _DEBUG_MARKERS:
-                cleaned = cleaned.replace(marker, " ")
-            material.append(cleaned)
-        return " ".join(" ".join(material).split())[:1200]
 
     def _relevant_windows(self, text: str, runtime_variables: dict[str, list[str]]) -> list[str]:
         aliases = [alias for aliases in runtime_variables.values() for alias in aliases if len(alias) >= 2]

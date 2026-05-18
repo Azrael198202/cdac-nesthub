@@ -112,9 +112,9 @@ class EvidenceQualityValidator:
                 y, mo, d = m.groups()
                 mi = int(mo)
                 di = int(d)
+                # Core only emits numeric variants. Named/locale surfaces are runtime-generated.
                 out.extend([
-                    f"{y}/{mo}/{d}", f"{y}.{mo}.{d}", f"{y}/{mi}/{di}",
-                    f"{mi}/{di}", f"{mi}-{di}", f"{di}. {mi}.",
+                    f"{y}/{mo}/{d}", f"{y}.{mo}.{d}", f"{mi}/{di}", f"{mi}-{di}", f"{di}. {mi}.",
                     f"{mo}/{d}", f"{mo}-{d}", f"{di}",
                 ])
         add(value)

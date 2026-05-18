@@ -5,8 +5,6 @@ import re
 import unicodedata
 from typing import Any
 
-from ai_core.utils.semantic_surface import RuntimeSemanticSurfaceNormalizer
-
 
 class RuntimeSemanticSignalEvaluator:
     """Language-neutral semantic signal scorer for answer evidence.
@@ -30,17 +28,12 @@ class RuntimeSemanticSignalEvaluator:
         hay = self._normalize(text)
         if not hay:
             return 0.0
-        lexical = self.lexical_signal(text, query_terms)
+        lexical = self._lexical_overlap(hay, query_terms)
         factual = self.factual_density(hay)
         structure = self.answer_structure_signal(hay)
-        # Factual density alone must not prove relevance. It can strengthen a
-        # text only when there is at least some runtime query alignment.
-        if lexical <= 0:
-            return 0.0
-        return max(lexical, min(1.0, lexical * 0.65 + factual * 0.22 + structure * 0.13))
-
-    def lexical_signal(self, text: str, query_terms: list[str]) -> float:
-        return self._lexical_overlap(self._normalize(text), query_terms)
+        # Use max rather than requiring English keywords. A table of numbers or
+        # dates can be high-signal even when query words are translated.
+        return max(lexical, factual * 0.85, structure * 0.75)
 
     def factual_density(self, text: str) -> float:
         if not text:
@@ -123,13 +116,12 @@ class AnswerSufficiencyEvaluator:
     """
 
     DEFAULT_MIN_COVERAGE = 1.0
-    DEFAULT_MIN_SCORE = 0.70
+    DEFAULT_MIN_SCORE = 0.72
     MAX_SELECTED = 7
     FETCHABLE_MIN_SCORE = 0.45
 
     def __init__(self, semantic_evaluator: RuntimeSemanticSignalEvaluator | None = None) -> None:
         self.semantic = semantic_evaluator or RuntimeSemanticSignalEvaluator()
-        self.semantic_surface = RuntimeSemanticSurfaceNormalizer()
 
     def evaluate(
         self,
@@ -142,8 +134,7 @@ class AnswerSufficiencyEvaluator:
         min_score: float | None = None,
     ) -> dict[str, Any]:
         min_score = self.DEFAULT_MIN_SCORE if min_score is None else min_score
-        source_text = " ".join(str(x or "") for x in [user_input, objective, capability])
-        known = self._clean_known(known_parameters, source_text=source_text)
+        known = self._clean_known(known_parameters)
         semantic_terms = self.semantic.extract_query_terms(
             user_input=user_input,
             objective=objective,
@@ -161,17 +152,14 @@ class AnswerSufficiencyEvaluator:
                 continue
             aggregate_text_parts.append(text)
             coverage = self._coverage(text, known)
-            lexical_signal = self.semantic.lexical_signal(text, semantic_terms)
             answer_signal = self.semantic.semantic_signal(text, semantic_terms)
             pub = self._public_evidence(item, {"score": 0, "coverage": coverage, "answer_signal": answer_signal})
             reference_penalty = 0.25 if self.semantic.looks_like_reference_document(text=text, url=pub.get("url"), title=pub.get("title")) and coverage["coverage_ratio"] < 1.0 else 0.0
-            misalignment_penalty = 0.35 if lexical_signal < 0.2 else 0.0
-            score = (coverage["coverage_ratio"] * 0.45) + (lexical_signal * 0.35) + (answer_signal * 0.20) - reference_penalty - misalignment_penalty
+            score = (coverage["coverage_ratio"] * 0.68) + (answer_signal * 0.32) - reference_penalty
             scored.append({
                 "score": round(max(0.0, min(1.0, score)), 3),
                 "coverage": coverage,
                 "answer_signal": round(answer_signal, 3),
-                "lexical_signal": round(lexical_signal, 3),
                 "reference_document_like": self.semantic.looks_like_reference_document(text=text, url=pub.get("url"), title=pub.get("title")),
                 "item": item,
                 "text_preview": text[:1200],
@@ -180,10 +168,9 @@ class AnswerSufficiencyEvaluator:
         scored.sort(key=lambda x: x.get("score", 0), reverse=True)
         aggregate_text = "\n".join(aggregate_text_parts)
         aggregate_coverage = self._coverage(aggregate_text, known)
-        aggregate_lexical_signal = self.semantic.lexical_signal(aggregate_text, semantic_terms)
         aggregate_answer_signal = self.semantic.semantic_signal(aggregate_text, semantic_terms)
         best_score = float(scored[0]["score"]) if scored else 0.0
-        aggregate_score = (aggregate_coverage["coverage_ratio"] * 0.45) + (aggregate_lexical_signal * 0.35) + (aggregate_answer_signal * 0.20)
+        aggregate_score = (aggregate_coverage["coverage_ratio"] * 0.68) + (aggregate_answer_signal * 0.32)
         effective_score = max(best_score, aggregate_score)
         fetch_candidates = [x for x in scored if self._needs_fetch(x)]
         passed = bool(
@@ -191,8 +178,6 @@ class AnswerSufficiencyEvaluator:
             and aggregate_coverage["passed"]
             and effective_score >= min_score
             and aggregate_answer_signal > 0
-            and aggregate_lexical_signal >= 0.2
-            and self._has_aligned_selected_evidence(scored)
             and not self._aggregate_is_only_search_snippets(scored)
         )
 
@@ -216,7 +201,6 @@ class AnswerSufficiencyEvaluator:
             "min_score": min_score,
             "aggregate_coverage": aggregate_coverage,
             "aggregate_answer_signal": round(aggregate_answer_signal, 3),
-            "aggregate_lexical_signal": round(aggregate_lexical_signal, 3),
             "semantic_signal_terms": semantic_terms,
             "selected_evidence": selected,
             "fetch_candidate_count": len(fetch_candidates),
@@ -226,39 +210,18 @@ class AnswerSufficiencyEvaluator:
             "next_action": next_action,
         }
 
-    def _clean_known(self, known: dict[str, Any], *, source_text: str = "") -> dict[str, Any]:
+    def _clean_known(self, known: dict[str, Any]) -> dict[str, Any]:
         output: dict[str, Any] = {}
         if not isinstance(known, dict):
             return output
-        source_norm = self._normalize(source_text)
         for key, value in known.items():
-            if key in {"context", "source_step", "parameters", "known", "optional", "step_id", "task_id", "step_type", "task_type", "objective", "required_capability", "execution_ready", "depends_on", "next_action", "action"}:
+            if key in {"context", "source_step", "parameters", "known", "optional"}:
                 continue
             if value is None or value == "":
                 continue
             if isinstance(value, (str, int, float, bool)):
-                value_text = str(value).strip()
-                surface_value = self.semantic_surface.canonical_or_surface(value_text, source_text)
-                if surface_value is None:
-                    continue
-                surface_text = str(surface_value).strip()
-                # Values not present in the original request/objective may be
-                # artifacts copied from retrieved pages. Keep long natural text
-                # only when it looks intentional; reject short opaque tokens.
-                if source_norm and self._normalize(surface_text) not in source_norm and self._looks_like_opaque_runtime_artifact(surface_text):
-                    continue
-                output[str(key)] = surface_value
+                output[str(key)] = value
         return output
-
-    def _looks_like_opaque_runtime_artifact(self, value: str) -> bool:
-        compact = re.sub(r"[^A-Za-z0-9]", "", str(value or ""))
-        if not compact:
-            return True
-        if len(compact) <= 4 and re.search(r"[A-Za-z]", compact) and re.search(r"\d", compact):
-            return True
-        if len(compact) <= 3 and compact.isupper():
-            return True
-        return False
 
     def _evidence_text(self, item: dict[str, Any]) -> str:
         parts: list[str] = []
@@ -313,9 +276,6 @@ class AnswerSufficiencyEvaluator:
         return {"passed": not missing and not partial, "coverage_ratio": round(ratio, 3), "matched": matched, "missing": missing, "partial": partial}
 
     def _variants(self, value: Any) -> list[str]:
-        temporal_aliases = self.semantic_surface.semantic_aliases(value)
-        if temporal_aliases and self.semantic_surface.is_compact_artifact(value):
-            return [self._normalize(v) for v in temporal_aliases if v]
         raw = self._normalize(str(value).strip())
         variants = [raw]
         if "," in raw:
@@ -325,10 +285,9 @@ class AnswerSufficiencyEvaluator:
             try:
                 mi = int(m)
                 di = int(d)
+                # Core only emits numeric variants. Named/locale surfaces are runtime-generated.
                 variants.extend([
-                    f"{y}/{m}/{d}", f"{y}.{m}.{d}", f"{y}/{mi}/{di}",
-                    f"{m}/{d}", f"{m}-{d}", f"{mi}/{di}", f"{mi}-{di}",
-                    f"{di}",
+                    f"{y}/{m}/{d}", f"{y}.{m}.{d}", f"{m}/{d}", f"{m}-{d}", f"{mi}/{di}", f"{mi}-{di}", f"{di}",
                 ])
             except Exception:
                 pass
@@ -340,6 +299,7 @@ class AnswerSufficiencyEvaluator:
         if len(raw) >= 10 and raw[4:5] == "-" and raw[7:8] == "-":
             y, m = raw[:4], raw[5:7]
             try:
+                int(m)
                 variants.extend([f"{y}-{m}", f"{y}/{m}"])
             except Exception:
                 pass
@@ -355,14 +315,6 @@ class AnswerSufficiencyEvaluator:
                 text_excerpt += container.get("text_excerpt", "")
         url = self._public_evidence(item, scored).get("url")
         return bool(url) and len(text_excerpt.strip()) < 400
-
-    def _has_aligned_selected_evidence(self, scored: list[dict[str, Any]]) -> bool:
-        if not scored:
-            return False
-        for entry in scored[: self.MAX_SELECTED]:
-            if float(entry.get("score", 0) or 0) >= self.FETCHABLE_MIN_SCORE and float(entry.get("lexical_signal", 0) or 0) >= 0.2:
-                return True
-        return False
 
     def _aggregate_is_only_search_snippets(self, scored: list[dict[str, Any]]) -> bool:
         if not scored:

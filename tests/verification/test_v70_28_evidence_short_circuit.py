@@ -6,7 +6,7 @@ from ai_core.executors.tool_call_executor import ToolCallExecutor
 
 def _runtime_fixture():
     text = (
-        "Target City information for May 16, 2026. "
+        "Target Entity information for 2026-05-16. "
         "Detailed values include 7% probability, 16 / 23 °C range, and other planning details."
     )
     return {
@@ -16,13 +16,13 @@ def _runtime_fixture():
             "step_id": "step_1",
             "task_id": "step_1",
             "step_type": "retrieve_information",
-            "objective": "Retrieve information for Target City on 2026-05-16",
-            "parameters": {"known": {"location": "Target City", "date": "2026-05-16"}, "missing_required": {}, "optional": {}},
+            "objective": "Retrieve information for Target Entity on 2026-05-16",
+            "parameters": {"known": {"location": "Target Entity", "date": "2026-05-16"}, "missing_required": {}, "optional": {}},
             "required_capability": "generic_information_access",
             "execution_strategy": ["web_evidence", "tool_generation"],
             "execution_ready": True,
         },
-        "user_input": "Could you check Target City for me tomorrow?",
+        "user_input": "Could you check Target Entity for the requested value?",
         "api_discovery": {
             "status": "success",
             "strategy_used": "fetched_page_answer_sufficiency",
@@ -30,10 +30,10 @@ def _runtime_fixture():
             "selected_evidence": [
                 {
                     "url": "https://example.test/item/2026-05-16",
-                    "title": "Target City details for May 16, 2026",
+                    "title": "Target Entity details for 2026-05-16",
                     "source": "web_evidence",
                     "confidence": 0.95,
-                    "coverage": {"passed": True, "coverage_ratio": 1, "matched": {"location": ["Target City"], "date": ["16"]}, "missing": []},
+                    "coverage": {"passed": True, "coverage_ratio": 1, "matched": {"location": ["Target Entity"], "date": ["16"]}, "missing": []},
                     "text_excerpt": text,
                 }
             ],

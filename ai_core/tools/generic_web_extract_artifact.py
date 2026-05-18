@@ -221,6 +221,8 @@ def _aliases(value) -> list[str]:
         m = re.match(r"^(\d{{4}})-(\d{{2}})-(\d{{2}})$", s)
         if m:
             y, mo, d = m.groups(); mi = int(mo); di = int(d)
+            # Keep core domain-neutral: generate numeric surface variants only.
+            # Locale/domain-specific named surfaces must be generated in runtime packs.
             out.extend([
                 f"{{y}}/{{mo}}/{{d}}", f"{{y}}.{{mo}}.{{d}}", f"{{y}}/{{mi}}/{{di}}",
                 f"{{mi}}/{{di}}", f"{{mi}}-{{di}}", f"{{mo}}/{{d}}", f"{{mo}}-{{d}}",

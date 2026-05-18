@@ -1,23 +1,15 @@
-# CDAC NestHub - Source Clean Build
+# CDAC NestHub - AI Runtime OS Source Clean
 
-This package contains the complete source tree with runtime-generated artifacts removed.
+This package is a source-only clean build.
 
-## Source Boundaries
+## Included
+- Generic source code for the AI Runtime OS kernel.
+- Generic auxiliary brain / coordination source when present.
+- Application source, schemas, scripts, tests, and base configuration.
 
-- `ai_core/`: primary orchestration and execution kernel.
-- `auxiliary_brain/`: parallel coordination layer for generated participants, communities, task graphs, and delivery state.
-- `apps/`: API and UI entry points.
-- `configs/`: generic command/runtime configuration only. Concrete domain profiles must be generated or supplied at runtime.
-- `runtime/`: empty runtime workspace with `.gitkeep` placeholders only.
+## Excluded
+- Runtime generated agents, tasks, workflows, traces, deliveries, checkpoints, cache, datasets, learned registries, downloaded artifacts, generated schemas, and runtime YAML state.
+- Python cache and test cache files.
 
-## Runtime Rule
-
-Concrete user/business semantics must not be hardcoded in source. They are generated or loaded at runtime under `runtime/generated/` or deployment-specific configuration.
-
-## Debug
-
-Use VS Code `Debug API Server` or run the API server directly from `apps/api/server.py`.
-
-## Validation
-
-This build was compiled after removing runtime-generated files and scanning source/config/test files for the configured forbidden terms.
+## Design rule
+Core source must remain domain-agnostic. Domain-specific behavior, semantic surface packs, tool bindings, workflows, agents, tasks, and environment-specific runtime state must be generated under `runtime/` during execution, not committed as source.
