@@ -79,3 +79,25 @@ def test_v26_auxiliary_source_does_not_contain_home_experience_terms() -> None:
             if term in text:
                 hits.append((str(path.relative_to(root)), term))
     assert hits == []
+
+
+def test_v264_execution_is_driven_by_main_brain(tmp_path):
+    from auxiliary_brain.studio.service import AgentStudioService
+
+    service = AgentStudioService(runtime_root=tmp_path, command_config_path="configs/agent_studio_commands.json")
+    service.handle_message("Create an agent named Alpha Agent to report the current runtime state.")
+    created = service.handle_message("Create a task named taskA, which calls the alpha agent.")
+    assert created["task_name"] == "taskA"
+    executed = service.handle_message("execute taskA")
+    assert executed["origin"] == "auxiliary_brain"
+    assert executed["status"] == "completed"
+    outputs = executed["result"]["outputs"]
+    assert outputs
+    assert all(item.get("origin") == "ai_core" for item in outputs.values())
+    delivery = executed["result"]["delivery"]
+    assert delivery["origin"] == "auxiliary_brain"
+    assert delivery["upstream_origin"] == "ai_core"
+    traces = list((tmp_path / "traces" / "runtime_layers").glob("*.json"))
+    trace_text = "\n".join(path.read_text(encoding="utf-8") for path in traces)
+    assert '"origin": "ai_core"' in trace_text
+    assert "agent_task_executed_by_main_brain" in trace_text

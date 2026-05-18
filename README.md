@@ -642,3 +642,50 @@ execute TaskA creates a live run.
 The UI shows task run, tool outputs, and a console delivery.
 The result should not contain unrelated search results caused by task-creation wording.
 ```
+
+## V2.6.4 Update - Main-Brain Driven Agent Execution
+
+### Goal
+
+Keep the auxiliary brain as a parallel community/task coordination layer, while moving actual execution responsibility back to `ai_core`.
+
+### Implemented
+
+1. Added `ai_core/agent_execution/` as the main-brain execution adapter for generated agent tasks.
+2. `auxiliary_brain` now resolves named agents/tasks, creates task graphs, and tracks state only.
+3. `execute TaskA` now calls the `ai_core` execution adapter for each task node.
+4. Tool outputs now carry `origin: ai_core`.
+5. Console deliveries remain stored by `auxiliary_brain`, with `upstream_origin: ai_core`.
+6. Runtime traces now show both layers clearly:
+   - `origin=auxiliary_brain`: task/community management and delivery storage.
+   - `origin=ai_core`: task execution, material collection, and stable synthesis.
+7. Source code keeps business/domain-specific terms out of `ai_core` and `auxiliary_brain`; runtime/tool routing phrases remain configuration-driven.
+
+### User Test
+
+```text
+Create an agent named Time Agent to remind you of the current time.
+Create an agent named Weather Agent to obtain the weather information for Fukuoka today and tomorrow.
+Create a task named taskA, which calls the time agent and the weather agent.
+execute TaskA
+```
+
+### Expected Result
+
+```text
+1. First two commands create generated participants.
+2. Third command creates taskA only; it does not execute.
+3. Fourth command executes taskA.
+4. UI shows task runs, tool outputs, deliveries, and traces.
+5. Tool outputs show origin=ai_core.
+6. Delivery shows origin=auxiliary_brain and upstream_origin=ai_core.
+```
+
+### Validation
+
+```text
+compileall: OK
+pytest: 56 passed
+forbidden business keyword scan in ai_core / auxiliary_brain: OK
+runtime: cleared before package
+```

@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from auxiliary_brain.community.builder import RuntimeCommunityBuilder
 from auxiliary_brain.community.models import RuntimeAgentDefinition, RuntimeCommunityDefinition, RuntimeTaskDefinition
-from auxiliary_brain.execution.tool_runtime import RuntimeToolRuntime
+from ai_core.agent_execution import AICoreAgentTaskExecutor
 from auxiliary_brain.observability import RuntimeTraceLogger
 from auxiliary_brain.scheduler.scheduler_runtime import RuntimeScheduler
 
@@ -23,7 +23,7 @@ class RuntimeExecutionRuntime:
         self.runtime_root = Path(runtime_root)
         self.builder = RuntimeCommunityBuilder()
         self.scheduler = RuntimeScheduler(runtime_root)
-        self.tools = RuntimeToolRuntime(runtime_root)
+        self.core_executor = AICoreAgentTaskExecutor(runtime_root)
         self.trace_logger = RuntimeTraceLogger(runtime_root)
         self.run_dir = self.runtime_root / "generated" / "task_runs"
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -76,11 +76,29 @@ class RuntimeExecutionRuntime:
             if len(task_inputs) != len(task.input_refs):
                 blocked.append(task.task_id)
                 continue
-            output = self.tools.execute(task=task, agent=agent, inputs=task_inputs)
+            output = self.core_executor.execute_task(task=task, agent=agent, inputs=task_inputs)
+            self.trace_logger.record(
+                origin="ai_core",
+                event_type="agent_task_executed_by_main_brain",
+                payload={
+                    "graph_id": str(graph_id),
+                    "task_id": task.task_id,
+                    "agent_id": agent.agent_id,
+                    "tool_type": output.get("tool_type"),
+                    "status": output.get("status"),
+                    "artifact_path": output.get("artifact_path"),
+                },
+            )
             outputs[task.output_ref or task.task_id] = output
             executed.append(task.task_id)
         status = "completed" if not blocked else ("partial" if executed else "blocked")
-        delivery = self.tools.deliver(graph_id=str(graph_id), content={"status": status, "outputs": outputs}) if executed else {}
+        delivery = self._deliver(graph_id=str(graph_id), content={"status": status, "outputs": outputs}) if executed else {}
+        if delivery:
+            self.trace_logger.record(
+                origin=self.ORIGIN,
+                event_type="delivery_stored_by_auxiliary_layer",
+                payload={"graph_id": str(graph_id), "upstream_origin": "ai_core", "delivery": delivery.get("artifact_path")},
+            )
         result = {
             "run_id": f"run_{uuid4().hex[:8]}",
             "origin": self.ORIGIN,
@@ -120,6 +138,24 @@ class RuntimeExecutionRuntime:
                 if incoming[next_id] == 0:
                     queue.append(next_id)
         return [by_id[task_id] for task_id in ordered_ids] if len(ordered_ids) == len(by_id) else list(definition.tasks)
+
+    def _deliver(self, *, graph_id: str, content: dict[str, Any]) -> dict[str, Any]:
+        delivery_dir = self.runtime_root / "deliveries"
+        delivery_dir.mkdir(parents=True, exist_ok=True)
+        delivery = {
+            "delivery_id": f"delivery_{uuid4().hex[:8]}",
+            "origin": self.ORIGIN,
+            "upstream_origin": "ai_core",
+            "graph_id": graph_id,
+            "channel": "console",
+            "status": "delivered",
+            "created_at": self._now(),
+            "content": content,
+        }
+        path = delivery_dir / f"{delivery['delivery_id']}.json"
+        path.write_text(json.dumps(delivery, ensure_ascii=False, indent=2), encoding="utf-8")
+        delivery["artifact_path"] = str(path)
+        return delivery
 
     def _write_run(self, graph_id: str, status: str, payload: dict[str, Any]) -> Path:
         data = {"graph_id": graph_id, "origin": self.ORIGIN, "status": status, "updated_at": self._now(), "payload": payload}
