@@ -1,5 +1,5 @@
 {
-  "version": "v2.5home-ui-fix",
+  "version": "v2.6-runtime-execution",
   "description": "Runtime-facing command phrases and interaction profiles for the agent studio. Source code reads this file and does not embed these phrases.",
   "runtime_inputs": [
     {
@@ -7,14 +7,28 @@
       "label": "External model access key",
       "placeholder": "Paste an access key only when runtime requests it",
       "secret": true,
-      "env_keys": ["OPENAI_API_KEY"]
+      "env_keys": [
+        "OPENAI_API_KEY"
+      ]
     }
   ],
   "actions": [
     {
       "action": "create_participant",
-      "patterns": ["创建agent", "创建Agent", "创建智能体", "create agent", "add agent", "new agent"],
-      "default_capabilities": ["runtime_generated_capability"],
+      "patterns": [
+        "创建agent",
+        "创建Agent",
+        "创建智能体",
+        "create agent",
+        "add agent",
+        "new agent",
+        "create a agent",
+        "create an agent",
+        "create a participant"
+      ],
+      "default_capabilities": [
+        "runtime_generated_capability"
+      ],
       "default_tools": [],
       "required_runtime_inputs": [
         {
@@ -22,30 +36,62 @@
           "label": "External model access key",
           "placeholder": "Paste an access key if this action should use an external model",
           "secret": true,
-          "env_keys": ["OPENAI_API_KEY"],
-          "message_patterns": ["use external", "external model", "外部模型"],
+          "env_keys": [
+            "OPENAI_API_KEY"
+          ],
+          "message_patterns": [
+            "use external",
+            "external model",
+            "外部模型"
+          ],
           "reason": "required_by_selected_runtime_profile"
         }
       ]
     },
     {
       "action": "create_task_graph",
-      "patterns": ["创建任务", "新建任务", "create task", "new task", "add task"],
-      "default_activation_mode": "manual"
+      "patterns": [
+        "创建任务",
+        "新建任务",
+        "create task",
+        "new task",
+        "add task",
+        "create a task",
+        "make a task",
+        "schedule task"
+      ],
+      "default_activation_mode": "scheduled_or_manual",
+      "default_timezone": "Asia/Tokyo"
     },
     {
       "action": "start_task_graph",
-      "patterns": ["启动任务", "开始任务", "start task", "run task"],
+      "patterns": [
+        "启动任务",
+        "开始任务",
+        "start task",
+        "run task"
+      ],
       "target_status": "running"
     },
     {
       "action": "stop_task_graph",
-      "patterns": ["停止任务", "暂停任务", "stop task", "pause task"],
+      "patterns": [
+        "停止任务",
+        "暂停任务",
+        "stop task",
+        "pause task"
+      ],
       "target_status": "stopped"
     },
     {
       "action": "show_state",
-      "patterns": ["查看", "显示", "show", "list", "status"],
+      "patterns": [
+        "查看",
+        "显示",
+        "show",
+        "list",
+        "status"
+      ],
       "target_status": "view"
     }
   ],

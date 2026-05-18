@@ -97,6 +97,14 @@
         <div id="taskGraphs"></div>
         <h3 class="small">Task Runs</h3>
         <div id="taskRuns"></div>
+        <h3 class="small">Schedules</h3>
+        <div id="schedules"></div>
+        <h3 class="small">Live Instances</h3>
+        <div id="instances"></div>
+        <h3 class="small">Tool Outputs</h3>
+        <div id="toolOutputs"></div>
+        <h3 class="small">Deliveries</h3>
+        <div id="deliveries"></div>
         <h3 class="small">Runtime Traces</h3>
         <div id="traces"></div>
       </div>
@@ -215,7 +223,7 @@ async function stopTask() {
 function renderCard(title, body, meta) { return `<div class="card"><h3>${escapeHtml(title)}</h3><div>${body}</div><div class="meta">${escapeHtml(meta || '')}</div></div>`; }
 function escapeHtml(value) { return String(value || '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 function renderState(state) {
-  const agents = state.agents || [], graphs = state.task_graphs || [], runs = state.task_runs || [], traces = state.traces || [];
+  const agents = state.agents || [], graphs = state.task_graphs || [], runs = state.task_runs || [], traces = state.traces || [], schedules = state.schedules || [], instances = state.instances || [], toolOutputs = state.tool_outputs || [], deliveries = state.deliveries || [];
   document.getElementById('agentCount').textContent = agents.length;
   document.getElementById('graphCount').textContent = graphs.length;
   document.getElementById('agents').innerHTML = agents.map(a => {
@@ -225,6 +233,10 @@ function renderState(state) {
   }).join('') || '<div class="small">No generated participants.</div>';
   document.getElementById('taskGraphs').innerHTML = graphs.map(g => renderCard(g.community_id || 'graph', `<pre>${escapeHtml(JSON.stringify({tasks:g.tasks, edges:g.edges, activations:g.activations}, null, 2))}</pre>`, g.artifact_path)).join('') || '<div class="small">No task graph.</div>';
   document.getElementById('taskRuns').innerHTML = runs.map(r => renderCard(r.graph_id || 'run', `<span class="pill ${r.status === 'stopped' ? 'danger' : ''}">${escapeHtml(r.status)}</span><pre>${escapeHtml(JSON.stringify(r.payload || {}, null, 2))}</pre>`, r.artifact_path)).join('') || '<div class="small">No active run.</div>';
+  document.getElementById('schedules').innerHTML = schedules.map(x => renderCard(x.schedule_id || 'schedule', `<span class="pill">${escapeHtml(x.status)}</span><pre>${escapeHtml(JSON.stringify({activation:x.activation, instance_id:x.instance_id}, null, 2))}</pre>`, x.artifact_path)).join('') || '<div class="small">No schedule.</div>';
+  document.getElementById('instances').innerHTML = instances.map(x => renderCard(x.instance_id || 'instance', `<span class="pill">${escapeHtml(x.status)}</span><pre>${escapeHtml(JSON.stringify({graph_id:x.graph_id, events:x.events}, null, 2))}</pre>`, x.artifact_path)).join('') || '<div class="small">No live instance.</div>';
+  document.getElementById('toolOutputs').innerHTML = toolOutputs.slice(0,6).map(x => renderCard(x.tool_call_id || 'tool', `<span class="pill">${escapeHtml(x.tool_type)}</span><pre>${escapeHtml(JSON.stringify({status:x.status, query:x.query, result_text:x.result_text, evidence:x.evidence}, null, 2))}</pre>`, x.artifact_path)).join('') || '<div class="small">No tool output.</div>';
+  document.getElementById('deliveries').innerHTML = deliveries.slice(0,6).map(x => renderCard(x.delivery_id || 'delivery', `<span class="pill">${escapeHtml(x.channel)}</span><pre>${escapeHtml(JSON.stringify(x.content || {}, null, 2))}</pre>`, x.artifact_path)).join('') || '<div class="small">No delivery.</div>';
   document.getElementById('traces').innerHTML = traces.slice(0,8).map(t => renderCard(t.trace_id || 'trace', `<span class="pill">${escapeHtml(t.origin)}</span><pre>${escapeHtml(JSON.stringify(t.payload || {}, null, 2))}</pre>`, t.artifact_path || t.trace_path)).join('') || '<div class="small">No trace.</div>';
 }
 async function refreshState() {

@@ -9,6 +9,8 @@ from typing import Any
 from uuid import uuid4
 
 from auxiliary_brain.runtime import AuxiliaryBrainRuntime
+from auxiliary_brain.execution import RuntimeExecutionRuntime
+from auxiliary_brain.scheduler import RuntimeTriggerParser
 from auxiliary_brain.studio.config_loader import StudioCommandConfig
 
 
@@ -30,6 +32,8 @@ class AgentStudioService:
         self.runtime_root = Path(runtime_root)
         self.command_config = StudioCommandConfig(command_config_path)
         self.auxiliary_runtime = AuxiliaryBrainRuntime(self.runtime_root)
+        self.execution_runtime = RuntimeExecutionRuntime(self.runtime_root)
+        self.trigger_parser = RuntimeTriggerParser()
         self.task_runs_dir = self.runtime_root / "generated" / "task_runs"
         self.runtime_input_dir = self.runtime_root / "generated" / "runtime_inputs"
 
@@ -77,7 +81,7 @@ class AgentStudioService:
             "default_capabilities",
             ["runtime_generated_capability"],
         )
-        tool_refs = [f"tool::{value}" for value in extracted[4:7]]
+        tool_refs = self.command_config.action_profile("create_participant").get("default_tools", [])
         specification = {
             "community_id": self._active_or_new_community_id(),
             "agents": [
@@ -101,45 +105,52 @@ class AgentStudioService:
         if not agents:
             self.create_participant("bootstrap")
             agents = self._load_agents()
-        agent_ids = [item.get("agent_id") for item in agents if item.get("agent_id")]
-        primary = agent_ids[0] if agent_ids else "participant_1"
-        secondary = agent_ids[1] if len(agent_ids) > 1 else primary
         graph_id = f"graph_{uuid4().hex[:8]}"
+        profile = self.command_config.action_profile("create_task_graph")
+        default_timezone = profile.get("default_timezone", "Asia/Tokyo")
+        activation = self.trigger_parser.parse(message, default_timezone=default_timezone)
+        selected_agents = self._select_agents_for_message(agents, message) or agents[:1]
+        tasks: list[dict[str, Any]] = []
+        edges: list[dict[str, Any]] = []
+        material_refs: list[str] = []
+        for index, agent in enumerate(selected_agents, start=1):
+            task_id = f"{graph_id}_step_{index}"
+            output_ref = f"{graph_id}_material_{index}"
+            tasks.append({
+                "task_id": task_id,
+                "assigned_agent_id": agent.get("agent_id"),
+                "objective": message,
+                "output_ref": output_ref,
+                "activation_ref": activation.get("activation_id"),
+                "parameters": {"source": "studio_message", "execution_mode": "collect"},
+                "metadata": {"selected_by": "runtime_overlap"},
+            })
+            material_refs.append(output_ref)
+        final_agent = selected_agents[0] if selected_agents else agents[0]
+        final_id = f"{graph_id}_final"
+        tasks.append({
+            "task_id": final_id,
+            "assigned_agent_id": final_agent.get("agent_id"),
+            "objective": message,
+            "input_refs": material_refs,
+            "output_ref": f"{graph_id}_final_output",
+            "parameters": {"source": "studio_message", "execution_mode": "compose"},
+        })
+        for task in tasks[:-1]:
+            edges.append({"from_task_id": task["task_id"], "to_task_id": final_id, "condition": "completed"})
         specification = {
             "community_id": self._active_or_new_community_id(),
             "agents": agents,
-            "activations": [
-                {
-                    "activation_id": f"activation_{uuid4().hex[:8]}",
-                    "mode": self.command_config.action_profile("create_task_graph").get("default_activation_mode", "manual"),
-                    "expression": "manual",
-                }
-            ],
-            "tasks": [
-                {
-                    "task_id": f"{graph_id}_step_1",
-                    "assigned_agent_id": primary,
-                    "objective": message,
-                    "output_ref": f"{graph_id}_material",
-                    "parameters": {"source": "studio_message"},
-                },
-                {
-                    "task_id": f"{graph_id}_step_2",
-                    "assigned_agent_id": secondary,
-                    "objective": "compose output from prior material",
-                    "input_refs": [f"{graph_id}_material"],
-                    "output_ref": f"{graph_id}_final",
-                    "parameters": {"source": "studio_message"},
-                },
-            ],
-            "edges": [
-                {"from_task_id": f"{graph_id}_step_1", "to_task_id": f"{graph_id}_step_2", "condition": "completed"}
-            ],
+            "activations": [activation],
+            "tasks": tasks,
+            "edges": edges,
             "metadata": {"source": "agent_studio", "message_excerpt": message[:160], "graph_id": graph_id},
         }
         result = self.auxiliary_runtime.create_from_specification(specification)
-        self._write_task_run(graph_id, "created", result)
-        return {"origin": self.ORIGIN, "action": "create_task_graph", "status": "completed", "graph_id": graph_id, "result": result, "state": self.snapshot()}
+        graph_path = result.get("paths", {}).get("community")
+        registration = self.execution_runtime.register_graph(graph_payload=specification, graph_path=graph_path) if graph_path else {}
+        self._write_task_run(graph_id, registration.get("schedule", {}).get("status", "created"), {"created": result, "registration": registration})
+        return {"origin": self.ORIGIN, "action": "create_task_graph", "status": "completed", "graph_id": graph_id, "result": result, "registration": registration, "state": self.snapshot()}
 
     def update_latest_task_graph(self, status: str, message: str = "") -> dict[str, Any]:
         run_files = sorted(self.task_runs_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
@@ -149,8 +160,28 @@ class AgentStudioService:
         else:
             payload = json.loads(run_files[0].read_text(encoding="utf-8"))
             graph_id = payload.get("graph_id") or run_files[0].stem
-        self._write_task_run(str(graph_id), status, {"message_excerpt": message[:160]})
-        return {"origin": self.ORIGIN, "action": "update_task_graph", "graph_id": graph_id, "status": status, "state": self.snapshot()}
+        result_payload: dict[str, Any] = {"message_excerpt": message[:160]}
+        final_status = status
+        if status == "running":
+            schedule_files = sorted((self.runtime_root / "generated" / "schedules").glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+            for schedule_file in schedule_files:
+                schedule_payload = json.loads(schedule_file.read_text(encoding="utf-8"))
+                if str(schedule_payload.get("graph_id")) == str(graph_id):
+                    scheduled_at = (schedule_payload.get("activation") or {}).get("metadata", {}).get("scheduled_at")
+                    if not scheduled_at:
+                        self.execution_runtime.scheduler.mark(schedule_payload.get("schedule_id"), "running", {"reason": "manual_start"})
+                    break
+            due_results = self.execution_runtime.run_due()
+            if due_results:
+                result_payload["executions"] = due_results
+                final_status = status
+            else:
+                result_payload["scheduler"] = "registered_waiting_for_activation"
+                final_status = "scheduled"
+        elif status == "stopped":
+            result_payload["scheduler"] = "stop_requested"
+        self._write_task_run(str(graph_id), final_status, result_payload)
+        return {"origin": self.ORIGIN, "action": "update_task_graph", "graph_id": graph_id, "status": final_status, "payload": result_payload, "state": self.snapshot()}
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -160,8 +191,29 @@ class AgentStudioService:
             "task_graphs": self._load_json_dir(self.runtime_root / "generated" / "tasks"),
             "task_runs": self._load_json_dir(self.task_runs_dir),
             "runtime_inputs": self._load_json_dir(self.runtime_input_dir),
+            "schedules": self._load_json_dir(self.runtime_root / "generated" / "schedules"),
+            "instances": self._load_json_dir(self.runtime_root / "instances"),
+            "tool_outputs": self._load_json_dir(self.runtime_root / "generated" / "tool_outputs"),
+            "deliveries": self._load_json_dir(self.runtime_root / "deliveries"),
             "traces": self._load_json_dir(self.runtime_root / "traces" / "runtime_layers"),
         }
+
+
+    def run_due_tasks(self) -> dict[str, Any]:
+        results = self.execution_runtime.run_due()
+        return {"origin": self.ORIGIN, "action": "run_due_tasks", "status": "completed", "results": results, "state": self.snapshot()}
+
+    def _select_agents_for_message(self, agents: list[dict[str, Any]], message: str) -> list[dict[str, Any]]:
+        message_terms = {term.casefold() for term in self._extract_terms(message)}
+        ranked: list[tuple[int, int, dict[str, Any]]] = []
+        for index, agent in enumerate(agents):
+            labels = [agent.get("role_label", ""), *agent.get("capability_labels", []), *agent.get("tool_refs", [])]
+            agent_terms = {term.casefold() for label in labels for term in self._extract_terms(str(label))}
+            score = len(message_terms & agent_terms)
+            if score > 0:
+                ranked.append((score, -index, agent))
+        ranked.sort(reverse=True, key=lambda item: (item[0], item[1]))
+        return [agent for _, __, agent in ranked] or agents[:2]
 
     def _active_or_new_community_id(self) -> str:
         community_dir = self.runtime_root / "generated" / "communities"

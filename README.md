@@ -471,3 +471,63 @@ Expected behavior:
 - Sending a message changes the button/status to thinking.
 - If a runtime input is required, dynamic input fields appear.
 - Created agents, task graphs, task runs, and traces are visible in the right panels.
+
+## V2.6 Runtime Execution Lifecycle
+
+### Implementation Goals
+
+V2.6 changes Agent Studio from a generated-graph viewer into a runnable experimental runtime. The main brain remains the controller, while the parallel auxiliary brain owns live execution lifecycle components. No domain-specific logic is added to `ai_core` or `auxiliary_brain`; concrete participant labels, task text, generated files, tool outputs, and delivery content are runtime artifacts.
+
+### Added Runtime Capabilities
+
+```text
+1. Parse structural activation expressions into runtime activation metadata.
+2. Register generated task graphs with a persistent scheduler registry.
+3. Create live execution instances under runtime/instances/.
+4. Dispatch due/generated tasks through the auxiliary execution runtime.
+5. Run generic public discovery and synthesis tool calls.
+6. Persist tool outputs under runtime/generated/tool_outputs/.
+7. Deliver execution results to a console delivery channel under runtime/deliveries/.
+8. Display schedules, instances, tool outputs, and deliveries in Agent Studio.
+```
+
+### Added Source Modules
+
+```text
+auxiliary_brain/scheduler/trigger_parser.py
+auxiliary_brain/scheduler/scheduler_runtime.py
+auxiliary_brain/execution/tool_runtime.py
+auxiliary_brain/execution/execution_runtime.py
+tests/runtime/test_v26_runtime_execution_lifecycle.py
+```
+
+### User Test Scenario
+
+Input in Agent Studio, in this order:
+
+```text
+Create a time alert agent.
+Create a weather forecast agent.
+Create a task: Alarm woke me up at 10:10 AM and tell me the weather forecast for Fukuoka that day.
+```
+
+Expected behavior:
+
+```text
+1. Two generated participants appear.
+2. A generated task graph appears with activation metadata containing trigger_type, expression, timezone, and scheduled_at.
+3. A schedule record appears under runtime/generated/schedules/.
+4. A live instance appears under runtime/instances/.
+5. At the trigger time, the runtime dispatches generated tasks.
+6. Generic tool outputs appear under runtime/generated/tool_outputs/.
+7. Console delivery appears under runtime/deliveries/.
+8. Trace events identify whether work was done by ai_core or auxiliary_brain.
+```
+
+### Verification
+
+```text
+PYTHONPATH=. python -m compileall ai_core auxiliary_brain apps tests: OK
+PYTHONPATH=. pytest -q: 52 passed
+Forbidden source term scan for ai_core / auxiliary_brain: OK
+```

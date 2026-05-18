@@ -16,6 +16,19 @@ runtime = WorkflowRuntime()
 studio_service = AgentStudioService()
 
 
+@app.on_event("startup")
+async def agent_studio_runtime_loop_startup():
+    async def _loop():
+        while True:
+            try:
+                studio_service.run_due_tasks()
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+    asyncio.create_task(_loop())
+
+
+
 class ChatRequest(BaseModel):
     message: str
     local_model: str | None = None
@@ -89,6 +102,11 @@ async def agent_studio_runtime_input(req: StudioRuntimeInputRequest):
 @app.post("/api/agent-studio/task/start")
 async def agent_studio_task_start(req: StudioMessageRequest):
     return JSONResponse(studio_service.update_latest_task_graph("running", req.message))
+
+
+@app.post("/api/agent-studio/task/run-due")
+async def agent_studio_task_run_due():
+    return JSONResponse(studio_service.run_due_tasks())
 
 
 @app.post("/api/agent-studio/task/stop")
