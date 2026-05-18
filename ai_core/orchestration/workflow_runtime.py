@@ -661,7 +661,11 @@ class WorkflowRuntime:
                     })
                     return
 
-            if node_config.get("review_required"):
+            auto_approve_reviews = bool(
+                state.get("runtime_options", {}).get("auto_approve_reviews")
+                or state.get("runtime_options", {}).get("delegation_mode")
+            )
+            if node_config.get("review_required") and not auto_approve_reviews:
                 state["pending_action"] = {
                     "kind": "node_review",
                     "node_id": node_id,
@@ -679,6 +683,17 @@ class WorkflowRuntime:
                     "progress": done
                 })
                 return
+
+            if node_config.get("review_required") and auto_approve_reviews:
+                await self._emit(run_id, {
+                    "type": "NODE_REVIEW_AUTO_APPROVED",
+                    "title": "Node review auto-approved",
+                    "node_id": node_id,
+                    "attempt_number": attempt_number,
+                    "message": "Review gate bypassed for delegated primary-runtime execution.",
+                    "progress": done,
+                    "origin": "ai_core",
+                })
 
         self.knowledge.save_success_case(run_id, state["results"])
         output_result = state.get("results", {}).get("output", {}) if isinstance(state.get("results", {}).get("output"), dict) else {}

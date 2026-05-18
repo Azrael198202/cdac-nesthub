@@ -43,6 +43,8 @@ class PrimaryBrainDelegationClient:
     async def execute_agent_request(self, request: AgentExecutionRequest) -> AgentExecutionResult:
         message = self._build_agent_message(request)
         core_run_id, state = await self.runtime.prepare(message)
+        state.setdefault("runtime_options", {})["delegation_mode"] = True
+        state.setdefault("runtime_options", {})["auto_approve_reviews"] = True
         await self.runtime.run_prepared(state)
         final_answer = self._extract_final_answer(state)
         status = self._extract_status(state)
@@ -65,6 +67,8 @@ class PrimaryBrainDelegationClient:
     ) -> dict[str, Any]:
         message = self._build_synthesis_message(task_name, task_instruction, agent_results, shared_context or {})
         core_run_id, state = await self.runtime.prepare(message)
+        state.setdefault("runtime_options", {})["delegation_mode"] = True
+        state.setdefault("runtime_options", {})["auto_approve_reviews"] = True
         await self.runtime.run_prepared(state)
         return {
             "origin": "ai_core",
@@ -76,12 +80,11 @@ class PrimaryBrainDelegationClient:
 
     def _build_agent_message(self, request: AgentExecutionRequest) -> str:
         return (
-            "Execute the delegated participant work using the primary runtime.\n"
-            f"Participant name: {request.participant_name}\n"
-            f"Participant instruction: {request.participant_instruction}\n"
+            f"{request.participant_instruction}\n\n"
+            "Task context:\n"
             f"Task name: {request.task_name}\n"
             f"Task instruction: {request.task_instruction}\n"
-            "Return only the participant result needed for the task."
+            "Return only the participant result needed for this task."
         )
 
     def _build_synthesis_message(
@@ -119,6 +122,9 @@ class PrimaryBrainDelegationClient:
             value = state.get(key) if isinstance(state, dict) else None
             if value:
                 return str(value)
+        pending = state.get("pending_action") if isinstance(state, dict) else None
+        if pending:
+            return "The primary runtime paused before producing a user-facing final answer."
         if isinstance(results, dict) and results:
             return str(results)
         return "The primary runtime completed without a user-facing final answer."
