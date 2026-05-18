@@ -37,6 +37,15 @@ class AgentStudioService:
         self.task_runs_dir = self.runtime_root / "generated" / "task_runs"
         self.runtime_input_dir = self.runtime_root / "generated" / "runtime_inputs"
 
+    async def handle_message_async(self, message: str, provided_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
+        action = self.command_config.detect_action(message)
+        missing = self._missing_inputs(action, message, provided_inputs or {})
+        if missing:
+            return self._interaction_required(action, missing, message)
+        if action == "execute_task_graph":
+            return await self.execute_task_graph_async(message)
+        return self.handle_message(message, provided_inputs=provided_inputs)
+
     def handle_message(self, message: str, provided_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         action = self.command_config.detect_action(message)
         missing = self._missing_inputs(action, message, provided_inputs or {})
@@ -167,6 +176,17 @@ class AgentStudioService:
         created_status = registration.get("schedule", {}).get("status", "created")
         self._write_task_run(graph_id, created_status, {"task_name": task_name, "created": result, "registration": registration})
         return {"origin": self.ORIGIN, "action": "create_task_graph", "status": "completed", "graph_id": graph_id, "task_name": task_name, "result": result, "registration": registration, "state": self.snapshot()}
+
+    async def execute_task_graph_async(self, message: str) -> dict[str, Any]:
+        graph_record = self._find_task_graph(message)
+        if not graph_record:
+            return {"origin": self.ORIGIN, "action": "execute_task_graph", "status": "not_found", "message": "No matching runtime task graph was found.", "state": self.snapshot()}
+        graph_path = self._execution_graph_path(graph_record)
+        result = await self.execution_runtime.execute_graph_file_async(graph_path)
+        graph_id = str(result.get("graph_id") or graph_record.get("community_id") or "graph")
+        task_name = str((graph_record.get("metadata") or {}).get("task_name") or graph_id)
+        self._write_task_run(graph_id, result.get("status", "completed"), {"task_name": task_name, "execution": result})
+        return {"origin": self.ORIGIN, "action": "execute_task_graph", "status": result.get("status", "completed"), "graph_id": graph_id, "task_name": task_name, "result": result, "state": self.snapshot()}
 
     def execute_task_graph(self, message: str) -> dict[str, Any]:
         graph_record = self._find_task_graph(message)

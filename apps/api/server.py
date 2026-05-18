@@ -91,7 +91,7 @@ async def agent_studio_commands():
 
 @app.post("/api/agent-studio/message")
 async def agent_studio_message(req: StudioMessageRequest):
-    return JSONResponse(studio_service.handle_message(req.message, provided_inputs=req.provided_inputs))
+    return JSONResponse(await studio_service.handle_message_async(req.message, provided_inputs=req.provided_inputs))
 
 
 @app.post("/api/agent-studio/runtime-input")

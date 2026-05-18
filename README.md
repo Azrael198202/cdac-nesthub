@@ -746,3 +746,37 @@ pytest: 57 passed
 forbidden business keyword scan in ai_core / auxiliary_brain: OK
 runtime: cleared before package
 ```
+
+## V2.7.1 Primary-Orchestration Execution Fix
+
+This update fixes the Agent Studio execution path so `execute <task>` no longer uses the lightweight retrieval wrapper as the main execution path.
+
+### Goal
+
+- `auxiliary_brain` remains responsible for generated participant/task/community state.
+- `ai_core` is responsible for primary orchestration execution.
+- The task execution path now routes generated-agent work through `WorkflowRuntime.prepare()` and `WorkflowRuntime.run_prepared()`.
+- Runtime traces and outputs include `core_run_id` and origin markers to distinguish auxiliary state management from primary orchestration.
+
+### Validation Scenario
+
+1. `Create an agent named Time Agent to remind you of the current time.`
+2. `Create an agent named Weather Agent to obtain the weather information for Fukuoka today and tomorrow.`
+3. `Create a task named taskA, which calls the time agent and the weather agent.`
+4. `execute TaskA`
+
+Expected behavior:
+
+- taskA is only created in step 3.
+- `execute TaskA` invokes `ai_core` primary orchestration for each generated task.
+- Output artifacts include `tool_type=main_brain_orchestration` and `core_run_id`.
+- `auxiliary_brain` stores the delivery and task state only after receiving the `ai_core` result.
+
+### Test
+
+```bash
+PYTHONPATH=. python -m compileall ai_core auxiliary_brain apps
+PYTHONPATH=. pytest -q
+```
+
+Result: 57 passed.

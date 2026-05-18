@@ -52,6 +52,77 @@ class RuntimeExecutionRuntime:
             results.append(result)
         return results
 
+
+    async def execute_graph_file_async(self, graph_path: str | Path, *, schedule_id: str | None = None) -> dict[str, Any]:
+        path = Path(graph_path)
+        if not path.exists():
+            return {"origin": self.ORIGIN, "status": "missing_graph", "graph_path": str(path)}
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        definition = self.builder.build(payload)
+        return await self.execute_definition_async(definition, graph_path=str(path), schedule_id=schedule_id)
+
+    async def execute_definition_async(self, definition: RuntimeCommunityDefinition, *, graph_path: str = "", schedule_id: str | None = None) -> dict[str, Any]:
+        graph_id = definition.metadata.get("graph_id") or definition.community_id
+        ordered_tasks = self._ordered_tasks(definition)
+        agents = {agent.agent_id: agent for agent in definition.agents}
+        outputs: dict[str, Any] = {}
+        executed: list[str] = []
+        blocked: list[str] = []
+        for task in ordered_tasks:
+            agent = agents.get(task.assigned_agent_id)
+            if not agent:
+                blocked.append(task.task_id)
+                continue
+            task_inputs = {ref: outputs[ref] for ref in task.input_refs if ref in outputs}
+            if len(task_inputs) != len(task.input_refs):
+                blocked.append(task.task_id)
+                continue
+            output = await self.core_executor.execute_task_async(task=task, agent=agent, inputs=task_inputs)
+            self.trace_logger.record(
+                origin="ai_core",
+                event_type="agent_task_executed_by_primary_orchestration",
+                payload={
+                    "graph_id": str(graph_id),
+                    "task_id": task.task_id,
+                    "agent_id": agent.agent_id,
+                    "tool_type": output.get("tool_type"),
+                    "status": output.get("status"),
+                    "artifact_path": output.get("artifact_path"),
+                    "core_run_id": output.get("core_run_id"),
+                },
+            )
+            outputs[task.output_ref or task.task_id] = output
+            executed.append(task.task_id)
+        status = "completed" if not blocked else ("partial" if executed else "blocked")
+        delivery = self._deliver(graph_id=str(graph_id), content={"status": status, "outputs": outputs}) if executed else {}
+        if delivery:
+            self.trace_logger.record(
+                origin=self.ORIGIN,
+                event_type="delivery_stored_by_auxiliary_layer",
+                payload={"graph_id": str(graph_id), "upstream_origin": "ai_core", "delivery": delivery.get("artifact_path")},
+            )
+        result = {
+            "run_id": f"run_{uuid4().hex[:8]}",
+            "origin": self.ORIGIN,
+            "graph_id": graph_id,
+            "graph_path": graph_path,
+            "schedule_id": schedule_id,
+            "status": status,
+            "executed_task_ids": executed,
+            "blocked_task_ids": blocked,
+            "outputs": outputs,
+            "delivery": delivery,
+            "created_at": self._now(),
+            "execution_mode": "ai_core_primary_orchestration",
+        }
+        self._write_run(str(graph_id), status, result)
+        self.trace_logger.record(
+            origin=self.ORIGIN,
+            event_type="live_execution_completed",
+            payload={"graph_id": graph_id, "status": status, "executed_count": len(executed), "blocked_count": len(blocked), "delivery": delivery.get("artifact_path")},
+        )
+        return result
+
     def execute_graph_file(self, graph_path: str | Path, *, schedule_id: str | None = None) -> dict[str, Any]:
         path = Path(graph_path)
         if not path.exists():

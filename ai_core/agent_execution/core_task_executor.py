@@ -11,7 +11,9 @@ from uuid import uuid4
 
 import httpx
 from bs4 import BeautifulSoup
+
 from ai_core.agent_execution.runtime_workflow_executor import RuntimeWorkflowExecutor
+from ai_core.agent_execution.orchestration_bridge import AICoreOrchestrationBridge, build_core_execution_request
 
 
 class AICoreAgentTaskExecutor:
@@ -31,6 +33,32 @@ class AICoreAgentTaskExecutor:
         self.tool_output_dir = self.runtime_root / "generated" / "tool_outputs"
         self.tool_output_dir.mkdir(parents=True, exist_ok=True)
         self.workflow_executor = RuntimeWorkflowExecutor()
+        self.orchestration_bridge = AICoreOrchestrationBridge()
+
+
+    async def execute_task_async(self, *, task: Any, agent: Any, inputs: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Run generated-agent work through the full main-brain orchestration pipeline."""
+        inputs = inputs or {}
+        request_text = build_core_execution_request(task=task, agent=agent, inputs=inputs)
+        bridge_result = await self.orchestration_bridge.execute(request_text)
+        output = {
+            "tool_call_id": f"tool_call_{uuid4().hex[:8]}",
+            "origin": self.ORIGIN,
+            "status": bridge_result.get("status", "completed"),
+            "tool_type": "main_brain_orchestration",
+            "task_id": getattr(task, "task_id", ""),
+            "agent_id": getattr(agent, "agent_id", ""),
+            "query": request_text,
+            "result_text": bridge_result.get("final_text", ""),
+            "core_run_id": bridge_result.get("run_id"),
+            "core_results": bridge_result.get("results", {}),
+            "core_events_summary": bridge_result.get("events_summary", []),
+            "workflow_plan": {"origin": self.ORIGIN, "mode": "primary_orchestration_runtime"},
+            "workflow_events": bridge_result.get("events_summary", []),
+            "created_at": self._now(),
+        }
+        output["artifact_path"] = str(self._write_output(output))
+        return output
 
     def execute_task(self, *, task: Any, agent: Any, inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         inputs = inputs or {}
