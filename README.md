@@ -572,3 +572,38 @@ Create a task: Alarm woke me up at 10:10 AM and tell me the weather forecast for
 ```
 
 Expected result: task graph creation succeeds, schedule and live instance records appear, and no `ZoneInfoNotFoundError` is raised.
+
+## V2.6.2 Named Task Execution Fix
+
+Goal: make Agent Studio support explicit named task creation and explicit named task execution.
+
+Implemented:
+
+- `Create an agent named ...` now stores a user-visible runtime label in generated agent artifacts.
+- `Create a task named taskA ...` creates a task graph only; it does not execute immediately when no scheduled trigger is present.
+- `execute TaskA` resolves the matching runtime-generated task graph by generated metadata and runs the live execution lifecycle immediately.
+- Runtime execution now uses the full community artifact so assigned participant references resolve correctly.
+- Task graph artifacts include generated metadata and generated participants for UI inspection.
+- Agent Studio displays execution output through task runs, tool outputs, and console deliveries.
+
+Manual test:
+
+```text
+Create an agent named Time Agent to remind you of the current time.
+Create an agent named Weather Agent to obtain the weather information for Fukuoka today and tomorrow.
+Create a task named taskA, which calls the time agent and the weather agent.
+execute TaskA
+```
+
+Expected result:
+
+- The first two commands create two generated participants.
+- The third command creates `taskA` with status `created` and no delivery yet.
+- The fourth command executes `taskA`, creates tool outputs, writes a delivery artifact, and displays the result in Agent Studio.
+
+Validation:
+
+```text
+compileall: OK
+pytest: 54 passed
+```

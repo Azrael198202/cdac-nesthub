@@ -1,5 +1,5 @@
 {
-  "version": "v2.6-runtime-execution",
+  "version": "v2.6.2-named-task-execution",
   "description": "Runtime-facing command phrases and interaction profiles for the agent studio. Source code reads this file and does not embed these phrases.",
   "runtime_inputs": [
     {
@@ -46,6 +46,9 @@
           ],
           "reason": "required_by_selected_runtime_profile"
         }
+      ],
+      "name_extractors": [
+        "(?i)\\b(?:named|called)\\s+([A-Za-z0-9 _-]{2,80}?)(?:\\s+to\\b|\\s+for\\b|[.!?]|$)"
       ]
     },
     {
@@ -61,7 +64,10 @@
         "schedule task"
       ],
       "default_activation_mode": "scheduled_or_manual",
-      "default_timezone": "Asia/Tokyo"
+      "default_timezone": "Asia/Tokyo",
+      "name_extractors": [
+        "(?i)\\b(?:named|called)\\s+([A-Za-z0-9 _-]{1,80}?)(?:\\s*,|\\s+which\\b|\\s+that\\b|\\s+to\\b|[.!?]|$)"
+      ]
     },
     {
       "action": "start_task_graph",
@@ -82,6 +88,19 @@
         "pause task"
       ],
       "target_status": "stopped"
+    },
+    {
+      "action": "execute_task_graph",
+      "patterns": [
+        "execute task",
+        "run named task",
+        "run task named",
+        "execute"
+      ],
+      "target_status": "executed",
+      "name_extractors": [
+        "(?i)\\b(?:execute|run)\\s+([A-Za-z0-9 _-]{1,80}?)(?:[.!?]|$)"
+      ]
     },
     {
       "action": "show_state",

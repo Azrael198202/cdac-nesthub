@@ -37,9 +37,11 @@ class RuntimeCommunityRegistry:
             json.dumps(
                 {
                     "community_id": definition.community_id,
+                    "agents": payload["agents"],
                     "activations": payload["activations"],
                     "tasks": payload["tasks"],
                     "edges": payload["edges"],
+                    "metadata": payload["metadata"],
                 },
                 ensure_ascii=False,
                 indent=2,

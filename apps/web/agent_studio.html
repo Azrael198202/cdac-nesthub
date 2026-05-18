@@ -181,7 +181,11 @@ function handleStudioResponse(data) {
     addBubble('warning', JSON.stringify({action:data.action, status:data.status, missing_inputs:data.missing_inputs.map(x => x.input_id)}, null, 2));
   } else {
     clearMissingInputs();
-    addBubble('system', JSON.stringify({action:data.action, origin:data.origin, graph_id:data.graph_id, status:data.status}, null, 2));
+    const base = {action:data.action, origin:data.origin, graph_id:data.graph_id, task_name:data.task_name, status:data.status};
+    addBubble('system', JSON.stringify(base, null, 2));
+    if (data.action === 'execute_task_graph' && data.result) {
+      addBubble('system', summarizeExecution(data.result));
+    }
   }
   renderState(data.state || {});
 }
@@ -220,6 +224,19 @@ async function stopTask() {
   } catch (err) { addBubble('warning', String(err)); }
   finally { setThinking(false); }
 }
+function summarizeExecution(result) {
+  const lines = [];
+  lines.push('Execution result: ' + (result.status || 'completed'));
+  const outputs = result.outputs || {};
+  Object.keys(outputs).forEach(key => {
+    const item = outputs[key] || {};
+    if (item.result_text) lines.push(key + ': ' + item.result_text);
+    else if (item.query) lines.push(key + ': ' + item.query);
+    else lines.push(key + ': ' + JSON.stringify(item).slice(0, 240));
+  });
+  if (result.delivery && result.delivery.artifact_path) lines.push('Delivery: ' + result.delivery.artifact_path);
+  return lines.join('\n');
+}
 function renderCard(title, body, meta) { return `<div class="card"><h3>${escapeHtml(title)}</h3><div>${body}</div><div class="meta">${escapeHtml(meta || '')}</div></div>`; }
 function escapeHtml(value) { return String(value || '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 function renderState(state) {
@@ -231,8 +248,8 @@ function renderState(state) {
     const tools = (a.tool_refs || []).map(v => `<span class="pill">${escapeHtml(v)}</span>`).join('');
     return renderCard(a.agent_id || 'participant', `<div>${escapeHtml(a.role_label || '')}</div><div>${caps}</div><div>${tools}</div>`, a.artifact_path);
   }).join('') || '<div class="small">No generated participants.</div>';
-  document.getElementById('taskGraphs').innerHTML = graphs.map(g => renderCard(g.community_id || 'graph', `<pre>${escapeHtml(JSON.stringify({tasks:g.tasks, edges:g.edges, activations:g.activations}, null, 2))}</pre>`, g.artifact_path)).join('') || '<div class="small">No task graph.</div>';
-  document.getElementById('taskRuns').innerHTML = runs.map(r => renderCard(r.graph_id || 'run', `<span class="pill ${r.status === 'stopped' ? 'danger' : ''}">${escapeHtml(r.status)}</span><pre>${escapeHtml(JSON.stringify(r.payload || {}, null, 2))}</pre>`, r.artifact_path)).join('') || '<div class="small">No active run.</div>';
+  document.getElementById('taskGraphs').innerHTML = graphs.map(g => renderCard(((g.metadata && g.metadata.task_name) || g.community_id || 'graph'), `<pre>${escapeHtml(JSON.stringify({tasks:g.tasks, edges:g.edges, activations:g.activations}, null, 2))}</pre>`, g.artifact_path)).join('') || '<div class="small">No task graph.</div>';
+  document.getElementById('taskRuns').innerHTML = runs.map(r => renderCard(((r.payload && r.payload.task_name) || r.graph_id || 'run'), `<span class="pill ${r.status === 'stopped' ? 'danger' : ''}">${escapeHtml(r.status)}</span><pre>${escapeHtml(JSON.stringify(r.payload || {}, null, 2))}</pre>`, r.artifact_path)).join('') || '<div class="small">No active run.</div>';
   document.getElementById('schedules').innerHTML = schedules.map(x => renderCard(x.schedule_id || 'schedule', `<span class="pill">${escapeHtml(x.status)}</span><pre>${escapeHtml(JSON.stringify({activation:x.activation, instance_id:x.instance_id}, null, 2))}</pre>`, x.artifact_path)).join('') || '<div class="small">No schedule.</div>';
   document.getElementById('instances').innerHTML = instances.map(x => renderCard(x.instance_id || 'instance', `<span class="pill">${escapeHtml(x.status)}</span><pre>${escapeHtml(JSON.stringify({graph_id:x.graph_id, events:x.events}, null, 2))}</pre>`, x.artifact_path)).join('') || '<div class="small">No live instance.</div>';
   document.getElementById('toolOutputs').innerHTML = toolOutputs.slice(0,6).map(x => renderCard(x.tool_call_id || 'tool', `<span class="pill">${escapeHtml(x.tool_type)}</span><pre>${escapeHtml(JSON.stringify({status:x.status, query:x.query, result_text:x.result_text, evidence:x.evidence}, null, 2))}</pre>`, x.artifact_path)).join('') || '<div class="small">No tool output.</div>';

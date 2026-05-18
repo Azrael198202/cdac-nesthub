@@ -56,6 +56,8 @@ class AgentStudioService:
             return self.create_participant(message)
         if action == "create_task_graph":
             return self.create_task_graph(message)
+        if action == "execute_task_graph":
+            return self.execute_task_graph(message)
         if action == "start_task_graph":
             return self.update_latest_task_graph("running", message)
         if action == "stop_task_graph":
@@ -76,8 +78,8 @@ class AgentStudioService:
 
     def create_participant(self, message: str) -> dict[str, Any]:
         extracted = self._extract_terms(message)
-        role_label = extracted[0] if extracted else f"role_{uuid4().hex[:8]}"
-        capability_labels = extracted[1:4] or self.command_config.action_profile("create_participant").get(
+        role_label = self._extract_runtime_label("create_participant", message) or (extracted[0] if extracted else f"role_{uuid4().hex[:8]}")
+        capability_labels = [term for term in extracted if term.casefold() not in {item.casefold() for item in self._extract_terms(role_label)}][:4] or self.command_config.action_profile("create_participant").get(
             "default_capabilities",
             ["runtime_generated_capability"],
         )
@@ -90,7 +92,7 @@ class AgentStudioService:
                     "role_label": role_label,
                     "capability_labels": capability_labels,
                     "tool_refs": tool_refs,
-                    "metadata": {"created_from": "studio_message"},
+                    "metadata": {"created_from": "studio_message", "display_name": role_label},
                 }
             ],
             "tasks": [],
@@ -106,6 +108,7 @@ class AgentStudioService:
             self.create_participant("bootstrap")
             agents = self._load_agents()
         graph_id = f"graph_{uuid4().hex[:8]}"
+        task_name = self._extract_runtime_label("create_task_graph", message) or graph_id
         profile = self.command_config.action_profile("create_task_graph")
         default_timezone = profile.get("default_timezone", "UTC")
         activation = self.trigger_parser.parse(message, default_timezone=default_timezone)
@@ -144,13 +147,27 @@ class AgentStudioService:
             "activations": [activation],
             "tasks": tasks,
             "edges": edges,
-            "metadata": {"source": "agent_studio", "message_excerpt": message[:160], "graph_id": graph_id},
+            "metadata": {"source": "agent_studio", "message_excerpt": message[:160], "graph_id": graph_id, "task_name": task_name},
         }
         result = self.auxiliary_runtime.create_from_specification(specification)
         graph_path = result.get("paths", {}).get("community")
-        registration = self.execution_runtime.register_graph(graph_payload=specification, graph_path=graph_path) if graph_path else {}
-        self._write_task_run(graph_id, registration.get("schedule", {}).get("status", "created"), {"created": result, "registration": registration})
-        return {"origin": self.ORIGIN, "action": "create_task_graph", "status": "completed", "graph_id": graph_id, "result": result, "registration": registration, "state": self.snapshot()}
+        registration = {}
+        if graph_path and activation.get("mode") == "scheduled":
+            registration = self.execution_runtime.register_graph(graph_payload=specification, graph_path=graph_path)
+        created_status = registration.get("schedule", {}).get("status", "created")
+        self._write_task_run(graph_id, created_status, {"task_name": task_name, "created": result, "registration": registration})
+        return {"origin": self.ORIGIN, "action": "create_task_graph", "status": "completed", "graph_id": graph_id, "task_name": task_name, "result": result, "registration": registration, "state": self.snapshot()}
+
+    def execute_task_graph(self, message: str) -> dict[str, Any]:
+        graph_record = self._find_task_graph(message)
+        if not graph_record:
+            return {"origin": self.ORIGIN, "action": "execute_task_graph", "status": "not_found", "message": "No matching runtime task graph was found.", "state": self.snapshot()}
+        graph_path = self._execution_graph_path(graph_record)
+        result = self.execution_runtime.execute_graph_file(graph_path)
+        graph_id = str(result.get("graph_id") or graph_record.get("community_id") or "graph")
+        task_name = str((graph_record.get("metadata") or {}).get("task_name") or graph_id)
+        self._write_task_run(graph_id, result.get("status", "completed"), {"task_name": task_name, "execution": result})
+        return {"origin": self.ORIGIN, "action": "execute_task_graph", "status": result.get("status", "completed"), "graph_id": graph_id, "task_name": task_name, "result": result, "state": self.snapshot()}
 
     def update_latest_task_graph(self, status: str, message: str = "") -> dict[str, Any]:
         run_files = sorted(self.task_runs_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
@@ -177,7 +194,7 @@ class AgentStudioService:
                 final_status = status
             else:
                 result_payload["scheduler"] = "registered_waiting_for_activation"
-                final_status = "scheduled"
+                final_status = "running"
         elif status == "stopped":
             result_payload["scheduler"] = "stop_requested"
         self._write_task_run(str(graph_id), final_status, result_payload)
@@ -202,6 +219,43 @@ class AgentStudioService:
     def run_due_tasks(self) -> dict[str, Any]:
         results = self.execution_runtime.run_due()
         return {"origin": self.ORIGIN, "action": "run_due_tasks", "status": "completed", "results": results, "state": self.snapshot()}
+
+    def _extract_runtime_label(self, action: str, message: str) -> str:
+        profile = self.command_config.action_profile(action)
+        for pattern in profile.get("name_extractors", []):
+            try:
+                match = re.search(str(pattern), message or "")
+            except re.error:
+                continue
+            if match:
+                label = self._clean_label(match.group(1))
+                if label:
+                    return label
+        return ""
+
+    def _clean_label(self, value: str) -> str:
+        label = re.sub(r"\s+", " ", str(value or "")).strip(" .,;:!?\t\r\n")
+        return label[:96]
+
+    def _execution_graph_path(self, graph_record: dict[str, Any]) -> str:
+        raw_path = Path(str(graph_record.get("artifact_path") or ""))
+        community_id = str(graph_record.get("community_id") or "")
+        if community_id and raw_path.name == f"{community_id}.json":
+            candidate = raw_path.parent.parent / "communities" / raw_path.name
+            if candidate.exists():
+                return str(candidate)
+        return str(raw_path)
+
+    def _find_task_graph(self, message: str) -> dict[str, Any] | None:
+        requested = self._extract_runtime_label("execute_task_graph", message).casefold()
+        graphs = self._load_json_dir(self.runtime_root / "generated" / "tasks")
+        if requested:
+            for graph in graphs:
+                metadata = graph.get("metadata") or {}
+                candidates = [metadata.get("task_name"), metadata.get("graph_id"), graph.get("community_id")]
+                if any(str(candidate or "").casefold() == requested for candidate in candidates):
+                    return graph
+        return graphs[0] if graphs else None
 
     def _select_agents_for_message(self, agents: list[dict[str, Any]], message: str) -> list[dict[str, Any]]:
         message_terms = {term.casefold() for term in self._extract_terms(message)}
