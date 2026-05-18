@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from ai_core.evolution.approval_learning import ApprovalLearningService
 from ai_core.orchestration.workflow_runtime import WorkflowRuntime
 from ai_core.events.event_bus import event_bus
-from auxiliary_brain.studio.service import AgentStudioService
+from auxiliary_brain.studio import AgentStudioService
 
 approval_learning = ApprovalLearningService()
 app = FastAPI()
@@ -16,22 +16,14 @@ runtime = WorkflowRuntime()
 studio_service = AgentStudioService()
 
 
-@app.on_event("startup")
-async def agent_studio_runtime_loop_startup():
-    async def _loop():
-        while True:
-            try:
-                studio_service.run_due_tasks()
-            except Exception:
-                pass
-            await asyncio.sleep(1)
-    asyncio.create_task(_loop())
-
-
-
 class ChatRequest(BaseModel):
     message: str
     local_model: str | None = None
+
+
+class AgentStudioRequest(BaseModel):
+    message: str
+    provided_inputs: dict[str, Any] | None = None
 
 
 class ResumeRequest(BaseModel):
@@ -55,8 +47,10 @@ async def home():
     )
 
 
+
+
 @app.get("/agent-studio")
-async def agent_studio_page():
+async def agent_studio_home():
     html = open("apps/web/agent_studio.html", "r", encoding="utf-8").read()
     return HTMLResponse(
         html,
@@ -64,19 +58,8 @@ async def agent_studio_page():
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
             "Expires": "0",
-            "X-Runtime-Page": "agent-studio",
         },
     )
-
-
-class StudioMessageRequest(BaseModel):
-    message: str
-    provided_inputs: dict[str, Any] | None = None
-
-
-class StudioRuntimeInputRequest(BaseModel):
-    input_id: str
-    value: str
 
 
 @app.get("/api/agent-studio/state")
@@ -84,34 +67,9 @@ async def agent_studio_state():
     return JSONResponse(studio_service.snapshot())
 
 
-@app.get("/api/agent-studio/commands")
-async def agent_studio_commands():
-    return JSONResponse(studio_service.command_config.load())
-
-
 @app.post("/api/agent-studio/message")
-async def agent_studio_message(req: StudioMessageRequest):
-    return JSONResponse(await studio_service.handle_message_async(req.message, provided_inputs=req.provided_inputs))
-
-
-@app.post("/api/agent-studio/runtime-input")
-async def agent_studio_runtime_input(req: StudioRuntimeInputRequest):
-    return JSONResponse(studio_service.accept_runtime_input(req.input_id, req.value))
-
-
-@app.post("/api/agent-studio/task/start")
-async def agent_studio_task_start(req: StudioMessageRequest):
-    return JSONResponse(studio_service.update_latest_task_graph("running", req.message))
-
-
-@app.post("/api/agent-studio/task/run-due")
-async def agent_studio_task_run_due():
-    return JSONResponse(studio_service.run_due_tasks())
-
-
-@app.post("/api/agent-studio/task/stop")
-async def agent_studio_task_stop(req: StudioMessageRequest):
-    return JSONResponse(studio_service.update_latest_task_graph("stopped", req.message))
+async def agent_studio_message(req: AgentStudioRequest):
+    return JSONResponse(await studio_service.handle_message(req.message, provided_inputs=req.provided_inputs))
 
 
 @app.get("/api/version")

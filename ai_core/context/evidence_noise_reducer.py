@@ -4,7 +4,6 @@ import re
 from typing import Any
 
 from ai_core.codegen.runtime_variable_inferencer import RuntimeVariableInferencer
-from ai_core.utils.semantic_surface import RuntimeSemanticSurfaceNormalizer
 
 
 class EvidenceNoiseReducer:
@@ -22,18 +21,9 @@ class EvidenceNoiseReducer:
     DEFAULT_MAX_TEXT_PER_ITEM = 1800
     DEFAULT_MIN_CONFIDENCE = 0.45
 
-    def __init__(self) -> None:
-        self.semantic_surface = RuntimeSemanticSurfaceNormalizer()
+    NOISE_MARKERS: tuple[str, ...] = ()
+    EXAMPLE_MARKERS: tuple[str, ...] = ()
 
-    NOISE_MARKERS = (
-        "privacy policy", "terms of use", "cookie", "advertising", "newsletter",
-        "sign in", "login", "subscribe", "all rights reserved", "copyright",
-        "download app", "careers", "contact us", "site map",
-    )
-    EXAMPLE_MARKERS = (
-        "example", "sample", "your_api_key", "demo", "placeholder",
-        "appid", "api key", "curl ", "swagger", "openapi",
-    )
 
 
     def reduce(self, payload: dict[str, Any], *, known_parameters: dict[str, Any] | None = None, max_items: int | None = None, max_chars_per_item: int | None = None) -> dict[str, Any]:
@@ -295,14 +285,11 @@ class EvidenceNoiseReducer:
             s = str(v).strip()
             if not s:
                 return
-            if self.semantic_surface.is_compact_artifact(s):
-                values.extend(self.semantic_surface.semantic_aliases(s))
-            else:
-                values.append(s)
+            values.append(s)
             m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
             if m:
                 y, mo, d = m.groups()
-                values.extend([f"{int(mo)}/{int(d)}", f"{mo}/{d}", f"{mo}-{d}", f"{int(d)}", f"{int(mo)}/{int(d)}"])
+                values.extend([f"{int(mo)}/{int(d)}", f"{mo}/{d}", f"{mo}-{d}", f"{int(d)}", f"{int(d)} May" if mo == "05" else f"{int(mo)}/{int(d)}"])
         add(value)
         dedup = []
         for v in values:

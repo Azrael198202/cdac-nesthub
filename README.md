@@ -1,41 +1,33 @@
 # CDAC NestHub - AI Runtime OS Source Clean
 
-## Version
-V2.8.2 Clean Source + Working Agent Studio
+This source package keeps the runtime workspace clean. Runtime artifacts are generated only when the server or a workflow runs.
 
-## Design Boundary
+## Agent Delegation Runtime
 
-- `ai_core/` is the primary runtime brain and execution kernel.
-- `auxiliary_brain/` is a parallel companion brain for agent, task, and community management.
-- `apps/` contains API and UI source code, including Agent Studio.
-- `runtime/` is a runtime workspace and is intentionally empty in source packages.
+The auxiliary layer manages participants, task graphs, community state, and delegation status. It does not execute tools, generate code, perform retrieval, or create final answers.
 
-## Runtime Workspace
+The primary runtime performs each delegated participant execution and the final synthesis:
 
-The source package keeps only:
+1. A user creates participants and task graphs in Agent Studio.
+2. The auxiliary layer stores definitions under the runtime workspace during execution.
+3. When a named task is executed, the auxiliary layer finds the selected participants.
+4. Each participant request is delegated to the primary runtime.
+5. The primary runtime performs parsing, intent handling, workflow planning, tool selection, execution, evidence handling, and synthesis.
+6. The auxiliary layer collects participant results and sends them back to the primary runtime for final synthesis.
+7. The auxiliary layer saves the delivery and exposes it to the UI.
 
-```text
-runtime/.gitkeep
+## Run
+
+```bash
+PYTHONPATH=. uvicorn apps.api.server:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Runtime-generated agents, tasks, traces, deliveries, checkpoints, tool bindings, semantic packs, and registries must be created during execution and must not be committed into the source package.
-
-## Agent Studio
-
-Start the API server and open:
+Open:
 
 ```text
 http://127.0.0.1:8000/agent-studio
 ```
 
-Agent Studio is source code and is preserved in this package.
+## Source Clean Rule
 
-## Execution Responsibility
-
-The companion brain manages definitions and dispatch metadata. The primary brain performs parsing, intent analysis, workflow construction, tool selection, execution, evidence handling, and final synthesis.
-
-## Clean Source Rules
-
-- Do not place concrete runtime artifacts in source.
-- Do not hard-code domain-specific logic in `ai_core/` or `auxiliary_brain/`.
-- Put concrete profiles, tools, and generated schemas under `runtime/` during execution only.
+The package keeps only source code and base configuration. Runtime workspace content is excluded from the source package.

@@ -1,1 +1,3 @@
-"""Generic studio layer for runtime-generated participants and task graphs."""
+from .service import AgentStudioService
+
+__all__ = ["AgentStudioService"]

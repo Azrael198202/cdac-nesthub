@@ -23,7 +23,7 @@ class SandboxVerificationResult:
 class SandboxVerifier:
     """Static and compile-time verifier for runtime-generated artifacts.
 
-    This is not a full security sandbox. It is a generic preflight gate that
+    This is not a full security sandbox. It is a generic precheck gate that
     prevents obviously unsafe artifacts from being registered without review.
     Runtime execution should still happen in an OS/container sandbox when the
     artifact uses network, filesystem, subprocess, or package installation.

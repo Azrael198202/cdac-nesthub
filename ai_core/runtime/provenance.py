@@ -49,7 +49,7 @@ class ExecutionProvenanceRecorder:
             "status": "started",
             "started_at": now,
             "finished_at": None,
-            "elapsed_ms": None,
+            "duration_ms": None,
             "input": self._safe_json(input_data or {}),
             "output": None,
             "error": None,
@@ -70,12 +70,12 @@ class ExecutionProvenanceRecorder:
     def finish(self, trace: dict[str, Any], *, output: Any = None, status: str = "success", error: Any = None) -> dict[str, Any]:
         finished_at = self._now()
         started = trace.pop("_started_monotonic", None)
-        elapsed_ms = None
+        duration_ms = None
         if isinstance(started, (int, float)):
-            elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
         trace["status"] = status
         trace["finished_at"] = finished_at
-        trace["elapsed_ms"] = elapsed_ms
+        trace["duration_ms"] = duration_ms
         trace["output"] = self._safe_json(output)
         trace["error"] = self._safe_json(error) if error else None
         trace.setdefault("events", []).append({"type": "execution_finished", "time": finished_at, "status": status})
@@ -101,7 +101,7 @@ class ExecutionProvenanceRecorder:
             "status": trace.get("status"),
             "started_at": trace.get("started_at"),
             "finished_at": trace.get("finished_at"),
-            "elapsed_ms": trace.get("elapsed_ms"),
+            "duration_ms": trace.get("duration_ms"),
             "artifact": trace.get("artifact"),
             "execution_claims": trace.get("execution_claims"),
             "input": trace.get("input"),

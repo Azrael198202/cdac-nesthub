@@ -5,267 +5,41 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Runtime Agent Studio</title>
   <style>
-    :root { --bg:#0f172a; --panel:#111827; --card:#1f2937; --muted:#94a3b8; --text:#e5e7eb; --line:#334155; --accent:#38bdf8; --warn:#f59e0b; --ok:#10b981; --danger:#ef4444; }
-    * { box-sizing: border-box; }
-    html, body { margin:0; height:100%; overflow:hidden; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--text); }
-    body { display:flex; flex-direction:column; }
-    header { flex:0 0 auto; padding:14px 20px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:16px; }
-    header h1 { font-size:18px; margin:0; }
-    header span { color:var(--muted); font-size:12px; }
-    main { flex:1 1 auto; min-height:0; display:grid; grid-template-columns:minmax(330px, 25vw) minmax(420px, 1fr) minmax(360px, 30vw); gap:12px; padding:12px; overflow:hidden; }
-    section { background:var(--panel); border:1px solid var(--line); border-radius:14px; overflow:hidden; min-height:0; display:flex; flex-direction:column; }
-    .section-title { flex:0 0 auto; padding:12px 14px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:8px; }
-    .section-title h2 { margin:0; font-size:14px; }
-    .content { flex:1 1 auto; min-height:0; padding:12px; overflow:auto; }
-    .chat-log { flex:1 1 auto; min-height:120px; overflow:auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
-    .composer { flex:0 0 auto; padding:12px; border-top:1px solid var(--line); background:rgba(15,23,42,.98); box-shadow:0 -8px 24px rgba(0,0,0,.18); }
-    .bubble { padding:10px 12px; border-radius:12px; background:var(--card); border:1px solid var(--line); font-size:13px; line-height:1.45; white-space:pre-wrap; }
-    .bubble.user { border-color:var(--accent); }
-    .bubble.system { border-color:#475569; }
-    .bubble.warning { border-color:var(--warn); }
-    textarea, input { width:100%; background:#020617; color:var(--text); border:1px solid var(--line); border-radius:10px; padding:10px; outline:none; }
-    textarea:focus, input:focus { border-color:var(--accent); }
-    textarea { min-height:86px; max-height:22vh; resize:vertical; }
-    label { display:block; font-size:12px; color:var(--muted); margin:9px 0 5px; }
-    button { background:#075985; color:white; border:0; border-radius:10px; padding:9px 12px; cursor:pointer; min-height:36px; }
-    button.secondary { background:#374151; }
-    button.danger { background:#7f1d1d; }
-    button:disabled { opacity:.55; cursor:not-allowed; }
-    .actions { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; align-items:center; }
-    .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:10px; margin-bottom:10px; }
-    .card h3 { margin:0 0 6px 0; font-size:13px; color:#f8fafc; }
-    .meta { color:var(--muted); font-size:12px; word-break:break-word; }
-    .pill { display:inline-block; padding:2px 7px; border-radius:999px; background:#0f766e; margin:2px 3px 2px 0; font-size:11px; }
-    .pill.warn { background:#92400e; }
-    .pill.danger { background:#7f1d1d; }
-    .small { font-size:12px; color:var(--muted); }
-    .status { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; }
-    .spinner { width:13px; height:13px; border:2px solid #64748b; border-top-color:var(--accent); border-radius:999px; animation:spin .8s linear infinite; display:none; }
-    .thinking .spinner { display:inline-block; }
-    @keyframes spin { to { transform:rotate(360deg); } }
-    pre { white-space:pre-wrap; word-break:break-word; background:#020617; border:1px solid var(--line); border-radius:10px; padding:10px; font-size:12px; margin:6px 0 0; }
-    .missing-panel { margin-top:10px; padding:10px; border:1px dashed var(--warn); border-radius:12px; display:none; }
-    .settings-grid { display:grid; grid-template-columns:1fr auto; gap:8px; align-items:end; }
-    .divider { height:1px; background:var(--line); margin:10px 0; }
-    @media (max-width: 1120px) { main { grid-template-columns:1fr; overflow:auto; } body { overflow:auto; } section { min-height:420px; } }
+    :root { color-scheme: dark; --bg:#0f172a; --panel:#111827; --card:#1f2937; --line:#334155; --text:#e5e7eb; --muted:#93c5fd; --accent:#0ea5e9; --danger:#991b1b; }
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif;font-size:14px}
+    header{height:76px;display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--line)}
+    h1{font-size:18px;margin:0 0 4px}.sub{color:#a5b4fc;font-size:12px}.status{color:#bae6fd}.btn{border:0;border-radius:10px;background:#334155;color:white;padding:10px 14px;font-weight:700;cursor:pointer}.btn.primary{background:#0369a1}.btn.danger{background:var(--danger)}.btn:disabled{opacity:.6;cursor:not-allowed}
+    main{display:grid;grid-template-columns:26% 44% 30%;gap:12px;height:calc(100vh - 76px);padding:12px}.panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);min-height:0;display:flex;flex-direction:column;overflow:hidden}.panel h2{font-size:14px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}.scroll{padding:12px;overflow:auto;min-height:0;flex:1}.item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}.pill{display:inline-block;margin:3px 4px 0 0;padding:3px 7px;border-radius:999px;background:#0f766e;color:#ccfbf1;font-size:12px}.path{color:#93c5fd;font-size:12px;word-break:break-all}.console{border-top:1px solid var(--line);padding:12px;background:#0b1220}.input{width:100%;height:84px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px;resize:vertical}.row{display:flex;gap:8px;margin-top:10px}.message{white-space:pre-wrap}.user{border-color:#0ea5e9}.error{border-color:#f59e0b}.final{border-color:#22c55e}.pre{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;background:#020617;border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;max-height:260px}.small{font-size:12px;color:#bfdbfe}.sectionTitle{color:#bfdbfe;font-weight:700;margin:12px 0 8px}.empty{color:#94a3b8;font-size:13px}
   </style>
 </head>
 <body>
-  <header>
-    <div>
-      <h1>Runtime Agent Studio</h1>
-      <span>Parallel auxiliary brain view. Original page remains unchanged.</span>
-    </div>
-    <div class="status" id="globalStatus"><span class="spinner"></span><span id="statusText">ready</span></div>
-    <button class="secondary" onclick="refreshState()">Refresh</button>
-  </header>
-  <main>
-    <section>
-      <div class="section-title"><h2>Interactive Console</h2><span class="small" id="commandHint">config loading</span></div>
-      <div class="chat-log" id="chatLog"></div>
-      <div class="composer">
-        <div id="runtimeAccessBox">
-          <label id="runtimeAccessLabel" for="runtimeAccessInput">Runtime access value</label>
-          <div class="settings-grid">
-            <input id="runtimeAccessInput" type="password" autocomplete="off" placeholder="Paste only when required by runtime" />
-            <button class="secondary" id="saveAccessButton" onclick="saveRuntimeAccess()">Save</button>
-          </div>
-          <div class="small" id="runtimeAccessStatus">Stored only for this server process unless configured otherwise.</div>
-        </div>
-        <div class="divider"></div>
-        <textarea id="messageInput" placeholder="Enter a runtime instruction. Command phrases are loaded from configuration."></textarea>
-        <div id="missingPanel" class="missing-panel">
-          <div class="small">Additional runtime inputs are required.</div>
-          <div id="missingFields"></div>
-          <div class="actions"><button onclick="submitMissingInputs()">Submit Inputs</button></div>
-        </div>
-        <div class="actions">
-          <button id="sendButton" onclick="sendMessage()">Send</button>
-          <button class="secondary" id="startButton" onclick="startTask()">Start Latest</button>
-          <button class="danger" id="stopButton" onclick="stopTask()">Stop Latest</button>
-        </div>
-      </div>
-    </section>
-    <section>
-      <div class="section-title"><h2>Generated Participants</h2><span class="small" id="agentCount">0</span></div>
-      <div class="content" id="agents"></div>
-    </section>
-    <section>
-      <div class="section-title"><h2>Workflow / Tools / Traces</h2><span class="small" id="graphCount">0</span></div>
-      <div class="content">
-        <h3 class="small">Task Graphs</h3>
-        <div id="taskGraphs"></div>
-        <h3 class="small">Task Runs</h3>
-        <div id="taskRuns"></div>
-        <h3 class="small">Schedules</h3>
-        <div id="schedules"></div>
-        <h3 class="small">Live Instances</h3>
-        <div id="instances"></div>
-        <h3 class="small">Tool Outputs</h3>
-        <div id="toolOutputs"></div>
-        <h3 class="small">Deliveries</h3>
-        <div id="deliveries"></div>
-        <h3 class="small">Runtime Traces</h3>
-        <div id="traces"></div>
-      </div>
-    </section>
-  </main>
+<header>
+  <div><h1>Runtime Agent Studio</h1><div class="sub">Auxiliary layer manages participants and tasks. Primary runtime executes delegated work.</div></div>
+  <div class="status" id="status">ready</div>
+  <button class="btn" onclick="refreshState()">Refresh</button>
+</header>
+<main>
+  <section class="panel"><h2>Interactive Console <span id="profileCount" class="small"></span></h2><div class="scroll" id="messages"></div><div class="console"><textarea id="input" class="input" placeholder="Enter a runtime instruction. Command phrases are loaded from configuration."></textarea><div class="row"><button id="sendBtn" class="btn primary" onclick="sendMessage()">Send</button><button class="btn" onclick="quickExecute()">Execute Named Task</button></div></div></section>
+  <section class="panel"><h2>Generated Participants <span id="participantCount" class="small"></span></h2><div class="scroll" id="participants"></div></section>
+  <section class="panel"><h2>Workflow / Results / Traces <span id="graphCount" class="small"></span></h2><div class="scroll" id="rightPane"></div></section>
+</main>
 <script>
-const chatLog = document.getElementById('chatLog');
-let pendingInteraction = null;
-let commandConfig = null;
-function addBubble(kind, text) {
-  const div = document.createElement('div');
-  div.className = 'bubble ' + kind;
-  div.textContent = text;
-  chatLog.appendChild(div);
-  chatLog.scrollTop = chatLog.scrollHeight;
+const messages = document.getElementById('messages');
+function renderJson(obj){ return JSON.stringify(obj, null, 2); }
+function addMessage(text, cls='item') { const el=document.createElement('div'); el.className=cls; el.innerHTML=`<div class="message">${escapeHtml(text)}</div>`; messages.appendChild(el); messages.scrollTop=messages.scrollHeight; }
+function escapeHtml(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+async function sendMessage(){ const input=document.getElementById('input'); const text=input.value.trim(); if(!text)return; input.value=''; addMessage(text,'item user'); const btn=document.getElementById('sendBtn'); btn.disabled=true; btn.textContent='Thinking...'; document.getElementById('status').textContent='running'; try{ const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})}); const data=await res.json(); addMessage(renderJson(data), data.status==='completed'?'item':'item error'); if(data.final_answer){ addMessage('Final Answer:\n'+data.final_answer,'item final'); } await refreshState(); }catch(e){ addMessage('Error: '+e,'item error'); } finally{btn.disabled=false;btn.textContent='Send';document.getElementById('status').textContent='ready';}}
+function quickExecute(){ const name=prompt('Task name to execute'); if(name){ document.getElementById('input').value='execute '+name; sendMessage(); }}
+async function refreshState(){ try{ const res=await fetch('/api/agent-studio/state'); const data=await res.json(); renderState(data); }catch(e){ console.error(e); }}
+function renderState(data){
+  const ps=data.participants||[]; document.getElementById('participantCount').textContent=ps.length; const pbox=document.getElementById('participants'); pbox.innerHTML=''; if(!ps.length)pbox.innerHTML='<div class="empty">No participant.</div>'; ps.forEach(p=>{ const el=document.createElement('div'); el.className='item'; el.innerHTML=`<b>${escapeHtml(p.name||p.participant_id)}</b><div class="small">${escapeHtml(p.participant_id||'')}</div><span class="pill">${escapeHtml(p.status||'created')}</span><span class="pill">delegate_to_ai_core</span><div class="path">${escapeHtml(p._path||'')}</div>`; pbox.appendChild(el); });
+  const right=document.getElementById('rightPane'); const graphs=data.task_graphs||[]; const runs=data.task_runs||[]; const deliveries=data.deliveries||[]; const traces=data.traces||[]; document.getElementById('graphCount').textContent=graphs.length; right.innerHTML='';
+  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Task Graphs</div>'); if(!graphs.length) right.insertAdjacentHTML('beforeend','<div class="empty">No task graph.</div>'); graphs.forEach(g=>right.appendChild(card(g.task_name||g.graph_id, renderJson(g))));
+  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Delegation Runs</div>'); if(!runs.length) right.insertAdjacentHTML('beforeend','<div class="empty">No run.</div>'); runs.forEach(r=>right.appendChild(card(r.run_id||'run', renderJson(r))));
+  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Deliveries</div>'); if(!deliveries.length) right.insertAdjacentHTML('beforeend','<div class="empty">No delivery.</div>'); deliveries.forEach(d=>right.appendChild(card(d.delivery_id||'delivery', d.final_answer || renderJson(d))));
+  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Runtime Traces</div>'); if(!traces.length) right.insertAdjacentHTML('beforeend','<div class="empty">No trace.</div>'); traces.forEach(t=>right.appendChild(card(t.trace_id||'trace', renderJson(t))));
 }
-function setThinking(on, label) {
-  document.body.classList.toggle('thinking', !!on);
-  document.getElementById('globalStatus').classList.toggle('thinking', !!on);
-  document.getElementById('statusText').textContent = on ? (label || 'thinking') : 'ready';
-  ['sendButton','startButton','stopButton','saveAccessButton'].forEach(id => {
-    const el = document.getElementById(id); if (el) el.disabled = !!on;
-  });
-  document.getElementById('sendButton').textContent = on ? 'Thinking...' : 'Send';
-}
-async function api(path, options) {
-  const res = await fetch(path, options || {});
-  if (!res.ok) throw new Error(await res.text());
-  return await res.json();
-}
-async function loadCommands() {
-  const data = await api('/api/agent-studio/commands');
-  commandConfig = data;
-  const count = Array.isArray(data.actions) ? data.actions.length : 0;
-  document.getElementById('commandHint').textContent = count + ' command profiles';
-  const runtimeInput = (data.runtime_inputs || [])[0] || {};
-  if (runtimeInput.label) document.getElementById('runtimeAccessLabel').textContent = runtimeInput.label;
-  if (runtimeInput.placeholder) document.getElementById('runtimeAccessInput').placeholder = runtimeInput.placeholder;
-}
-async function saveRuntimeAccess() {
-  const value = document.getElementById('runtimeAccessInput').value.trim();
-  if (!value) { addBubble('warning', 'No runtime access value entered.'); return; }
-  setThinking(true, 'saving access');
-  try {
-    const inputProfile = (commandConfig && commandConfig.runtime_inputs || [])[0] || {input_id:'runtime_access'};
-    const data = await api('/api/agent-studio/runtime-input', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({input_id:inputProfile.input_id, value})
-    });
-    document.getElementById('runtimeAccessInput').value = '';
-    document.getElementById('runtimeAccessStatus').textContent = data.message || 'Runtime input accepted.';
-    addBubble('system', JSON.stringify({action:data.action, status:data.status}, null, 2));
-  } catch (err) { addBubble('warning', String(err)); }
-  finally { setThinking(false); }
-}
-async function sendMessage(extraPayload) {
-  const input = document.getElementById('messageInput');
-  const message = (extraPayload && extraPayload.message) || input.value.trim();
-  if (!message) return;
-  addBubble('user', message);
-  if (!extraPayload) input.value = '';
-  setThinking(true, 'thinking');
-  try {
-    const data = await api('/api/agent-studio/message', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(Object.assign({message}, extraPayload || {}))
-    });
-    handleStudioResponse(data);
-  } catch (err) { addBubble('warning', String(err)); }
-  finally { setThinking(false); }
-}
-function handleStudioResponse(data) {
-  if (data.missing_inputs && data.missing_inputs.length) {
-    pendingInteraction = data;
-    renderMissingInputs(data.missing_inputs);
-    addBubble('warning', JSON.stringify({action:data.action, status:data.status, missing_inputs:data.missing_inputs.map(x => x.input_id)}, null, 2));
-  } else {
-    clearMissingInputs();
-    const base = {action:data.action, origin:data.origin, graph_id:data.graph_id, task_name:data.task_name, status:data.status};
-    addBubble('system', JSON.stringify(base, null, 2));
-    if (data.action === 'execute_task_graph' && data.result) {
-      addBubble('system', summarizeExecution(data.result));
-    }
-  }
-  renderState(data.state || {});
-}
-function renderMissingInputs(fields) {
-  const panel = document.getElementById('missingPanel');
-  const root = document.getElementById('missingFields');
-  root.innerHTML = fields.map(f => `<label for="missing_${escapeHtml(f.input_id)}">${escapeHtml(f.label || f.input_id)}</label><input id="missing_${escapeHtml(f.input_id)}" data-input-id="${escapeHtml(f.input_id)}" type="${f.secret ? 'password' : 'text'}" placeholder="${escapeHtml(f.placeholder || '')}" />`).join('');
-  panel.style.display = 'block';
-}
-function clearMissingInputs() {
-  pendingInteraction = null;
-  document.getElementById('missingFields').innerHTML = '';
-  document.getElementById('missingPanel').style.display = 'none';
-}
-async function submitMissingInputs() {
-  if (!pendingInteraction) return;
-  const inputs = {};
-  document.querySelectorAll('#missingFields input[data-input-id]').forEach(el => { inputs[el.dataset.inputId] = el.value; });
-  await sendMessage({message: pendingInteraction.original_message || document.getElementById('messageInput').value.trim(), provided_inputs: inputs});
-}
-async function startTask() {
-  setThinking(true, 'starting');
-  try {
-    const data = await api('/api/agent-studio/task/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message:'manual'})});
-    addBubble('system', JSON.stringify({action:data.action, status:data.status, graph_id:data.graph_id}, null, 2));
-    renderState(data.state);
-  } catch (err) { addBubble('warning', String(err)); }
-  finally { setThinking(false); }
-}
-async function stopTask() {
-  setThinking(true, 'stopping');
-  try {
-    const data = await api('/api/agent-studio/task/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message:'manual'})});
-    addBubble('system', JSON.stringify({action:data.action, status:data.status, graph_id:data.graph_id}, null, 2));
-    renderState(data.state);
-  } catch (err) { addBubble('warning', String(err)); }
-  finally { setThinking(false); }
-}
-function summarizeExecution(result) {
-  const lines = [];
-  lines.push('Execution result: ' + (result.status || 'completed'));
-  const outputs = result.outputs || {};
-  Object.keys(outputs).forEach(key => {
-    const item = outputs[key] || {};
-    if (item.result_text) lines.push(key + ': ' + item.result_text);
-    else if (item.query) lines.push(key + ': ' + item.query);
-    else lines.push(key + ': ' + JSON.stringify(item).slice(0, 240));
-  });
-  if (result.delivery && result.delivery.artifact_path) lines.push('Delivery: ' + result.delivery.artifact_path);
-  return lines.join('\n');
-}
-function renderCard(title, body, meta) { return `<div class="card"><h3>${escapeHtml(title)}</h3><div>${body}</div><div class="meta">${escapeHtml(meta || '')}</div></div>`; }
-function escapeHtml(value) { return String(value || '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
-function renderState(state) {
-  const agents = state.agents || [], graphs = state.task_graphs || [], runs = state.task_runs || [], traces = state.traces || [], schedules = state.schedules || [], instances = state.instances || [], toolOutputs = state.tool_outputs || [], deliveries = state.deliveries || [];
-  document.getElementById('agentCount').textContent = agents.length;
-  document.getElementById('graphCount').textContent = graphs.length;
-  document.getElementById('agents').innerHTML = agents.map(a => {
-    const caps = (a.capability_labels || []).map(v => `<span class="pill">${escapeHtml(v)}</span>`).join('');
-    const tools = (a.tool_refs || []).map(v => `<span class="pill">${escapeHtml(v)}</span>`).join('');
-    return renderCard(a.agent_id || 'participant', `<div>${escapeHtml(a.role_label || '')}</div><div>${caps}</div><div>${tools}</div>`, a.artifact_path);
-  }).join('') || '<div class="small">No generated participants.</div>';
-  document.getElementById('taskGraphs').innerHTML = graphs.map(g => renderCard(((g.metadata && g.metadata.task_name) || g.community_id || 'graph'), `<pre>${escapeHtml(JSON.stringify({tasks:g.tasks, edges:g.edges, activations:g.activations}, null, 2))}</pre>`, g.artifact_path)).join('') || '<div class="small">No task graph.</div>';
-  document.getElementById('taskRuns').innerHTML = runs.map(r => renderCard(((r.payload && r.payload.task_name) || r.graph_id || 'run'), `<span class="pill ${r.status === 'stopped' ? 'danger' : ''}">${escapeHtml(r.status)}</span><pre>${escapeHtml(JSON.stringify(r.payload || {}, null, 2))}</pre>`, r.artifact_path)).join('') || '<div class="small">No active run.</div>';
-  document.getElementById('schedules').innerHTML = schedules.map(x => renderCard(x.schedule_id || 'schedule', `<span class="pill">${escapeHtml(x.status)}</span><pre>${escapeHtml(JSON.stringify({activation:x.activation, instance_id:x.instance_id}, null, 2))}</pre>`, x.artifact_path)).join('') || '<div class="small">No schedule.</div>';
-  document.getElementById('instances').innerHTML = instances.map(x => renderCard(x.instance_id || 'instance', `<span class="pill">${escapeHtml(x.status)}</span><pre>${escapeHtml(JSON.stringify({graph_id:x.graph_id, events:x.events}, null, 2))}</pre>`, x.artifact_path)).join('') || '<div class="small">No live instance.</div>';
-  document.getElementById('toolOutputs').innerHTML = toolOutputs.slice(0,6).map(x => renderCard(x.tool_call_id || 'tool', `<span class="pill">${escapeHtml(x.tool_type)}</span><pre>${escapeHtml(JSON.stringify({status:x.status, query:x.query, result_text:x.result_text, evidence:x.evidence}, null, 2))}</pre>`, x.artifact_path)).join('') || '<div class="small">No tool output.</div>';
-  document.getElementById('deliveries').innerHTML = deliveries.slice(0,6).map(x => renderCard(x.delivery_id || 'delivery', `<span class="pill">${escapeHtml(x.channel)}</span><pre>${escapeHtml(JSON.stringify(x.content || {}, null, 2))}</pre>`, x.artifact_path)).join('') || '<div class="small">No delivery.</div>';
-  document.getElementById('traces').innerHTML = traces.slice(0,8).map(t => renderCard(t.trace_id || 'trace', `<span class="pill">${escapeHtml(t.origin)}</span><pre>${escapeHtml(JSON.stringify(t.payload || {}, null, 2))}</pre>`, t.artifact_path || t.trace_path)).join('') || '<div class="small">No trace.</div>';
-}
-async function refreshState() {
-  setThinking(true, 'refreshing');
-  try { renderState(await api('/api/agent-studio/state')); }
-  catch (err) { addBubble('warning', String(err)); }
-  finally { setThinking(false); }
-}
-document.getElementById('messageInput').addEventListener('keydown', event => {
-  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') sendMessage();
-});
-loadCommands().catch(err => addBubble('warning', String(err)));
+function card(title, body){ const el=document.createElement('div'); el.className='item'; el.innerHTML=`<b>${escapeHtml(title)}</b><div class="pre">${escapeHtml(body)}</div>`; return el; }
 refreshState();
 </script>
 </body>

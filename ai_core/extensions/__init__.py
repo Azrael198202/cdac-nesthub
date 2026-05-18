@@ -1,1 +1,0 @@
-"""Domain-neutral extension entrypoints."""
