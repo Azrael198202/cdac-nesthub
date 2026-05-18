@@ -1,12 +1,32 @@
 {
-  "version": "v2.5home-ui",
-  "description": "Runtime-facing command phrases for the agent studio. Source code reads this file and does not embed these phrases.",
+  "version": "v2.5home-ui-fix",
+  "description": "Runtime-facing command phrases and interaction profiles for the agent studio. Source code reads this file and does not embed these phrases.",
+  "runtime_inputs": [
+    {
+      "input_id": "external_model_access",
+      "label": "External model access key",
+      "placeholder": "Paste an access key only when runtime requests it",
+      "secret": true,
+      "env_keys": ["OPENAI_API_KEY"]
+    }
+  ],
   "actions": [
     {
       "action": "create_participant",
       "patterns": ["创建agent", "创建Agent", "创建智能体", "create agent", "add agent", "new agent"],
       "default_capabilities": ["runtime_generated_capability"],
-      "default_tools": []
+      "default_tools": [],
+      "required_runtime_inputs": [
+        {
+          "input_id": "external_model_access",
+          "label": "External model access key",
+          "placeholder": "Paste an access key if this action should use an external model",
+          "secret": true,
+          "env_keys": ["OPENAI_API_KEY"],
+          "message_patterns": ["use external", "external model", "外部模型"],
+          "reason": "required_by_selected_runtime_profile"
+        }
+      ]
     },
     {
       "action": "create_task_graph",

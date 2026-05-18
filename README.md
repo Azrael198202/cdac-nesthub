@@ -435,3 +435,39 @@ Domain-term scan for ai_core and auxiliary_brain: no configured home-experience 
 4. Add task graph visual layout instead of JSON-only view.
 5. Add approval gate UI for generated actions that require human review.
 ```
+
+## V2.5 Home Agent Studio UI Fix
+
+### Goal
+Improve the parallel auxiliary-brain operation page without replacing `apps/web/index.html` and without moving concrete runtime semantics into `ai_core` or `auxiliary_brain` source code.
+
+### Changes
+- Kept the original web page unchanged.
+- Updated `apps/web/agent_studio.html` with a fixed, visible composer area so the send/start/stop controls are not hidden by the viewport.
+- Added a thinking state for long operations; action buttons are disabled while a request is active.
+- Added a runtime access input area. The source code does not embed provider-specific prompts; labels and input profiles are loaded from `configs/agent_studio_commands.json`.
+- Added dynamic missing-input rendering. When the runtime returns `missing_inputs`, the page creates input fields automatically and submits them back to the runtime.
+- Added `/api/agent-studio/runtime-input` for process-level runtime input acceptance.
+- Runtime input markers are stored under `runtime/generated/runtime_inputs/` without storing the submitted secret value.
+
+### Validation
+```bash
+PYTHONPATH=. python -m compileall -q ai_core auxiliary_brain apps tests
+PYTHONPATH=. pytest -q
+# 47 passed
+```
+
+### Suggested test questions
+```text
+create agent alpha beta
+create agent alpha use external model
+create task neutral objective
+start task
+stop task
+```
+
+Expected behavior:
+- The send button remains visible.
+- Sending a message changes the button/status to thinking.
+- If a runtime input is required, dynamic input fields appear.
+- Created agents, task graphs, task runs, and traces are visible in the right panels.

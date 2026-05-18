@@ -61,3 +61,34 @@ def test_original_web_page_is_not_replaced() -> None:
     new_page = Path("apps/web/agent_studio.html").read_text(encoding="utf-8")
     assert original != new_page
     assert "Runtime Agent Studio" not in original
+
+
+def test_agent_studio_page_has_visible_controls_and_runtime_input_box() -> None:
+    page = Path("apps/web/agent_studio.html").read_text(encoding="utf-8")
+    assert 'id="sendButton"' in page
+    assert 'id="runtimeAccessInput"' in page
+    assert 'id="missingPanel"' in page
+    assert 'Thinking...' in page
+    assert 'main {' in page and 'overflow:hidden' in page
+
+
+def test_studio_service_reports_missing_inputs_from_config(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    service = AgentStudioService(runtime_root=tmp_path, command_config_path="configs/agent_studio_commands.json")
+    result = service.handle_message("create agent alpha use external model")
+    assert result["status"] == "needs_input"
+    assert result["missing_inputs"]
+    assert result["missing_inputs"][0]["input_id"] == "external_model_access"
+
+
+def test_studio_service_accepts_runtime_input_without_exposing_secret(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    service = AgentStudioService(runtime_root=tmp_path, command_config_path="configs/agent_studio_commands.json")
+    accepted = service.accept_runtime_input("external_model_access", "sk-test-value")
+    assert accepted["status"] == "accepted"
+    assert monkeypatch is not None
+    marker = tmp_path / "generated" / "runtime_inputs" / "external_model_access.json"
+    text = marker.read_text(encoding="utf-8")
+    assert "sk-test-value" not in text
+    result = service.handle_message("create agent alpha use external model")
+    assert result["status"] == "completed"

@@ -58,6 +58,12 @@ async def agent_studio_page():
 
 class StudioMessageRequest(BaseModel):
     message: str
+    provided_inputs: dict[str, Any] | None = None
+
+
+class StudioRuntimeInputRequest(BaseModel):
+    input_id: str
+    value: str
 
 
 @app.get("/api/agent-studio/state")
@@ -72,7 +78,12 @@ async def agent_studio_commands():
 
 @app.post("/api/agent-studio/message")
 async def agent_studio_message(req: StudioMessageRequest):
-    return JSONResponse(studio_service.handle_message(req.message))
+    return JSONResponse(studio_service.handle_message(req.message, provided_inputs=req.provided_inputs))
+
+
+@app.post("/api/agent-studio/runtime-input")
+async def agent_studio_runtime_input(req: StudioRuntimeInputRequest):
+    return JSONResponse(studio_service.accept_runtime_input(req.input_id, req.value))
 
 
 @app.post("/api/agent-studio/task/start")

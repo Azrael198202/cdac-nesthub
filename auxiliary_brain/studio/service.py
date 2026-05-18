@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,9 +31,23 @@ class AgentStudioService:
         self.command_config = StudioCommandConfig(command_config_path)
         self.auxiliary_runtime = AuxiliaryBrainRuntime(self.runtime_root)
         self.task_runs_dir = self.runtime_root / "generated" / "task_runs"
+        self.runtime_input_dir = self.runtime_root / "generated" / "runtime_inputs"
 
-    def handle_message(self, message: str) -> dict[str, Any]:
+    def handle_message(self, message: str, provided_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         action = self.command_config.detect_action(message)
+        missing = self._missing_inputs(action, message, provided_inputs or {})
+        if missing:
+            self._write_interaction_trace(action, message, missing)
+            return {
+                "origin": self.ORIGIN,
+                "action": action,
+                "status": "needs_input",
+                "original_message": message,
+                "missing_inputs": missing,
+                "state": self.snapshot(),
+            }
+        if provided_inputs:
+            self._accept_runtime_inputs(provided_inputs)
         if action == "create_participant":
             return self.create_participant(message)
         if action == "create_task_graph":
@@ -41,7 +56,19 @@ class AgentStudioService:
             return self.update_latest_task_graph("running", message)
         if action == "stop_task_graph":
             return self.update_latest_task_graph("stopped", message)
-        return {"origin": self.ORIGIN, "action": action, "state": self.snapshot()}
+        return {"origin": self.ORIGIN, "action": action, "status": "view", "state": self.snapshot()}
+
+    def accept_runtime_input(self, input_id: str, value: str) -> dict[str, Any]:
+        if not value:
+            return {"origin": self.ORIGIN, "action": "runtime_input", "status": "empty", "message": "No value was provided."}
+        self._accept_runtime_inputs({input_id: value})
+        return {
+            "origin": self.ORIGIN,
+            "action": "runtime_input",
+            "status": "accepted",
+            "message": "Runtime input accepted for the active server process.",
+            "state": self.snapshot(),
+        }
 
     def create_participant(self, message: str) -> dict[str, Any]:
         extracted = self._extract_terms(message)
@@ -67,7 +94,7 @@ class AgentStudioService:
             "metadata": {"source": "agent_studio", "message_excerpt": message[:160]},
         }
         result = self.auxiliary_runtime.create_from_specification(specification)
-        return {"origin": self.ORIGIN, "action": "create_participant", "result": result, "state": self.snapshot()}
+        return {"origin": self.ORIGIN, "action": "create_participant", "status": "completed", "result": result, "state": self.snapshot()}
 
     def create_task_graph(self, message: str) -> dict[str, Any]:
         agents = self._load_agents()
@@ -112,7 +139,7 @@ class AgentStudioService:
         }
         result = self.auxiliary_runtime.create_from_specification(specification)
         self._write_task_run(graph_id, "created", result)
-        return {"origin": self.ORIGIN, "action": "create_task_graph", "graph_id": graph_id, "result": result, "state": self.snapshot()}
+        return {"origin": self.ORIGIN, "action": "create_task_graph", "status": "completed", "graph_id": graph_id, "result": result, "state": self.snapshot()}
 
     def update_latest_task_graph(self, status: str, message: str = "") -> dict[str, Any]:
         run_files = sorted(self.task_runs_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
@@ -132,6 +159,7 @@ class AgentStudioService:
             "communities": self._load_json_dir(self.runtime_root / "generated" / "communities"),
             "task_graphs": self._load_json_dir(self.runtime_root / "generated" / "tasks"),
             "task_runs": self._load_json_dir(self.task_runs_dir),
+            "runtime_inputs": self._load_json_dir(self.runtime_input_dir),
             "traces": self._load_json_dir(self.runtime_root / "traces" / "runtime_layers"),
         }
 
@@ -157,6 +185,89 @@ class AgentStudioService:
             if value not in result:
                 result.append(value[:64])
         return result[:12]
+
+    def _missing_inputs(self, action: str, message: str, provided_inputs: dict[str, Any]) -> list[dict[str, Any]]:
+        profile = self.command_config.action_profile(action)
+        required = profile.get("required_runtime_inputs", [])
+        missing: list[dict[str, Any]] = []
+        for item in required:
+            input_id = str(item.get("input_id", "")).strip()
+            if not input_id:
+                continue
+            if provided_inputs.get(input_id):
+                continue
+            if self._runtime_input_available(item):
+                continue
+            token_patterns = item.get("message_patterns", [])
+            if token_patterns and not any(re.search(str(pattern), message, re.IGNORECASE) for pattern in token_patterns):
+                continue
+            missing.append({
+                "input_id": input_id,
+                "label": item.get("label", input_id),
+                "placeholder": item.get("placeholder", ""),
+                "secret": bool(item.get("secret", False)),
+                "reason": item.get("reason", "required_by_runtime_profile"),
+            })
+        return missing
+
+    def _runtime_input_available(self, item: dict[str, Any]) -> bool:
+        for env_key in item.get("env_keys", []):
+            if os.environ.get(str(env_key)):
+                return True
+        input_id = str(item.get("input_id", ""))
+        if input_id:
+            marker = self.runtime_input_dir / f"{input_id}.json"
+            if marker.exists():
+                try:
+                    payload = json.loads(marker.read_text(encoding="utf-8"))
+                    return bool(payload.get("configured"))
+                except json.JSONDecodeError:
+                    return False
+        return False
+
+    def _accept_runtime_inputs(self, values: dict[str, Any]) -> None:
+        config = self.command_config.load()
+        known_inputs = {str(item.get("input_id")): item for item in config.get("runtime_inputs", [])}
+        for action in config.get("actions", []):
+            for item in action.get("required_runtime_inputs", []):
+                if item.get("input_id"):
+                    known_inputs[str(item.get("input_id"))] = item
+        self.runtime_input_dir.mkdir(parents=True, exist_ok=True)
+        for input_id, value in values.items():
+            if value is None or value == "":
+                continue
+            profile = known_inputs.get(str(input_id), {"input_id": input_id})
+            for env_key in profile.get("env_keys", []):
+                os.environ[str(env_key)] = str(value)
+            marker = {
+                "input_id": str(input_id),
+                "origin": self.ORIGIN,
+                "configured": True,
+                "secret": bool(profile.get("secret", True)),
+                "accepted_at": datetime.now(timezone.utc).isoformat(),
+            }
+            (self.runtime_input_dir / f"{input_id}.json").write_text(
+                json.dumps(marker, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+
+    def _write_interaction_trace(self, action: str, message: str, missing: list[dict[str, Any]]) -> None:
+        trace_dir = self.runtime_root / "traces" / "runtime_layers"
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        trace_id = f"interaction_{uuid4().hex[:8]}"
+        record = {
+            "trace_id": trace_id,
+            "origin": self.ORIGIN,
+            "event": "missing_runtime_input",
+            "action": action,
+            "message_excerpt": message[:160],
+            "missing_inputs": missing,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (trace_dir / f"{trace_id}.json").write_text(
+            json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
 
     def _load_agents(self) -> list[dict[str, Any]]:
         return self._load_json_dir(self.runtime_root / "generated" / "agents")
