@@ -8,8 +8,8 @@
     :root { color-scheme: dark; --bg:#0f172a; --panel:#111827; --card:#1f2937; --line:#334155; --text:#e5e7eb; --muted:#93c5fd; --accent:#0ea5e9; --danger:#991b1b; }
     *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif;font-size:14px}
     header{height:76px;display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--line)}
-    h1{font-size:18px;margin:0 0 4px}.sub{color:#a5b4fc;font-size:12px}.status{color:#bae6fd}.btn{border:0;border-radius:10px;background:#334155;color:white;padding:10px 14px;font-weight:700;cursor:pointer}.btn.primary{background:#0369a1}.btn.danger{background:var(--danger)}.btn:disabled{opacity:.6;cursor:not-allowed}
-    main{display:grid;grid-template-columns:26% 44% 30%;gap:12px;height:calc(100vh - 76px);padding:12px}.panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);min-height:0;display:flex;flex-direction:column;overflow:hidden}.panel h2{font-size:14px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}.scroll{padding:12px;overflow:auto;min-height:0;flex:1}.item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}.pill{display:inline-block;margin:3px 4px 0 0;padding:3px 7px;border-radius:999px;background:#0f766e;color:#ccfbf1;font-size:12px}.path{color:#93c5fd;font-size:12px;word-break:break-all}.console{border-top:1px solid var(--line);padding:12px;background:#0b1220}.input{width:100%;height:84px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px;resize:vertical}.row{display:flex;gap:8px;margin-top:10px}.message{white-space:pre-wrap}.user{border-color:#0ea5e9}.error{border-color:#f59e0b}.final{border-color:#22c55e}.pre{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;background:#020617;border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;max-height:260px}.small{font-size:12px;color:#bfdbfe}.sectionTitle{color:#bfdbfe;font-weight:700;margin:12px 0 8px}.empty{color:#94a3b8;font-size:13px}
+    h1{font-size:18px;margin:0 0 4px}.sub{color:#a5b4fc;font-size:12px}.status{color:#bae6fd;display:flex;align-items:center;gap:8px}.status.running::before{content:'';width:10px;height:10px;border:2px solid #38bdf8;border-top-color:transparent;border-radius:50%;display:inline-block;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.btn{border:0;border-radius:10px;background:#334155;color:white;padding:10px 14px;font-weight:700;cursor:pointer}.btn.primary{background:#0369a1}.btn.danger{background:var(--danger)}.btn:disabled{opacity:.6;cursor:not-allowed}
+    main{display:grid;grid-template-columns:26% 44% 30%;gap:12px;height:calc(100vh - 76px);padding:12px}.panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);min-height:0;display:flex;flex-direction:column;overflow:hidden}.panel h2{font-size:14px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}.scroll{padding:12px;overflow:auto;min-height:0;flex:1}.item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}.pill{display:inline-block;margin:3px 4px 0 0;padding:3px 7px;border-radius:999px;background:#0f766e;color:#ccfbf1;font-size:12px}.path{color:#93c5fd;font-size:12px;word-break:break-all}.console{border-top:1px solid var(--line);padding:12px;background:#0b1220}.input{width:100%;height:84px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px;resize:vertical}.row{display:flex;gap:8px;margin-top:10px}.message{white-space:pre-wrap}.user{border-color:#0ea5e9}.error{border-color:#f59e0b}.final{border-color:#22c55e}.pre{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;background:#020617;border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;max-height:260px}.small{font-size:12px;color:#bfdbfe}.sectionTitle{color:#bfdbfe;font-weight:700;margin:12px 0 8px}.empty{color:#94a3b8;font-size:13px}.progressLine{display:flex;align-items:center;gap:8px;margin:6px 0;color:#bfdbfe}.progressDot{width:8px;height:8px;border-radius:999px;background:#38bdf8;animation:pulse 1.2s ease-in-out infinite}.progressDot.done{background:#22c55e;animation:none}.progressDot.wait{background:#f59e0b;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.15)}}
   </style>
 </head>
 <body>
@@ -28,11 +28,56 @@ const messages = document.getElementById('messages');
 function renderJson(obj){ return JSON.stringify(obj, null, 2); }
 function addMessage(text, cls='item') { const el=document.createElement('div'); el.className=cls; el.innerHTML=`<div class="message">${escapeHtml(text)}</div>`; messages.appendChild(el); messages.scrollTop=messages.scrollHeight; }
 function escapeHtml(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function setStudioStatus(text, running=false){ const el=document.getElementById('status'); el.textContent=text; el.classList.toggle('running', !!running); }
+function addProgressMessage(text){ addMessage('Progress: '+text, 'item'); }
 let lastSubmittedInstruction = '';
 let lastMissingInputs = [];
-async function sendMessage(){ const input=document.getElementById('input'); const text=input.value.trim(); if(!text)return; input.value=''; lastSubmittedInstruction=text; addMessage(text,'item user'); const btn=document.getElementById('sendBtn'); btn.disabled=true; btn.textContent='Thinking...'; document.getElementById('status').textContent='running'; try{ const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})}); const data=await res.json(); addMessage(renderJson(data), data.status==='completed'?'item':'item error'); if(data.missing_inputs && data.missing_inputs.length){ lastMissingInputs=data.missing_inputs; addMissingInputs(data.missing_inputs, text); } if(data.final_answer){ addMessage('Final Answer:\n'+data.final_answer,'item final'); } await refreshState(); }catch(e){ addMessage('Error: '+e,'item error'); } finally{btn.disabled=false;btn.textContent='Send';document.getElementById('status').textContent='ready';}}
-function addMissingInputs(items, pendingInstruction){ const el=document.createElement('div'); el.className='item error'; let html='<b>Additional input required</b>'; items.forEach((it,idx)=>{ const field=escapeHtml(it.field||'runtime_access_key'); html+=`<div class="small">${escapeHtml(it.message||'Input required')}</div><input id="missing_${idx}" data-secret-key="${field}" class="input" style="height:38px;margin-top:8px" placeholder="${field}" /><div class="row"><button class="btn primary" onclick="saveMissingSecret(${idx}, true)">Save & Continue</button><button class="btn" onclick="saveMissingSecret(${idx}, false)">Save</button></div>`; }); html+='<div class="small">Press Enter in the input field or click Save. Secrets are stored in the local runtime secret file for this environment.</div>'; el.innerHTML=html; messages.appendChild(el); items.forEach((_,idx)=>{ const input=document.getElementById('missing_'+idx); if(input){ input.addEventListener('keydown', async (event)=>{ if(event.key==='Enter'){ event.preventDefault(); await saveMissingSecret(idx, true); }}); }}); messages.scrollTop=messages.scrollHeight; }
-async function saveMissingSecret(index, continueAfterSave){ const input=document.getElementById('missing_'+index); if(!input)return; const value=input.value.trim(); const key=(input.dataset.secretKey||'runtime_access_key').trim()||'runtime_access_key'; if(!value){ addMessage('Secret value is required before saving.','item error'); return; } document.getElementById('status').textContent='saving'; try{ const res=await fetch('/api/agent-studio/secret',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key,value})}); const data=await res.json(); if(!res.ok || !data.ok){ addMessage('Secret save failed: '+renderJson(data),'item error'); return; } addMessage('Secret saved to '+(data.path||'runtime secret file')+'.','item final'); if(continueAfterSave && lastSubmittedInstruction){ document.getElementById('input').value=lastSubmittedInstruction; await sendMessage(); } }catch(e){ addMessage('Secret save failed: '+e,'item error'); } finally{ document.getElementById('status').textContent='ready'; }}
+async function sendMessage(){
+  const input=document.getElementById('input');
+  const text=input.value.trim();
+  if(!text)return;
+  input.value='';
+  lastSubmittedInstruction=text;
+  addMessage(text,'item user');
+  const btn=document.getElementById('sendBtn');
+  btn.disabled=true;
+  btn.textContent='Thinking...';
+  setStudioStatus('running', true);
+  let pollTimer=null;
+  let hintTimer=null;
+  const hints=[
+    'receiving instruction',
+    'routing command',
+    'preparing delegation request',
+    'calling primary runtime',
+    'waiting for runtime result',
+    'refreshing execution state'
+  ];
+  let hintIndex=0;
+  try{
+    addProgressMessage(hints[hintIndex++]);
+    pollTimer=setInterval(()=>refreshState(), 1200);
+    hintTimer=setInterval(()=>{
+      if(hintIndex<hints.length){ addProgressMessage(hints[hintIndex++]); }
+    }, 2500);
+    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});
+    const data=await res.json();
+    addMessage(renderJson(data), data.status==='completed'?'item':'item error');
+    if(data.missing_inputs && data.missing_inputs.length){ lastMissingInputs=data.missing_inputs; addMissingInputs(data.missing_inputs, text); }
+    if(data.final_answer){ addMessage('Final Answer:\n'+data.final_answer,'item final'); }
+    await refreshState();
+  }catch(e){
+    addMessage('Error: '+e,'item error');
+  } finally{
+    if(pollTimer) clearInterval(pollTimer);
+    if(hintTimer) clearInterval(hintTimer);
+    btn.disabled=false;
+    btn.textContent='Send';
+    setStudioStatus('ready', false);
+  }
+}
+function addMissingInputs(items, pendingInstruction){ const el=document.createElement('div'); el.className='item error missing-card'; el.id='missing_input_card_'+Date.now(); let html='<b>Additional input required</b>'; items.forEach((it,idx)=>{ const field=escapeHtml(it.field||'runtime_access_key'); html+=`<div class="small">${escapeHtml(it.message||'Input required')}</div><input id="missing_${idx}" data-secret-key="${field}" data-card-id="${el.id}" class="input" style="height:38px;margin-top:8px" placeholder="${field}" /><div class="row"><button class="btn primary" onclick="saveMissingSecret(${idx})">Save & Continue</button></div>`; }); html+='<div class="small">Press Enter in the input field or click Save & Continue. Secrets are stored in the local runtime secret file for this environment.</div>'; el.innerHTML=html; messages.appendChild(el); items.forEach((_,idx)=>{ const input=document.getElementById('missing_'+idx); if(input){ input.addEventListener('keydown', async (event)=>{ if(event.key==='Enter'){ event.preventDefault(); await saveMissingSecret(idx); }}); }}); messages.scrollTop=messages.scrollHeight; }
+async function saveMissingSecret(index){ const input=document.getElementById('missing_'+index); if(!input)return; const value=input.value.trim(); const key=(input.dataset.secretKey||'runtime_access_key').trim()||'runtime_access_key'; if(!value){ addMessage('Secret value is required before saving.','item error'); return; } setStudioStatus('saving', true); try{ const res=await fetch('/api/agent-studio/secret',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key,value})}); const data=await res.json(); if(!res.ok || !data.ok){ addMessage('Secret save failed: '+renderJson(data),'item error'); return; } const cardId=input.dataset.cardId; const card=cardId?document.getElementById(cardId):input.closest('.missing-card'); if(card){ card.remove(); } addMessage('Secret saved to '+(data.path||'runtime secret file')+'.','item final'); if(lastSubmittedInstruction){ document.getElementById('input').value=lastSubmittedInstruction; await sendMessage(); } }catch(e){ addMessage('Secret save failed: '+e,'item error'); } finally{ setStudioStatus('ready', false); }}
 
 
 function quickExecute(){ const name=prompt('Task name to execute'); if(name){ document.getElementById('input').value='execute '+name; sendMessage(); }}
@@ -41,9 +86,29 @@ function renderState(data){
   const ps=data.participants||[]; document.getElementById('participantCount').textContent=ps.length; const pbox=document.getElementById('participants'); pbox.innerHTML=''; if(!ps.length)pbox.innerHTML='<div class="empty">No participant.</div>'; ps.forEach(p=>{ const el=document.createElement('div'); el.className='item'; el.innerHTML=`<b>${escapeHtml(p.name||p.participant_id)}</b><div class="small">${escapeHtml(p.participant_id||'')}</div><span class="pill">${escapeHtml(p.status||'created')}</span><span class="pill">delegate_to_ai_core</span><div class="path">${escapeHtml(p._path||'')}</div>`; pbox.appendChild(el); });
   const right=document.getElementById('rightPane'); const graphs=data.task_graphs||[]; const runs=data.task_runs||[]; const deliveries=data.deliveries||[]; const traces=data.traces||[]; document.getElementById('graphCount').textContent=graphs.length; right.innerHTML='';
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Task Graphs</div>'); if(!graphs.length) right.insertAdjacentHTML('beforeend','<div class="empty">No task graph.</div>'); graphs.forEach(g=>right.appendChild(card(g.task_name||g.graph_id, renderJson(g))));
-  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Delegation Runs</div>'); if(!runs.length) right.insertAdjacentHTML('beforeend','<div class="empty">No run.</div>'); runs.forEach(r=>right.appendChild(card(r.run_id||'run', renderJson(r))));
+  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Delegation Runs</div>'); if(!runs.length) right.insertAdjacentHTML('beforeend','<div class="empty">No run.</div>'); runs.forEach(r=>right.appendChild(runCard(r)));
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Deliveries</div>'); if(!deliveries.length) right.insertAdjacentHTML('beforeend','<div class="empty">No delivery.</div>'); deliveries.forEach(d=>right.appendChild(card(d.delivery_id||'delivery', d.final_answer || renderJson(d))));
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Runtime Traces</div>'); if(!traces.length) right.insertAdjacentHTML('beforeend','<div class="empty">No trace.</div>'); traces.forEach(t=>right.appendChild(card(t.trace_id||'trace', renderJson(t))));
+}
+function runCard(r){
+  const el=document.createElement('div');
+  el.className='item';
+  const status=escapeHtml(r.status||'unknown');
+  const stage=escapeHtml(r.current_stage||'');
+  const events=Array.isArray(r.progress_events)?r.progress_events:[];
+  let html=`<b>${escapeHtml(r.run_id||'run')}</b> <span class="pill">${status}</span>`;
+  if(stage){ html+=`<div class="small">Current stage: ${stage}</div>`; }
+  if(events.length){
+    html+='<div style="margin-top:8px">';
+    events.slice(-8).forEach(ev=>{
+      const cls=ev.status==='completed'?'done':(ev.status==='waiting'?'wait':'');
+      html+=`<div class="progressLine"><span class="progressDot ${cls}"></span><span>${escapeHtml(ev.label||ev.stage||'step')}</span><span class="small">${escapeHtml(ev.status||'running')}</span></div>`;
+    });
+    html+='</div>';
+  }
+  html+=`<div class="pre">${escapeHtml(renderJson(r))}</div>`;
+  el.innerHTML=html;
+  return el;
 }
 function card(title, body){ const el=document.createElement('div'); el.className='item'; el.innerHTML=`<b>${escapeHtml(title)}</b><div class="pre">${escapeHtml(body)}</div>`; return el; }
 refreshState();

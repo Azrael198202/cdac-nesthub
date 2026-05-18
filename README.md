@@ -55,3 +55,19 @@ The package keeps only source code and base configuration. Runtime workspace con
 - Replaced text-mode subprocess.run calls with UTF-8 + errors='replace' wrapper.
 - Agent Studio auto-approve behavior is unchanged.
 - Runtime workspace is kept source-clean; only runtime/.gitkeep is included.
+## V2.8.5 Agent Studio Missing Input UX
+
+- Agent Studio missing input prompt now shows only `Save & Continue`.
+- Pressing Enter in the secret input triggers `Save & Continue`.
+- After a secret is saved, the missing-input card is removed.
+- A green confirmation card remains to indicate the secret has been saved.
+- Runtime workspace remains source-clean; only `runtime/.gitkeep` is packaged.
+
+
+## V2.8.6 Agent Studio Execution Progress UI
+
+- Agent Studio status now shows animated running/saving states.
+- Sending a message starts polling `/api/agent-studio/state` while the request is executing.
+- Delegation runs now persist `current_stage` and `progress_events` so the UI can show where execution is working.
+- The auxiliary layer still records coordination state only; delegated work remains owned by the primary runtime.
+- Runtime workspace is kept clean in source packages and only contains `runtime/.gitkeep`.
