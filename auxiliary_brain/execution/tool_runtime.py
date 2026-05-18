@@ -23,8 +23,9 @@ class RuntimeToolRuntime:
 
     ORIGIN = "auxiliary_brain"
 
-    def __init__(self, runtime_root: str | Path = "runtime") -> None:
+    def __init__(self, runtime_root: str | Path = "runtime", tool_config_path: str | Path = "configs/agent_runtime_tools.json") -> None:
         self.runtime_root = Path(runtime_root)
+        self.tool_config_path = Path(tool_config_path)
         self.tool_output_dir = self.runtime_root / "generated" / "tool_outputs"
         self.delivery_dir = self.runtime_root / "deliveries"
         self.tool_output_dir.mkdir(parents=True, exist_ok=True)
@@ -63,7 +64,21 @@ class RuntimeToolRuntime:
         return delivery
 
     def _collect(self, *, task: RuntimeTaskDefinition, agent: RuntimeAgentDefinition) -> dict[str, Any]:
-        query = self._compact_query(" ".join([task.objective, agent.role_label, " ".join(agent.capability_labels)]))
+        operation = self._select_operation(task=task, agent=agent)
+        if operation == "runtime_context_snapshot":
+            snapshot = self._runtime_context_snapshot(task=task, agent=agent)
+            return {
+                "tool_call_id": f"tool_call_{uuid4().hex[:8]}",
+                "origin": self.ORIGIN,
+                "status": "completed",
+                "tool_type": "runtime_context_snapshot",
+                "task_id": task.task_id,
+                "agent_id": agent.agent_id,
+                "result_text": snapshot.get("result_text"),
+                "context": snapshot,
+                "created_at": self._now(),
+            }
+        query = self._build_agent_query(task=task, agent=agent)
         evidence = self._public_discovery(query)
         return {
             "tool_call_id": f"tool_call_{uuid4().hex[:8]}",
@@ -95,6 +110,51 @@ class RuntimeToolRuntime:
             "input_count": len(inputs),
             "created_at": self._now(),
         }
+
+    def _select_operation(self, *, task: RuntimeTaskDefinition, agent: RuntimeAgentDefinition) -> str:
+        config = self._load_tool_config()
+        searchable = " ".join([
+            str(agent.role_label),
+            " ".join(str(v) for v in agent.capability_labels),
+            str((agent.metadata or {}).get("user_instruction", "")),
+            str(task.objective),
+        ]).casefold()
+        for profile in config.get("profiles", []):
+            terms = [str(term).casefold() for term in profile.get("match_terms", [])]
+            if terms and any(term in searchable for term in terms):
+                return str(profile.get("operation") or "public_discovery")
+        return "public_discovery"
+
+    def _runtime_context_snapshot(self, *, task: RuntimeTaskDefinition, agent: RuntimeAgentDefinition) -> dict[str, Any]:
+        now = datetime.now().astimezone()
+        return {
+            "status": "success",
+            "iso_time": now.isoformat(),
+            "timezone": now.tzname(),
+            "result_text": f"{agent.role_label}: {now.isoformat()}",
+            "objective": task.objective,
+        }
+
+    def _build_agent_query(self, *, task: RuntimeTaskDefinition, agent: RuntimeAgentDefinition) -> str:
+        instruction = str((agent.metadata or {}).get("user_instruction") or "")
+        if instruction:
+            return self._compact_query(self._clean_instruction_text(instruction))
+        text = " ".join([str(agent.role_label), " ".join(agent.capability_labels), str(task.objective)])
+        return self._compact_query(self._clean_instruction_text(text))
+
+    def _clean_instruction_text(self, text: str) -> str:
+        cleaned = str(text or "")
+        config = self._load_tool_config()
+        for phrase in (config.get("text_cleanup") or {}).get("drop_phrases", []):
+            cleaned = re.sub(re.escape(str(phrase)), " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\b[A-Za-z0-9_]+\.(?:json|py|html|md)\b", " ", cleaned)
+        return self._clean(cleaned)
+
+    def _load_tool_config(self) -> dict[str, Any]:
+        try:
+            return json.loads(self.tool_config_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {"profiles": [], "text_cleanup": {}}
 
     def _public_discovery(self, query: str) -> dict[str, Any]:
         if not query:
@@ -146,13 +206,22 @@ class RuntimeToolRuntime:
     def _extract_fragments(self, value: Any) -> list[str]:
         if isinstance(value, dict):
             fragments: list[str] = []
+            if value.get("result_text"):
+                fragments.append(str(value.get("result_text"))[:600])
             evidence = value.get("evidence") if isinstance(value.get("evidence"), dict) else {}
             selected = evidence.get("selected_document") if isinstance(evidence, dict) else {}
             if isinstance(selected, dict):
                 text = selected.get("text_excerpt") or selected.get("title") or ""
                 if text:
                     fragments.append(str(text)[:600])
-            for key in ("result_text", "query"):
+            results = evidence.get("results") if isinstance(evidence, dict) else []
+            if isinstance(results, list):
+                for result in results[:2]:
+                    if isinstance(result, dict):
+                        item = " - ".join(str(result.get(k) or "") for k in ("title", "snippet") if result.get(k))
+                        if item:
+                            fragments.append(item[:600])
+            for key in ("query",):
                 if value.get(key):
                     fragments.append(str(value.get(key))[:600])
             return fragments

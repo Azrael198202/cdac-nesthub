@@ -607,3 +607,38 @@ Validation:
 compileall: OK
 pytest: 54 passed
 ```
+
+
+## V2.6.3 Update - Named Task Output Quality
+
+### Goal
+
+Make named task execution visibly useful in Agent Studio. A task created by name is stored only as a graph until the user explicitly executes it. Execution now uses each runtime-generated agent instruction as the task material source, rather than searching with the graph creation sentence.
+
+### Implemented
+
+1. Agent definitions now persist the original runtime instruction in agent metadata.
+2. Task graph creation resolves explicitly referenced agent names before lexical fallback.
+3. Collect steps use agent-specific instructions as objectives.
+4. Tool routing is driven by `configs/agent_runtime_tools.json`, not hard-coded business phrases.
+5. Generic runtime context snapshots can produce an immediate local execution result.
+6. Public discovery queries are cleaned to avoid graph/task command pollution.
+7. `execute TaskA` now produces tool outputs and a console delivery that can be seen in the UI.
+
+### User Test
+
+```text
+Create an agent named Time Agent to remind you of the current time.
+Create an agent named Weather Agent to obtain the weather information for Fukuoka today and tomorrow.
+Create a task named taskA, which calls the time agent and the weather agent.
+execute TaskA
+```
+
+Expected result:
+
+```text
+taskA remains created until execution is requested.
+execute TaskA creates a live run.
+The UI shows task run, tool outputs, and a console delivery.
+The result should not contain unrelated search results caused by task-creation wording.
+```

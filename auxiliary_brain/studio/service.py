@@ -79,7 +79,8 @@ class AgentStudioService:
     def create_participant(self, message: str) -> dict[str, Any]:
         extracted = self._extract_terms(message)
         role_label = self._extract_runtime_label("create_participant", message) or (extracted[0] if extracted else f"role_{uuid4().hex[:8]}")
-        capability_labels = [term for term in extracted if term.casefold() not in {item.casefold() for item in self._extract_terms(role_label)}][:4] or self.command_config.action_profile("create_participant").get(
+        role_terms = {item.casefold() for item in self._extract_terms(role_label)}
+        capability_labels = [term for term in extracted if term.casefold() not in role_terms][:4] or self.command_config.action_profile("create_participant").get(
             "default_capabilities",
             ["runtime_generated_capability"],
         )
@@ -92,7 +93,7 @@ class AgentStudioService:
                     "role_label": role_label,
                     "capability_labels": capability_labels,
                     "tool_refs": tool_refs,
-                    "metadata": {"created_from": "studio_message", "display_name": role_label},
+                    "metadata": {"created_from": "studio_message", "display_name": role_label, "user_instruction": message[:500]},
                 }
             ],
             "tasks": [],
@@ -119,14 +120,15 @@ class AgentStudioService:
         for index, agent in enumerate(selected_agents, start=1):
             task_id = f"{graph_id}_step_{index}"
             output_ref = f"{graph_id}_material_{index}"
+            agent_instruction = str((agent.get("metadata") or {}).get("user_instruction") or message)
             tasks.append({
                 "task_id": task_id,
                 "assigned_agent_id": agent.get("agent_id"),
-                "objective": message,
+                "objective": agent_instruction,
                 "output_ref": output_ref,
                 "activation_ref": activation.get("activation_id"),
                 "parameters": {"source": "studio_message", "execution_mode": "collect"},
-                "metadata": {"selected_by": "runtime_overlap"},
+                "metadata": {"selected_by": "runtime_overlap", "parent_task_message": message[:300]},
             })
             material_refs.append(output_ref)
         final_agent = selected_agents[0] if selected_agents else agents[0]
@@ -134,7 +136,7 @@ class AgentStudioService:
         tasks.append({
             "task_id": final_id,
             "assigned_agent_id": final_agent.get("agent_id"),
-            "objective": message,
+            "objective": f"{task_name}: compose generated outputs",
             "input_refs": material_refs,
             "output_ref": f"{graph_id}_final_output",
             "parameters": {"source": "studio_message", "execution_mode": "compose"},
@@ -258,16 +260,29 @@ class AgentStudioService:
         return graphs[0] if graphs else None
 
     def _select_agents_for_message(self, agents: list[dict[str, Any]], message: str) -> list[dict[str, Any]]:
+        normalized_message = self._normalize_for_match(message)
+        explicitly_selected: list[dict[str, Any]] = []
+        for agent in agents:
+            label = str(agent.get("role_label") or "")
+            if label and self._normalize_for_match(label) in normalized_message:
+                explicitly_selected.append(agent)
+        if explicitly_selected:
+            return explicitly_selected
         message_terms = {term.casefold() for term in self._extract_terms(message)}
         ranked: list[tuple[int, int, dict[str, Any]]] = []
         for index, agent in enumerate(agents):
             labels = [agent.get("role_label", ""), *agent.get("capability_labels", []), *agent.get("tool_refs", [])]
+            metadata = agent.get("metadata") or {}
+            labels.append(str(metadata.get("user_instruction") or ""))
             agent_terms = {term.casefold() for label in labels for term in self._extract_terms(str(label))}
             score = len(message_terms & agent_terms)
             if score > 0:
                 ranked.append((score, -index, agent))
         ranked.sort(reverse=True, key=lambda item: (item[0], item[1]))
         return [agent for _, __, agent in ranked] or agents[:2]
+
+    def _normalize_for_match(self, value: str) -> str:
+        return re.sub(r"[^a-z0-9\u3040-\u30ff\u3400-\u9fff]+", " ", str(value or "").casefold()).strip()
 
     def _active_or_new_community_id(self) -> str:
         community_dir = self.runtime_root / "generated" / "communities"

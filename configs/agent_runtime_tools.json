@@ -1,0 +1,21 @@
+{
+  "version": "v2.6.3-runtime-output-routing",
+  "description": "Runtime tool routing profiles. Source code consumes these patterns generically and does not embed domain phrases.",
+  "profiles": [
+    {
+      "profile_id": "runtime_context_snapshot",
+      "operation": "runtime_context_snapshot",
+      "match_terms": ["time", "current", "clock", "now", "日時", "時間", "現在"]
+    },
+    {
+      "profile_id": "public_information_discovery",
+      "operation": "public_discovery",
+      "match_terms": ["weather", "forecast", "obtain", "information", "調べ", "取得", "検索"]
+    }
+  ],
+  "text_cleanup": {
+    "drop_phrases": [
+      "create a task", "create task", "named", "which calls", "calls", "agent", "execute", "task"
+    ]
+  }
+}
