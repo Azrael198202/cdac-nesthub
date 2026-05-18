@@ -96,3 +96,11 @@ The package keeps only source code and base configuration. Runtime workspace con
 - Agent Studio can show whether the primary runtime is executing, waiting, failed, or completed at node level.
 - Durable resume keeps the same delegation run and continues from checkpoint while preserving visible progress events.
 - Runtime workspace is excluded from source packages; only `runtime/.gitkeep` is kept.
+
+## V2.8.10 Delegation Objective Separation & Resume Result Merge
+
+- Participant creation now stores both the original definition instruction and a runtime execution objective.
+- Delegated execution sends only the participant work objective to ai_core, so ai_core does not confuse agent definition with task execution.
+- Durable resume now replaces stale paused participant results with completed results.
+- Final delegated synthesis filters out old waiting placeholders before generating the final answer.
+- Runtime workspace remains source-clean; generated runtime content is not included in the source package.

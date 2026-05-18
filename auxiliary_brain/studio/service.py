@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+import re
 
 from auxiliary_brain.delegation import AgentDelegationRuntime
 from auxiliary_brain.runtime import new_id
@@ -47,10 +48,14 @@ class AgentStudioService:
 
     def create_participant(self, instruction: str, name: str | None = None) -> dict[str, Any]:
         participant_id = new_id("participant")
+        participant_name = name or participant_id
+        execution_objective = self._derive_execution_objective(instruction, participant_name)
         payload = {
             "participant_id": participant_id,
-            "name": name or participant_id,
-            "instruction": instruction,
+            "name": participant_name,
+            "instruction": execution_objective,
+            "execution_objective": execution_objective,
+            "definition_instruction": instruction,
             "origin": "auxiliary_brain",
             "status": "created",
             "created_at": self._now(),
@@ -194,6 +199,49 @@ class AgentStudioService:
             response["pending_action"] = result.get("pending_action")
             response["message"] = "Delegated primary-runtime execution is waiting for required input."
         return response
+
+
+    def _derive_execution_objective(self, instruction: str, participant_name: str | None = None) -> str:
+        """Extract the participant's reusable work objective from a creation command.
+
+        The studio stores both the original definition command and the runtime
+        objective. Delegated execution must use the objective, not the creation
+        sentence, otherwise the primary runtime may plan to create an agent again.
+        This parser is generic command-shape handling; it does not encode any
+        business domain.
+        """
+        text = (instruction or "").strip()
+        if not text:
+            return ""
+
+        # Common shape: "create ... named <name> to <objective>".
+        match = re.search(
+            r"\bnamed\s+.+?\s+to\s+(.+?)(?:[。.!?]\s*)?$",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if match:
+            return match.group(1).strip(" .。")
+
+        # Common shape without a name: "create ... to <objective>".
+        match = re.search(
+            r"\bcreate\b.+?\bto\s+(.+?)(?:[。.!?]\s*)?$",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if match:
+            return match.group(1).strip(" .。")
+
+        # If the task statement used a relative clause, keep the clause body.
+        match = re.search(
+            r"\bthat\s+(.+?)(?:[。.!?]\s*)?$",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if match:
+            return match.group(1).strip(" .。")
+
+        return text
 
     def _ensure_community(self) -> str:
         existing = self.store.list_json("generated/communities")

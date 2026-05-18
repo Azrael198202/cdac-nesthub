@@ -54,7 +54,7 @@ class AgentDelegationRuntime:
             request = AgentExecutionRequest(
                 participant_id=str(participant.get("participant_id") or participant.get("id")),
                 participant_name=participant_name,
-                participant_instruction=str(participant.get("instruction") or participant.get("description") or ""),
+                participant_instruction=str(participant.get("execution_objective") or participant.get("instruction") or participant.get("description") or ""),
                 task_name=task_name,
                 task_instruction=task_instruction,
                 community_id=community_id,
@@ -97,6 +97,8 @@ class AgentDelegationRuntime:
                 self._record_progress(run_payload, "waiting_input", "Waiting for required input", "waiting")
                 return run_payload
 
+        run_payload["agent_results"] = self._dedupe_result_payloads(run_payload.get("agent_results") or [])
+        agent_results = self._to_agent_results(run_payload["agent_results"])
         self._record_progress(run_payload, "final_synthesis", "Primary runtime synthesizing delegated results", "running")
         synthesis = await self.primary_client.synthesize_delegated_results(
             task_name=task_name,
@@ -150,7 +152,7 @@ class AgentDelegationRuntime:
         run_payload["status"] = "resuming"
         self._record_progress(run_payload, "durable_resume", "Durable resume requested", "running")
 
-        existing_results = list(run_payload.get("agent_results") or [])
+        existing_results = self._dedupe_result_payloads(list(run_payload.get("agent_results") or []))
         resumed_index = None
         agent_results = []
         for idx, payload in enumerate(existing_results):
@@ -169,6 +171,10 @@ class AgentDelegationRuntime:
                 )
                 resumed_payload = resumed.__dict__
                 existing_results[idx] = resumed_payload
+                existing_results = self._dedupe_result_payloads(existing_results)
+                run_payload["agent_results"] = existing_results
+                if resumed.status not in {"requires_key", "requires_input", "paused"}:
+                    self._clear_waiting_fields(run_payload)
                 agent_results.append(resumed)
                 self._record_progress(run_payload, f"participant_{idx + 1}_resume_complete", f"Participant resumed: {resumed.participant_name}", "completed" if resumed.status == "completed" else resumed.status)
                 if resumed.status in {"requires_key", "requires_input", "paused"}:
@@ -207,7 +213,7 @@ class AgentDelegationRuntime:
             request = AgentExecutionRequest(
                 participant_id=participant_id,
                 participant_name=participant_name,
-                participant_instruction=str(participant.get("instruction") or participant.get("description") or ""),
+                participant_instruction=str(participant.get("execution_objective") or participant.get("instruction") or participant.get("description") or ""),
                 task_name=task_name,
                 task_instruction=task_instruction,
                 community_id=community_id,
@@ -237,7 +243,10 @@ class AgentDelegationRuntime:
                 self.store.write_json(f"generated/results/{run_id}.json", run_payload)
                 return run_payload
 
+        existing_results = self._dedupe_result_payloads(existing_results)
         run_payload["agent_results"] = existing_results
+        self._clear_waiting_fields(run_payload)
+        agent_results = self._to_agent_results(existing_results)
         self._record_progress(run_payload, "final_synthesis", "Primary runtime synthesizing delegated results", "running")
         synthesis = await self.primary_client.synthesize_delegated_results(
             task_name=task_name,
@@ -267,6 +276,55 @@ class AgentDelegationRuntime:
         })
         self.store.write_json(f"generated/results/{run_id}.json", run_payload)
         return run_payload
+
+    def _result_key(self, payload: dict[str, Any]) -> str:
+        return str(payload.get("participant_id") or payload.get("participant_name") or "")
+
+    def _dedupe_result_payloads(self, payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Keep the latest result per participant and prefer non-paused results.
+
+        Durable resume first stores a paused result and later replaces it with a
+        completed result. This helper prevents stale waiting placeholders from
+        being included in final synthesis.
+        """
+        order: list[str] = []
+        merged: dict[str, dict[str, Any]] = {}
+        paused_statuses = {"requires_key", "requires_input", "paused"}
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                continue
+            key = self._result_key(payload)
+            if not key:
+                key = str(len(order))
+            if key not in merged:
+                order.append(key)
+                merged[key] = payload
+                continue
+            old_status = str(merged[key].get("status") or "")
+            new_status = str(payload.get("status") or "")
+            if old_status in paused_statuses and new_status not in paused_statuses:
+                merged[key] = payload
+            else:
+                merged[key] = payload
+        return [merged[key] for key in order if key in merged]
+
+    def _to_agent_results(self, payloads: list[dict[str, Any]]):
+        from ai_core.agent_delegation import AgentExecutionResult
+        results = []
+        paused_statuses = {"requires_key", "requires_input", "paused"}
+        for payload in self._dedupe_result_payloads(payloads):
+            status = str(payload.get("status") or "")
+            if status in paused_statuses:
+                continue
+            try:
+                results.append(AgentExecutionResult(**payload))
+            except Exception:
+                continue
+        return results
+
+    def _clear_waiting_fields(self, run_payload: dict[str, Any]) -> None:
+        for key in ["pending_action", "missing_inputs"]:
+            run_payload.pop(key, None)
 
     async def _execute_agent_request_with_progress(self, request, progress_callback):
         try:

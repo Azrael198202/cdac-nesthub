@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Callable
+import uuid
 from typing import Any
 
 from ai_core.orchestration.workflow_runtime import WorkflowRuntime
@@ -175,27 +176,86 @@ class PrimaryBrainDelegationClient:
         agent_results: list[AgentExecutionResult],
         shared_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        message = self._build_synthesis_message(task_name, task_instruction, agent_results, shared_context or {})
-        core_run_id, state = await self.runtime.prepare(message)
-        state.setdefault("runtime_options", {})["delegation_mode"] = True
-        state.setdefault("runtime_options", {})["auto_approve_reviews"] = True
-        await self.runtime.run_prepared(state)
+        """Create the final delegated answer inside the primary runtime boundary.
+
+        This is intentionally not a new task workflow. The participant workflows
+        have already executed. Starting another full workflow for synthesis may
+        accidentally treat the synthesis prompt as a fresh executable task.
+        Here the primary runtime performs a generic, deterministic synthesis over
+        completed participant results only.
+        """
+        core_run_id = uuid.uuid4().hex[:12]
+        usable_results = self._usable_agent_results(agent_results)
+        final_answer = self._compose_delegated_final_answer(
+            task_name=task_name,
+            task_instruction=task_instruction,
+            agent_results=usable_results,
+        )
         return {
             "origin": "ai_core",
             "core_run_id": core_run_id,
-            "status": self._extract_status(state),
-            "final_answer": self._extract_final_answer(state),
-            "workflow_results": state.get("results", {}),
+            "status": "completed" if usable_results else "completed_with_no_participant_result",
+            "final_answer": final_answer,
+            "workflow_results": {
+                "delegated_synthesis": {
+                    "status": "completed",
+                    "participant_count": len(agent_results),
+                    "used_participant_count": len(usable_results),
+                    "omitted_participant_count": max(0, len(agent_results) - len(usable_results)),
+                }
+            },
         }
 
     def _build_agent_message(self, request: AgentExecutionRequest) -> str:
+        objective = (request.participant_instruction or "").strip()
         return (
-            f"{request.participant_instruction}\n\n"
-            "Task context:\n"
+            "Execute the delegated participant work using the primary runtime.\n"
+            f"Participant name: {request.participant_name}\n"
+            f"Participant work objective: {objective}\n"
             f"Task name: {request.task_name}\n"
-            f"Task instruction: {request.task_instruction}\n"
+            "Do not create or redefine participants or tasks. Execute only the participant work objective.\n"
             "Return only the participant result needed for this task."
         )
+
+    def _usable_agent_results(self, agent_results: list[AgentExecutionResult]) -> list[AgentExecutionResult]:
+        blocked_statuses = {"requires_key", "requires_input", "paused"}
+        placeholder_texts = {
+            "The primary runtime paused before producing a user-facing final answer.",
+            "The primary runtime completed without a user-facing final answer.",
+        }
+        usable: list[AgentExecutionResult] = []
+        seen: set[str] = set()
+        for result in reversed(agent_results):
+            key = result.participant_id or result.participant_name
+            if key in seen:
+                continue
+            seen.add(key)
+            answer = (result.final_answer or "").strip()
+            if result.status in blocked_statuses:
+                continue
+            if answer in placeholder_texts:
+                continue
+            usable.append(result)
+        return list(reversed(usable))
+
+    def _compose_delegated_final_answer(
+        self,
+        *,
+        task_name: str,
+        task_instruction: str,
+        agent_results: list[AgentExecutionResult],
+    ) -> str:
+        if not agent_results:
+            return "The delegated task completed, but no completed participant result was available for final synthesis."
+        lines = [f"Task: {task_name}"]
+        for result in agent_results:
+            label = result.participant_name or result.participant_id or "participant"
+            status = result.status or "completed"
+            answer = (result.final_answer or "").strip()
+            if not answer:
+                answer = "No user-facing answer was produced."
+            lines.append(f"{label} ({status}): {answer}")
+        return "\n".join(lines)
 
     def _build_synthesis_message(
         self,
