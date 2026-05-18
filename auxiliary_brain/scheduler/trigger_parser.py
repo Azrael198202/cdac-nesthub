@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 from typing import Any
 from uuid import uuid4
+
+from auxiliary_brain.scheduler.timezone_resolver import RuntimeTimezoneResolver
 
 
 class RuntimeTriggerParser:
@@ -17,9 +18,12 @@ class RuntimeTriggerParser:
 
     CLOCK_RE = re.compile(r"(?<!\d)(\d{1,2})\s*:\s*(\d{2})\s*([AaPp][Mm])?(?!\d)")
 
-    def parse(self, text: str, *, default_timezone: str = "Asia/Tokyo") -> dict[str, Any]:
+    def __init__(self, timezone_resolver: RuntimeTimezoneResolver | None = None) -> None:
+        self.timezone_resolver = timezone_resolver or RuntimeTimezoneResolver()
+
+    def parse(self, text: str, *, default_timezone: str = "UTC") -> dict[str, Any]:
         raw = str(text or "")
-        zone = ZoneInfo(default_timezone)
+        zone, timezone_key, timezone_metadata = self.timezone_resolver.resolve(default_timezone)
         now = datetime.now(zone)
         match = self.CLOCK_RE.search(raw)
         if not match:
@@ -27,8 +31,8 @@ class RuntimeTriggerParser:
                 "activation_id": f"activation_{uuid4().hex[:8]}",
                 "mode": "manual",
                 "expression": "manual",
-                "timezone": default_timezone,
-                "metadata": {"trigger_type": "manual", "parsed": False},
+                "timezone": timezone_key,
+                "metadata": {"trigger_type": "manual", "parsed": False, "timezone_resolution": timezone_metadata},
             }
         hour = int(match.group(1))
         minute = int(match.group(2))
@@ -42,8 +46,8 @@ class RuntimeTriggerParser:
                 "activation_id": f"activation_{uuid4().hex[:8]}",
                 "mode": "manual",
                 "expression": "manual",
-                "timezone": default_timezone,
-                "metadata": {"trigger_type": "manual", "parsed": False, "reason": "invalid_clock_value"},
+                "timezone": timezone_key,
+                "metadata": {"trigger_type": "manual", "parsed": False, "reason": "invalid_clock_value", "timezone_resolution": timezone_metadata},
             }
         scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if scheduled <= now:
@@ -53,12 +57,13 @@ class RuntimeTriggerParser:
             "activation_id": f"activation_{uuid4().hex[:8]}",
             "mode": "scheduled",
             "expression": expression,
-            "timezone": default_timezone,
+            "timezone": timezone_key,
             "metadata": {
                 "trigger_type": "time",
                 "expression": expression,
-                "timezone": default_timezone,
+                "timezone": timezone_key,
                 "scheduled_at": scheduled.isoformat(),
                 "parsed": True,
+                "timezone_resolution": timezone_metadata,
             },
         }

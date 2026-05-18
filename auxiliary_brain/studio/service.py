@@ -107,7 +107,7 @@ class AgentStudioService:
             agents = self._load_agents()
         graph_id = f"graph_{uuid4().hex[:8]}"
         profile = self.command_config.action_profile("create_task_graph")
-        default_timezone = profile.get("default_timezone", "Asia/Tokyo")
+        default_timezone = profile.get("default_timezone", "UTC")
         activation = self.trigger_parser.parse(message, default_timezone=default_timezone)
         selected_agents = self._select_agents_for_message(agents, message) or agents[:1]
         tasks: list[dict[str, Any]] = []

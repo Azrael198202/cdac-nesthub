@@ -531,3 +531,44 @@ PYTHONPATH=. python -m compileall ai_core auxiliary_brain apps tests: OK
 PYTHONPATH=. pytest -q: 52 passed
 Forbidden source term scan for ai_core / auxiliary_brain: OK
 ```
+
+## V2.6.1 Runtime Timezone Fallback Fix
+
+### Problem Fixed
+
+On Windows Python installations, `zoneinfo.ZoneInfo` may fail when the IANA timezone database is not installed. This caused Agent Studio task creation to return Internal Server Error before the runtime could register the schedule.
+
+### Implementation
+
+```text
+1. Added runtime-configured timezone fallback resolver.
+2. Added configs/runtime_timezones.json for host-specific fallback offsets.
+3. Removed locale-specific timezone fallback from source code.
+4. Trigger parsing now records timezone_resolution metadata.
+5. Agent Studio no longer crashes when host timezone data is missing.
+```
+
+### Added Files
+
+```text
+configs/runtime_timezones.json
+auxiliary_brain/scheduler/timezone_resolver.py
+tests/runtime/test_v26_1_timezone_fallback.py
+```
+
+### Verification
+
+```text
+PYTHONPATH=. python -m compileall -q ai_core auxiliary_brain apps tests: OK
+PYTHONPATH=. pytest -q: 53 passed
+```
+
+### Retest Input
+
+```text
+Create a time alert agent.
+Create a weather forecast agent.
+Create a task: Alarm woke me up at 10:10 AM and tell me the weather forecast for Fukuoka that day.
+```
+
+Expected result: task graph creation succeeds, schedule and live instance records appear, and no `ZoneInfoNotFoundError` is raised.
