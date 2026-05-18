@@ -111,7 +111,7 @@ class StructuredFactGraph:
         return None
 
     def _looks_temporal(self, value: str) -> bool:
-        return bool(re.search(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\b(today|tomorrow|yesterday)\b", value, flags=re.I))
+        return bool(re.search(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}", value, flags=re.I))
 
     def _nearby_label(self, text: str, index: int) -> str | None:
         left = text[max(0, index - 80):index]

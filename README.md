@@ -104,3 +104,15 @@ The package keeps only source code and base configuration. Runtime workspace con
 - Durable resume now replaces stale paused participant results with completed results.
 - Final delegated synthesis filters out old waiting placeholders before generating the final answer.
 - Runtime workspace remains source-clean; generated runtime content is not included in the source package.
+
+## V2.8.11 Runtime Semantic Contract Engine
+
+This version adds a domain-neutral semantic validation layer. The core runtime does not hard-code business field names or scenario-specific rules. Runtime-generated contracts may declare semantic types, source policies, and constraints under `runtime/generated/contracts/`. The core only executes generic validation steps:
+
+- infer generic fact type from evidence shape and local context
+- apply contract and generic constraints
+- filter invalid facts before final synthesis
+- synthesize only from verified facts by default
+- keep runtime workspace clean in source packages
+
+Generated runtime files are not included in the source archive.

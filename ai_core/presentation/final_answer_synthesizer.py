@@ -6,6 +6,7 @@ from typing import Any
 from ai_core.llm.provider_router import ProviderRouter
 from ai_core.presentation.result_sanitizer import ResultSanitizer
 from ai_core.presentation.structured_fact_normalizer import StructuredFactNormalizer
+from ai_core.runtime.semantic import SynthesisGuard
 
 
 class FinalAnswerSynthesizer:
@@ -17,6 +18,7 @@ class FinalAnswerSynthesizer:
         self.sanitizer = ResultSanitizer()
         self.normalizer = StructuredFactNormalizer()
         self.router = ProviderRouter()
+        self.guard = SynthesisGuard()
 
     async def synthesize(
         self,
@@ -28,7 +30,7 @@ class FinalAnswerSynthesizer:
         trust_summary: dict[str, Any],
     ) -> dict[str, Any]:
         sanitized = self.sanitizer.sanitize_materials(materials)
-        facts = self.normalizer.normalize(materials=sanitized, state=state)
+        facts = self.guard.filter(self.normalizer.normalize(materials=sanitized, state=state))
         deterministic = self._deterministic_summary(facts=facts, sanitized=sanitized, trust_summary=trust_summary)
         answer = deterministic
 
@@ -51,6 +53,7 @@ class FinalAnswerSynthesizer:
                 "source": "model_or_rule_synthesis" if answer != deterministic else "rule_synthesis",
                 "raw_source_material_returned": False,
                 "normalized_facts_only": True,
+                "verified_facts_only": True,
             },
         }
 
@@ -58,7 +61,8 @@ class FinalAnswerSynthesizer:
         output_policy = (((state.get("runtime") or {}) if isinstance(state, dict) else {}).get("output_policy") or {})
         if output_policy.get("disable_model_synthesis") is True:
             return False
-        return bool(facts)
+        output_policy = (((state.get("runtime") or {}) if isinstance(state, dict) else {}).get("output_policy") or {})
+        return bool(facts) and output_policy.get("allow_model_synthesis_from_verified_facts") is True
 
     async def _try_model_synthesis(
         self,

@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass, asdict
 from typing import Any
 
+from ai_core.runtime.semantic import RuntimeSemanticContractEngine
+
 
 _DEBUG_MARKERS = (
     "Matched Parameter:",
@@ -50,7 +52,8 @@ class StructuredFactNormalizer:
             source_url = self._source_url(material)
             content = material.get("content")
             facts.extend(self._facts_from_value(content, runtime_variables=runtime_variables, source_url=source_url))
-        return self._dedupe([f.to_dict() for f in facts])
+        deduped = self._dedupe([f.to_dict() for f in facts])
+        return RuntimeSemanticContractEngine().verify_facts(deduped, state=state or {})
 
     def reject_debug_text(self, text: str) -> bool:
         sample = str(text or "")[:4000]
