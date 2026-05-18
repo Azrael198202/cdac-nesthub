@@ -139,6 +139,46 @@ class AgentStudioService:
             response["message"] = "Delegated primary-runtime execution is waiting for required input."
         return response
 
+    async def resume_run(self, run_id: str) -> dict[str, Any]:
+        run_id = (run_id or "").strip()
+        if not run_id:
+            return {
+                "action": "resume_task_graph",
+                "origin": "auxiliary_brain",
+                "status": "blocked",
+                "message": "A run id is required.",
+            }
+        run_payload = self.store.read_json(f"generated/results/{run_id}.json")
+        if not run_payload:
+            return {
+                "action": "resume_task_graph",
+                "origin": "auxiliary_brain",
+                "status": "not_found",
+                "run_id": run_id,
+            }
+        task_name = str(run_payload.get("task_name") or "").strip()
+        if not task_name:
+            return {
+                "action": "resume_task_graph",
+                "origin": "auxiliary_brain",
+                "status": "blocked",
+                "run_id": run_id,
+                "message": "The paused run does not reference a task name.",
+            }
+        run_payload["status"] = "resuming"
+        run_payload["resumed_at"] = self._now()
+        run_payload.setdefault("progress_events", []).append({
+            "stage": "resume_requested",
+            "label": "Resume requested after input was saved",
+            "status": "running",
+            "at": self._now(),
+        })
+        self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+        response = await self.execute_task(task_name)
+        response["action"] = "resume_task_graph"
+        response["resumed_from_run_id"] = run_id
+        return response
+
     def _ensure_community(self) -> str:
         existing = self.store.list_json("generated/communities")
         if existing:

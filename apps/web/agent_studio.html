@@ -9,7 +9,7 @@
     *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif;font-size:14px}
     header{height:76px;display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--line)}
     h1{font-size:18px;margin:0 0 4px}.sub{color:#a5b4fc;font-size:12px}.status{color:#bae6fd;display:flex;align-items:center;gap:8px}.status.running::before{content:'';width:10px;height:10px;border:2px solid #38bdf8;border-top-color:transparent;border-radius:50%;display:inline-block;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.btn{border:0;border-radius:10px;background:#334155;color:white;padding:10px 14px;font-weight:700;cursor:pointer}.btn.primary{background:#0369a1}.btn.danger{background:var(--danger)}.btn:disabled{opacity:.6;cursor:not-allowed}
-    main{display:grid;grid-template-columns:26% 44% 30%;gap:12px;height:calc(100vh - 76px);padding:12px}.panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);min-height:0;display:flex;flex-direction:column;overflow:hidden}.panel h2{font-size:14px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}.scroll{padding:12px;overflow:auto;min-height:0;flex:1}.item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}.pill{display:inline-block;margin:3px 4px 0 0;padding:3px 7px;border-radius:999px;background:#0f766e;color:#ccfbf1;font-size:12px}.path{color:#93c5fd;font-size:12px;word-break:break-all}.console{border-top:1px solid var(--line);padding:12px;background:#0b1220}.input{width:100%;height:84px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px;resize:vertical}.row{display:flex;gap:8px;margin-top:10px}.message{white-space:pre-wrap}.user{border-color:#0ea5e9}.error{border-color:#f59e0b}.final{border-color:#22c55e}.pre{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;background:#020617;border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;max-height:260px}.small{font-size:12px;color:#bfdbfe}.sectionTitle{color:#bfdbfe;font-weight:700;margin:12px 0 8px}.empty{color:#94a3b8;font-size:13px}.progressLine{display:flex;align-items:center;gap:8px;margin:6px 0;color:#bfdbfe}.progressDot{width:8px;height:8px;border-radius:999px;background:#38bdf8;animation:pulse 1.2s ease-in-out infinite}.progressDot.done{background:#22c55e;animation:none}.progressDot.wait{background:#f59e0b;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.15)}}
+    main{display:grid;grid-template-columns:26% 44% 30%;gap:12px;height:calc(100vh - 76px);padding:12px}.panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);min-height:0;display:flex;flex-direction:column;overflow:hidden}.panel h2{font-size:14px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}.scroll{padding:12px;overflow:auto;min-height:0;flex:1}.item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}.pill{display:inline-block;margin:3px 4px 0 0;padding:3px 7px;border-radius:999px;background:#0f766e;color:#ccfbf1;font-size:12px}.path{color:#93c5fd;font-size:12px;word-break:break-all}.console{border-top:1px solid var(--line);padding:12px;background:#0b1220}.input{width:100%;height:84px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px;resize:vertical}.row{display:flex;gap:8px;margin-top:10px}.message{white-space:pre-wrap}.user{border-color:#0ea5e9}.error{border-color:#f59e0b}.final{border-color:#22c55e}.pre{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;background:#020617;border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;max-height:260px}.small{font-size:12px;color:#bfdbfe}.sectionTitle{color:#bfdbfe;font-weight:700;margin:12px 0 8px}.empty{color:#94a3b8;font-size:13px}.cardHeader{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.copyBtn{border:1px solid var(--line);border-radius:8px;background:#0b1220;color:#bfdbfe;padding:4px 8px;cursor:pointer;font-size:12px}.copyBtn:hover{border-color:#38bdf8;color:#e0f2fe}.toast{position:fixed;right:20px;bottom:20px;background:#064e3b;border:1px solid #22c55e;color:#dcfce7;padding:10px 14px;border-radius:10px;z-index:50}.progressLine{display:flex;align-items:center;gap:8px;margin:6px 0;color:#bfdbfe}.progressDot{width:8px;height:8px;border-radius:999px;background:#38bdf8;animation:pulse 1.2s ease-in-out infinite}.progressDot.done{background:#22c55e;animation:none}.progressDot.wait{background:#f59e0b;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.15)}}
   </style>
 </head>
 <body>
@@ -32,6 +32,9 @@ function setStudioStatus(text, running=false){ const el=document.getElementById(
 function addProgressMessage(text){ addMessage('Progress: '+text, 'item'); }
 let lastSubmittedInstruction = '';
 let lastMissingInputs = [];
+let lastPendingRunId = '';
+let lastPendingInstruction = '';
+
 async function sendMessage(){
   const input=document.getElementById('input');
   const text=input.value.trim();
@@ -63,7 +66,7 @@ async function sendMessage(){
     const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});
     const data=await res.json();
     addMessage(renderJson(data), data.status==='completed'?'item':'item error');
-    if(data.missing_inputs && data.missing_inputs.length){ lastMissingInputs=data.missing_inputs; addMissingInputs(data.missing_inputs, text); }
+    if(data.missing_inputs && data.missing_inputs.length){ lastMissingInputs=data.missing_inputs; lastPendingRunId=data.run_id||''; lastPendingInstruction=text; addMissingInputs(data.missing_inputs, text); }
     if(data.final_answer){ addMessage('Final Answer:\n'+data.final_answer,'item final'); }
     await refreshState();
   }catch(e){
@@ -77,7 +80,71 @@ async function sendMessage(){
   }
 }
 function addMissingInputs(items, pendingInstruction){ const el=document.createElement('div'); el.className='item error missing-card'; el.id='missing_input_card_'+Date.now(); let html='<b>Additional input required</b>'; items.forEach((it,idx)=>{ const field=escapeHtml(it.field||'runtime_access_key'); html+=`<div class="small">${escapeHtml(it.message||'Input required')}</div><input id="missing_${idx}" data-secret-key="${field}" data-card-id="${el.id}" class="input" style="height:38px;margin-top:8px" placeholder="${field}" /><div class="row"><button class="btn primary" onclick="saveMissingSecret(${idx})">Save & Continue</button></div>`; }); html+='<div class="small">Press Enter in the input field or click Save & Continue. Secrets are stored in the local runtime secret file for this environment.</div>'; el.innerHTML=html; messages.appendChild(el); items.forEach((_,idx)=>{ const input=document.getElementById('missing_'+idx); if(input){ input.addEventListener('keydown', async (event)=>{ if(event.key==='Enter'){ event.preventDefault(); await saveMissingSecret(idx); }}); }}); messages.scrollTop=messages.scrollHeight; }
-async function saveMissingSecret(index){ const input=document.getElementById('missing_'+index); if(!input)return; const value=input.value.trim(); const key=(input.dataset.secretKey||'runtime_access_key').trim()||'runtime_access_key'; if(!value){ addMessage('Secret value is required before saving.','item error'); return; } setStudioStatus('saving', true); try{ const res=await fetch('/api/agent-studio/secret',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key,value})}); const data=await res.json(); if(!res.ok || !data.ok){ addMessage('Secret save failed: '+renderJson(data),'item error'); return; } const cardId=input.dataset.cardId; const card=cardId?document.getElementById(cardId):input.closest('.missing-card'); if(card){ card.remove(); } addMessage('Secret saved to '+(data.path||'runtime secret file')+'.','item final'); if(lastSubmittedInstruction){ document.getElementById('input').value=lastSubmittedInstruction; await sendMessage(); } }catch(e){ addMessage('Secret save failed: '+e,'item error'); } finally{ setStudioStatus('ready', false); }}
+async function saveMissingSecret(index){
+  const input=document.getElementById('missing_'+index);
+  if(!input)return;
+  const value=input.value.trim();
+  const key=(input.dataset.secretKey||'runtime_access_key').trim()||'runtime_access_key';
+  if(!value){ addMessage('Secret value is required before saving.','item error'); return; }
+  setStudioStatus('saving', true);
+  try{
+    const res=await fetch('/api/agent-studio/secret',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key,value})});
+    const data=await res.json();
+    if(!res.ok || !data.ok){ addMessage('Secret save failed: '+renderJson(data),'item error'); return; }
+    const cardId=input.dataset.cardId;
+    const card=cardId?document.getElementById(cardId):input.closest('.missing-card');
+    if(card){ card.remove(); }
+    addMessage('Secret saved to '+(data.path||'runtime secret file')+'.','item final');
+    if(lastPendingRunId){
+      await resumePendingRun(lastPendingRunId);
+    } else if(lastPendingInstruction || lastSubmittedInstruction){
+      document.getElementById('input').value=lastPendingInstruction || lastSubmittedInstruction;
+      await sendMessage();
+    }
+  }catch(e){ addMessage('Secret save failed: '+e,'item error'); }
+  finally{ setStudioStatus('ready', false); }
+}
+async function resumePendingRun(runId){
+  if(!runId)return;
+  const btn=document.getElementById('sendBtn');
+  btn.disabled=true;
+  btn.textContent='Thinking...';
+  setStudioStatus('running', true);
+  let pollTimer=null;
+  try{
+    addProgressMessage('resuming suspended delegated run');
+    pollTimer=setInterval(()=>refreshState(), 1200);
+    const res=await fetch('/api/agent-studio/resume-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_id:runId})});
+    const data=await res.json();
+    addMessage(renderJson(data), data.status==='completed'?'item':'item error');
+    if(data.missing_inputs && data.missing_inputs.length){ lastMissingInputs=data.missing_inputs; lastPendingRunId=data.run_id||runId; addMissingInputs(data.missing_inputs, lastPendingInstruction); }
+    if(data.final_answer){ addMessage('Final Answer:\n'+data.final_answer,'item final'); }
+    await refreshState();
+  }catch(e){ addMessage('Resume failed: '+e,'item error'); }
+  finally{
+    if(pollTimer) clearInterval(pollTimer);
+    btn.disabled=false;
+    btn.textContent='Send';
+    setStudioStatus('ready', false);
+  }
+}
+async function copyText(text){
+  try{
+    await navigator.clipboard.writeText(text);
+    showToast('Copied');
+  }catch(e){
+    showToast('Copy failed');
+  }
+}
+function showToast(text){
+  const old=document.querySelector('.toast');
+  if(old) old.remove();
+  const el=document.createElement('div');
+  el.className='toast';
+  el.textContent=text;
+  document.body.appendChild(el);
+  setTimeout(()=>el.remove(), 1600);
+}
 
 
 function quickExecute(){ const name=prompt('Task name to execute'); if(name){ document.getElementById('input').value='execute '+name; sendMessage(); }}
@@ -93,24 +160,59 @@ function renderState(data){
 function runCard(r){
   const el=document.createElement('div');
   el.className='item';
-  const status=escapeHtml(r.status||'unknown');
-  const stage=escapeHtml(r.current_stage||'');
+  const jsonText=renderJson(r);
+  const header=document.createElement('div');
+  header.className='cardHeader';
+  const left=document.createElement('div');
+  left.innerHTML=`<b>${escapeHtml(r.run_id||'run')}</b> <span class="pill">${escapeHtml(r.status||'unknown')}</span>`;
+  const copy=document.createElement('button');
+  copy.className='copyBtn';
+  copy.textContent='📋 Copy';
+  copy.onclick=()=>copyText(jsonText);
+  header.appendChild(left);
+  header.appendChild(copy);
+  el.appendChild(header);
+  const stage=String(r.current_stage||'');
+  if(stage){ const stageEl=document.createElement('div'); stageEl.className='small'; stageEl.textContent='Current stage: '+stage; el.appendChild(stageEl); }
   const events=Array.isArray(r.progress_events)?r.progress_events:[];
-  let html=`<b>${escapeHtml(r.run_id||'run')}</b> <span class="pill">${status}</span>`;
-  if(stage){ html+=`<div class="small">Current stage: ${stage}</div>`; }
   if(events.length){
-    html+='<div style="margin-top:8px">';
+    const wrap=document.createElement('div');
+    wrap.style.marginTop='8px';
     events.slice(-8).forEach(ev=>{
+      const line=document.createElement('div');
       const cls=ev.status==='completed'?'done':(ev.status==='waiting'?'wait':'');
-      html+=`<div class="progressLine"><span class="progressDot ${cls}"></span><span>${escapeHtml(ev.label||ev.stage||'step')}</span><span class="small">${escapeHtml(ev.status||'running')}</span></div>`;
+      line.className='progressLine';
+      line.innerHTML=`<span class="progressDot ${cls}"></span><span>${escapeHtml(ev.label||ev.stage||'step')}</span><span class="small">${escapeHtml(ev.status||'running')}</span>`;
+      wrap.appendChild(line);
     });
-    html+='</div>';
+    el.appendChild(wrap);
   }
-  html+=`<div class="pre">${escapeHtml(renderJson(r))}</div>`;
-  el.innerHTML=html;
+  const pre=document.createElement('div');
+  pre.className='pre';
+  pre.textContent=jsonText;
+  el.appendChild(pre);
   return el;
 }
-function card(title, body){ const el=document.createElement('div'); el.className='item'; el.innerHTML=`<b>${escapeHtml(title)}</b><div class="pre">${escapeHtml(body)}</div>`; return el; }
+function card(title, body){
+  const el=document.createElement('div');
+  el.className='item';
+  const header=document.createElement('div');
+  header.className='cardHeader';
+  const label=document.createElement('b');
+  label.textContent=title;
+  const copy=document.createElement('button');
+  copy.className='copyBtn';
+  copy.textContent='📋 Copy';
+  copy.onclick=()=>copyText(body);
+  header.appendChild(label);
+  header.appendChild(copy);
+  const pre=document.createElement('div');
+  pre.className='pre';
+  pre.textContent=body;
+  el.appendChild(header);
+  el.appendChild(pre);
+  return el;
+}
 refreshState();
 </script>
 </body>

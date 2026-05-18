@@ -31,6 +31,10 @@ class AgentStudioSecretRequest(BaseModel):
     value: str
 
 
+class AgentStudioResumeRunRequest(BaseModel):
+    run_id: str
+
+
 class ResumeRequest(BaseModel):
     run_id: str
     decision: str = "approve"
@@ -87,6 +91,11 @@ async def agent_studio_secret(req: AgentStudioSecretRequest):
         return JSONResponse({"ok": False, "status": "blocked", "message": "Secret value is required."}, status_code=400)
     SecretStore().set(key, value)
     return JSONResponse({"ok": True, "status": "saved", "key": key, "path": "runtime/configs/secrets/secrets.json"})
+
+
+@app.post("/api/agent-studio/resume-run")
+async def agent_studio_resume_run(req: AgentStudioResumeRunRequest):
+    return JSONResponse(await studio_service.resume_run(req.run_id))
 
 
 @app.get("/api/version")

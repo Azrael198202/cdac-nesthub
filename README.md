@@ -71,3 +71,11 @@ The package keeps only source code and base configuration. Runtime workspace con
 - Delegation runs now persist `current_stage` and `progress_events` so the UI can show where execution is working.
 - The auxiliary layer still records coordination state only; delegated work remains owned by the primary runtime.
 - Runtime workspace is kept clean in source packages and only contains `runtime/.gitkeep`.
+
+## V2.8.7 Agent Studio Debug UX and Resume
+
+- Added copy buttons for task graph, delegation run, delivery, and trace JSON panels.
+- Added browser clipboard helper and toast feedback for copied artifacts.
+- Added `/api/agent-studio/resume-run` so Save & Continue can resume the paused delegated run path instead of only saving a secret.
+- Preserved `/` manual approval flow and `/agent-studio` auto-approval delegation mode.
+- Runtime workspace is excluded from the source package; only `runtime/.gitkeep` is kept.
