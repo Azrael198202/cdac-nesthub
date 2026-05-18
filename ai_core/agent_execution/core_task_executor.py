@@ -11,6 +11,8 @@ from uuid import uuid4
 
 import httpx
 from bs4 import BeautifulSoup
+runtime-workflow-executor
+from ai_core.agent_execution.runtime_workflow_executor import RuntimeWorkflowExecutor
 
 
 class AICoreAgentTaskExecutor:
@@ -29,6 +31,7 @@ class AICoreAgentTaskExecutor:
         self.tool_config_path = Path(tool_config_path)
         self.tool_output_dir = self.runtime_root / "generated" / "tool_outputs"
         self.tool_output_dir.mkdir(parents=True, exist_ok=True)
+        self.workflow_executor = RuntimeWorkflowExecutor()
 
     def execute_task(self, *, task: Any, agent: Any, inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         inputs = inputs or {}
@@ -42,36 +45,60 @@ class AICoreAgentTaskExecutor:
 
     def collect_task_material(self, *, task: Any, agent: Any) -> dict[str, Any]:
         operation = self._select_operation(task=task, agent=agent)
-        if operation == "runtime_context_snapshot":
-            material = self._runtime_context_snapshot(task=task, agent=agent)
-            return {
-                "tool_call_id": f"tool_call_{uuid4().hex[:8]}",
-                "origin": self.ORIGIN,
-                "status": "completed",
-                "tool_type": "runtime_context_snapshot",
-                "task_id": getattr(task, "task_id", ""),
-                "agent_id": getattr(agent, "agent_id", ""),
-                "result_text": material.get("result_text"),
-                "evidence": material,
-                "created_at": self._now(),
-            }
         query = self._build_agent_query(task=task, agent=agent)
-        evidence = self._public_discovery(query)
+        plan = self.workflow_executor.build_collect_plan(
+            operation=operation,
+            query=query,
+            task_id=str(getattr(task, "task_id", "")),
+            agent_id=str(getattr(agent, "agent_id", "")),
+        )
+        run = self.workflow_executor.run_collect_plan(
+            plan=plan,
+            operation=operation,
+            query=query,
+            collectors={"public_discovery": self._public_discovery},
+            context_supplier=lambda: self._runtime_context_snapshot(task=task, agent=agent),
+        )
+        material = run.get("final_material", {}) if isinstance(run.get("final_material"), dict) else {}
+        if operation == "runtime_context_snapshot":
+            evidence = run.get("workflow_outputs", {}).get("collected_material", material)
+            status = "completed"
+            result_text = evidence.get("result_text") if isinstance(evidence, dict) else ""
+            tool_type = "runtime_context_snapshot"
+        else:
+            evidence = run.get("workflow_outputs", {}).get("collected_material", material)
+            status = evidence.get("status", "completed") if isinstance(evidence, dict) else "completed"
+            result_text = self._summarize_evidence(evidence)
+            tool_type = "generic_public_discovery"
         return {
             "tool_call_id": f"tool_call_{uuid4().hex[:8]}",
             "origin": self.ORIGIN,
-            "status": evidence.get("status", "completed"),
-            "tool_type": "generic_public_discovery",
+            "status": status,
+            "tool_type": tool_type,
             "task_id": getattr(task, "task_id", ""),
             "agent_id": getattr(agent, "agent_id", ""),
             "query": query,
+            "result_text": result_text,
             "evidence": evidence,
+            "workflow_plan": run.get("workflow_plan"),
+            "workflow_events": run.get("execution_events", []),
+            "evidence_validation": run.get("workflow_outputs", {}).get("validated_material", {}),
             "created_at": self._now(),
         }
 
     def synthesize_task(self, *, task: Any, agent: Any, inputs: dict[str, Any]) -> dict[str, Any]:
         fragments = self._collect_fragments(inputs)
-        final_text = self._stable_join(fragments) if fragments else self._clean(str(getattr(task, "objective", "")))
+        plan = self.workflow_executor.build_synthesis_plan(
+            input_refs=list(getattr(task, "input_refs", []) or []),
+            task_id=str(getattr(task, "task_id", "")),
+            agent_id=str(getattr(agent, "agent_id", "")),
+        )
+        run = self.workflow_executor.run_synthesis_plan(
+            plan=plan,
+            fragments=fragments,
+            synthesizer=lambda items: self._stable_join(items) if items else self._clean(str(getattr(task, "objective", ""))),
+        )
+        final_text = run.get("result_text") or self._clean(str(getattr(task, "objective", "")))
         return {
             "tool_call_id": f"tool_call_{uuid4().hex[:8]}",
             "origin": self.ORIGIN,
@@ -81,7 +108,9 @@ class AICoreAgentTaskExecutor:
             "agent_id": getattr(agent, "agent_id", ""),
             "result_text": final_text,
             "input_count": len(inputs),
-            "synthesis": {"source": "ai_core_rule_synthesis", "fragment_count": len(fragments)},
+            "workflow_plan": run.get("workflow_plan"),
+            "workflow_events": run.get("execution_events", []),
+            "synthesis": {"source": "ai_core_workflow_synthesis", "fragment_count": len(fragments)},
             "created_at": self._now(),
         }
 
@@ -111,7 +140,8 @@ class AICoreAgentTaskExecutor:
         }
 
     def _build_agent_query(self, *, task: Any, agent: Any) -> str:
-        instruction = str((getattr(agent, "metadata", {}) or {}).get("user_instruction") or "")
+        metadata = getattr(agent, "metadata", {}) or {}
+        instruction = str(metadata.get("execution_instruction") or metadata.get("user_instruction") or "")
         base = instruction or " ".join([
             str(getattr(agent, "role_label", "")),
             " ".join(str(v) for v in getattr(agent, "capability_labels", [])),
@@ -218,6 +248,23 @@ class AICoreAgentTaskExecutor:
             if len(lines) >= 8:
                 break
         return "\n".join(lines)
+
+
+    def _summarize_evidence(self, evidence: Any) -> str:
+        if not isinstance(evidence, dict):
+            return self._clean(str(evidence))[:900]
+        lines: list[str] = []
+        if evidence.get("selected_document") and isinstance(evidence.get("selected_document"), dict):
+            selected = evidence["selected_document"]
+            text = selected.get("text_excerpt") or selected.get("title") or ""
+            if text:
+                lines.append(self._clean(str(text))[:700])
+        for result in evidence.get("results", [])[:2] if isinstance(evidence.get("results"), list) else []:
+            if isinstance(result, dict):
+                item = " - ".join(str(result.get(k) or "") for k in ("title", "snippet") if result.get(k))
+                if item:
+                    lines.append(self._clean(item)[:400])
+        return "\n".join(f"- {line}" for line in lines if line)
 
     def _load_config(self) -> dict[str, Any]:
         try:

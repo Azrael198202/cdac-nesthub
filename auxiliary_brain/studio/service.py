@@ -80,7 +80,9 @@ class AgentStudioService:
         extracted = self._extract_terms(message)
         role_label = self._extract_runtime_label("create_participant", message) or (extracted[0] if extracted else f"role_{uuid4().hex[:8]}")
         role_terms = {item.casefold() for item in self._extract_terms(role_label)}
-        capability_labels = [term for term in extracted if term.casefold() not in role_terms][:4] or self.command_config.action_profile("create_participant").get(
+        execution_instruction = self._extract_runtime_instruction("create_participant", message)
+        capability_source = execution_instruction or message
+        capability_labels = [term for term in self._extract_terms(capability_source) if term.casefold() not in role_terms][:4] or self.command_config.action_profile("create_participant").get(
             "default_capabilities",
             ["runtime_generated_capability"],
         )
@@ -93,7 +95,12 @@ class AgentStudioService:
                     "role_label": role_label,
                     "capability_labels": capability_labels,
                     "tool_refs": tool_refs,
-                    "metadata": {"created_from": "studio_message", "display_name": role_label, "user_instruction": message[:500]},
+                    "metadata": {
+                        "created_from": "studio_message",
+                        "display_name": role_label,
+                        "user_instruction": message[:500],
+                        "execution_instruction": execution_instruction[:500],
+                    },
                 }
             ],
             "tasks": [],
@@ -120,7 +127,8 @@ class AgentStudioService:
         for index, agent in enumerate(selected_agents, start=1):
             task_id = f"{graph_id}_step_{index}"
             output_ref = f"{graph_id}_material_{index}"
-            agent_instruction = str((agent.get("metadata") or {}).get("user_instruction") or message)
+            agent_metadata = agent.get("metadata") or {}
+            agent_instruction = str(agent_metadata.get("execution_instruction") or agent_metadata.get("user_instruction") or message)
             tasks.append({
                 "task_id": task_id,
                 "assigned_agent_id": agent.get("agent_id"),
@@ -234,6 +242,20 @@ class AgentStudioService:
                 if label:
                     return label
         return ""
+
+
+    def _extract_runtime_instruction(self, action: str, message: str) -> str:
+        profile = self.command_config.action_profile(action)
+        for pattern in profile.get("instruction_extractors", []):
+            try:
+                match = re.search(str(pattern), message or "", flags=re.IGNORECASE)
+            except re.error:
+                continue
+            if match:
+                value = self._clean_label(match.group(1))
+                if value:
+                    return value
+        return self._clean_label(message)
 
     def _clean_label(self, value: str) -> str:
         label = re.sub(r"\s+", " ", str(value or "")).strip(" .,;:!?\t\r\n")

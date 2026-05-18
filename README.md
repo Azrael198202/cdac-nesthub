@@ -689,3 +689,60 @@ pytest: 56 passed
 forbidden business keyword scan in ai_core / auxiliary_brain: OK
 runtime: cleared before package
 ```
+
+## V2.7 Update - Runtime Workflow Executor
+
+### Goal
+
+Convert named agent task execution from a simple retrieval wrapper into an actual main-brain workflow execution path. The auxiliary brain still manages generated agents, communities, task graphs, schedules, and deliveries. The main brain now plans and executes a neutral runtime workflow DAG for each generated task node.
+
+### Implemented
+
+1. Added `ai_core/agent_execution/runtime_workflow_executor.py`.
+2. `AICoreAgentTaskExecutor` now builds a workflow plan for every collect or synthesize task.
+3. Collect execution now follows a neutral DAG:
+   - prepare runtime request
+   - collect material through the selected generic operation
+   - validate collected material
+4. Synthesis execution now follows a neutral DAG:
+   - prepare runtime inputs
+   - stable synthesis
+5. Tool output artifacts now include:
+   - `workflow_plan`
+   - `workflow_events`
+   - `evidence_validation`
+   - `origin=ai_core`
+6. Agent creation now stores a cleaned runtime execution instruction separately from the original user message.
+7. Task execution no longer uses the task-creation sentence as the collection query.
+8. Agent Studio continues to show generated participants, task graphs, task runs, tool outputs, deliveries, and trace records.
+9. No business/domain-specific logic was added to `ai_core` or `auxiliary_brain`; command and routing surfaces remain configuration-driven.
+
+### User Test
+
+```text
+Create an agent named Time Agent to remind you of the current time.
+Create an agent named Weather Agent to obtain the weather information for Fukuoka today and tomorrow.
+Create a task named taskA, which calls the time agent and the weather agent.
+execute TaskA
+```
+
+### Expected Result
+
+```text
+1. The first two commands create generated participants.
+2. The third command creates taskA and does not execute it.
+3. The fourth command executes taskA.
+4. Tool outputs show origin=ai_core.
+5. Tool outputs include workflow_plan and workflow_events.
+6. Delivery is stored by auxiliary_brain with upstream_origin=ai_core.
+7. The result should not include the task creation sentence as a search query.
+```
+
+### Validation
+
+```text
+compileall: OK
+pytest: 57 passed
+forbidden business keyword scan in ai_core / auxiliary_brain: OK
+runtime: cleared before package
+```

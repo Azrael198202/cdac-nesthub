@@ -1,5 +1,5 @@
 {
-  "version": "v2.6.2-named-task-execution",
+  "version": "v2.7-runtime-workflow-executor",
   "description": "Runtime-facing command phrases and interaction profiles for the agent studio. Source code reads this file and does not embed these phrases.",
   "runtime_inputs": [
     {
@@ -49,6 +49,9 @@
       ],
       "name_extractors": [
         "(?i)\\b(?:named|called)\\s+([A-Za-z0-9 _-]{2,80}?)(?:\\s+to\\b|\\s+for\\b|[.!?]|$)"
+      ],
+      "instruction_extractors": [
+        "(?i)\\b(?:to|for)\\s+(.{3,500}?)(?:[.!?]|$)"
       ]
     },
     {
