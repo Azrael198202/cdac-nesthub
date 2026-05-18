@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Runtime Agent Studio</title>
+  <style>
+    :root { --bg:#0f172a; --panel:#111827; --card:#1f2937; --muted:#94a3b8; --text:#e5e7eb; --line:#334155; --accent:#38bdf8; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--text); }
+    header { padding:16px 20px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; }
+    header h1 { font-size:18px; margin:0; }
+    header span { color:var(--muted); font-size:12px; }
+    main { display:grid; grid-template-columns: 360px 1fr 420px; gap:12px; padding:12px; height:calc(100vh - 58px); }
+    section { background:var(--panel); border:1px solid var(--line); border-radius:14px; overflow:hidden; min-height:0; }
+    .section-title { padding:12px 14px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; }
+    .section-title h2 { margin:0; font-size:14px; }
+    .content { padding:12px; overflow:auto; height:calc(100% - 46px); }
+    .chat-log { height:calc(100% - 120px); overflow:auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
+    .bubble { padding:10px 12px; border-radius:12px; background:var(--card); border:1px solid var(--line); font-size:13px; line-height:1.45; white-space:pre-wrap; }
+    .bubble.user { border-color:var(--accent); }
+    textarea { width:100%; min-height:72px; resize:vertical; background:#020617; color:var(--text); border:1px solid var(--line); border-radius:10px; padding:10px; }
+    button { background:#075985; color:white; border:0; border-radius:10px; padding:9px 12px; cursor:pointer; }
+    button.secondary { background:#374151; }
+    button.danger { background:#7f1d1d; }
+    .actions { display:flex; gap:8px; margin-top:8px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:10px; margin-bottom:10px; }
+    .card h3 { margin:0 0 6px 0; font-size:13px; color:#f8fafc; }
+    .meta { color:var(--muted); font-size:12px; word-break:break-word; }
+    .pill { display:inline-block; padding:2px 7px; border-radius:999px; background:#0f766e; margin:2px 3px 2px 0; font-size:11px; }
+    .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    pre { white-space:pre-wrap; word-break:break-word; background:#020617; border:1px solid var(--line); border-radius:10px; padding:10px; font-size:12px; }
+    .small { font-size:12px; color:var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Runtime Agent Studio</h1>
+      <span>Parallel auxiliary brain view. Original page remains unchanged.</span>
+    </div>
+    <button class="secondary" onclick="refreshState()">Refresh</button>
+  </header>
+  <main>
+    <section>
+      <div class="section-title"><h2>Interactive Console</h2><span class="small" id="commandHint">config loading</span></div>
+      <div class="chat-log" id="chatLog"></div>
+      <div style="padding:12px;border-top:1px solid var(--line);">
+        <textarea id="messageInput" placeholder="Enter a runtime instruction. Command phrases are loaded from configuration."></textarea>
+        <div class="actions">
+          <button onclick="sendMessage()">Send</button>
+          <button class="secondary" onclick="startTask()">Start Latest</button>
+          <button class="danger" onclick="stopTask()">Stop Latest</button>
+        </div>
+      </div>
+    </section>
+    <section>
+      <div class="section-title"><h2>Generated Participants</h2><span class="small" id="agentCount">0</span></div>
+      <div class="content" id="agents"></div>
+    </section>
+    <section>
+      <div class="section-title"><h2>Workflow / Tools / Traces</h2><span class="small" id="graphCount">0</span></div>
+      <div class="content">
+        <h3 class="small">Task Graphs</h3>
+        <div id="taskGraphs"></div>
+        <h3 class="small">Task Runs</h3>
+        <div id="taskRuns"></div>
+        <h3 class="small">Runtime Traces</h3>
+        <div id="traces"></div>
+      </div>
+    </section>
+  </main>
+<script>
+const chatLog = document.getElementById('chatLog');
+function addBubble(kind, text) {
+  const div = document.createElement('div');
+  div.className = 'bubble ' + kind;
+  div.textContent = text;
+  chatLog.appendChild(div);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+async function api(path, options) {
+  const res = await fetch(path, options || {});
+  if (!res.ok) throw new Error(await res.text());
+  return await res.json();
+}
+async function loadCommands() {
+  const data = await api('/api/agent-studio/commands');
+  const count = Array.isArray(data.actions) ? data.actions.length : 0;
+  document.getElementById('commandHint').textContent = count + ' command profiles';
+}
+async function sendMessage() {
+  const input = document.getElementById('messageInput');
+  const message = input.value.trim();
+  if (!message) return;
+  addBubble('user', message);
+  input.value = '';
+  const data = await api('/api/agent-studio/message', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message})
+  });
+  addBubble('system', JSON.stringify({action:data.action, origin:data.origin, graph_id:data.graph_id, status:data.status}, null, 2));
+  renderState(data.state || await api('/api/agent-studio/state'));
+}
+async function startTask() {
+  const data = await api('/api/agent-studio/task/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message:'manual'})});
+  addBubble('system', JSON.stringify({action:data.action, status:data.status, graph_id:data.graph_id}, null, 2));
+  renderState(data.state);
+}
+async function stopTask() {
+  const data = await api('/api/agent-studio/task/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message:'manual'})});
+  addBubble('system', JSON.stringify({action:data.action, status:data.status, graph_id:data.graph_id}, null, 2));
+  renderState(data.state);
+}
+function renderCard(title, body, meta) {
+  return `<div class="card"><h3>${escapeHtml(title)}</h3><div>${body}</div><div class="meta">${escapeHtml(meta || '')}</div></div>`;
+}
+function escapeHtml(value) {
+  return String(value || '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+}
+function renderState(state) {
+  const agents = state.agents || [];
+  const graphs = state.task_graphs || [];
+  const runs = state.task_runs || [];
+  const traces = state.traces || [];
+  document.getElementById('agentCount').textContent = agents.length;
+  document.getElementById('graphCount').textContent = graphs.length;
+  document.getElementById('agents').innerHTML = agents.map(a => {
+    const caps = (a.capability_labels || []).map(v => `<span class="pill">${escapeHtml(v)}</span>`).join('');
+    const tools = (a.tool_refs || []).map(v => `<span class="pill">${escapeHtml(v)}</span>`).join('');
+    return renderCard(a.agent_id || 'participant', `<div>${escapeHtml(a.role_label || '')}</div><div>${caps}</div><div>${tools}</div>`, a.artifact_path);
+  }).join('') || '<div class="small">No generated participants.</div>';
+  document.getElementById('taskGraphs').innerHTML = graphs.map(g => renderCard(g.community_id || 'graph', `<pre>${escapeHtml(JSON.stringify({tasks:g.tasks, edges:g.edges, activations:g.activations}, null, 2))}</pre>`, g.artifact_path)).join('') || '<div class="small">No task graph.</div>';
+  document.getElementById('taskRuns').innerHTML = runs.map(r => renderCard(r.graph_id || 'run', `<span class="pill">${escapeHtml(r.status)}</span><pre>${escapeHtml(JSON.stringify(r.payload || {}, null, 2))}</pre>`, r.artifact_path)).join('') || '<div class="small">No active run.</div>';
+  document.getElementById('traces').innerHTML = traces.slice(0,8).map(t => renderCard(t.trace_id || 'trace', `<span class="pill">${escapeHtml(t.origin)}</span><pre>${escapeHtml(JSON.stringify(t.payload || {}, null, 2))}</pre>`, t.artifact_path || t.trace_path)).join('') || '<div class="small">No trace.</div>';
+}
+async function refreshState() { renderState(await api('/api/agent-studio/state')); }
+loadCommands().catch(err => addBubble('system', String(err)));
+refreshState().catch(err => addBubble('system', String(err)));
+</script>
+</body>
+</html>

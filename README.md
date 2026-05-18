@@ -277,3 +277,161 @@ Expected behavior:
 4. The final known parameter should expose `3-day`, not `P3D`.
 5. Any unit/surface knowledge needed for a specific request should be generated under runtime/generated/semantic_packs/ rather than stored as fixed core logic.
 ```
+
+## V2.5 Home Experience Update - Agent Community Runtime
+
+### Goal
+
+Add an auxiliary runtime layer controlled by `ai_core` without adding business logic to `ai_core` or to the auxiliary brain runtime. The new layer lets the system create runtime-generated agents, communities, and task graphs under `runtime/generated/`.
+
+### Implemented
+
+1. Added a parallel generic Agent Community Runtime under `auxiliary_brain/community/`.
+2. Added a generic auxiliary runtime entrypoint under `auxiliary_brain/runtime.py`, outside `ai_core`.
+3. Added runtime artifact persistence:
+   - `runtime/generated/agents/`
+   - `runtime/generated/communities/`
+   - `runtime/generated/tasks/`
+4. Added neutral community definition models:
+   - runtime agent definition
+   - runtime community definition
+   - runtime activation definition
+   - runtime task definition
+   - runtime task edge definition
+5. Added neutral message bus for generated agents.
+6. Added neutral blackboard shared state for generated agents.
+7. Added task graph dispatch with dependency ordering and blocking when generated definitions are incomplete.
+8. Added tests to verify generated artifact persistence, task dependency execution, blocking behavior, and no home-experience business terms in `ai_core` source files.
+9. Runtime generated content is cleared before packaging; only `.gitkeep` is kept.
+
+### Design Rule
+
+`ai_core` and the auxiliary runtime do not contain concrete business agents. Concrete agents such as a home morning assistant, environment information collector, meal planner, reminder agent, or message sender must be generated at runtime and persisted under `runtime/generated/`.
+
+### Verification
+
+```text
+PYTHONPATH=. python -m compileall -q ai_core tests
+PYTHONPATH=. pytest -q
+36 passed
+```
+
+### User Test Question
+
+```text
+Create a small runtime agent community for my morning routine. At 06:00, tell me the current time, summarize today's plan and outside conditions, and prepare a breakfast idea. At 11:30, prepare a lunch idea and send it to me as a message.
+```
+
+Expected behavior:
+
+```text
+1. ai_core should not directly implement those concrete roles.
+2. The auxiliary runtime should generate agent definitions under runtime/generated/agents/.
+3. The community definition should be saved under runtime/generated/communities/.
+4. The activation/task graph should be saved under runtime/generated/tasks/.
+5. The coordinator should dispatch generated task nodes according to dependency order.
+6. Missing generated agent references should block only the affected task, not the whole runtime.
+```
+
+## V2.5 Home Parallel Auxiliary Brain Adjustment
+
+Implementation target:
+
+```text
+ai_core/              main control brain only
+auxiliary_brain/      parallel auxiliary brain runtime
+runtime/generated/    shared generated artifacts
+runtime/traces/       shared traces with explicit origin labels
+```
+
+Changes:
+
+1. Moved community runtime source code out of `ai_core` and into `auxiliary_brain`.
+2. Removed the auxiliary brain entrypoint from `ai_core/extensions`.
+3. Added trace records with an explicit `origin` value so logs can distinguish main brain and auxiliary brain activity.
+4. Kept generated agents, communities, and task graphs under the shared `runtime/generated` tree.
+5. Added tests to verify that auxiliary brain code is parallel to `ai_core`, not nested inside it.
+
+User test question:
+
+```text
+Create a generated assistant community from my request, save generated agent definitions, save the community definition, save the task graph, and show which runtime layer handled the operation.
+```
+
+Expected result:
+
+```text
+- ai_core remains the controller.
+- auxiliary_brain creates and dispatches the generated community.
+- runtime/generated/agents contains generated agent definitions.
+- runtime/generated/communities contains generated community definitions.
+- runtime/generated/tasks contains generated task graphs.
+- runtime/traces/runtime_layers contains logs with origin = auxiliary_brain.
+```
+
+## V2.5 Home UI Parallel Patch - Agent Studio
+
+### Goal
+
+This patch keeps the original `apps/web/index.html` unchanged and adds a new UI page for the parallel auxiliary runtime.
+
+### Added
+
+```text
+apps/web/agent_studio.html
+auxiliary_brain/studio/config_loader.py
+auxiliary_brain/studio/service.py
+configs/agent_studio_commands.json
+.vscode/launch.json
+tests/runtime/test_v25home_agent_studio_ui.py
+```
+
+### Runtime Layout
+
+```text
+ai_core/              Main control brain
+auxiliary_brain/      Parallel auxiliary brain
+runtime/generated/    Shared generated participants, communities, task graphs, and task runs
+runtime/traces/       Origin-labelled runtime layer traces
+```
+
+### UI Capabilities
+
+```text
+1. Interactive console for runtime participant creation.
+2. Generated participant list.
+3. Task graph, tool reference, run-state, and trace viewer.
+4. Interactive console for task graph creation.
+5. Start/stop controls for the latest generated task graph.
+6. Command phrases are loaded from configs/agent_studio_commands.json, not embedded in source code.
+7. VS Code debug configuration for FastAPI server and UI smoke test.
+```
+
+### Debug
+
+```text
+Open VS Code Run and Debug:
+- Debug API Server
+- Debug Smoke Test
+
+Then open:
+http://127.0.0.1:8000/agent-studio
+```
+
+### Verification
+
+```text
+PYTHONPATH=. python -m compileall ai_core auxiliary_brain apps tests: OK
+PYTHONPATH=. pytest -q: 44 passed
+Domain-term scan for ai_core and auxiliary_brain: no configured home-experience terms found
+```
+
+### Suggested Next Additions
+
+```text
+1. Add SSE updates for auxiliary runtime events.
+2. Add per-participant execution timeline.
+3. Add generated-tool artifact preview panel.
+4. Add task graph visual layout instead of JSON-only view.
+5. Add approval gate UI for generated actions that require human review.
+```

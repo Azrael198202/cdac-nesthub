@@ -1,0 +1,33 @@
+{
+  "version": "v2.5home-ui",
+  "description": "Runtime-facing command phrases for the agent studio. Source code reads this file and does not embed these phrases.",
+  "actions": [
+    {
+      "action": "create_participant",
+      "patterns": ["创建agent", "创建Agent", "创建智能体", "create agent", "add agent", "new agent"],
+      "default_capabilities": ["runtime_generated_capability"],
+      "default_tools": []
+    },
+    {
+      "action": "create_task_graph",
+      "patterns": ["创建任务", "新建任务", "create task", "new task", "add task"],
+      "default_activation_mode": "manual"
+    },
+    {
+      "action": "start_task_graph",
+      "patterns": ["启动任务", "开始任务", "start task", "run task"],
+      "target_status": "running"
+    },
+    {
+      "action": "stop_task_graph",
+      "patterns": ["停止任务", "暂停任务", "stop task", "pause task"],
+      "target_status": "stopped"
+    },
+    {
+      "action": "show_state",
+      "patterns": ["查看", "显示", "show", "list", "status"],
+      "target_status": "view"
+    }
+  ],
+  "fallback_action": "create_participant"
+}
