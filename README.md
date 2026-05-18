@@ -79,3 +79,13 @@ The package keeps only source code and base configuration. Runtime workspace con
 - Added `/api/agent-studio/resume-run` so Save & Continue can resume the paused delegated run path instead of only saving a secret.
 - Preserved `/` manual approval flow and `/agent-studio` auto-approval delegation mode.
 - Runtime workspace is excluded from the source package; only `runtime/.gitkeep` is kept.
+
+
+## V2.8.8 Durable Checkpoint Runtime
+
+- Agent Studio resume now uses the same delegation run instead of starting a new run.
+- Paused participant execution is resumed from the saved ai_core checkpoint.
+- auxiliary_brain remains a coordinator only: it manages participants, tasks, runs, state, and delivery.
+- ai_core owns participant execution, tool planning/execution, checkpoint continuation, and final synthesis.
+- Save & Continue stores the secret, then calls resume-run; resume-run continues the blocked primary-runtime node instead of re-running completed participants.
+- runtime workspace is intentionally excluded from the source package except runtime/.gitkeep.

@@ -165,18 +165,34 @@ class AgentStudioService:
                 "run_id": run_id,
                 "message": "The paused run does not reference a task name.",
             }
-        run_payload["status"] = "resuming"
-        run_payload["resumed_at"] = self._now()
-        run_payload.setdefault("progress_events", []).append({
-            "stage": "resume_requested",
-            "label": "Resume requested after input was saved",
-            "status": "running",
-            "at": self._now(),
-        })
-        self.store.write_json(f"generated/results/{run_id}.json", run_payload)
-        response = await self.execute_task(task_name)
-        response["action"] = "resume_task_graph"
-        response["resumed_from_run_id"] = run_id
+        task_graph = self.store.read_json(f"generated/tasks/{task_name}.json")
+        if not task_graph:
+            return {
+                "action": "resume_task_graph",
+                "origin": "auxiliary_brain",
+                "status": "not_found",
+                "run_id": run_id,
+                "task_name": task_name,
+            }
+        all_participants = self.store.list_json("generated/agents")
+        selected_ids = set(task_graph.get("selected_participant_ids") or [])
+        participants = [p for p in all_participants if p.get("participant_id") in selected_ids] or all_participants
+        result = await self.delegation_runtime.resume_task(run_payload, task_graph, participants)
+        status = result.get("status", "completed")
+        response = {
+            "action": "resume_task_graph",
+            "origin": "auxiliary_brain",
+            "status": status,
+            "task_name": task_name,
+            "run_id": result.get("run_id"),
+            "resumed_from_run_id": run_id,
+            "final_answer": (result.get("synthesis") or {}).get("final_answer"),
+            "delivery": result.get("delivery"),
+        }
+        if status in {"requires_key", "requires_input", "paused"}:
+            response["missing_inputs"] = result.get("missing_inputs", [])
+            response["pending_action"] = result.get("pending_action")
+            response["message"] = "Delegated primary-runtime execution is waiting for required input."
         return response
 
     def _ensure_community(self) -> str:

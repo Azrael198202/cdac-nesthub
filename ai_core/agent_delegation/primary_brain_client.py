@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Any
-from uuid import uuid4
 
 from ai_core.orchestration.workflow_runtime import WorkflowRuntime
 
@@ -61,6 +59,100 @@ class PrimaryBrainDelegationClient:
             pending_action=pending_action if isinstance(pending_action, dict) else None,
             missing_inputs=self._extract_missing_inputs(state),
         )
+
+
+    async def resume_agent_request(self, result_payload: dict[str, Any]) -> AgentExecutionResult:
+        """Resume a paused primary-runtime participant run from its saved checkpoint.
+
+        This is a durable continuation path: the auxiliary layer passes the
+        previously returned participant result, including its core_run_id. The
+        primary runtime loads its own checkpoint and continues from the blocked
+        node instead of starting the participant from the beginning.
+        """
+        core_run_id = str(result_payload.get("core_run_id") or "").strip()
+        if not core_run_id:
+            return AgentExecutionResult(
+                participant_id=str(result_payload.get("participant_id") or ""),
+                participant_name=str(result_payload.get("participant_name") or "participant"),
+                core_run_id="",
+                status="failed",
+                final_answer="Missing core_run_id; unable to resume participant execution.",
+                workflow_results={},
+            )
+
+        state = self.runtime.checkpoints.load(core_run_id)
+        if not state:
+            return AgentExecutionResult(
+                participant_id=str(result_payload.get("participant_id") or ""),
+                participant_name=str(result_payload.get("participant_name") or "participant"),
+                core_run_id=core_run_id,
+                status="failed",
+                final_answer="Primary runtime checkpoint was not found; cannot resume without restarting.",
+                workflow_results={},
+            )
+
+        pending = state.get("pending_action") if isinstance(state, dict) else None
+        if isinstance(pending, dict):
+            await self._resume_state_direct(core_run_id, state, pending)
+        final_state = state
+
+        return AgentExecutionResult(
+            participant_id=str(result_payload.get("participant_id") or ""),
+            participant_name=str(result_payload.get("participant_name") or "participant"),
+            core_run_id=core_run_id,
+            status=self._extract_status(final_state),
+            final_answer=self._extract_final_answer(final_state),
+            workflow_results=final_state.get("results", {}) if isinstance(final_state, dict) else {},
+            pending_action=(final_state.get("pending_action") if isinstance(final_state, dict) and isinstance(final_state.get("pending_action"), dict) else None),
+            missing_inputs=self._extract_missing_inputs(final_state) if isinstance(final_state, dict) else [],
+        )
+
+
+    async def _resume_state_direct(self, core_run_id: str, state: dict[str, Any], pending: dict[str, Any]) -> None:
+        """Continue a saved primary-runtime state without restarting earlier nodes."""
+        kind = str(pending.get("kind") or "")
+        retry_index = pending.get("retry_node_index")
+        node_id = pending.get("node_id")
+
+        if kind in {"secret_input", "optional_credential_choice"}:
+            modified = self._build_resume_modified_result(pending)
+            secret_key = str(modified.get("secret_key") or "runtime_access_key")
+            secret_value = str(modified.get("value") or modified.get("credential") or modified.get("api_key") or "")
+            if not secret_value:
+                return
+            state.setdefault("runtime_credentials", {})[secret_key] = "***"
+            state.setdefault("runtime_execution_preferences", {})["credential_mode"] = "provided"
+
+        if node_id:
+            state.get("results", {}).pop(node_id, None)
+        if retry_index is not None:
+            state["node_index"] = int(retry_index)
+        state.pop("pending_action", None)
+        self.runtime.checkpoints.save(core_run_id, state)
+        await self.runtime._emit(core_run_id, {
+            "type": "DURABLE_RESUME_STARTED",
+            "title": "Durable resume started",
+            "message": "Continuing from the saved primary-runtime checkpoint instead of restarting the workflow.",
+            "node_id": node_id,
+            "progress": state.get("progress", 0),
+            "origin": "ai_core",
+        })
+        await self.runtime._continue(state)
+
+    def _build_resume_modified_result(self, pending: dict[str, Any]) -> dict[str, Any]:
+        kind = str(pending.get("kind") or "")
+        request = pending.get("request") if isinstance(pending.get("request"), dict) else {}
+        secret_key = str(pending.get("secret_key") or request.get("secret_key") or request.get("provider") or "runtime_access_key")
+        try:
+            from ai_core.secrets.secret_store import SecretStore
+            secret_value = SecretStore().get(secret_key)
+        except Exception:
+            secret_value = None
+        if kind == "optional_credential_choice":
+            return {"action": "provide_credential", "choice": "provide_credential", "secret_key": secret_key, "value": secret_value or "", "credential": secret_value or "", "api_key": secret_value or ""}
+        if kind == "secret_input":
+            return {"secret_key": secret_key, "value": secret_value or ""}
+        return {"action": "approve", "secret_key": secret_key, "value": secret_value or ""}
 
     async def synthesize_delegated_results(
         self,
