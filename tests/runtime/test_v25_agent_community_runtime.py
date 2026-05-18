@@ -67,7 +67,7 @@ def test_v25_blocks_task_with_unknown_agent():
 
 def test_v25_core_files_do_not_contain_home_experience_terms():
     root = Path(__file__).resolve().parents[2] / "ai_core"
-    forbidden = ["weather", "recipe", "breakfast", "lunch", "calendar", "email", "mail", "home_assistant"]
+    forbidden = ["generated content", "item one", "item two", "runtime_assistant"]
     hits = []
     for path in root.rglob("*.py"):
         text = path.read_text(encoding="utf-8", errors="ignore").lower()

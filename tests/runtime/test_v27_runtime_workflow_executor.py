@@ -8,10 +8,10 @@ from auxiliary_brain.studio.service import AgentStudioService
 
 def test_v27_execute_named_task_uses_main_brain_workflow_executor(tmp_path: Path, monkeypatch) -> None:
     service = AgentStudioService(runtime_root=tmp_path / "runtime")
-    service.handle_message("Create an agent named Time Agent to remind you of the current time.")
-    service.handle_message("Create an agent named Weather Agent to obtain the weather information for Fukuoka today and tomorrow.")
-    created = service.handle_message("Create a task named taskA, which calls the time agent and the weather agent.")
-    assert created["task_name"] == "taskA"
+    service.handle_message("Create an agent named Signal Agent to remind you of the current time.")
+    service.handle_message("Create an agent named Collector Agent to obtain the external information for TargetPlace today and tomorrow.")
+    created = service.handle_message("Create a task named graphAlpha, which calls the signal participant and the collector participant.")
+    assert created["task_name"] == "graphAlpha"
     graph = created["state"]["task_graphs"][0]
     assert graph["tasks"][0]["objective"].lower().startswith("obtain") or graph["tasks"][1]["objective"].lower().startswith("obtain")
 

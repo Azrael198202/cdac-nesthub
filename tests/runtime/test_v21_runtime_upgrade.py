@@ -24,7 +24,7 @@ def test_task_decomposition_graph_supports_parallel_dimensions():
         "meal options",
         "time allocation",
     ]
-    graph = TaskDecompositionGraph().build("Create a one day plan", dimensions)
+    graph = TaskDecompositionGraph().build("Create a single cycle plan", dimensions)
     assert len(graph["nodes"]) == 8
     assert len(graph["parallel_batches"][0]) == 7
     assert len(graph["parallel_batches"][1]) == 1

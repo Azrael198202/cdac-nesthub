@@ -6,7 +6,7 @@ def test_v24_removes_fixed_surface_module_from_core():
     assert Path("ai_core/utils/semantic_surface.py").exists()
 
 
-def test_v24_core_has_no_fixed_calendar_word_lists():
+def test_v24_core_has_no_fixed_schedule_source_word_lists():
     blocked_literals = [
         "January", "February", "March", "April", "June", "July", "August",
         "September", "October", "November", "December",
@@ -28,9 +28,9 @@ def test_v24_runtime_pack_generation_is_outside_core(tmp_path):
     pack_dir = tmp_path / "runtime" / "generated" / "semantic_packs"
     normalizer = RuntimeSemanticSurfaceNormalizer(pack_dir=pack_dir)
     pack = normalizer.generate_runtime_pack(
-        request_text="Prepare a 3-day result for AlphaPlace.",
+        request_text="Prepare a 3-unit result for AlphaPlace.",
         values=["P3D"],
         pack_name="case_pack",
     )
-    assert pack["entries"][0]["aliases"] == ["3-day"]
+    assert pack["entries"][0]["aliases"] == ["3-unit"]
     assert (pack_dir / "case_pack.json").exists()

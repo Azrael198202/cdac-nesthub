@@ -94,7 +94,7 @@ class RuntimeExecutionRuntime:
             outputs[task.output_ref or task.task_id] = output
             executed.append(task.task_id)
         status = "completed" if not blocked else ("partial" if executed else "blocked")
-        delivery = self._deliver(graph_id=str(graph_id), content={"status": status, "outputs": outputs}) if executed else {}
+        delivery = self._deliver(graph_id=str(graph_id), content=self._delivery_content(status=status, outputs=outputs)) if executed else {}
         if delivery:
             self.trace_logger.record(
                 origin=self.ORIGIN,
@@ -163,7 +163,7 @@ class RuntimeExecutionRuntime:
             outputs[task.output_ref or task.task_id] = output
             executed.append(task.task_id)
         status = "completed" if not blocked else ("partial" if executed else "blocked")
-        delivery = self._deliver(graph_id=str(graph_id), content={"status": status, "outputs": outputs}) if executed else {}
+        delivery = self._deliver(graph_id=str(graph_id), content=self._delivery_content(status=status, outputs=outputs)) if executed else {}
         if delivery:
             self.trace_logger.record(
                 origin=self.ORIGIN,
@@ -210,6 +210,21 @@ class RuntimeExecutionRuntime:
                 if incoming[next_id] == 0:
                     queue.append(next_id)
         return [by_id[task_id] for task_id in ordered_ids] if len(ordered_ids) == len(by_id) else list(definition.tasks)
+
+
+    def _delivery_content(self, *, status: str, outputs: dict[str, Any]) -> dict[str, Any]:
+        final_answer = ""
+        for value in reversed(list(outputs.values())):
+            if isinstance(value, dict) and value.get("tool_type") == "stable_synthesis" and value.get("result_text"):
+                final_answer = str(value.get("result_text"))
+                break
+        if not final_answer:
+            fragments: list[str] = []
+            for value in outputs.values():
+                if isinstance(value, dict) and value.get("result_text"):
+                    fragments.append(str(value.get("result_text")))
+            final_answer = "\n".join(item for item in fragments if item)
+        return {"status": status, "final_answer": final_answer, "outputs": outputs, "upstream_origin": "ai_core"}
 
     def _deliver(self, *, graph_id: str, content: dict[str, Any]) -> dict[str, Any]:
         delivery_dir = self.runtime_root / "deliveries"

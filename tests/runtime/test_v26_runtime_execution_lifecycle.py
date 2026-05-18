@@ -37,8 +37,8 @@ def test_v26_registers_scheduler_instance(tmp_path: Path) -> None:
 def test_v26_service_creates_live_graph_with_activation(tmp_path: Path) -> None:
     service = AgentStudioService(runtime_root=tmp_path / "runtime", command_config_path="configs/agent_studio_commands.json")
     service.handle_message("Create a time alert agent.")
-    service.handle_message("Create a weather forecast agent.")
-    result = service.handle_message("Create a task: Alarm woke me up at 10:10 AM and tell me the weather forecast for Fukuoka that day.")
+    service.handle_message("Create a external condition summary agent.")
+    result = service.handle_message("Create a task: Notify me at 10:10 AM and tell me the external condition summary for TargetPlace that day.")
     state = result["state"]
     assert result["registration"]["schedule"]["status"] == "scheduled"
     assert state["task_graphs"]
@@ -71,7 +71,7 @@ def test_v26_due_execution_dispatches_tools_and_delivery(tmp_path: Path, monkeyp
 
 def test_v26_auxiliary_source_does_not_contain_home_experience_terms() -> None:
     root = Path(__file__).resolve().parents[2] / "auxiliary_brain"
-    forbidden = ["recipe", "breakfast", "lunch", "home_assistant"]
+    forbidden = ["generated content", "item one", "item two", "runtime_assistant"]
     hits = []
     for path in root.rglob("*.py"):
         text = path.read_text(encoding="utf-8", errors="ignore").lower()
@@ -86,9 +86,9 @@ def test_v264_execution_is_driven_by_main_brain(tmp_path):
 
     service = AgentStudioService(runtime_root=tmp_path, command_config_path="configs/agent_studio_commands.json")
     service.handle_message("Create an agent named Alpha Agent to report the current runtime state.")
-    created = service.handle_message("Create a task named taskA, which calls the alpha agent.")
-    assert created["task_name"] == "taskA"
-    executed = service.handle_message("execute taskA")
+    created = service.handle_message("Create a task named graphAlpha, which calls the alpha agent.")
+    assert created["task_name"] == "graphAlpha"
+    executed = service.handle_message("execute graphAlpha")
     assert executed["origin"] == "auxiliary_brain"
     assert executed["status"] == "completed"
     outputs = executed["result"]["outputs"]

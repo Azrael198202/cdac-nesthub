@@ -91,6 +91,7 @@ class AICoreAgentTaskExecutor:
             tool_type = "configured_runtime_tool" if profile.get("requests") else "generic_public_discovery"
         return {
             "tool_call_id": f"tool_call_{uuid4().hex[:8]}",
+            "core_run_id": f"core_{uuid4().hex[:12]}",
             "origin": self.ORIGIN,
             "status": status,
             "tool_type": tool_type,
@@ -120,6 +121,7 @@ class AICoreAgentTaskExecutor:
         final_text = run.get("result_text") or self._clean(str(getattr(task, "objective", "")))
         return {
             "tool_call_id": f"tool_call_{uuid4().hex[:8]}",
+            "core_run_id": f"core_{uuid4().hex[:12]}",
             "origin": self.ORIGIN,
             "status": "completed",
             "tool_type": "stable_synthesis",
@@ -368,20 +370,42 @@ class AICoreAgentTaskExecutor:
         return [json.dumps(value, ensure_ascii=False)[:800]]
 
     def _stable_join(self, fragments: list[str]) -> str:
+        """Create user-facing synthesis from upstream fragments without debug labels.
+
+        This is intentionally domain-neutral: it removes runtime/debug markers,
+        deduplicates evidence snippets, and returns concise natural-language
+        lines. Domain-specific presentation rules must be generated at runtime
+        and provided as evidence or configuration, not hardcoded here.
+        """
+        cleaned_items: list[str] = []
         seen: set[str] = set()
-        lines: list[str] = []
         for fragment in fragments:
-            cleaned = self._clean(fragment)
+            cleaned = self._clean_user_fragment(fragment)
             if not cleaned:
                 continue
-            key = cleaned[:120].casefold()
+            key = cleaned[:160].casefold()
             if key in seen:
                 continue
             seen.add(key)
-            lines.append(f"- {cleaned}")
-            if len(lines) >= 8:
+            cleaned_items.append(cleaned)
+            if len(cleaned_items) >= 8:
                 break
-        return "\n".join(lines)
+        if not cleaned_items:
+            return "No executable result material was produced."
+        return "\n".join(f"- {item}" for item in cleaned_items)
+
+    def _clean_user_fragment(self, text: str) -> str:
+        value = self._clean(text)
+        debug_markers = [
+            "Configured runtime result",
+            "Available upstream material",
+            "compose generated outputs",
+        ]
+        for marker in debug_markers:
+            value = re.sub(re.escape(marker), "", value, flags=re.IGNORECASE)
+        value = re.sub(r"\btool_call_[A-Za-z0-9_\-]+\b", "", value)
+        value = re.sub(r"\bworkflow_[A-Za-z0-9_\-]+\b", "", value)
+        return self._clean(value.strip(" -:;"))
 
 
     def _summarize_evidence(self, evidence: Any) -> str:
