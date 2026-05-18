@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from ai_core.utils.safe_subprocess import run_text
 
 
 @dataclass
@@ -104,7 +104,7 @@ class DependencyScanner:
         with tempfile.TemporaryDirectory() as tmp:
             req = Path(tmp) / "requirements.txt"
             req.write_text("\n".join(requirements), encoding="utf-8")
-            proc = subprocess.run(
+            proc = run_text(
                 [exe, "-r", str(req), "--format", "json"],
                 text=True,
                 capture_output=True,

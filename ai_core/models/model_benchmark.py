@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ai_core.utils.safe_subprocess import run_text
 from ai_core.config.paths import RUNTIME_TRACES
 
 
@@ -82,7 +82,7 @@ class RuntimeModelBenchmark:
         if not exe:
             return {"status": "unavailable", "returncode": -1, "stdout": "", "stderr": "ollama command is not available."}
         try:
-            proc = subprocess.run([exe, "run", model_id, prompt], text=True, capture_output=True, timeout=timeout_seconds)
+            proc = run_text([exe, "run", model_id, prompt], text=True, capture_output=True, timeout=timeout_seconds)
             return {"status": "completed", "returncode": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}
         except Exception as exc:
             return {"status": "failed", "returncode": -1, "stdout": "", "stderr": str(exc)}

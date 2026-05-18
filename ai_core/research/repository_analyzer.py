@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from ai_core.utils.safe_subprocess import run_text
 from ai_core.config.paths import RUNTIME_DOWNLOADS
 from ai_core.security.dependency_scanner import DependencyScanner
 from ai_core.security.repository_dependency_gate import RepositoryDependencyGate
@@ -76,7 +76,7 @@ class GitHubRepositoryAnalyzer:
         target = self._target_path(repository_url, request_id=request_id)
         if target.exists():
             shutil.rmtree(target)
-        proc = subprocess.run(
+        proc = run_text(
             [git, "clone", "--depth", "1", "--filter=blob:limit=1m", repository_url, str(target)],
             capture_output=True,
             text=True,

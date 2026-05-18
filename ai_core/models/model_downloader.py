@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ai_core.utils.safe_subprocess import run_text
 from ai_core.config.paths import RUNTIME_DOWNLOADS
 
 
@@ -60,7 +60,7 @@ class RuntimeModelDownloader:
             return self._result("unavailable", model_id, "ollama", None, None, False, True, "ollama command is not available.", {"candidate": candidate})
         cmd = [exe, "pull", model_id]
         try:
-            proc = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout_seconds)
+            proc = run_text(cmd, text=True, capture_output=True, timeout=timeout_seconds)
             ok = proc.returncode == 0
             return self._result(
                 "downloaded" if ok else "failed",

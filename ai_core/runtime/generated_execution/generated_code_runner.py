@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+from ai_core.utils.safe_subprocess import run_text
 
 
 class GeneratedCodeRunner:
@@ -14,7 +14,7 @@ class GeneratedCodeRunner:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "generated_unit.py"
             path.write_text(source, encoding="utf-8")
-            proc = subprocess.run(
+            proc = run_text(
                 [sys.executable, str(path)],
                 cwd=td,
                 capture_output=True,

@@ -47,3 +47,11 @@ The package keeps only source code and base configuration. Runtime workspace con
 - Pressing Enter in the secret input saves the value and retries the pending instruction.
 - Secrets are written to `runtime/configs/secrets/secrets.json` through the existing `SecretStore`.
 - Root `/` approval workflow remains unchanged.
+
+## V2.8.4 Safe Subprocess Output Decode
+
+- Fixed Windows subprocess output decoding crash when external commands emit UTF-8 or mixed bytes under cp932 locale.
+- Added ai_core/utils/safe_subprocess.py.
+- Replaced text-mode subprocess.run calls with UTF-8 + errors='replace' wrapper.
+- Agent Studio auto-approve behavior is unchanged.
+- Runtime workspace is kept source-clean; only runtime/.gitkeep is included.

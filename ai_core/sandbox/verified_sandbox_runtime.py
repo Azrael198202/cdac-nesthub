@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from ai_core.utils.safe_subprocess import run_text
 from ai_core.security.dependency_scanner import DependencyScanner
 from ai_core.tools.sandbox_verifier import SandboxVerifier
 from ai_core.utils.safe_json import make_json_safe, safe_json_dumps
@@ -263,12 +263,12 @@ class VerifiedSandboxRuntime:
             "-v", f"{root}:/work:ro", "-w", "/work", "python:3.12-slim",
             "python", str(PurePosixPath("/work") / runner.name),
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
+        proc = run_text(cmd, capture_output=True, text=True, timeout=timeout_seconds)
         return {"mode": "docker", "returncode": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr, "checks": [{"name": "docker_sandbox_execution", "returncode": proc.returncode}]}
 
     def _run_in_venv(self, root: Path, runner: Path, *, timeout_seconds: int) -> dict[str, Any]:
         venv = root / ".venv"
-        subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True, capture_output=True, text=True, timeout=timeout_seconds)
+        run_text([sys.executable, "-m", "venv", str(venv)], check=True, capture_output=True, text=True, timeout=timeout_seconds)
         py = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-        proc = subprocess.run([str(py), str(runner)], cwd=str(root), capture_output=True, text=True, timeout=timeout_seconds)
+        proc = run_text([str(py), str(runner)], cwd=str(root), capture_output=True, text=True, timeout=timeout_seconds)
         return {"mode": "venv", "returncode": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr, "checks": [{"name": "venv_sandbox_execution", "returncode": proc.returncode}]}

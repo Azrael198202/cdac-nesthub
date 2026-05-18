@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
 from dataclasses import asdict, dataclass
 from typing import Any
+from ai_core.utils.safe_subprocess import run_text
 
 
 @dataclass
@@ -72,7 +72,7 @@ class DockerPrecheck:
 
     def _run(self, cmd: list[str], *, timeout_seconds: int) -> dict[str, Any]:
         try:
-            proc = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout_seconds)
+            proc = run_text(cmd, text=True, capture_output=True, timeout=timeout_seconds)
             return {
                 "cmd": cmd,
                 "returncode": proc.returncode,
