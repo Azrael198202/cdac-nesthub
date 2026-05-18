@@ -182,6 +182,7 @@ class RuntimeExecutionRuntime:
             "outputs": outputs,
             "delivery": delivery,
             "created_at": self._now(),
+            "execution_mode": "ai_core_primary_orchestration",
         }
         self._write_run(str(graph_id), status, result)
         self.trace_logger.record(

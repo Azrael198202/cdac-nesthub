@@ -780,3 +780,50 @@ PYTHONPATH=. pytest -q
 ```
 
 Result: 57 passed.
+
+## V2.7.2 Configured Runtime Dispatch Fix
+
+This update fixes the Agent Studio execution result quality problem where a generated task could report only the agent instruction text instead of an actual runtime result.
+
+### Goal
+
+- `auxiliary_brain` still manages generated participants, task graphs, task runs, and deliveries.
+- `ai_core` executes generated-agent work through a neutral workflow DAG.
+- Tool dispatch is selected from `configs/agent_runtime_tools.json` rather than hardcoded source terms.
+- Configured HTTP/JSON tools can be invoked by `ai_core` through a generic runtime dispatch contract.
+- Final task output now uses collected runtime material instead of echoing the original instruction.
+
+### Important Design Point
+
+No business or domain logic was added to `ai_core` or `auxiliary_brain` source code. Runtime routing phrases, configured endpoint templates, parameter extractors, and output fields are kept in configuration.
+
+### User Test
+
+```text
+Create an agent named Time Agent to remind you of the current time.
+Create an agent named Weather Agent to obtain the weather information for Fukuoka today and tomorrow.
+Create a task named taskA, which calls the time agent and the weather agent.
+execute TaskA
+```
+
+### Expected Result
+
+```text
+1. taskA is created but not executed until `execute TaskA` is entered.
+2. The execution output contains a live time result from the main-brain execution layer.
+3. The information-collection agent uses the configured runtime tool profile from configs/agent_runtime_tools.json.
+4. Tool outputs show origin=ai_core.
+5. Delivery is stored by auxiliary_brain with upstream_origin=ai_core.
+6. The final output should not simply echo:
+   - obtain the weather information ...
+   - remind you of the current time
+```
+
+### Validation
+
+```text
+compileall: OK
+pytest: 58 passed
+forbidden business keyword scan in ai_core / auxiliary_brain: OK
+runtime: cleared before package
+```

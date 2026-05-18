@@ -37,28 +37,16 @@ class AICoreAgentTaskExecutor:
 
 
     async def execute_task_async(self, *, task: Any, agent: Any, inputs: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Run generated-agent work through the full main-brain orchestration pipeline."""
-        inputs = inputs or {}
-        request_text = build_core_execution_request(task=task, agent=agent, inputs=inputs)
-        bridge_result = await self.orchestration_bridge.execute(request_text)
-        output = {
-            "tool_call_id": f"tool_call_{uuid4().hex[:8]}",
-            "origin": self.ORIGIN,
-            "status": bridge_result.get("status", "completed"),
-            "tool_type": "main_brain_orchestration",
-            "task_id": getattr(task, "task_id", ""),
-            "agent_id": getattr(agent, "agent_id", ""),
-            "query": request_text,
-            "result_text": bridge_result.get("final_text", ""),
-            "core_run_id": bridge_result.get("run_id"),
-            "core_results": bridge_result.get("results", {}),
-            "core_events_summary": bridge_result.get("events_summary", []),
-            "workflow_plan": {"origin": self.ORIGIN, "mode": "primary_orchestration_runtime"},
-            "workflow_events": bridge_result.get("events_summary", []),
-            "created_at": self._now(),
-        }
-        output["artifact_path"] = str(self._write_output(output))
-        return output
+        """Run generated-agent work through the main-brain execution kernel.
+
+        The auxiliary layer invokes this method, but execution stays inside
+        ai_core.  This path uses the same neutral workflow DAG and configured
+        tool-dispatch contracts as the synchronous path, then persists an
+        ai_core-origin tool output.  It intentionally does not let the
+        auxiliary layer perform retrieval, shell work, code execution, or
+        synthesis.
+        """
+        return self.execute_task(task=task, agent=agent, inputs=inputs or {})
 
     def execute_task(self, *, task: Any, agent: Any, inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         inputs = inputs or {}
@@ -79,11 +67,15 @@ class AICoreAgentTaskExecutor:
             task_id=str(getattr(task, "task_id", "")),
             agent_id=str(getattr(agent, "agent_id", "")),
         )
+        profile = self._select_profile(task=task, agent=agent)
+        collectors = {"public_discovery": self._public_discovery}
+        if profile.get("requests"):
+            collectors[operation] = lambda runtime_query: self._configured_collection(profile=profile, query=runtime_query)
         run = self.workflow_executor.run_collect_plan(
             plan=plan,
             operation=operation,
             query=query,
-            collectors={"public_discovery": self._public_discovery},
+            collectors=collectors,
             context_supplier=lambda: self._runtime_context_snapshot(task=task, agent=agent),
         )
         material = run.get("final_material", {}) if isinstance(run.get("final_material"), dict) else {}
@@ -96,7 +88,7 @@ class AICoreAgentTaskExecutor:
             evidence = run.get("workflow_outputs", {}).get("collected_material", material)
             status = evidence.get("status", "completed") if isinstance(evidence, dict) else "completed"
             result_text = self._summarize_evidence(evidence)
-            tool_type = "generic_public_discovery"
+            tool_type = "configured_runtime_tool" if profile.get("requests") else "generic_public_discovery"
         return {
             "tool_call_id": f"tool_call_{uuid4().hex[:8]}",
             "origin": self.ORIGIN,
@@ -142,18 +134,8 @@ class AICoreAgentTaskExecutor:
         }
 
     def _select_operation(self, *, task: Any, agent: Any) -> str:
-        config = self._load_config()
-        searchable = " ".join([
-            str(getattr(agent, "role_label", "")),
-            " ".join(str(v) for v in getattr(agent, "capability_labels", [])),
-            str((getattr(agent, "metadata", {}) or {}).get("user_instruction", "")),
-            str(getattr(task, "objective", "")),
-        ]).casefold()
-        for profile in config.get("profiles", []):
-            terms = [str(term).casefold() for term in profile.get("match_terms", [])]
-            if terms and any(term in searchable for term in terms):
-                return str(profile.get("operation") or "public_discovery")
-        return "public_discovery"
+        profile = self._select_profile(task=task, agent=agent)
+        return str(profile.get("operation") or "public_discovery")
 
     def _runtime_context_snapshot(self, *, task: Any, agent: Any) -> dict[str, Any]:
         now = datetime.now().astimezone()
@@ -183,6 +165,131 @@ class AICoreAgentTaskExecutor:
             cleaned = re.sub(re.escape(str(phrase)), " ", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\b[A-Za-z0-9_]+\.(?:json|py|html|md)\b", " ", cleaned)
         return self._clean(cleaned)
+
+    def _select_profile(self, *, task: Any, agent: Any) -> dict[str, Any]:
+        config = self._load_config()
+        searchable = " ".join([
+            str(getattr(agent, "role_label", "")),
+            " ".join(str(v) for v in getattr(agent, "capability_labels", [])),
+            str((getattr(agent, "metadata", {}) or {}).get("user_instruction", "")),
+            str((getattr(agent, "metadata", {}) or {}).get("execution_instruction", "")),
+            str(getattr(task, "objective", "")),
+        ]).casefold()
+        for profile in config.get("profiles", []):
+            terms = [str(term).casefold() for term in profile.get("match_terms", [])]
+            if terms and any(term in searchable for term in terms):
+                return profile
+        return {}
+
+    def _configured_collection(self, *, profile: dict[str, Any], query: str) -> dict[str, Any]:
+        requests = profile.get("requests") if isinstance(profile.get("requests"), list) else []
+        if not requests:
+            return self._public_discovery(query)
+        variables = self._extract_profile_variables(profile=profile, query=query)
+        attempts: list[dict[str, Any]] = []
+        for request in requests:
+            if not isinstance(request, dict):
+                continue
+            url = self._render_template(str(request.get("url_template") or ""), variables)
+            if not url:
+                continue
+            try:
+                with httpx.Client(timeout=float(request.get("timeout_seconds") or 12.0), follow_redirects=True, headers={"User-Agent": "AI-Core-Runtime/1.0"}) as client:
+                    response = client.get(url)
+                    response.raise_for_status()
+                content_type = response.headers.get("content-type", "")
+                if "json" in content_type.casefold() or str(request.get("response_type") or "").casefold() == "json":
+                    payload: Any = response.json()
+                else:
+                    payload = {"text": self._clean(response.text)[:3000]}
+                result_text = self._summarize_configured_payload(profile=profile, payload=payload, variables=variables)
+                material = {
+                    "status": "success",
+                    "query": query,
+                    "url": url,
+                    "variables": variables,
+                    "result_text": result_text,
+                    "response_status": response.status_code,
+                    "response_type": request.get("response_type") or content_type,
+                    "fetched_at": self._now(),
+                }
+                return material
+            except Exception as exc:
+                attempts.append({"url": url, "status": "error", "error": str(exc)})
+        fallback = self._public_discovery(query)
+        fallback["configured_attempts"] = attempts
+        return fallback
+
+    def _extract_profile_variables(self, *, profile: dict[str, Any], query: str) -> dict[str, str]:
+        variables: dict[str, str] = {"query": query}
+        for spec in profile.get("parameters", []) if isinstance(profile.get("parameters"), list) else []:
+            if not isinstance(spec, dict):
+                continue
+            name = str(spec.get("name") or "").strip()
+            if not name:
+                continue
+            value = ""
+            for pattern in spec.get("patterns", []) if isinstance(spec.get("patterns"), list) else []:
+                try:
+                    match = re.search(str(pattern), query, flags=re.IGNORECASE)
+                except re.error:
+                    continue
+                if match:
+                    value = self._clean(match.group(1) if match.groups() else match.group(0))
+                    break
+            if not value:
+                value = str(spec.get("default") or "")
+            variables[name] = value
+        return variables
+
+    def _render_template(self, template: str, variables: dict[str, str]) -> str:
+        rendered = template
+        for key, value in variables.items():
+            rendered = rendered.replace("{" + key + "}", quote_plus(str(value)))
+        return rendered
+
+    def _summarize_configured_payload(self, *, profile: dict[str, Any], payload: Any, variables: dict[str, str]) -> str:
+        fields = profile.get("summary_fields") if isinstance(profile.get("summary_fields"), list) else []
+        lines: list[str] = []
+        heading = profile.get("summary_heading")
+        if heading:
+            lines.append(self._render_plain_template(str(heading), variables))
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            label = str(field.get("label") or field.get("path") or "value")
+            path = str(field.get("path") or "")
+            suffix = str(field.get("suffix") or "")
+            value = self._json_path(payload, path)
+            if value not in (None, "", []):
+                lines.append(f"{label}: {self._clean(str(value))}{suffix}")
+        if lines:
+            return "\n".join(lines)
+        if isinstance(payload, dict):
+            return self._clean(json.dumps(payload, ensure_ascii=False))[:1200]
+        return self._clean(str(payload))[:1200]
+
+    def _render_plain_template(self, template: str, variables: dict[str, str]) -> str:
+        rendered = template
+        for key, value in variables.items():
+            rendered = rendered.replace("{" + key + "}", str(value))
+        return rendered
+
+    def _json_path(self, payload: Any, path: str) -> Any:
+        current = payload
+        if not path:
+            return current
+        for part in path.split("."):
+            if isinstance(current, list):
+                try:
+                    current = current[int(part)]
+                except Exception:
+                    return None
+            elif isinstance(current, dict):
+                current = current.get(part)
+            else:
+                return None
+        return current
 
     def _public_discovery(self, query: str) -> dict[str, Any]:
         if not query:
@@ -281,6 +388,8 @@ class AICoreAgentTaskExecutor:
         if not isinstance(evidence, dict):
             return self._clean(str(evidence))[:900]
         lines: list[str] = []
+        if evidence.get("result_text"):
+            lines.append(self._clean(str(evidence.get("result_text")))[:1200])
         if evidence.get("selected_document") and isinstance(evidence.get("selected_document"), dict):
             selected = evidence["selected_document"]
             text = selected.get("text_excerpt") or selected.get("title") or ""

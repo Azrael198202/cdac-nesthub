@@ -1,21 +1,120 @@
 {
-  "version": "v2.6.3-runtime-output-routing",
+  "version": "v2.7.2-configured-runtime-dispatch",
   "description": "Runtime tool routing profiles. Source code consumes these patterns generically and does not embed domain phrases.",
   "profiles": [
     {
       "profile_id": "runtime_context_snapshot",
       "operation": "runtime_context_snapshot",
-      "match_terms": ["time", "current", "clock", "now", "日時", "時間", "現在"]
+      "match_terms": [
+        "time",
+        "current",
+        "clock",
+        "now",
+        "日時",
+        "時間",
+        "現在"
+      ]
+    },
+    {
+      "profile_id": "public_information_forecast_json",
+      "operation": "configured_http_json",
+      "match_terms": [
+        "weather",
+        "forecast",
+        "天気",
+        "天候",
+        "予報"
+      ],
+      "parameters": [
+        {
+          "name": "target",
+          "patterns": [
+            "(?i)\\bfor\\s+([A-Za-z][A-Za-z .,'-]{1,80}?)(?:\\s+today|\\s+tomorrow|[.!?]|$)",
+            "(?i)\\bin\\s+([A-Za-z][A-Za-z .,'-]{1,80}?)(?:\\s+today|\\s+tomorrow|[.!?]|$)"
+          ],
+          "default": "Fukuoka"
+        }
+      ],
+      "requests": [
+        {
+          "url_template": "https://wttr.in/{target}?format=j1",
+          "response_type": "json",
+          "timeout_seconds": 12
+        }
+      ],
+      "summary_heading": "Configured runtime result for {target}",
+      "summary_fields": [
+        {
+          "label": "Current condition",
+          "path": "current_condition.0.weatherDesc.0.value"
+        },
+        {
+          "label": "Current temperature",
+          "path": "current_condition.0.temp_C",
+          "suffix": " C"
+        },
+        {
+          "label": "Current feels like",
+          "path": "current_condition.0.FeelsLikeC",
+          "suffix": " C"
+        },
+        {
+          "label": "Current humidity",
+          "path": "current_condition.0.humidity",
+          "suffix": "%"
+        },
+        {
+          "label": "First date",
+          "path": "weather.0.date"
+        },
+        {
+          "label": "First range",
+          "path": "weather.0.mintempC",
+          "suffix": "-"
+        },
+        {
+          "label": "First max",
+          "path": "weather.0.maxtempC",
+          "suffix": " C"
+        },
+        {
+          "label": "Second date",
+          "path": "weather.1.date"
+        },
+        {
+          "label": "Second min",
+          "path": "weather.1.mintempC",
+          "suffix": " C"
+        },
+        {
+          "label": "Second max",
+          "path": "weather.1.maxtempC",
+          "suffix": " C"
+        }
+      ]
     },
     {
       "profile_id": "public_information_discovery",
       "operation": "public_discovery",
-      "match_terms": ["weather", "forecast", "obtain", "information", "調べ", "取得", "検索"]
+      "match_terms": [
+        "obtain",
+        "information",
+        "調べ",
+        "取得",
+        "検索"
+      ]
     }
   ],
   "text_cleanup": {
     "drop_phrases": [
-      "create a task", "create task", "named", "which calls", "calls", "agent", "execute", "task"
+      "create a task",
+      "create task",
+      "named",
+      "which calls",
+      "calls",
+      "agent",
+      "execute",
+      "task"
     ]
   }
 }
