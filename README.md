@@ -40,3 +40,10 @@ The package keeps only source code and base configuration. Runtime workspace con
 - Secret/key or required-input pauses are returned to Agent Studio as `missing_inputs`.
 - auxiliary_brain remains limited to agent/task/community management, delegation coordination, state persistence, and delivery storage.
 - ai_core remains responsible for input parsing, intent recognition, workflow planning, tool selection, execution, evidence handling, and synthesis.
+
+## V2.8.3 Agent Studio Secret Save
+
+- Agent Studio missing-input prompt now shows `Save & Continue` and `Save` buttons.
+- Pressing Enter in the secret input saves the value and retries the pending instruction.
+- Secrets are written to `runtime/configs/secrets/secrets.json` through the existing `SecretStore`.
+- Root `/` approval workflow remains unchanged.

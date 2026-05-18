@@ -26,6 +26,11 @@ class AgentStudioRequest(BaseModel):
     provided_inputs: dict[str, Any] | None = None
 
 
+class AgentStudioSecretRequest(BaseModel):
+    key: str
+    value: str
+
+
 class ResumeRequest(BaseModel):
     run_id: str
     decision: str = "approve"
@@ -70,6 +75,18 @@ async def agent_studio_state():
 @app.post("/api/agent-studio/message")
 async def agent_studio_message(req: AgentStudioRequest):
     return JSONResponse(await studio_service.handle_message(req.message, provided_inputs=req.provided_inputs))
+
+
+@app.post("/api/agent-studio/secret")
+async def agent_studio_secret(req: AgentStudioSecretRequest):
+    from ai_core.secrets.secret_store import SecretStore
+
+    key = (req.key or "runtime_access_key").strip() or "runtime_access_key"
+    value = (req.value or "").strip()
+    if not value:
+        return JSONResponse({"ok": False, "status": "blocked", "message": "Secret value is required."}, status_code=400)
+    SecretStore().set(key, value)
+    return JSONResponse({"ok": True, "status": "saved", "key": key, "path": "runtime/configs/secrets/secrets.json"})
 
 
 @app.get("/api/version")
