@@ -1,1 +1,1 @@
-v2.9.7-runtime-auto-repair-and-ui-recovery
+v2.9.8-runtime-secret-resume-persistence-fix

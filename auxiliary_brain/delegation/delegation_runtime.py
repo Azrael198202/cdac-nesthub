@@ -227,6 +227,7 @@ class AgentDelegationRuntime:
                         participant_name=str(payload.get("participant_name") or "participant"),
                         resume=True,
                     ),
+                    provided_inputs=provided_inputs,
                 )
                 resumed_payload = resumed.__dict__
                 existing_results[idx] = resumed_payload

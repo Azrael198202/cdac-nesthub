@@ -143,6 +143,9 @@ async function submitMissingInputs(){
   const hasValue=Object.values(provided).some(v=>String(v||'').trim()!=='');
   if(!hasValue){ addMessage('Please enter at least one value before continuing.','item error'); return; }
   closeMissingInputModal();
+  if(provided.secret_key && provided.value){
+    await saveRuntimeSecret(provided.secret_key, provided.value);
+  }
   if(lastPendingRunId){ await resumePendingRun(lastPendingRunId, provided); return; }
   const text=lastPendingInstruction || lastSubmittedInstruction;
   if(text){
@@ -152,6 +155,16 @@ async function submitMissingInputs(){
     await refreshState();
   }
 }
+async function saveRuntimeSecret(key, value){
+  const cleanKey=String(key||'').trim();
+  const cleanValue=String(value||'').trim();
+  if(!cleanKey || !cleanValue){ return; }
+  const res=await fetch('/api/agent-studio/secret',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:cleanKey,value:cleanValue})});
+  const data=await res.json().catch(()=>({}));
+  if(!res.ok || data.ok===false){ throw new Error(data.message || 'Failed to save runtime secret.'); }
+  addProgressMessage('runtime secret saved');
+}
+
 async function resumePendingRun(runId, providedInputs){
   if(!runId)return;
   const btn=document.getElementById('sendBtn');
@@ -160,6 +173,9 @@ async function resumePendingRun(runId, providedInputs){
   setStudioStatus('running', true);
   let pollTimer=null;
   try{
+    if(providedInputs && providedInputs.secret_key && providedInputs.value){
+      await saveRuntimeSecret(providedInputs.secret_key, providedInputs.value);
+    }
     addProgressMessage('resuming suspended delegated run');
     pollTimer=setInterval(()=>refreshState(), 1200);
     const res=await fetch('/api/agent-studio/resume-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_id:runId, provided_inputs:providedInputs||null})});
