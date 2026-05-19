@@ -1640,13 +1640,16 @@ class ToolCallExecutor:
         })
         try:
             cost_snapshot = self.runtime_cost_policy.snapshot(state)
+            # v2.9.23: search-first adaptive execution.  Public web evidence is
+            # discovered and validated before API discovery/calls.  API discovery
+            # is an escalation path only when public evidence is insufficient.
             external_discovery = await asyncio.wait_for(self.external_discovery.discover(
                 run_id=run_id,
                 node_id=node_id,
                 capability=capability,
                 step=step,
                 user_input=state.get("input", ""),
-            ), timeout=cost_snapshot.operation_timeout_seconds)
+            ), timeout=cost_snapshot.stage_timeout("web_discovery", 30))
             direct_execution = await asyncio.wait_for(self._try_direct_evidence_execution_from_discovery(
                 run_id=run_id,
                 node_id=node_id,
@@ -1656,35 +1659,46 @@ class ToolCallExecutor:
                 state=state,
                 api_discovery={},
                 external_discovery=external_discovery,
-                reason=reason,
-            ), timeout=cost_snapshot.operation_timeout_seconds)
+                reason=reason + "_web_first",
+            ), timeout=cost_snapshot.stage_timeout("web_search", 90))
+            if direct_execution and direct_execution.get("status") == "success":
+                await event_bus.emit(run_id, {
+                    "type": "SEARCH_FIRST_EVIDENCE_SUFFICIENT",
+                    "title": "Search-first evidence sufficient",
+                    "message": "Public web evidence satisfied the execution contract; API discovery was skipped.",
+                    "node_id": node_id,
+                    "step_id": step_id,
+                })
             if not direct_execution:
-                api_discovery = await asyncio.wait_for(self.api_discovery.discover(
-                    run_id=run_id,
-                    node_id=node_id,
-                    capability=capability,
-                    step=step,
-                    user_input=state.get("input", ""),
-                ), timeout=cost_snapshot.operation_timeout_seconds)
-                if self.evidence_short_circuit.should_bypass_generated_execution(api_discovery, external_discovery):
+                api_discovery = {}
+                try:
+                    api_discovery = await asyncio.wait_for(self.api_discovery.discover(
+                        run_id=run_id,
+                        node_id=node_id,
+                        capability=capability,
+                        step=step,
+                        user_input=state.get("input", ""),
+                    ), timeout=cost_snapshot.stage_timeout("api_discovery", 15))
+                except Exception as api_exc:
                     await event_bus.emit(run_id, {
-                        "type": "EVIDENCE_SATISFIED_SHORT_CIRCUIT",
-                        "title": "Evidence satisfied before generated execution",
-                        "message": "Collected evidence already satisfies the runtime request; generated execution is bypassed.",
+                        "type": "API_DISCOVERY_SKIPPED_OR_FAILED",
+                        "title": "API escalation unavailable",
+                        "message": str(api_exc),
                         "node_id": node_id,
                         "step_id": step_id,
                     })
-                direct_execution = await asyncio.wait_for(self._try_direct_evidence_execution_from_discovery(
-                    run_id=run_id,
-                    node_id=node_id,
-                    step_id=step_id,
-                    capability=capability,
-                    step=step,
-                    state=state,
-                    api_discovery=api_discovery,
-                    external_discovery=external_discovery,
-                    reason=reason + "_with_secondary_discovery",
-                ), timeout=cost_snapshot.operation_timeout_seconds)
+                if api_discovery:
+                    direct_execution = await asyncio.wait_for(self._try_direct_evidence_execution_from_discovery(
+                        run_id=run_id,
+                        node_id=node_id,
+                        step_id=step_id,
+                        capability=capability,
+                        step=step,
+                        state=state,
+                        api_discovery=api_discovery,
+                        external_discovery=external_discovery,
+                        reason=reason + "_api_escalation_after_web_insufficient",
+                    ), timeout=cost_snapshot.stage_timeout("api_call", 30))
             if direct_execution and direct_execution.get("status") == "success":
                 tool_input = self._build_tool_input(
                     step=step,
@@ -2759,7 +2773,7 @@ class ToolCallExecutor:
                     objective=objective,
                     policy=cost_snapshot.evidence_policy(),
                 ),
-                timeout=cost_snapshot.operation_timeout_seconds,
+                timeout=cost_snapshot.stage_timeout("extraction", 45),
             )
         except Exception as exc:
             await event_bus.emit(run_id, {
@@ -3051,9 +3065,10 @@ class ToolCallExecutor:
                     "message": "A credential-protected provider may improve the result. You can provide an API key or continue without it.",
                     "reason": "No no-credential candidate produced a validated executable result. You may provide a credential for protected candidates, or continue without an API key using the best available no-key evidence or error summary.",
                     "required": False,
+                    "api_sources": [self._compact_candidate_for_interaction(c) for c in credential_candidates[:5]],
                     "fields": {"credential": {"label": "API Key / Credential", "secret": True, "required": False, "placeholder": "Paste API key here"}},
                     "secret_fields": [
-                        {"name": "credential", "label": "API Key / Credential", "interaction_type": "secret", "required": False, "placeholder": "Paste API key here"}
+                        {"name": (self._compact_candidate_for_interaction(credential_candidates[0]).get("secret_key") if credential_candidates else "runtime_access_key"), "label": f"{(self._compact_candidate_for_interaction(credential_candidates[0]).get('provider') if credential_candidates else 'Provider')} access key", "interaction_type": "secret", "required": False, "placeholder": f"Paste key for {(self._compact_candidate_for_interaction(credential_candidates[0]).get('provider') if credential_candidates else 'provider')}", "provider": (self._compact_candidate_for_interaction(credential_candidates[0]).get("provider") if credential_candidates else None), "source_url": (self._compact_candidate_for_interaction(credential_candidates[0]).get("url") if credential_candidates else None)}
                     ],
                     "actions": [
                         {"id": "continue_without_key", "label": "Continue without API key"},
@@ -3214,11 +3229,25 @@ class ToolCallExecutor:
         }
 
     def _compact_candidate_for_interaction(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        source_url = candidate.get("url") or candidate.get("official_documentation_url")
+        provider_name = candidate.get("provider") or candidate.get("provider_name") or candidate.get("name") or candidate.get("title")
+        secret_key = (
+            candidate.get("secret_key")
+            or candidate.get("required_secret")
+            or candidate.get("required_secret_key")
+            or candidate.get("api_key_name")
+            or candidate.get("credential_name")
+            or "runtime_access_key"
+        )
         return make_json_safe({
             "name": candidate.get("name"),
-            "url": candidate.get("url") or candidate.get("official_documentation_url"),
+            "title": candidate.get("title"),
+            "provider": provider_name,
+            "url": source_url,
             "source": candidate.get("source"),
             "tool_type": candidate.get("tool_type"),
+            "secret_key": secret_key,
+            "requires_credential": self._candidate_requires_credential(candidate),
             "score": candidate.get("score"),
             "score_reasons": candidate.get("score_reasons"),
         })
@@ -3524,6 +3553,33 @@ class ToolCallExecutor:
         """
         fields = interaction.get("fields") if isinstance(interaction.get("fields"), dict) else {}
         candidates = interaction.get("candidates") if isinstance(interaction.get("candidates"), list) else []
+        first_candidate = candidates[0] if candidates and isinstance(candidates[0], dict) else {}
+        api_sources = []
+        for item in candidates[:5]:
+            if not isinstance(item, dict):
+                continue
+            api_sources.append({
+                "provider": item.get("provider") or item.get("name") or item.get("title") or "credential-protected source",
+                "url": item.get("url"),
+                "source": item.get("source"),
+                "tool_type": item.get("tool_type"),
+                "secret_key": item.get("secret_key") or "runtime_access_key",
+            })
+        source_label = first_candidate.get("provider") or first_candidate.get("name") or first_candidate.get("title") or "credential-protected source"
+        source_url = first_candidate.get("url")
+        secret_key = first_candidate.get("secret_key") or "runtime_access_key"
+        default_secret_fields = [
+            {
+                "name": secret_key,
+                "label": f"{source_label} access key",
+                "interaction_type": "secret",
+                "required": False,
+                "placeholder": f"Paste key for {source_label}",
+                "provider": source_label,
+                "source_url": source_url,
+                "secret_key": secret_key,
+            }
+        ]
         return {
             "step_id": step_id,
             "type": "credential_optional_upgrade",
@@ -3532,16 +3588,11 @@ class ToolCallExecutor:
             "message": interaction.get("message") or "A credential-protected provider may improve the result. You can provide an API key or continue without it.",
             "objective": step.get("objective"),
             "reason": interaction.get("reason") or "Credential-protected candidates are optional upgrades and must not block no-key execution paths.",
+            "provider": source_label,
+            "api_source": {"provider": source_label, "url": source_url, "secret_key": secret_key},
+            "api_sources": api_sources,
             "fields": fields,
-            "secret_fields": interaction.get("secret_fields") or [
-                {
-                    "name": "credential",
-                    "label": "API Key / Credential",
-                    "interaction_type": "secret",
-                    "required": False,
-                    "placeholder": "Paste API key here",
-                }
-            ],
+            "secret_fields": interaction.get("secret_fields") or default_secret_fields,
             "actions": interaction.get("actions") or [
                 {"id": "continue_without_key", "label": "Continue without API key"},
                 {"id": "provide_credential", "label": "Provide API key and continue"},

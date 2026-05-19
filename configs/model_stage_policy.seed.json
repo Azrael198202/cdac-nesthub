@@ -130,11 +130,25 @@
         "max_generated_component_attempts": 1,
         "max_evidence_pages": 5,
         "max_evidence_page_chars": 18000,
-        "operation_timeout_seconds": 45,
-        "sandbox_timeout_seconds": 25,
+        "operation_timeout_seconds": 180,
+        "sandbox_timeout_seconds": 45,
         "prefer_repair_before_model_escalation": true,
         "allow_paid_model_escalation": true,
         "notes": "Domain-neutral runtime budget and convergence controls.",
+        "stage_timeouts": {
+          "web_discovery": 30,
+          "web_search": 90,
+          "extraction": 45,
+          "evidence_validation": 20,
+          "api_discovery": 15,
+          "api_call": 30,
+          "synthesis": 20
+        },
+        "method_timeout_seconds": {
+          "api_call": 30,
+          "web_search": 90,
+          "extraction": 45
+        },
         "adaptive_evidence": {
           "enabled": true,
           "min_sources": 2,

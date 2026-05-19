@@ -73,6 +73,9 @@ class ContinuationEngine:
             "title": first.get("title") or "Optional API Key Available",
             "message": first.get("message") or "A credential-protected provider may improve the result. You can provide an API key or continue without it.",
             "required": False,
+            "provider": first.get("provider") or (first.get("api_source") or {}).get("provider") if isinstance(first.get("api_source"), dict) else first.get("provider"),
+            "api_source": first.get("api_source") or {},
+            "api_sources": first.get("api_sources") or first.get("candidates") or [],
             "secret_fields": first.get("secret_fields") or [
                 {
                     "name": "credential",

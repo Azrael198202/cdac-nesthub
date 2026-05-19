@@ -578,21 +578,44 @@ class PrimaryBrainDelegationClient:
             return []
         kind = str(pending.get("kind") or "")
         if kind == "secret_input":
+            request = pending.get("request") if isinstance(pending.get("request"), dict) else {}
+            api_source = request.get("api_source") if isinstance(request.get("api_source"), dict) else {}
+            api_sources = request.get("api_sources") if isinstance(request.get("api_sources"), list) else []
+            secret_fields = request.get("secret_fields") if isinstance(request.get("secret_fields"), list) else []
+            first_secret = secret_fields[0] if secret_fields and isinstance(secret_fields[0], dict) else {}
+            provider = str(api_source.get("provider") or first_secret.get("provider") or request.get("provider") or pending.get("provider") or "credential-protected provider")
+            source_url = str(api_source.get("url") or first_secret.get("source_url") or pending.get("source_url") or "")
+            field_name = str(first_secret.get("name") or api_source.get("secret_key") or pending.get("secret_key") or "runtime_access_key")
             return [{
                 "kind": "secret_input",
-                "field": str(pending.get("secret_key") or "runtime_access_key"),
-                "message": "A credential-protected method is available. Enter the key to use it, or continue without this key to try another allowed method.",
+                "field": field_name,
+                "message": str(pending.get("message") or request.get("message") or "A credential-protected method is available. Enter the key to use it, or continue without this key to try another allowed method."),
                 "input_type": "password",
                 "required": False,
+                "provider": provider,
+                "source_url": source_url,
+                "api_source": api_source,
+                "api_sources": api_sources,
             }]
         if kind == "optional_credential_choice":
             request = pending.get("request") if isinstance(pending.get("request"), dict) else {}
+            api_source = request.get("api_source") if isinstance(request.get("api_source"), dict) else {}
+            api_sources = request.get("api_sources") if isinstance(request.get("api_sources"), list) else []
+            secret_fields = request.get("secret_fields") if isinstance(request.get("secret_fields"), list) else []
+            first_secret = secret_fields[0] if secret_fields and isinstance(secret_fields[0], dict) else {}
+            provider = str(api_source.get("provider") or first_secret.get("provider") or request.get("provider") or pending.get("provider") or "credential-protected provider")
+            source_url = str(api_source.get("url") or first_secret.get("source_url") or pending.get("source_url") or "")
+            field_name = str(first_secret.get("name") or api_source.get("secret_key") or request.get("secret_key") or request.get("provider") or "runtime_access_key")
             return [{
                 "kind": "optional_credential_choice",
-                "field": str(request.get("secret_key") or request.get("provider") or "runtime_access_key"),
+                "field": field_name,
                 "message": str(request.get("message") or pending.get("message") or "A credential-protected method can improve this execution. Enter the key to use it, or continue without this key."),
                 "input_type": "password",
                 "required": False,
+                "provider": provider,
+                "source_url": source_url,
+                "api_source": api_source,
+                "api_sources": api_sources,
             }]
         if kind == "human_information_required":
             request = pending.get("request") if isinstance(pending.get("request"), dict) else {}

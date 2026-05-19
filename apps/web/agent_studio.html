@@ -103,13 +103,23 @@ function openMissingInputModal(items, runId){
     const field=String(it.field||it.name||('field_'+idx));
     const message=String(it.message||'Please provide this value.');
     const validation=String(it.validation_error||'');
+    const provider=String(it.provider || (it.api_source&&it.api_source.provider) || '');
+    const sourceUrl=String(it.source_url || (it.api_source&&it.api_source.url) || '');
+    const sourceList=Array.isArray(it.api_sources) ? it.api_sources : [];
     const wrap=document.createElement('div');
     const label=document.createElement('label');
     label.className='fieldLabel';
     label.textContent=field;
     const hint=document.createElement('div');
     hint.className='fieldHint';
-    hint.textContent=message + (validation ? '\n\nValidation error:\n' + validation : '');
+    let sourceText='';
+    if(provider || sourceUrl){ sourceText += '\nAPI / Provider: ' + (provider || 'credential-protected provider'); }
+    if(sourceUrl){ sourceText += '\nSource: ' + sourceUrl; }
+    if(sourceList.length){
+      const names=sourceList.slice(0,3).map(x=>String((x&&x.provider)|| (x&&x.name) || (x&&x.url) || '')).filter(Boolean);
+      if(names.length){ sourceText += '\nCandidate sources: ' + names.join(' | '); }
+    }
+    hint.textContent=message + sourceText + (validation ? '\n\nValidation error:\n' + validation : '');
     const inputType=String(it.input_type||'');
     const area = inputType==='textarea' || (kind==='validation_recovery' && field==='corrected_json');
     const input=document.createElement(area?'textarea':'input');
@@ -261,7 +271,15 @@ function deriveMissingInputs(run){
     return [{kind:'validation_recovery', field, message:'Schema validation failed. Please provide a valid value.', validation_error:err}];
   }
   if(kind==='secret_input' || kind==='optional_credential_choice'){
-    return [{kind:kind, field:String(pending.secret_key||'runtime_access_key'), message:String(pending.message||'A credential-protected method is available. Enter a key to use it, or continue without this key to try another allowed method.'), input_type:'password'}];
+    const request = pending.request || {};
+    const secretFields = Array.isArray(request.secret_fields) ? request.secret_fields : [];
+    const firstSecret = secretFields.length ? secretFields[0] : {};
+    const apiSource = request.api_source || {};
+    const apiSources = Array.isArray(request.api_sources) ? request.api_sources : [];
+    const provider = apiSource.provider || firstSecret.provider || request.provider || pending.provider || 'credential-protected provider';
+    const sourceUrl = apiSource.url || firstSecret.source_url || pending.source_url || '';
+    const fieldName = firstSecret.name || apiSource.secret_key || pending.secret_key || 'runtime_access_key';
+    return [{kind:kind, field:String(fieldName), message:String(pending.message||request.message||'A credential-protected method is available. Enter a key to use it, or continue without this key to try another allowed method.'), input_type:'password', provider:String(provider), source_url:String(sourceUrl), api_source:apiSource, api_sources:apiSources}];
   }
   if(kind==='human_information_required'){
     const request = pending.request || {};

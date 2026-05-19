@@ -30,6 +30,7 @@ class RuntimeCostSnapshot:
     adaptive_stop_quality_score: float
     operation_timeout_seconds: int
     sandbox_timeout_seconds: int
+    stage_timeouts: dict[str, int]
     prefer_repair_before_model_escalation: bool
     allow_paid_model_escalation: bool
 
@@ -47,7 +48,16 @@ class RuntimeCostSnapshot:
             "fact_limit": self.adaptive_fact_limit,
             "block_limit": self.adaptive_block_limit,
             "stop_quality_score": self.adaptive_stop_quality_score,
+            "stage_timeouts": dict(self.stage_timeouts),
         }
+
+    def stage_timeout(self, name: str, default: int | None = None) -> int:
+        if default is None:
+            default = self.operation_timeout_seconds
+        try:
+            return max(1, int(self.stage_timeouts.get(name, default)))
+        except Exception:
+            return max(1, int(default))
 
 
 class RuntimeCostPolicy:
@@ -92,8 +102,9 @@ class RuntimeCostPolicy:
             adaptive_fact_limit=self._int("AI_CORE_ADAPTIVE_EVIDENCE_FACT_LIMIT", adaptive.get("fact_limit"), 48, 8),
             adaptive_block_limit=self._int("AI_CORE_ADAPTIVE_EVIDENCE_BLOCK_LIMIT", adaptive.get("block_limit"), 32, 6),
             adaptive_stop_quality_score=self._float("AI_CORE_ADAPTIVE_EVIDENCE_STOP_SCORE", adaptive.get("stop_quality_score"), 0.78, 0.0, 0.99),
-            operation_timeout_seconds=self._int("AI_CORE_OPERATION_TIMEOUT_SECONDS", policy.get("operation_timeout_seconds"), 45, 5),
-            sandbox_timeout_seconds=self._int("AI_CORE_SANDBOX_TIMEOUT_SECONDS", policy.get("sandbox_timeout_seconds"), 25, 5),
+            operation_timeout_seconds=self._int("AI_CORE_OPERATION_TIMEOUT_SECONDS", policy.get("operation_timeout_seconds"), 180, 5),
+            sandbox_timeout_seconds=self._int("AI_CORE_SANDBOX_TIMEOUT_SECONDS", policy.get("sandbox_timeout_seconds"), 45, 5),
+            stage_timeouts=self._stage_timeouts(policy),
             prefer_repair_before_model_escalation=self._bool("AI_CORE_REPAIR_BEFORE_ESCALATION", policy.get("prefer_repair_before_model_escalation"), True),
             allow_paid_model_escalation=self._bool("AI_CORE_ALLOW_PAID_MODEL_ESCALATION", policy.get("allow_paid_model_escalation"), True),
         )
@@ -157,3 +168,21 @@ class RuntimeCostPolicy:
         except Exception:
             parsed = default
         return max(minimum, min(maximum, parsed))
+
+
+# v2.9.23 helper extension kept at module end to avoid changing callers.
+def _runtime_cost_policy_stage_timeouts(self, policy: dict[str, Any]) -> dict[str, int]:
+    configured = policy.get("stage_timeouts") if isinstance(policy.get("stage_timeouts"), dict) else {}
+    aliases = policy.get("method_timeout_seconds") if isinstance(policy.get("method_timeout_seconds"), dict) else {}
+    values = {
+        "web_discovery": self._int("AI_CORE_STAGE_TIMEOUT_WEB_DISCOVERY", configured.get("web_discovery"), 30, 1),
+        "extraction": self._int("AI_CORE_STAGE_TIMEOUT_EXTRACTION", configured.get("extraction"), 45, 1),
+        "evidence_validation": self._int("AI_CORE_STAGE_TIMEOUT_EVIDENCE_VALIDATION", configured.get("evidence_validation"), 20, 1),
+        "api_discovery": self._int("AI_CORE_STAGE_TIMEOUT_API_DISCOVERY", configured.get("api_discovery"), 15, 1),
+        "api_call": self._int("AI_CORE_STAGE_TIMEOUT_API_CALL", aliases.get("api_call", configured.get("api_call")), 30, 1),
+        "web_search": self._int("AI_CORE_STAGE_TIMEOUT_WEB_SEARCH", aliases.get("web_search", configured.get("web_search")), 90, 1),
+        "synthesis": self._int("AI_CORE_STAGE_TIMEOUT_SYNTHESIS", configured.get("synthesis"), 20, 1),
+    }
+    return values
+
+RuntimeCostPolicy._stage_timeouts = _runtime_cost_policy_stage_timeouts
