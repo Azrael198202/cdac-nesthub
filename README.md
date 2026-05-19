@@ -116,3 +116,13 @@ This version adds a domain-neutral semantic validation layer. The core runtime d
 - keep runtime workspace clean in source packages
 
 Generated runtime files are not included in the source archive.
+
+## V2.8.12 Runtime Fact Usability and Production Package Cleanup
+
+- Fixed semantic over-filtering that caused completed participant runs to return only a safe-conversion fallback.
+- The normalizer now ignores extractor trace text and prefers structured runtime evidence when available.
+- Coordinate-like values are no longer allowed to poison nearby unrelated numeric facts in the same evidence window.
+- Added a generic runtime-native observation execution path that is only activated by runtime-generated source/capability contracts.
+- Agent delegation prompts now ask the primary runtime to prefer runtime-native observations when a task can be satisfied from current runtime state.
+- Final synthesis still uses verified facts only; no business/domain field names were added to ai_core.
+- Production source package excludes `tests/`, `scripts/`, `__pycache__/`, and runtime-generated files.

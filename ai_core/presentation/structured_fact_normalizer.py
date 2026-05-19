@@ -93,8 +93,11 @@ class StructuredFactNormalizer:
             facts.extend(self._facts_from_text(text, runtime_variables=runtime_variables, source_url=source_url))
 
         # Generic key-value extraction for already structured payloads.
+        # Exclude known intermediate-carrier keys that usually contain traces
+        # rather than user-facing facts.  This is not domain logic; it is a
+        # runtime artifact hygiene boundary.
         for key, item in value.items():
-            if key in {"raw", "html", "trace", "debug", "extracted_material", "normalized_facts"}:
+            if key in {"raw", "html", "trace", "debug", "extracted_material", "normalized_facts", "answer_material", "attempt_summary"}:
                 continue
             if isinstance(item, (str, int, float)):
                 text = f"{key}: {item}"
@@ -106,6 +109,11 @@ class StructuredFactNormalizer:
     def _facts_from_text(self, text: str, *, runtime_variables: dict[str, list[str]], source_url: str) -> list[NormalizedFact]:
         compact = " ".join(str(text or "").split())
         if not compact:
+            return []
+        # Intermediate extraction traces are useful for debugging but are not
+        # user-facing evidence.  The runtime may still provide structured
+        # records next to those traces; those records are handled separately.
+        if self.reject_debug_text(compact):
             return []
         relevant_windows = self._relevant_windows(compact, runtime_variables)
         if not relevant_windows:
@@ -129,7 +137,7 @@ class StructuredFactNormalizer:
                     source_url=source_url,
                 ))
             # Also keep concise descriptive windows containing runtime values.
-            if self._mentions_runtime_value(window, runtime_variables):
+            if self._mentions_runtime_value(window, runtime_variables) and not self.reject_debug_text(window):
                 facts.append(NormalizedFact(
                     kind="supporting_statement",
                     label="statement",

@@ -210,6 +210,8 @@ class PrimaryBrainDelegationClient:
         objective = (request.participant_instruction or "").strip()
         return (
             "Execute the delegated participant work using the primary runtime.\n"
+            "Use runtime-native observations when the objective can be satisfied by current runtime state; otherwise use verified external or generated capabilities as needed.\n"
+            "Return only facts that can be represented as verified runtime facts.\n"
             f"Participant name: {request.participant_name}\n"
             f"Participant work objective: {objective}\n"
             f"Task name: {request.task_name}\n"

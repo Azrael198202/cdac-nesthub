@@ -46,11 +46,15 @@ class FactTypeInferencer:
         return enriched
 
     def _looks_like_coordinate(self, *, value: str, unit: str, context: str) -> bool:
+        # Only classify the observed value itself as a coordinate.  A context
+        # window may contain many unrelated numbers; seeing a coordinate
+        # elsewhere in the same window must not poison all neighboring facts.
         sample = context or ""
-        if self.COORDINATE_TOKEN.search(sample):
+        value_text = value.strip()
+        if value_text and self.COORDINATE_TOKEN.fullmatch(value_text):
             return True
-        if unit.startswith("°"):
-            after = self._text_after_value(sample, value)
+        if unit.startswith("°") and not unit.casefold().startswith(("°c", "°f")):
+            after = self._text_after_value(sample, value_text)
             if self.DIRECTION_AFTER_VALUE.match(after):
                 return True
         return False

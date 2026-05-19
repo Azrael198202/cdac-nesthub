@@ -51,6 +51,13 @@ class ResultMaterialBuilder:
                 return {key: value.strip()}
         data = result.get("data")
         if isinstance(data, dict):
+            # Prefer structured runtime evidence over pre-composed answer text.
+            # Pre-composed text may contain extractor traces; structured evidence
+            # can be normalized and validated by the semantic contract engine.
+            if isinstance(data.get("normalized_facts"), list):
+                return {"normalized_facts": data.get("normalized_facts"), "source_url": data.get("source_url"), "source_title": data.get("source_title")}
+            if isinstance(data.get("structured_evidence"), list):
+                return {"structured_evidence": data.get("structured_evidence"), "source_url": data.get("source_url"), "source_title": data.get("source_title"), "known_parameters": data.get("known_parameters")}
             public = {k: v for k, v in data.items() if k not in self.INTERNAL_KEYS}
             return public if public else {}
         if data is not None:
