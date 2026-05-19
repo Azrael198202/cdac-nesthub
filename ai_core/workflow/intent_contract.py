@@ -27,7 +27,7 @@ class IntentContractGuard:
         parsed_entities = parsed.get("parsed_entities") if isinstance(parsed.get("parsed_entities"), dict) else {}
         temporal_expressions = parsed.get("temporal_expressions") if isinstance(parsed.get("temporal_expressions"), list) else []
         target_values = self._target_values(normalized, parsed_entities, temporal_expressions)
-        family = self._intent_family(intent_type=intent_type, normalized=normalized, parsed=parsed)
+        family = self._intent_family(intent_type=intent_type, normalized=normalized, parsed=parsed, temporal_expressions=temporal_expressions)
         return {
             "status": "locked" if intent_type else "empty",
             "intent_type": intent_type,
@@ -58,6 +58,11 @@ class IntentContractGuard:
             event = step.pop("_intent_guard_event", None)
             if event:
                 guard_events.append({"step_id": step.get("step_id") or step.get("task_id"), **event, "before": before, "after": deepcopy(step)})
+            if self._is_redundant_parameter_preparation_step(step, contract, steps):
+                step["skip_execution"] = True
+                step["skip_reason"] = "upstream_contract_already_contains_required_targets"
+                step["_intent_guard_event"] = {"status": "checked", "reason": "redundant_parameter_preparation_step_disabled"}
+                guard_events.append({"step_id": step.get("step_id") or step.get("task_id"), "status": "checked", "reason": "redundant_parameter_preparation_step_disabled", "before": before, "after": deepcopy(step)})
             step.setdefault("intent_contract_ref", {
                 "intent_type": contract.get("intent_type"),
                 "intent_family": contract.get("intent_family"),
@@ -97,7 +102,7 @@ class IntentContractGuard:
             step["semantic_category"] = "structured_external_observation"
             step["required_source_level"] = "external_content"
             step["execution_method_policy"] = {
-                "preferred_methods": ["api_call", "web_search", "existing_tool"],
+                "preferred_methods": ["web_search", "api_call", "existing_tool"],
                 "disabled_methods": ["runtime_generated_tool", "model_knowledge"],
                 "fallback_allowed": True,
             }
@@ -127,18 +132,61 @@ class IntentContractGuard:
                 values.insert(0 if value == "structured_provider" else len(values), value)
         return values
 
-    def _intent_family(self, *, intent_type: str, normalized: dict[str, Any], parsed: dict[str, Any]) -> str:
-        text = " ".join([intent_type, *[str(k) for k in normalized.keys()], *[str(k) for k in parsed.keys()]]).casefold()
-        # Generic category labels only. Concrete business terms are not encoded.
+    def _intent_family(self, *, intent_type: str, normalized: dict[str, Any], parsed: dict[str, Any], temporal_expressions: list[Any] | None = None) -> str:
+        temporal_expressions = temporal_expressions if isinstance(temporal_expressions, list) else []
+        temporal_types = []
+        temporal_texts = []
+        for item in temporal_expressions:
+            if isinstance(item, dict):
+                temporal_types.append(str(item.get("value_type") or ""))
+                temporal_texts.append(str(item.get("text") or ""))
+        text = " ".join([
+            intent_type,
+            *[str(k) for k in normalized.keys()],
+            *[str(k) for k in parsed.keys()],
+            *temporal_types,
+            *temporal_texts,
+        ]).casefold()
+        # Generic category labels only. This uses structural temporal signals
+        # emitted upstream rather than concrete domain/provider names.
         has_external_targets = bool(normalized) and any(
             isinstance(v, (list, dict)) or str(v).strip()
             for v in normalized.values()
         )
+        has_runtime_temporal_marker = any(str(t).casefold() in {"datetime", "time", "timestamp"} for t in temporal_types)
+        has_parameter_entity = any(str(k).casefold() in {"location", "date", "dates"} for k in normalized.keys())
+        if has_runtime_temporal_marker and not has_parameter_entity:
+            return "runtime_observation"
         if ("current" in text or "runtime" in text or "remind" in text) and not ("information" in text and has_external_targets):
             return "runtime_observation"
         if "information" in text or "retrieval" in text or "lookup" in text or "search" in text:
             return "external_information"
         return "general"
+
+    def _is_redundant_parameter_preparation_step(self, step: dict[str, Any], contract: dict[str, Any], all_steps: list[Any]) -> bool:
+        if str(contract.get("intent_family") or "") != "external_information":
+            return False
+        normalized = contract.get("normalized_intent") if isinstance(contract.get("normalized_intent"), dict) else {}
+        if not normalized:
+            return False
+        known = ((step.get("parameters") or {}).get("known") if isinstance(step.get("parameters"), dict) else {})
+        known = known if isinstance(known, dict) else {}
+        normalized_keys = {str(k) for k in normalized.keys()}
+        known_keys = {str(k) for k in known.keys()}
+        # If a step only prepares a subset of already-normalized parameters and
+        # a later ready step contains the full normalized parameter set, skip it.
+        if normalized_keys.issubset(known_keys):
+            return False
+        step_id = step.get("step_id") or step.get("task_id")
+        for other in all_steps:
+            if not isinstance(other, dict) or other is step:
+                continue
+            deps = other.get("depends_on") if isinstance(other.get("depends_on"), list) else []
+            other_known = ((other.get("parameters") or {}).get("known") if isinstance(other.get("parameters"), dict) else {})
+            other_known = other_known if isinstance(other_known, dict) else {}
+            if step_id in deps and normalized_keys.issubset({str(k) for k in other_known.keys()}):
+                return True
+        return False
 
     def _target_values(self, *items: Any) -> list[str]:
         values: list[str] = []

@@ -192,6 +192,19 @@ class ToolCallExecutor:
             # only uses runtime-configured structural policies.
             step = self._repair_single_step_before_execution(step, state)
             step = self.state_consistency.repair_step(step)
+            if bool(step.get("skip_execution")):
+                execution_steps.append({
+                    "step_id": step_id,
+                    "status": "skipped",
+                    "tool": {"id": "contract_skip", "source": "runtime_contract"},
+                    "input": {},
+                    "result": {
+                        "status": "skipped",
+                        "data": {"reason": step.get("skip_reason") or "execution was skipped by contract"},
+                    },
+                    "source_step": step,
+                })
+                continue
             required_capability = self._capability_name(step.get("required_capability"))
             human_interaction = self._normalize_human_interaction(step.get("human_interaction"))
             execution_ready = bool(step.get("execution_ready", False))
@@ -1105,8 +1118,11 @@ class ToolCallExecutor:
         forced = ""
         reason = ""
         if family == "external_information" and method_contract.method in {"runtime_generated_tool", "model_knowledge"}:
-            forced = next((m for m in preferred if m not in disabled and m in {"api_call", "web_search", "existing_tool"}), "web_search")
+            forced = next((m for m in ["web_search", "api_call", "existing_tool"] if m in preferred and m not in disabled), "web_search")
             reason = "locked_external_information_contract_blocked_runtime_method"
+        elif family == "external_information" and method_contract.method == "api_call" and "web_search" not in disabled:
+            forced = "web_search"
+            reason = "search_first_external_information_contract"
         elif family == "runtime_observation" and method_contract.method in {"web_search", "api_call", "knowledge_base", "model_knowledge"}:
             forced = next((m for m in preferred if m not in disabled and m in {"runtime_generated_tool", "existing_tool"}), "runtime_generated_tool")
             reason = "locked_runtime_observation_contract_blocked_external_method"
@@ -3627,7 +3643,7 @@ class ToolCallExecutor:
             return "tool_execution_failed"
         if execution_steps and blocked_steps:
             return "partially_executed"
-        if execution_steps and all(step.get("status") == "executed" for step in execution_steps):
+        if execution_steps and all(step.get("status") in {"executed", "skipped"} for step in execution_steps):
             return "executed"
         if execution_steps:
             return "ready"
