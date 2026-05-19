@@ -63,6 +63,8 @@ class RuntimeBootstrap:
         self._ensure_model_topology()
         self._ensure_model_stage_policy()
         self._ensure_provider_runtime_templates()
+        self._ensure_runtime_capability_inference()
+        self._ensure_runtime_primitive_tool_templates()
         self._ensure_model_providers()
         self._ensure_workflow()
         self._ensure_node_configs()
@@ -88,6 +90,24 @@ class RuntimeBootstrap:
     def _ensure_provider_runtime_templates(self) -> None:
         source = Path("configs/provider_runtime_templates.seed.json")
         target = RUNTIME_GENERATED / "system_topology" / "provider_runtime_templates.json"
+        if target.exists():
+            return
+        if source.exists():
+            target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+    def _ensure_runtime_capability_inference(self) -> None:
+        source = Path("configs/runtime_capability_inference.seed.json")
+        target = RUNTIME_GENERATED / "system_topology" / "runtime_capability_inference.json"
+        if target.exists():
+            return
+        if source.exists():
+            target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+    def _ensure_runtime_primitive_tool_templates(self) -> None:
+        source = Path("configs/runtime_primitive_tool_templates.seed.json")
+        target = RUNTIME_GENERATED / "system_topology" / "runtime_primitive_tool_templates.json"
         if target.exists():
             return
         if source.exists():

@@ -9,6 +9,7 @@ from ai_core.tools.tool_blueprint_builder import ToolBlueprintBuilder
 from ai_core.tools.browser_automation_blueprint import BrowserAutomationBlueprintBuilder
 from ai_core.tools.tool_code_generation_request import ToolCodeGenerationRequestBuilder
 from ai_core.tools.runtime_generated_tool_installer import RuntimeGeneratedToolInstaller
+from ai_core.tools.runtime_primitive_tool_factory import RuntimePrimitiveToolFactory
 
 
 class RuntimeToolRegistry:
@@ -29,6 +30,7 @@ class RuntimeToolRegistry:
             self.registry_path.write_text("{}", encoding="utf-8")
 
         self.generated_tool_installer = RuntimeGeneratedToolInstaller()
+        self.primitive_tool_factory = RuntimePrimitiveToolFactory()
 
         self.blueprint_builder = ToolBlueprintBuilder()
         self.browser_blueprint_builder = BrowserAutomationBlueprintBuilder()
@@ -80,7 +82,7 @@ class RuntimeToolRegistry:
         if not isinstance(implementation, dict):
             return False
         impl_type = str(implementation.get("type") or "").lower().strip()
-        if impl_type not in {"python_function", "python_module", "runtime_python"}:
+        if impl_type not in {"python_function", "python_module", "runtime_python", "runtime_provider"}:
             return False
         if not (implementation.get("module_path") or implementation.get("path")):
             return False
@@ -110,6 +112,25 @@ class RuntimeToolRegistry:
                 **installed_artifact,
                 "status": installed_artifact.get("status", "enabled"),
                 "generation_status": "runtime_tool_artifact_installed",
+                "source_step": step,
+            }
+
+        primitive_artifact = self.primitive_tool_factory.build_artifact(
+            capability=capability,
+            step=step,
+            user_input=user_input,
+        )
+        if primitive_artifact:
+            installed_primitive = self.generated_tool_installer.install_artifact(
+                artifact=primitive_artifact,
+                capability=str(primitive_artifact.get("capability") or capability),
+                source_step=step,
+                user_input=user_input,
+            )
+            return {
+                **installed_primitive,
+                "status": installed_primitive.get("status", "enabled"),
+                "generation_status": "runtime_primitive_tool_generated_and_installed",
                 "source_step": step,
             }
 

@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from ai_core.utils.safe_json import make_json_safe
+from ai_core.runtime.evidence import RuntimeEvidenceNormalizer
 
 
 class EvidenceDirectAnswerBuilder:
@@ -25,6 +26,7 @@ class EvidenceDirectAnswerBuilder:
         payload: dict[str, Any],
         capability: str,
         attempts: list[dict[str, Any]] | None = None,
+        state: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         known = self._known_parameters(payload)
         scored: list[tuple[float, dict[str, Any], str]] = []
@@ -55,19 +57,36 @@ class EvidenceDirectAnswerBuilder:
             text = aggregate_text
 
         source_url = top_candidate.get("url") or top_candidate.get("official_documentation_url")
-        structured_records = self._extract_structured_records(text, known)
-        answer_material = self._build_answer_material(text, known, structured_records)
+        normalized = RuntimeEvidenceNormalizer().normalize(
+            text=text,
+            known=known,
+            source_url=str(source_url or ""),
+            state=state or {},
+        )
+        structured_records = normalized.get("normalized_facts") if isinstance(normalized.get("normalized_facts"), list) else []
+        answer_material = str(normalized.get("answer_material") or "").strip()
+        quality = normalized.get("answer_material_quality") if isinstance(normalized.get("answer_material_quality"), dict) else {}
+        if not answer_material or quality.get("passed") is False:
+            # Fall back to the legacy generic extractor only when the normalized
+            # path cannot produce compact source-backed material.
+            legacy_records = self._extract_structured_records(text, known)
+            answer_material = self._build_answer_material(text, known, legacy_records)
+            structured_records = legacy_records[:8]
+            quality = {"passed": bool(answer_material), "legacy_path_used": True, "domain_specific_rules_used": False}
         if not answer_material:
             return None
 
         data = {
             "answer": answer_material,
             "answer_material": answer_material,
-            "structured_evidence": structured_records[:8],
+            "normalized_facts": structured_records[:24],
+            "structured_evidence": structured_records[:12],
+            "selected_evidence_blocks": normalized.get("selected_evidence_blocks", [])[:8] if isinstance(normalized, dict) else [],
             "source_url": source_url,
             "source_title": top_candidate.get("title") or top_candidate.get("name"),
             "known_parameters": known,
             "candidate_score": top_candidate.get("score"),
+            "answer_material_quality": quality,
             "evidence_direct_fallback": True,
             "no_key_path_used": True,
             "raw_evidence_omitted": True,
@@ -101,19 +120,40 @@ class EvidenceDirectAnswerBuilder:
         if not isinstance(payload, dict):
             return {}
         known: dict[str, Any] = {}
-        direct_known = payload.get("known") if isinstance(payload.get("known"), dict) else {}
-        param_known = {}
-        params = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
-        if isinstance(params.get("known"), dict):
-            param_known = params.get("known") or {}
-        for source in (direct_known, param_known, payload):
+
+        def collect(source: Any) -> None:
+            if not isinstance(source, dict):
+                return
             for key, value in source.items():
                 if key in {"context", "source_step", "parameters", "known", "optional"}:
                     continue
                 if value is None or value == "":
                     continue
                 if isinstance(value, (str, int, float, bool)):
-                    known[key] = value
+                    known[str(key)] = value
+                elif isinstance(value, (list, tuple, set)):
+                    compact = [item for item in value if isinstance(item, (str, int, float, bool)) and str(item).strip()]
+                    if compact:
+                        known[str(key)] = compact
+                elif isinstance(value, dict):
+                    # Only keep shallow scalar/list dictionaries. Deep runtime
+                    # envelopes are handled through the state-aware normalizer.
+                    compact_dict: dict[str, Any] = {}
+                    for child_key, child_value in value.items():
+                        if isinstance(child_value, (str, int, float, bool)) and str(child_value).strip():
+                            compact_dict[str(child_key)] = child_value
+                        elif isinstance(child_value, (list, tuple, set)):
+                            child_list = [item for item in child_value if isinstance(item, (str, int, float, bool)) and str(item).strip()]
+                            if child_list:
+                                compact_dict[str(child_key)] = child_list
+                    if compact_dict:
+                        known[str(key)] = compact_dict
+
+        direct_known = payload.get("known") if isinstance(payload.get("known"), dict) else {}
+        params = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+        param_known = params.get("known") if isinstance(params.get("known"), dict) else {}
+        for source in (direct_known, param_known, payload):
+            collect(source)
         return known
 
     def _candidate_text(self, candidate: dict[str, Any]) -> str:

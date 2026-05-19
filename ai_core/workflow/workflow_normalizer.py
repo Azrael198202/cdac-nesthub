@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from ai_core.runtime.capability.capability_inference import CapabilityInference
+
 
 class WorkflowNormalizer:
     """
@@ -12,6 +14,9 @@ class WorkflowNormalizer:
     runtime-provided strings. It never hardcodes task types, actions, or capability
     names.
     """
+
+    def __init__(self) -> None:
+        self.capability_inference = CapabilityInference()
 
     def normalize(self, workflow_plan: dict[str, Any]) -> dict[str, Any]:
         plan = deepcopy(workflow_plan or {})
@@ -40,6 +45,8 @@ class WorkflowNormalizer:
                 step_capability = self._match_capability(step, global_capabilities)
             if step_capability:
                 step["required_capability"] = step_capability
+            else:
+                step = self.capability_inference.apply_to_step(step=step, plan=plan)
 
             if "execution_strategy" not in step or not isinstance(step.get("execution_strategy"), list):
                 plan_strategy = plan.get("execution_strategy") if isinstance(plan.get("execution_strategy"), list) else None

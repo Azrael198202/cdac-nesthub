@@ -2506,6 +2506,7 @@ class ToolCallExecutor:
             payload=tool_input,
             capability=capability,
             attempts=[],
+            state=state,
         )
         if not direct_result or not self.result_classifier.classify(direct_result).get("success"):
             await event_bus.emit(run_id, {
@@ -2828,6 +2829,7 @@ class ToolCallExecutor:
             payload=tool_input,
             capability=capability,
             attempts=attempts,
+            state=state,
         )
         if direct_result and self.result_classifier.classify(direct_result).get("success"):
             direct_result.setdefault("fallback", {})["no_key_evidence_direct_answer"] = {
