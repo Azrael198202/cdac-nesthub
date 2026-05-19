@@ -105,7 +105,6 @@ import html
 import json
 import re
 import urllib.request
-from ai_core.runtime.temporal import DateAliasGenerator
 from datetime import datetime
 
 CANDIDATE_URL = {json.dumps(url, ensure_ascii=False)}
@@ -219,9 +218,40 @@ def _aliases(value) -> list[str]:
         if not s:
             return
         out.append(s)
-        out.extend(DateAliasGenerator().aliases_for(s))
+        out.extend(_date_aliases_for(s))
     add(value)
     return list(dict.fromkeys(out))
+
+
+def _date_aliases_for(value: str) -> list[str]:
+    """Create generic textual aliases for ISO-like temporal values.
+
+    This generated artifact is intentionally self-contained so sandbox
+    verification does not depend on project package imports. It does not
+    contain domain semantics; aliases are derived only from the supplied
+    runtime value.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return []
+    aliases = []
+    def add(v):
+        v = str(v or "").strip()
+        if v:
+            aliases.append(v)
+    add(text)
+    normalized = text.replace("/", "-").replace(".", "-")
+    match = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T\s].*)?$", normalized)
+    if match:
+        y, m, d = match.groups()
+        mi, di = int(m), int(d)
+        add(f"{{y}}-{{mi:02d}}-{{di:02d}}")
+        add(f"{{y}}/{{mi:02d}}/{{di:02d}}")
+        add(f"{{mi:02d}}/{{di:02d}}")
+        add(f"{{mi}}/{{di}}")
+        add(f"{{di:02d}}")
+        add(f"{{di}}")
+    return list(dict.fromkeys(aliases))
 
 
 def _required_terms(known: dict) -> dict:

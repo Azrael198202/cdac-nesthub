@@ -209,7 +209,16 @@ class AgentDelegationRuntime:
         community_id = str(task_graph.get("community_id") or run_payload.get("community_id") or "default")
         selected = self._select_participants(task_graph, participants)
         run_payload["status"] = "resuming"
+        run_payload["current_stage"] = "resuming"
+        # Once resume has been accepted, the top-level waiting contract must be
+        # cleared immediately. Otherwise the UI keeps showing a required-input
+        # prompt while the primary runtime is already continuing from the
+        # checkpoint. Participant-level paused payloads are left intact until
+        # the primary runtime returns the resumed result, because they carry the
+        # durable checkpoint identity needed by the resume call.
+        self._clear_waiting_fields(run_payload)
         self._record_progress(run_payload, "durable_resume", "Durable resume requested", "running")
+        self.store.write_json(f"generated/results/{run_id}.json", run_payload)
 
         existing_results = self._dedupe_result_payloads(list(run_payload.get("agent_results") or []))
         resumed_index = None

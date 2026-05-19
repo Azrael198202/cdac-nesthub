@@ -41,6 +41,16 @@ class VerifiedSandboxRuntime:
         self.static_verifier = SandboxVerifier()
         self.dependency_scanner = DependencyScanner()
 
+    def _project_root(self) -> Path:
+        """Return the source root that contains ai_core.
+
+        Generated artifacts may import generic runtime support modules. The
+        sandbox keeps the generated artifact isolated while exposing this root
+        read-only/through PYTHONPATH so those generic support modules can be
+        imported during verification.
+        """
+        return Path(__file__).resolve().parents[2]
+
     def verify_tool_artifact(
         self,
         *,
@@ -257,10 +267,14 @@ class VerifiedSandboxRuntime:
 
     def _run_in_docker(self, root: Path, runner: Path, *, allow_network: bool, timeout_seconds: int) -> dict[str, Any]:
         network = "bridge" if allow_network else "none"
+        project_root = self._project_root()
         cmd = [
             "docker", "run", "--rm", "--network", network,
             "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-            "-v", f"{root}:/work:ro", "-w", "/work", "python:3.12-slim",
+            "-v", f"{root}:/work:ro",
+            "-v", f"{project_root}:/project:ro",
+            "-e", "PYTHONPATH=/project",
+            "-w", "/work", "python:3.12-slim",
             "python", str(PurePosixPath("/work") / runner.name),
         ]
         proc = run_text(cmd, capture_output=True, text=True, timeout=timeout_seconds)
@@ -270,5 +284,9 @@ class VerifiedSandboxRuntime:
         venv = root / ".venv"
         run_text([sys.executable, "-m", "venv", str(venv)], check=True, capture_output=True, text=True, timeout=timeout_seconds)
         py = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-        proc = run_text([str(py), str(runner)], cwd=str(root), capture_output=True, text=True, timeout=timeout_seconds)
+        env = os.environ.copy()
+        project_root = str(self._project_root())
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = project_root if not existing else project_root + os.pathsep + existing
+        proc = run_text([str(py), str(runner)], cwd=str(root), env=env, capture_output=True, text=True, timeout=timeout_seconds)
         return {"mode": "venv", "returncode": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr, "checks": [{"name": "venv_sandbox_execution", "returncode": proc.returncode}]}
