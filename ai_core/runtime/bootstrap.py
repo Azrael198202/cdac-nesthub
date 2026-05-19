@@ -4,12 +4,14 @@ from ai_core.config.paths import (
 )
 from ai_core.config.loader import ConfigLoader
 from ai_core.runtime.runtime_template_generator import RuntimeTemplateGenerator
+from ai_core.runtime.modeling.capability_topology import RuntimeModelTopology
 
 
 class RuntimeBootstrap:
     def __init__(self) -> None:
         self.loader = ConfigLoader()
         self.template_generator = RuntimeTemplateGenerator()
+        self.model_topology = RuntimeModelTopology()
 
     def ensure(self) -> None:
         for d in [
@@ -36,6 +38,7 @@ class RuntimeBootstrap:
             RUNTIME_GENERATED / "module_generation_requests",
             RUNTIME_GENERATED / "modules",
             RUNTIME_GENERATED / "models",
+            RUNTIME_GENERATED / "modeling",
             RUNTIME_GENERATED / "api_discovery_requests",
             RUNTIME_GENERATED / "connectors",
             RUNTIME_REGISTRY,
@@ -49,6 +52,7 @@ class RuntimeBootstrap:
         ]:
             d.mkdir(parents=True, exist_ok=True)
 
+        self._ensure_model_topology()
         self._ensure_model_providers()
         self._ensure_workflow()
         self._ensure_node_configs()
@@ -59,6 +63,10 @@ class RuntimeBootstrap:
         self._ensure_environment()
         self._ensure_registry()
         self._ensure_datasets()
+
+
+    def _ensure_model_topology(self) -> None:
+        self.model_topology.ensure_defaults()
 
     def _ensure_model_providers(self) -> None:
         """Ensure provider config prefers the local base model qwen3:8b.
@@ -80,9 +88,20 @@ class RuntimeBootstrap:
         return {
             "default_route": ["ollama", "openai"],
             "routes": {
+                "local_light": ["ollama", "openai"],
+                "local_capable": ["ollama", "vllm", "lmstudio", "openai"],
+                "strong_reasoning": ["openai", "vllm", "lmstudio", "ollama"],
                 "input_parsing": ["ollama", "openai"],
+                "intent_simple": ["ollama", "openai"],
+                "intent_complex": ["openai", "vllm", "lmstudio", "ollama"],
                 "intent_recognition": ["ollama", "openai"],
+                "workflow_basic": ["ollama", "vllm", "lmstudio", "openai"],
+                "workflow_complex": ["openai", "vllm", "lmstudio", "ollama"],
                 "workflow_planning": ["ollama", "openai"],
+                "semantic_grounding": ["openai", "vllm", "lmstudio", "ollama"],
+                "tool_selection": ["ollama", "vllm", "lmstudio", "openai"],
+                "stable_synthesis": ["ollama", "openai"],
+                "stable_synthesis_strong": ["openai", "vllm", "lmstudio", "ollama"],
                 "reasoning": ["ollama", "openai"],
                 # Code artifact generation uses code-specialized local models first.
                 # The generic vision/reasoning model is kept later as fallback only.
@@ -347,8 +366,10 @@ class RuntimeBootstrap:
                     "cache_enabled": True,
                     "interactive_key_required": True,
                     "role": "external_fallback",
-                    "model_tags": ["reasoning", "json_generation", "tool_calling", "document_generation"],
-                    "capabilities": ["reasoning", "json_generation", "tool_calling", "document_generation"]
+                    "model_tags": ["reasoning", "json_generation", "tool_calling", "document_generation", "semantic_grounding", "workflow_planning", "evidence_verification", "stable_synthesis", "structured_output"],
+                    "capabilities": ["reasoning", "json_generation", "tool_calling", "document_generation", "semantic_grounding", "workflow_planning", "evidence_verification", "stable_synthesis", "structured_output"],
+                    "quality": {"semantic_grounding": 20, "workflow_planning": 16, "stable_synthesis": 16, "structured_output": 15},
+                    "priority": 4
                 },
 
                 "vllm_coder": {
@@ -785,6 +806,9 @@ class RuntimeBootstrap:
                 "adapter_id": "input_parsing_adapter",
                 "type": "llm_json",
                 "provider_route": ["ollama", "openai"],
+                "route_name": "input_parsing",
+                "model_complexity": "low",
+                "model_capabilities": ["json_generation", "structured_extraction"],
                 "prompt": "runtime/generated/prompts/input_parsing.yaml",
                 "output_schema": "runtime/generated/schemas/input_parsing.schema.json",
                 "json_mode": True
@@ -793,6 +817,9 @@ class RuntimeBootstrap:
                 "adapter_id": "intent_recognition_adapter",
                 "type": "llm_json",
                 "provider_route": ["ollama", "openai"],
+                "route_name": "intent_simple",
+                "model_complexity": "low",
+                "model_capabilities": ["json_generation", "structured_extraction"],
                 "prompt": "runtime/generated/prompts/intent_recognition.yaml",
                 "output_schema": "runtime/generated/schemas/intent_recognition.schema.json",
                 "json_mode": True
@@ -801,6 +828,9 @@ class RuntimeBootstrap:
                 "adapter_id": "workflow_planning_adapter",
                 "type": "llm_json",
                 "provider_route": ["ollama", "openai"],
+                "route_name": "workflow_basic",
+                "model_complexity": "medium",
+                "model_capabilities": ["workflow_planning", "json_generation"],
                 "prompt": "runtime/generated/prompts/workflow_planning.yaml",
                 "output_schema": "runtime/generated/schemas/workflow_planning.schema.json",
                 "json_mode": True

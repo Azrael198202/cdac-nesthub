@@ -32,6 +32,12 @@ class ExecutionModeSelector:
                 mode = str(rule.get("execution_mode") or "").strip()
                 if mode:
                     return mode
+        # Default to the first non-runtime-native mode unless runtime-native is
+        # explicitly requested by contract or routing rule. This prevents local
+        # runtime state from swallowing external or generated capabilities.
+        for mode in self.priority.order(policy):
+            if mode != "runtime_native":
+                return mode
         return self.priority.order(policy)[0]
 
     def policy_for(self, *, step: dict[str, Any], plan: dict[str, Any], state: dict[str, Any], capability: str) -> dict[str, Any]:

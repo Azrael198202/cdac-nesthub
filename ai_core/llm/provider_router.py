@@ -6,6 +6,7 @@ from ai_core.llm.provider_handler_registry import ProviderHandlerRegistry
 from ai_core.llm.provider_handlers.base import ProviderUnavailableError
 from ai_core.context.prompt_budget_manager import PromptBudgetManager
 from ai_core.llm.model_capability_matcher import ModelCapabilityMatcher
+from ai_core.runtime.modeling import ModelRoutingPlanner
 
 
 class ProviderRouter:
@@ -20,6 +21,7 @@ class ProviderRouter:
         self.registry = ProviderHandlerRegistry()
         self.prompt_budget = PromptBudgetManager()
         self.model_matcher = ModelCapabilityMatcher()
+        self.routing_planner = ModelRoutingPlanner()
 
     def _config(self) -> dict:
         return self.loader.load_yaml(RUNTIME_CONFIGS / "models" / "providers.yaml")
@@ -60,14 +62,27 @@ class ProviderRouter:
         config = self._config()
         route = list(adapter.get("provider_route") or config.get("default_route", []))
         providers = config.get("providers", {})
+        route_plan = self.routing_planner.plan(
+            node_id=node_id,
+            adapter=adapter,
+            prompt=prompt,
+            rendered_user_prompt=rendered_user_prompt,
+            schema=schema,
+            provider_config=config,
+            default_route=route,
+        )
+        route = route_plan.get("route") or route
         route = self.model_matcher.rank_route(route=route, providers=providers, config=config, adapter=adapter)
         last_error = None
 
         await event_bus.emit(run_id, {
             "type": "LLM_ROUTE_START",
             "title": "LLM route started",
-            "message": "Trying providers: " + ", ".join(route),
+            "message": "route=" + str(route_plan.get("route_name")) + "; complexity=" + str((route_plan.get("complexity") or {}).get("level")) + "; providers=" + ", ".join(route),
             "node_id": node_id,
+            "route_name": route_plan.get("route_name"),
+            "complexity": route_plan.get("complexity"),
+            "escalated": route_plan.get("escalated"),
         })
 
         for provider_name in route:

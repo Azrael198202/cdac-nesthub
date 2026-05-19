@@ -69,6 +69,12 @@ class ModelCapabilityMatcher:
         # Extra routing quality hints remain provider-neutral. They do not mention
         # specific vendors; they only reward declared fit for the requested role.
         quality = provider.get("quality") if isinstance(provider.get("quality"), dict) else {}
+        for key, value in quality.items():
+            if str(key).lower() in {r.lower() for r in required}:
+                try:
+                    score += int(value)
+                except Exception:
+                    pass
         if any(x in {"code_generation", "python_generation", "adapter_generation"} for x in [r.lower() for r in required]):
             score += int(quality.get("code_generation", 0))
             score += int(quality.get("structured_output", 0))

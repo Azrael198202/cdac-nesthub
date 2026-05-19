@@ -18,3 +18,10 @@ runtime/deliveries/
 runtime/checkpoints/
 runtime/cache/
 runtime/configs/secrets/
+tests/
+scripts/
+*.log
+runtime/downloads/
+runtime/registry/
+runtime/knowledge/
+runtime/datasets/

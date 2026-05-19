@@ -136,3 +136,25 @@ Generated runtime files are not included in the source archive.
 - Web retrieval remains a fallback instead of the default for every request.
 - Added `.gitignore` to prevent cache/runtime artifacts from entering source packages.
 - Production package excludes `tests/`, `scripts/`, `__pycache__/`, `.pyc`, and runtime-generated files.
+
+
+## V2.8.14 Multi-Model Cognitive Routing
+
+This version adds a generic cognitive model topology. The runtime can route low-complexity nodes to a local base model and escalate high-complexity or low-quality nodes to stronger local/API models through LiteLLM-compatible provider configuration.
+
+Key points:
+
+- `input_parsing` and simple intent-style nodes can stay on the configured local base model.
+- Complex planning, semantic grounding, evidence verification, stable synthesis, and artifact/code generation can use stronger routes.
+- Routing is based on structural runtime signals: node id, prompt/schema size, generic required capabilities, prior failures, and feedback scores.
+- No business-domain vocabulary is hardcoded into `ai_core`; generated runtime topology and feedback are stored under `runtime/generated/modeling/`.
+- `tests/`, `scripts/`, `__pycache__/`, `*.pyc`, and runtime execution artifacts are excluded from the source package.
+
+Important files:
+
+```text
+ai_core/runtime/modeling/
+configs/model_routing_topology.json
+ai_core/llm/provider_router.py
+ai_core/llm/model_capability_matcher.py
+```
