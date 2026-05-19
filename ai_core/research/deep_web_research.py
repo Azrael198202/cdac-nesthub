@@ -21,6 +21,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 from ai_core.research.web_research_tool import GenericWebResearchTool
 from ai_core.runtime.evidence import EvidenceBudgetAllocator, CandidateEvidenceRanker, AdaptiveEvidenceReducer
+from ai_core.runtime.browser import BrowserNetworkObserver, StructuredResponseExtractor
 
 
 @dataclass
@@ -182,6 +183,8 @@ class DeepWebResearchPipeline:
         self.budget_allocator = EvidenceBudgetAllocator()
         self.ranker = CandidateEvidenceRanker()
         self.reducer = AdaptiveEvidenceReducer()
+        self.browser_observer = BrowserNetworkObserver()
+        self.structured_extractor = StructuredResponseExtractor()
 
     async def run(
         self,
@@ -205,10 +208,39 @@ class DeepWebResearchPipeline:
             if not url or url in seen:
                 continue
             seen.add(url)
+            browser_doc: dict[str, Any] | None = None
+            if policy.get("browser_network_discovery_enabled", True):
+                observed = await self.browser_observer.observe(url=url)
+                if observed.status == "success":
+                    browser_doc = observed.to_document()
+                    structured = self.structured_extractor.extract(browser_document=browser_doc, known=known, max_facts=budget.fact_limit)
+                    browser_doc["normalized_facts"] = structured.normalized_facts
+                    browser_doc["answer_material"] = structured.answer_material
+                    browser_doc["source_summaries"] = structured.source_summaries
+                    browser_doc["structured_response_extraction"] = structured.extraction_trace
+                    urls.append(browser_doc.get("url") or url)
+                    layers.append("browser_network_observation")
+                    if structured.normalized_facts:
+                        layers.append("structured_network_response")
+                    fetched.append({"source": "browser_network_discovery", "source_search_result": candidate, "document": browser_doc})
+                    reduced = self.reducer.reduce(documents=fetched, known=known, state=state, budget=budget)
+                    if self.budget_allocator.should_stop(normalized=reduced, fetched_count=len(fetched), budget=budget):
+                        break
+
+            # DOM/text fallback is still useful when no structured network response
+            # satisfies the evidence gate. It runs after browser observation.
             doc = await self.web.fetch(url=url, max_chars=max(policy.get("fetch_chars_per_source", budget.fetch_chars_per_source), budget.fetch_chars_per_source))
             if not isinstance(doc, dict) or doc.get("status") != "success":
                 continue
+            if browser_doc:
+                # Preserve browser-visible material and captured network metadata.
+                doc = {**doc, **{k: v for k, v in browser_doc.items() if v}}
             extracted = self.extractor.extract(doc)
+            if browser_doc and browser_doc.get("browser_network_responses"):
+                extracted["browser_network_responses"] = browser_doc.get("browser_network_responses")
+                extracted["structured_response_extraction"] = browser_doc.get("structured_response_extraction")
+                extracted["normalized_facts"] = browser_doc.get("normalized_facts") or []
+                extracted["answer_material"] = browser_doc.get("answer_material") or ""
             urls.append(url)
             layers.extend(extracted.get("extraction_layers") or [])
             fetched.append({"source": "deep_web_extraction", "source_search_result": candidate, "document": extracted})
