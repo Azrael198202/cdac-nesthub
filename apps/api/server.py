@@ -74,7 +74,7 @@ async def home():
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
             "Expires": "0",
-            "X-AI-Core-Version": "v2.9.6",
+            "X-AI-Core-Version": "v2.9.7",
         },
     )
 
@@ -123,7 +123,7 @@ async def agent_studio_resume_run(req: AgentStudioResumeRunRequest):
 
 @app.get("/api/version")
 async def version():
-    return JSONResponse({"version": "v2.9.6", "name": "runtime_execution_policy_and_credential_recovery"})
+    return JSONResponse({"version": "v2.9.7", "name": "runtime_auto_repair_and_ui_recovery"})
 
 
 @app.post("/api/chat")

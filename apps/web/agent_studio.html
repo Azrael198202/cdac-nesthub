@@ -68,7 +68,8 @@ async function sendMessage(){
     const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});
     const data=await res.json();
     addMessage(renderJson(data), data.status==='completed'?'item':'item error');
-    if(data.missing_inputs && data.missing_inputs.length){ lastMissingInputs=data.missing_inputs; lastPendingRunId=data.run_id||''; lastPendingInstruction=text; addMissingInputs(data.missing_inputs, text, lastPendingRunId); }
+    const pendingItems = collectMissingInputs(data);
+    if(pendingItems.length){ lastMissingInputs=pendingItems; lastPendingRunId=data.run_id||''; lastPendingInstruction=text; addMissingInputs(pendingItems, text, lastPendingRunId); }
     if(data.final_answer){ addMessage('Final Answer:\n'+data.final_answer,'item final'); }
     await refreshState();
   }catch(e){
@@ -106,9 +107,10 @@ function openMissingInputModal(items, runId){
     const hint=document.createElement('div');
     hint.className='fieldHint';
     hint.textContent=message + (validation ? '\n\nValidation error:\n' + validation : '');
-    const area = kind==='validation_recovery' && field==='corrected_json';
+    const inputType=String(it.input_type||'');
+    const area = inputType==='textarea' || (kind==='validation_recovery' && field==='corrected_json');
     const input=document.createElement(area?'textarea':'input');
-    if(!area && (kind==='secret_input' || kind==='optional_credential_choice')){ input.type='password'; input.autocomplete='off'; }
+    if(!area && (inputType==='password' || kind==='secret_input' || kind==='optional_credential_choice')){ input.type='password'; input.autocomplete='off'; }
     input.id='missing_form_'+idx;
     input.className='fieldInput '+(area?'area':'');
     input.dataset.field=field;
@@ -163,7 +165,8 @@ async function resumePendingRun(runId, providedInputs){
     const res=await fetch('/api/agent-studio/resume-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_id:runId, provided_inputs:providedInputs||null})});
     const data=await res.json();
     addMessage(renderJson(data), data.status==='completed'?'item':'item error');
-    if(data.missing_inputs && data.missing_inputs.length){ lastMissingInputs=data.missing_inputs; lastPendingRunId=data.run_id||runId; addMissingInputs(data.missing_inputs, lastPendingInstruction, lastPendingRunId); }
+    const pendingItems = collectMissingInputs(data);
+    if(pendingItems.length){ lastMissingInputs=pendingItems; lastPendingRunId=data.run_id||runId; addMissingInputs(pendingItems, lastPendingInstruction, lastPendingRunId); }
     if(data.final_answer){ addMessage('Final Answer:\n'+data.final_answer,'item final'); }
     await refreshState();
   }catch(e){ addMessage('Resume failed: '+e,'item error'); }
@@ -204,6 +207,13 @@ function renderState(data){
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Runtime Traces</div>'); if(!traces.length) right.insertAdjacentHTML('beforeend','<div class="empty">No trace.</div>'); traces.forEach(t=>right.appendChild(card(t.trace_id||'trace', renderJson(t))));
 }
 
+function collectMissingInputs(payload){
+  if(!payload || typeof payload !== 'object'){ return []; }
+  if(Array.isArray(payload.missing_inputs) && payload.missing_inputs.length){ return payload.missing_inputs; }
+  const derived = deriveMissingInputs(payload);
+  return Array.isArray(derived) ? derived : [];
+}
+
 function deriveMissingInputs(run){
   if(Array.isArray(run.missing_inputs) && run.missing_inputs.length){ return run.missing_inputs; }
   const pending=run.pending_action||{};
@@ -216,8 +226,16 @@ function deriveMissingInputs(run){
     if(m){ field=m[1]+(m[2]!==undefined?'.'+m[2]:'')+'.'+m[3]; }
     return [{kind:'validation_recovery', field, message:'Schema validation failed. Please provide a valid value.', validation_error:err}];
   }
-  if(kind==='secret_input'){
-    return [{kind:'secret_input', field:String(pending.secret_key||'runtime_access_key'), message:'A runtime access key is required to continue.'}];
+  if(kind==='secret_input' || kind==='optional_credential_choice'){
+    return [{kind:kind, field:String(pending.secret_key||'runtime_access_key'), message:String(pending.message||'A runtime access key is required to continue.'), input_type:'password'}];
+  }
+  if(kind==='human_information_required'){
+    const request = pending.request || {};
+    const fields = Array.isArray(request.fields) ? request.fields : [];
+    if(fields.length){
+      return fields.map((f,idx)=>({kind:kind, field:String(f.name||f.field||('field_'+idx)), message:String(f.message||f.label||request.message||'Please provide this value.'), input_type:String(f.input_type||'text')}));
+    }
+    return [{kind:kind, field:'input', message:String(request.message||pending.message||'Please provide the required information.')}];
   }
   return [];
 }

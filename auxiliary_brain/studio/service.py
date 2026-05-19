@@ -252,9 +252,10 @@ class AgentStudioService:
             "delivery": result.get("delivery"),
         }
         if status in {"requires_key", "requires_input", "paused"}:
-            response["missing_inputs"] = result.get("missing_inputs", [])
-            response["pending_action"] = result.get("pending_action")
-            response["message"] = "Delegated primary-runtime execution is waiting for required input."
+            pending_action = result.get("pending_action")
+            response["pending_action"] = pending_action
+            response["missing_inputs"] = self._normalize_missing_inputs(result.get("missing_inputs", []), pending_action)
+            response["message"] = self._paused_message(response["missing_inputs"], pending_action)
         return response
 
     async def resume_run(self, run_id: str, provided_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -308,10 +309,62 @@ class AgentStudioService:
             "delivery": result.get("delivery"),
         }
         if status in {"requires_key", "requires_input", "paused"}:
-            response["missing_inputs"] = result.get("missing_inputs", [])
-            response["pending_action"] = result.get("pending_action")
-            response["message"] = "Delegated primary-runtime execution is waiting for required input."
+            pending_action = result.get("pending_action")
+            response["pending_action"] = pending_action
+            response["missing_inputs"] = self._normalize_missing_inputs(result.get("missing_inputs", []), pending_action)
+            response["message"] = self._paused_message(response["missing_inputs"], pending_action)
         return response
+
+    def _normalize_missing_inputs(self, missing_inputs: Any, pending_action: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if isinstance(missing_inputs, list) and missing_inputs:
+            return [x for x in missing_inputs if isinstance(x, dict)]
+        pending = pending_action if isinstance(pending_action, dict) else {}
+        kind = str(pending.get("kind") or "")
+        if kind in {"secret_input", "optional_credential_choice"}:
+            return [{
+                "kind": kind,
+                "field": str(pending.get("secret_key") or "runtime_access_key"),
+                "message": str(pending.get("message") or "A runtime access key is required to continue."),
+                "input_type": "password",
+                "required": True,
+            }]
+        if kind == "human_information_required":
+            request = pending.get("request") if isinstance(pending.get("request"), dict) else {}
+            fields = request.get("fields") if isinstance(request.get("fields"), list) else []
+            normalized = []
+            for index, field in enumerate(fields):
+                if isinstance(field, dict):
+                    normalized.append({
+                        "kind": kind,
+                        "field": str(field.get("name") or field.get("field") or f"field_{index}"),
+                        "message": str(field.get("message") or field.get("label") or "Please provide this value."),
+                        "input_type": str(field.get("input_type") or "text"),
+                        "required": bool(field.get("required", True)),
+                    })
+            if normalized:
+                return normalized
+            return [{"kind": kind, "field": "input", "message": str(request.get("message") or pending.get("message") or "Please provide the required information."), "required": True}]
+        if kind == "validation_recovery":
+            # Validation recovery should normally be handled automatically by the runtime repair/escalation path.
+            # Expose a JSON editor only as a final fallback so the UI can still recover instead of silently pausing.
+            return [{
+                "kind": kind,
+                "field": "corrected_json",
+                "message": "Automatic repair could not fully validate this node result. Paste corrected JSON to continue.",
+                "validation_error": str(pending.get("validation_error") or ""),
+                "input_type": "textarea",
+                "required": True,
+            }]
+        return []
+
+    def _paused_message(self, missing_inputs: list[dict[str, Any]], pending_action: dict[str, Any] | None) -> str:
+        pending = pending_action if isinstance(pending_action, dict) else {}
+        kind = str(pending.get("kind") or "")
+        if missing_inputs:
+            return "Delegated primary-runtime execution is waiting for required input."
+        if kind == "validation_recovery":
+            return "Delegated primary-runtime execution paused after schema validation failed. Runtime auto repair should handle structural errors before asking the user."
+        return "Delegated primary-runtime execution is paused."
 
 
     def _derive_execution_objective(self, instruction: str, participant_name: str | None = None) -> str:
