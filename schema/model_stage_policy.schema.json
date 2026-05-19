@@ -1,0 +1,104 @@
+{
+  "type": "object",
+  "required": [
+    "version",
+    "global_policy",
+    "model_catalog",
+    "stages"
+  ],
+  "properties": {
+    "version": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "global_policy": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "model_catalog": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "provider_template",
+          "tier",
+          "cost_class",
+          "install_strategy",
+          "capabilities"
+        ],
+        "properties": {
+          "provider_template": {
+            "type": "string"
+          },
+          "family": {
+            "type": "string"
+          },
+          "tier": {
+            "type": "string"
+          },
+          "cost_class": {
+            "type": "string"
+          },
+          "install_strategy": {
+            "type": "string"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "stages": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "default",
+          "fallback",
+          "upper_substitutes",
+          "lower_substitutes",
+          "validation"
+        ],
+        "properties": {
+          "default": {
+            "type": "string"
+          },
+          "fallback": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "upper_substitutes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "lower_substitutes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "validation": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "raw_evidence_policy": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,434 @@
+{
+  "version": "2.9.1",
+  "description": "Generic stage-bound model policy. No business-domain keywords or task-specific rules.",
+  "global_policy": {
+    "cost_policy": {
+      "allow_paid_models": true,
+      "prefer_local_when_quality_sufficient": true,
+      "missing_paid_key_action": "skip_and_try_lower_substitute"
+    },
+    "missing_model_policy": {
+      "local_model_action": "download_on_demand",
+      "external_model_action": "use_when_key_available",
+      "unknown_stage_action": "ask_strong_model_for_model_recommendation_then_persist_candidate"
+    },
+    "routing_control": {
+      "model_routing_is_deterministic": true,
+      "llm_may_only_propose_candidates": true,
+      "capability_routing_uses_taxonomy_first": true,
+      "execution_mode_uses_policy_first": true
+    }
+  },
+  "model_catalog": {
+    "qwen3:1.7b": {
+      "provider_template": "ollama",
+      "family": "qwen",
+      "tier": "local_small",
+      "cost_class": "free",
+      "install_strategy": "on_demand",
+      "capabilities": [
+        "json_generation",
+        "short_context"
+      ]
+    },
+    "qwen2.5:3b": {
+      "provider_template": "ollama",
+      "family": "qwen",
+      "tier": "local_small",
+      "cost_class": "free",
+      "install_strategy": "on_demand",
+      "capabilities": [
+        "json_generation",
+        "structured_extraction"
+      ]
+    },
+    "qwen3:4b": {
+      "provider_template": "ollama",
+      "family": "qwen",
+      "tier": "local_basic",
+      "cost_class": "free",
+      "install_strategy": "on_demand",
+      "capabilities": [
+        "json_generation",
+        "structured_extraction",
+        "reasoning"
+      ]
+    },
+    "qwen3:8b": {
+      "provider_template": "ollama",
+      "family": "qwen",
+      "tier": "local_standard",
+      "cost_class": "free",
+      "install_strategy": "on_demand",
+      "capabilities": [
+        "json_generation",
+        "structured_extraction",
+        "reasoning"
+      ]
+    },
+    "qwen3:14b": {
+      "provider_template": "ollama",
+      "family": "qwen",
+      "tier": "local_high",
+      "cost_class": "free",
+      "install_strategy": "on_demand",
+      "capabilities": [
+        "json_generation",
+        "structured_extraction",
+        "reasoning",
+        "planning"
+      ]
+    },
+    "qwen3:32b": {
+      "provider_template": "ollama",
+      "family": "qwen",
+      "tier": "local_strong",
+      "cost_class": "free",
+      "install_strategy": "on_demand",
+      "capabilities": [
+        "json_generation",
+        "reasoning",
+        "workflow_planning",
+        "stable_synthesis"
+      ]
+    },
+    "qwen2.5-coder:7b": {
+      "provider_template": "ollama_coder_qwen25",
+      "family": "qwen_coder",
+      "tier": "local_coder",
+      "cost_class": "free",
+      "install_strategy": "on_demand",
+      "capabilities": [
+        "code_generation",
+        "tool_generation",
+        "schema_repair",
+        "json_generation"
+      ]
+    },
+    "qwen2.5-coder:14b": {
+      "provider_template": "ollama_coder_qwen25",
+      "family": "qwen_coder",
+      "tier": "local_coder_high",
+      "cost_class": "free",
+      "install_strategy": "on_demand",
+      "capabilities": [
+        "code_generation",
+        "tool_generation",
+        "schema_repair",
+        "json_generation"
+      ]
+    },
+    "deepseek-coder-v2:16b": {
+      "provider_template": "ollama_coder_deepseek",
+      "family": "deepseek_coder",
+      "tier": "local_coder_high",
+      "cost_class": "free",
+      "install_strategy": "on_demand",
+      "capabilities": [
+        "code_generation",
+        "tool_generation",
+        "schema_repair",
+        "json_generation"
+      ]
+    },
+    "gpt-4o-mini": {
+      "provider_template": "openai",
+      "family": "openai",
+      "tier": "external_standard",
+      "cost_class": "paid",
+      "install_strategy": "key_required",
+      "capabilities": [
+        "json_generation",
+        "reasoning",
+        "structured_extraction",
+        "workflow_planning"
+      ]
+    },
+    "gpt-4.1": {
+      "provider_template": "openai",
+      "family": "openai",
+      "tier": "external_strong",
+      "cost_class": "paid",
+      "install_strategy": "key_required",
+      "capabilities": [
+        "json_generation",
+        "reasoning",
+        "workflow_planning",
+        "stable_synthesis",
+        "evidence_verification"
+      ]
+    },
+    "gpt-5.x": {
+      "provider_template": "openai",
+      "family": "openai",
+      "tier": "external_top",
+      "cost_class": "paid",
+      "install_strategy": "key_required",
+      "capabilities": [
+        "json_generation",
+        "reasoning",
+        "workflow_planning",
+        "stable_synthesis",
+        "evidence_verification",
+        "code_generation"
+      ]
+    },
+    "claude-sonnet": {
+      "provider_template": "claude",
+      "family": "claude",
+      "tier": "external_strong",
+      "cost_class": "paid",
+      "install_strategy": "key_required",
+      "capabilities": [
+        "reasoning",
+        "stable_synthesis",
+        "code_generation",
+        "document_generation"
+      ]
+    }
+  },
+  "stages": {
+    "input_parsing": {
+      "default": "qwen3:8b",
+      "fallback": [
+        "qwen3:14b",
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "qwen3:14b",
+        "gpt-4o-mini"
+      ],
+      "lower_substitutes": [
+        "qwen3:4b",
+        "qwen2.5:3b"
+      ],
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true
+      }
+    },
+    "simple_intent": {
+      "default": "qwen3:8b",
+      "fallback": [
+        "qwen3:14b"
+      ],
+      "upper_substitutes": [
+        "qwen3:14b",
+        "gpt-4o-mini"
+      ],
+      "lower_substitutes": [
+        "qwen3:4b"
+      ],
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true
+      }
+    },
+    "complex_intent": {
+      "default": "qwen3:32b",
+      "fallback": [
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "gpt-4.1",
+        "gpt-5.x"
+      ],
+      "lower_substitutes": [
+        "qwen3:14b"
+      ],
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true
+      }
+    },
+    "workflow_planning": {
+      "default": "qwen3:32b",
+      "fallback": [
+        "gpt-4.1",
+        "gpt-5.x"
+      ],
+      "upper_substitutes": [
+        "gpt-4.1",
+        "gpt-5.x"
+      ],
+      "lower_substitutes": [
+        "qwen3:14b"
+      ],
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true
+      }
+    },
+    "capability_classification": {
+      "default": "deterministic_taxonomy",
+      "fallback": [
+        "qwen3:14b",
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "gpt-4.1"
+      ],
+      "lower_substitutes": [
+        "qwen3:8b"
+      ],
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true
+      }
+    },
+    "model_routing": {
+      "default": "deterministic_runtime_policy",
+      "fallback": [],
+      "upper_substitutes": [],
+      "lower_substitutes": [],
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": false
+      }
+    },
+    "tool_selection": {
+      "default": "deterministic_registry",
+      "fallback": [
+        "qwen3:14b",
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "gpt-4.1"
+      ],
+      "lower_substitutes": [
+        "qwen3:8b"
+      ],
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true
+      }
+    },
+    "tool_generation": {
+      "default": "qwen2.5-coder:7b",
+      "fallback": [
+        "deepseek-coder-v2:16b",
+        "qwen2.5-coder:14b"
+      ],
+      "upper_substitutes": [
+        "gpt-5.x",
+        "claude-sonnet"
+      ],
+      "lower_substitutes": [
+        "qwen3:8b"
+      ],
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true
+      }
+    },
+    "code_generation": {
+      "default": "qwen2.5-coder:7b",
+      "fallback": [
+        "deepseek-coder-v2:16b",
+        "qwen2.5-coder:14b"
+      ],
+      "upper_substitutes": [
+        "gpt-5.x",
+        "claude-sonnet"
+      ],
+      "lower_substitutes": [
+        "qwen3:8b"
+      ],
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true
+      }
+    },
+    "evidence_extraction": {
+      "default": "qwen3:14b",
+      "fallback": [
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "gpt-4.1"
+      ],
+      "lower_substitutes": [
+        "qwen3:8b"
+      ],
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true
+      }
+    },
+    "fact_verification": {
+      "default": "gpt-4.1",
+      "fallback": [
+        "qwen3:32b",
+        "gpt-5.x"
+      ],
+      "upper_substitutes": [
+        "gpt-5.x"
+      ],
+      "lower_substitutes": [
+        "qwen3:14b"
+      ],
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true
+      }
+    },
+    "final_synthesis": {
+      "default": "gpt-4.1",
+      "fallback": [
+        "gpt-5.x",
+        "claude-sonnet",
+        "qwen3:32b"
+      ],
+      "upper_substitutes": [
+        "gpt-5.x",
+        "claude-sonnet"
+      ],
+      "lower_substitutes": [
+        "qwen3:32b",
+        "qwen3:14b"
+      ],
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true
+      },
+      "raw_evidence_policy": {
+        "weak_model_direct_raw_evidence": false,
+        "use_reduced_fact_material": true
+      }
+    },
+    "feedback_understanding": {
+      "default": "qwen3:8b",
+      "fallback": [
+        "qwen3:14b",
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "gpt-4.1"
+      ],
+      "lower_substitutes": [
+        "qwen3:4b"
+      ],
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true
+      }
+    },
+    "general_runtime": {
+      "default": "qwen3:8b",
+      "fallback": [
+        "qwen3:14b",
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "gpt-4.1"
+      ],
+      "lower_substitutes": [
+        "qwen3:4b"
+      ],
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true
+      }
+    }
+  }
+}

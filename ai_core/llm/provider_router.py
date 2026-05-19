@@ -6,7 +6,7 @@ from ai_core.llm.provider_handler_registry import ProviderHandlerRegistry
 from ai_core.llm.provider_handlers.base import ProviderUnavailableError
 from ai_core.context.prompt_budget_manager import PromptBudgetManager
 from ai_core.llm.model_capability_matcher import ModelCapabilityMatcher
-from ai_core.runtime.modeling import ModelRoutingPlanner
+from ai_core.runtime.modeling import ModelRoutingPlanner, ModelStagePolicy
 
 
 class ProviderRouter:
@@ -22,6 +22,7 @@ class ProviderRouter:
         self.prompt_budget = PromptBudgetManager()
         self.model_matcher = ModelCapabilityMatcher()
         self.routing_planner = ModelRoutingPlanner()
+        self.stage_policy = ModelStagePolicy()
 
     def _config(self) -> dict:
         return self.loader.load_yaml(RUNTIME_CONFIGS / "models" / "providers.yaml")
@@ -72,15 +73,25 @@ class ProviderRouter:
             default_route=route,
         )
         route = route_plan.get("route") or route
+        config, route, stage_policy_meta = self.stage_policy.apply_to_route(
+            config=config,
+            route=route,
+            node_id=node_id,
+            adapter=adapter,
+            route_name=route_plan.get("route_name"),
+            escalated=bool(route_plan.get("escalated")),
+        )
+        providers = config.get("providers", {})
         route = self.model_matcher.rank_route(route=route, providers=providers, config=config, adapter=adapter)
         last_error = None
 
         await event_bus.emit(run_id, {
             "type": "LLM_ROUTE_START",
             "title": "LLM route started",
-            "message": "route=" + str(route_plan.get("route_name")) + "; complexity=" + str((route_plan.get("complexity") or {}).get("level")) + "; providers=" + ", ".join(route),
+            "message": "route=" + str(route_plan.get("route_name")) + "; stage=" + str((stage_policy_meta or {}).get("stage_id")) + "; complexity=" + str((route_plan.get("complexity") or {}).get("level")) + "; providers=" + ", ".join(route),
             "node_id": node_id,
             "route_name": route_plan.get("route_name"),
+            "stage_policy": stage_policy_meta,
             "complexity": route_plan.get("complexity"),
             "escalated": route_plan.get("escalated"),
         })

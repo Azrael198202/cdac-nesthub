@@ -16,6 +16,21 @@ This source package reorganizes the runtime around a clear boundary:
 7. Natural-language feedback can trigger model escalation and re-optimization.
 8. Runtime model/capability topology is generated or refreshed at startup under `runtime/generated/system_topology`.
 
+
+## v2.9.1 stage-bound model policy
+
+This version adds a generic model-stage policy layer:
+
+- `runtime/generated/system_topology/model_stage_policy.json` binds each cognitive stage to default, fallback, upper-substitute, and lower-substitute models.
+- `configs/model_stage_policy.seed.json` is the source fallback used to recreate the runtime policy.
+- `schema/model_stage_policy.schema.json` validates the policy shape.
+- `ModelStagePolicy` expands stage policy into provider/model-specific virtual routes at runtime.
+- JSON schema validation failure now triggers one model escalation attempt before auto-repair.
+- Global paid/free behavior is controlled by `global_policy.cost_policy.allow_paid_models`.
+- Local models are not downloaded during bootstrap; Ollama pulls them on demand only when selected.
+
+The policy remains domain-neutral: model selection uses stage ids, capabilities, tier, cost class, schema status, and runtime signals, not business keywords.
+
 ## Runtime-generated model governance
 
 At startup, `/api/runtime/bootstrap` performs:
@@ -29,6 +44,7 @@ At startup, `/api/runtime/bootstrap` performs:
 ```text
 runtime/generated/system_topology/
 ├── runtime_governance_graph.json
+├── model_stage_policy.json
 ├── model_inventory.json
 ├── model_requirements.json
 ├── missing_model_recommendations.json

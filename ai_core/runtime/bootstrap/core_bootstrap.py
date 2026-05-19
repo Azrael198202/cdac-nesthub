@@ -5,6 +5,7 @@ from ai_core.config.paths import (
 from ai_core.config.loader import ConfigLoader
 from ai_core.runtime.runtime_template_generator import RuntimeTemplateGenerator
 from ai_core.runtime.modeling.capability_topology import RuntimeModelTopology
+from ai_core.runtime.modeling.model_stage_policy import ModelStagePolicy
 
 
 class RuntimeBootstrap:
@@ -12,6 +13,7 @@ class RuntimeBootstrap:
         self.loader = ConfigLoader()
         self.template_generator = RuntimeTemplateGenerator()
         self.model_topology = RuntimeModelTopology()
+        self.model_stage_policy = ModelStagePolicy()
 
     def ensure(self) -> None:
         for d in [
@@ -39,6 +41,7 @@ class RuntimeBootstrap:
             RUNTIME_GENERATED / "modules",
             RUNTIME_GENERATED / "models",
             RUNTIME_GENERATED / "modeling",
+            RUNTIME_GENERATED / "system_topology",
             RUNTIME_GENERATED / "api_discovery_requests",
             RUNTIME_GENERATED / "connectors",
             RUNTIME_REGISTRY,
@@ -53,10 +56,13 @@ class RuntimeBootstrap:
             d.mkdir(parents=True, exist_ok=True)
 
         self._ensure_model_topology()
+        self._ensure_model_stage_policy()
         self._ensure_model_providers()
         self._ensure_workflow()
         self._ensure_node_configs()
         self._ensure_runtime_templates()
+        self._ensure_prompts()
+        self._ensure_schemas()
         self._ensure_adapters()
         self._ensure_capability_routes()
         self._ensure_base_capabilities()
@@ -67,6 +73,10 @@ class RuntimeBootstrap:
 
     def _ensure_model_topology(self) -> None:
         self.model_topology.ensure_defaults()
+
+
+    def _ensure_model_stage_policy(self) -> None:
+        self.model_stage_policy.ensure_defaults()
 
     def _ensure_model_providers(self) -> None:
         """Ensure provider config prefers the local base model qwen3:8b.
@@ -179,6 +189,8 @@ class RuntimeBootstrap:
                     "model": "qwen3:8b",
                     "available_local_models": [
                         "qwen3-vl:8b-thinking",
+                        "qwen3:32b",
+                        "qwen3:14b",
                         "qwen3:8b",
                         "qwen3:4b",
                         "qwen2.5:3b",
@@ -187,8 +199,9 @@ class RuntimeBootstrap:
                         "llama3.2:3b"
                     ],
                     "fallback_models": [
+                        "qwen3:32b",
+                        "qwen3:14b",
                         "qwen3:8b",
-                        "qwen3:4b",
                         "qwen3:4b",
                         "qwen2.5:3b",
                         "qwen3:1.7b",
@@ -372,6 +385,27 @@ class RuntimeBootstrap:
                     "priority": 4
                 },
 
+                "claude": {
+                    "enabled": False,
+                    "type": "universal_model",
+                    "protocol": "openai_compatible",
+                    "base_url": "https://api.anthropic.com",
+                    "endpoint": "/v1/chat/completions",
+                    "auth_type": "bearer_env",
+                    "auth_env": "ANTHROPIC_API_KEY",
+                    "model": "claude-sonnet",
+                    "timeout_seconds": 90,
+                    "max_prompt_tokens": 12000,
+                    "max_schema_chars": 12000,
+                    "cache_enabled": True,
+                    "interactive_key_required": True,
+                    "role": "external_fallback",
+                    "model_tags": ["reasoning", "json_generation", "document_generation", "stable_synthesis", "code_generation", "structured_output"],
+                    "capabilities": ["reasoning", "json_generation", "document_generation", "stable_synthesis", "code_generation", "structured_output"],
+                    "quality": {"stable_synthesis": 20, "code_generation": 20, "structured_output": 12},
+                    "priority": 3
+                },
+
                 "vllm_coder": {
                     "enabled": False,
                     "type": "universal_model",
@@ -438,7 +472,7 @@ class RuntimeBootstrap:
                 "allow_placeholder_result": False,
                 "prefer_local_base_model": True,
                 "base_model_provider": "ollama",
-                "base_model": "qwen3-vl:8b-thinking",
+                "base_model": "qwen3:8b",
                 "code_generation_provider": "ollama_coder_qwen25",
                 "code_generation_model": "qwen2.5-coder:7b",
                 "external_provider_is_fallback": True

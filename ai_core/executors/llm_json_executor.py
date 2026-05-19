@@ -12,6 +12,7 @@ from ai_core.evolution.runtime_learning import RuntimeLearningService
 from ai_core.evolution.approval_learning import ApprovalLearningService
 from ai_core.context.runtime_context_reducer import RuntimeContextReducer
 from ai_core.roles import RoleProfileSelector, PromptPackLoader, RoleScopedContextReducer
+from ai_core.runtime.modeling import ModelStagePolicy
 
 
 class LLMJsonExecutor:
@@ -34,6 +35,7 @@ class LLMJsonExecutor:
         self.role_selector = RoleProfileSelector()
         self.prompt_pack_loader = PromptPackLoader()
         self.role_context_reducer = RoleScopedContextReducer()
+        self.stage_policy = ModelStagePolicy()
 
     async def execute(self, workflow_node: dict, node_config: dict, state: dict, capability_result: dict) -> dict:
         run_id = state["run_id"]
@@ -174,15 +176,61 @@ class LLMJsonExecutor:
         except Exception as exc:
             original_error = str(exc)
 
+            stage_id = self.stage_policy.stage_for(
+                node_id=node_id,
+                adapter=adapter,
+                route_name=adapter.get("route_name") or adapter.get("model_route_name"),
+            )
+            if not adapter.get("force_model_escalation") and self.stage_policy.should_escalate_on_validation_failure(stage_id):
+                escalated_adapter = self.stage_policy.escalation_adapter(
+                    adapter=adapter,
+                    stage_id=stage_id,
+                    reason="schema_validation_failed",
+                )
+                await event_bus.emit(run_id, {
+                    "type": "LLM_JSON_VALIDATION_ESCALATING",
+                    "title": "Validation failed; escalating model",
+                    "message": f"node={node_id}, stage={stage_id}, reason=schema_validation_failed",
+                    "node_id": node_id,
+                    "stage_id": stage_id,
+                    "original_error": original_error,
+                })
+                escalated_result = await self.router.generate_json(
+                    run_id=run_id,
+                    node_id=node_id,
+                    adapter=escalated_adapter,
+                    prompt=prompt,
+                    rendered_user_prompt=rendered,
+                    schema=schema,
+                )
+                try:
+                    self.validator.validate_data(escalated_result, schema)
+                    result = escalated_result
+                    validation_ok = True
+                    adapter = escalated_adapter
+                    await event_bus.emit(run_id, {
+                        "type": "LLM_JSON_VALIDATED",
+                        "title": "JSON validated after model escalation",
+                        "message": node_id,
+                        "node_id": node_id,
+                        "stage_id": stage_id,
+                    })
+                except Exception as escalation_exc:
+                    result = escalated_result
+                    original_error = str(escalation_exc)
+
             # 1. First repair the RESULT when the model omitted required fields
             # or returned a shape that can be safely normalized.
-            result_repaired, repaired_result, result_changes = self.result_auto_repair.try_repair(
-                node_id=node_id,
-                result=result,
-                schema=schema,
-                state=state,
-                error_message=original_error,
-            )
+            if validation_ok:
+                result_repaired, repaired_result, result_changes = False, result, []
+            else:
+                result_repaired, repaired_result, result_changes = self.result_auto_repair.try_repair(
+                    node_id=node_id,
+                    result=result,
+                    schema=schema,
+                    state=state,
+                    error_message=original_error,
+                )
 
             if result_repaired:
                 await event_bus.emit(run_id, {
