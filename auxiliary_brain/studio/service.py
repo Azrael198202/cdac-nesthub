@@ -41,14 +41,15 @@ class AgentStudioService:
             "action": "conversation_message",
             "origin": "auxiliary_brain",
             "status": "completed",
-            "message": "I received your message. You can create participants, create tasks, execute tasks, or give feedback to re-optimize the latest result.",
+            "message": "I received your message. You can create participants, create tasks, execute tasks, continue missing-information collection, or give natural-language feedback to re-optimize the latest result.",
             "conversation_intent": "general_chat",
+            "latest_task": self._latest_task_name(),
         }
 
 
     async def handle_feedback(self, message: str, task_name: str | None = None) -> dict[str, Any]:
         feedback = self.feedback_classifier.classify(message, fallback_target=task_name or self._latest_task_name())
-        target_task = str(feedback.get("target_task") or task_name or self._latest_task_name() or "").strip()
+        target_task = self._resolve_task_name(str(feedback.get("target_task") or task_name or self._latest_task_name() or "").strip()) or ""
         self.model_upgrade_controller.record_upgrade_request(
             target_node=str(feedback.get("target_node") or "output"),
             reason=str(feedback.get("intent") or "studio_feedback"),
@@ -120,8 +121,28 @@ class AgentStudioService:
         runs.sort(key=lambda item: str(item.get("completed_at") or item.get("started_at") or ""), reverse=True)
         return str(runs[0].get("task_name") or "").strip() or None
 
+    def _resolve_task_name(self, task_name: str | None) -> str | None:
+        candidate = str(task_name or "").strip()
+        tasks = self.store.list_json("generated/tasks")
+        names = [str(t.get("task_name") or t.get("graph_id") or "").strip() for t in tasks]
+        names = [n for n in names if n]
+        if candidate in names:
+            return candidate
+        folded = candidate.casefold()
+        for name in names:
+            if name.casefold() == folded:
+                return name
+        # If a parser produced only the suffix of a compact identifier, recover
+        # the latest/known compact task name that ends with that suffix.
+        if candidate:
+            matches = [name for name in names if name.casefold().endswith(folded)]
+            if len(matches) == 1:
+                return matches[0]
+        return candidate or self._latest_task_name()
+
     def _latest_run_for_task(self, task_name: str) -> dict[str, Any] | None:
-        runs = [r for r in self.store.list_json("generated/results") if str(r.get("task_name") or "") == task_name]
+        resolved = self._resolve_task_name(task_name) or task_name
+        runs = [r for r in self.store.list_json("generated/results") if str(r.get("task_name") or "") == resolved]
         if not runs:
             return None
         runs.sort(key=lambda item: str(item.get("completed_at") or item.get("started_at") or ""), reverse=True)

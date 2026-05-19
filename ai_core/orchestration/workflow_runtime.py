@@ -170,7 +170,7 @@ class WorkflowRuntime:
             # v50: approval of a generated capability review is not terminal.
             # It means the execution node may now reuse or execute the generated
             # registered module/tool. Remove the stale execution result and
-            # reschedule the same node immediately.
+            # dispatch the same node again immediately.
             if node_id:
                 state.get("results", {}).pop(node_id, None)
                 state["node_index"] = int(retry_index if retry_index is not None else self._node_index_by_id(state.get("workflow", {}), node_id))

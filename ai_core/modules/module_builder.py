@@ -14,7 +14,7 @@ class RuntimeModuleBuilder:
     Generic runtime module builder.
 
     IMPORTANT:
-    This builder does not understand scheduler, notification, web_query, etc.
+    This builder does not understand domain-specific module types.
     It only creates a module package from structured runtime metadata.
 
     Semantic understanding must happen before this step:

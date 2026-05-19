@@ -25,12 +25,17 @@ class FeedbackClassifier:
         upgrade_terms = [str(x).lower() for x in feedback_config.get("upgrade_quality", [])]
         retry_terms = [str(x).lower() for x in feedback_config.get("retry_or_reoptimize", [])]
         dissatisfaction_terms = [str(x).lower() for x in feedback_config.get("dissatisfaction", [])]
+        generic_negative_signals = [
+            "doesn't have", "does not have", "missing", "not include", "not included",
+            "wrong", "incorrect", "not correct", "not right", "doesn't answer",
+            "不对", "没有", "不正确", "不是", "缺少", "重新", "优化", "升级",
+        ]
         if any(term and term in lowered for term in upgrade_terms):
             intent = "upgrade_execution_quality"
         elif any(term and term in lowered for term in retry_terms):
             intent = "reoptimize_previous_result"
-        elif any(term and term in lowered for term in dissatisfaction_terms):
-            intent = "record_result_feedback"
+        elif any(term and term in lowered for term in dissatisfaction_terms) or any(term in lowered for term in generic_negative_signals):
+            intent = "reoptimize_previous_result" if (fallback_target or "re" in lowered or "重新" in lowered or "优化" in lowered or "upgrade" in lowered or "升级" in lowered) else "record_result_feedback"
         else:
             return {"matched": False, "intent": "chat", "message": text}
         return {
@@ -58,10 +63,10 @@ class FeedbackClassifier:
         import re
 
         patterns = [
-            r"\btask\s*[:=#-]?\s*([A-Za-z0-9_\-]+)\b",
-            r"\b([A-Za-z][A-Za-z0-9_\-]*\d*|[A-Za-z]+[A-Za-z0-9_\-]*)\b",
+            r"\b((?:task|job|run)[A-Za-z0-9_\-]+)\b",
+            r"\b(?:task|job|run)\s*[:=#-]\s*([A-Za-z0-9_\-]+)\b",
         ]
-        for pattern in patterns[:1]:
+        for pattern in patterns:
             match = re.search(pattern, text, flags=re.IGNORECASE)
             if match:
                 return match.group(1).strip()

@@ -72,8 +72,13 @@ class StudioCommandRouter:
 
     def _extract_feedback_target(self, text: str) -> str | None:
         # Generic compact identifier extraction for feedback messages.
-        # It does not encode any domain or business vocabulary.
-        match = re.search(r"\btask\s*[:=#-]?\s*([A-Za-z0-9_\-]+)\b", text, flags=re.IGNORECASE)
-        if match:
-            return match.group(1).strip() or None
+        # Preserve compact identifiers such as "taskA" as one token.
+        patterns = [
+            r"\b((?:task|job|run)[A-Za-z0-9_\-]+)\b",
+            r"\b(?:task|job|run)\s*[:=#-]\s*([A-Za-z0-9_\-]+)\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).strip() or None
         return None

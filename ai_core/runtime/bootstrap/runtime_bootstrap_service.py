@@ -10,6 +10,7 @@ from ai_core.config.paths import CONFIGS_DIR, RUNTIME_GENERATED
 from ai_core.events.event_bus import event_bus
 from ai_core.runtime.bootstrap.model_requirement_generator import ModelRequirementGenerator
 from ai_core.runtime.bootstrap.provider_discovery import ProviderDiscovery
+from ai_core.runtime.governance.runtime_governance import RuntimeGovernanceRegistry
 
 
 class RuntimeBootstrapService:
@@ -27,6 +28,7 @@ class RuntimeBootstrapService:
         self.loader = ConfigLoader()
         self.discovery = ProviderDiscovery()
         self.generator = ModelRequirementGenerator()
+        self.governance = RuntimeGovernanceRegistry()
 
     async def bootstrap(self, *, force: bool = False) -> dict[str, Any]:
         if self.OUTPUT_PATH.exists() and not force:
@@ -62,6 +64,12 @@ class RuntimeBootstrapService:
         generated["provider_inventory_snapshot"] = provider_inventory
         self.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         self.OUTPUT_PATH.write_text(json.dumps(generated, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.governance.write_bootstrap_artifacts(
+            topology=generated,
+            provider_inventory=provider_inventory,
+            feature_inventory=feature_inventory,
+            source=source,
+        )
         await event_bus.emit(run_id, {
             "type": "RUNTIME_BOOTSTRAP_DONE",
             "title": "Runtime bootstrap completed",

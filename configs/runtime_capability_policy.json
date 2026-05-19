@@ -1,6 +1,6 @@
 {
-  "version": "2.8.15",
-  "description": "Generic runtime execution-source policy. Capability labels and indicators are config/runtime data, not core logic.",
+  "version": "2.9.0",
+  "description": "Generic runtime execution-source policy. Concrete domain vocabulary belongs to runtime-generated contracts, not source code.",
   "preferred_execution_modes": [
     "structured_provider",
     "web_retrieval",
@@ -20,8 +20,8 @@
         "system_state",
         "local_runtime",
         "current_runtime_state",
-        "current time",
-        "now"
+        "system clock",
+        "local machine"
       ]
     },
     {
@@ -38,10 +38,8 @@
         "structured_provider",
         "structured source",
         "api preferred",
-        "forecast",
-        "weather",
-        "stock",
-        "currency"
+        "remote state",
+        "volatile external state"
       ]
     },
     {

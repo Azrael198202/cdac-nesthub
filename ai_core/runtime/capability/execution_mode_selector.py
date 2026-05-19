@@ -22,19 +22,20 @@ class ExecutionModeSelector:
 
     def select(self, *, step: dict[str, Any], plan: dict[str, Any], state: dict[str, Any], capability: str) -> str:
         policy = self.policy_for(step=step, plan=plan, state=state, capability=capability)
+        strategy = self._strategy_values(step)
+        strategy_mode = self._mode_from_strategy(strategy, policy)
+        if strategy_mode:
+            return strategy_mode
+
         explicit = self._explicit_mode(step, plan, state)
-        if explicit:
+        if explicit and not self._runtime_native_denied(explicit, strategy, policy):
             return explicit
 
         classification = self.classifier.classify(step=step, plan=plan, state=state, capability=capability)
         category = str(classification.get("category") or "")
         mode = self._mode_from_category(category, policy)
-        if mode:
+        if mode and not self._runtime_native_denied(mode, strategy, policy):
             return mode
-
-        strategy = self._strategy_values(step)
-        if any(v in {"web_evidence", "web_retrieval", "external_evidence"} for v in strategy):
-            return "web_retrieval"
 
         # Routing indicators are only applied to compact capability semantics, not
         # to the full delegated prompt. This prevents generic wrapper phrases such
@@ -53,13 +54,42 @@ class ExecutionModeSelector:
                     return mode
 
         default = str(policy.get("unknown_capability_default") or "").strip()
-        if default:
+        if default and not self._runtime_native_denied(default, strategy, policy):
             return default
         for mode in self.priority.order(policy):
             if mode != "runtime_native":
                 return mode
         return self.priority.order(policy)[0]
 
+
+    def _mode_from_strategy(self, strategy: list[str], policy: dict[str, Any]) -> str:
+        normalized = {str(x).strip() for x in strategy if str(x).strip()}
+        if not normalized:
+            return ""
+        for rule in policy.get("routing_rules", []):
+            if not isinstance(rule, dict):
+                continue
+            if str(rule.get("match_scope") or "") != "execution_strategy":
+                continue
+            values = {str(x).strip() for x in rule.get("strategy_values", []) if str(x).strip()}
+            if values and normalized.intersection(values):
+                return str(rule.get("execution_mode") or "").strip()
+        return ""
+
+    def _runtime_native_denied(self, mode: str, strategy: list[str], policy: dict[str, Any]) -> bool:
+        if mode != "runtime_native":
+            return False
+        strategy_set = {str(x).strip() for x in strategy if str(x).strip()}
+        for rule in policy.get("deny_runtime_native_when", []):
+            if not isinstance(rule, dict):
+                continue
+            values = {str(x).strip() for x in rule.get("execution_strategy_contains", []) if str(x).strip()}
+            if values and strategy_set.intersection(values):
+                return True
+            required = {str(x).strip() for x in rule.get("source_required", []) if str(x).strip()}
+            if required and strategy_set.intersection(required):
+                return True
+        return False
 
     def _strategy_values(self, *items: Any) -> list[str]:
         result: list[str] = []

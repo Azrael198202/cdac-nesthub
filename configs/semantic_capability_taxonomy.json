@@ -1,6 +1,6 @@
 {
-  "version": "2.8.15",
-  "description": "Generic semantic capability taxonomy. Indicators are runtime/config data and can be replaced by bootstrap-generated topology.",
+  "version": "2.9.0",
+  "description": "Generic semantic capability taxonomy. Concrete domain aliases are generated at runtime under runtime/generated/contracts.",
   "capability_semantic_graph": {
     "runtime_state_observation": {
       "preferred_modes": ["runtime_native"],
@@ -11,9 +11,8 @@
         "local runtime",
         "system state",
         "system clock",
-        "current time",
-        "now",
-        "local machine"
+        "local machine",
+        "current_runtime_state"
       ]
     },
     "structured_external_observation": {
@@ -23,12 +22,9 @@
         "external state",
         "external observation",
         "live external",
-        "forecast",
-        "weather",
-        "market",
-        "currency",
-        "traffic",
-        "schedule data"
+        "remote structured data",
+        "volatile external state",
+        "api preferred"
       ]
     },
     "web_retrieval": {
@@ -50,9 +46,7 @@
         "artifact",
         "file generation",
         "document generation",
-        "image generation",
-        "slide generation",
-        "pdf generation",
+        "media generation",
         "code generation"
       ]
     },

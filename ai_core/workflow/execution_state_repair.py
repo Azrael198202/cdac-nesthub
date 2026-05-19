@@ -210,7 +210,7 @@ class ExecutionStateRepair:
     def _requires_confirmation_by_structure(self, step: dict[str, Any]) -> bool:
         # Do not treat orchestration fields such as next_action="execute" as
         # user-facing side effects. Confirmation is based on the step's target
-        # operation and strategy, not the scheduler verb used to advance it.
+        # operation and strategy, not the orchestration verb used to advance it.
         operation_text = " ".join(
             str(step.get(k, ""))
             for k in ["task_type", "action", "step_type", "objective"]

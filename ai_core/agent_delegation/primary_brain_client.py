@@ -7,6 +7,7 @@ from typing import Any
 
 from ai_core.orchestration.workflow_runtime import WorkflowRuntime
 from ai_core.llm.provider_router import ProviderRouter
+from auxiliary_brain.protocols.runtime_protocol import PrimaryRuntimeRequestEnvelope, PrimaryRuntimeExecutionPolicy
 
 
 @dataclass
@@ -211,16 +212,27 @@ class PrimaryBrainDelegationClient:
         }
 
     def _build_agent_message(self, request: AgentExecutionRequest) -> str:
-        objective = (request.participant_instruction or "").strip()
+        import json
+
+        envelope = PrimaryRuntimeRequestEnvelope(
+            request_type="agent_execution",
+            task_name=request.task_name,
+            participant_name=request.participant_name,
+            participant_id=request.participant_id,
+            objective=(request.participant_instruction or "").strip(),
+            task_instruction=request.task_instruction,
+            community_id=request.community_id,
+            context=request.shared_context or {},
+            execution_policy=PrimaryRuntimeExecutionPolicy(),
+        )
         return (
-            "Execute the delegated participant work using the primary runtime.\n"
-            "Use runtime-native observations when the objective can be satisfied by current runtime state; otherwise use verified external or generated capabilities as needed.\n"
-            "Return only facts that can be represented as verified runtime facts.\n"
-            f"Participant name: {request.participant_name}\n"
-            f"Participant work objective: {objective}\n"
-            f"Task name: {request.task_name}\n"
-            "Do not create or redefine participants or tasks. Execute only the participant work objective.\n"
-            "Return only the participant result needed for this task."
+            "Execute this canonical auxiliary-to-primary runtime request.\n"
+            "The auxiliary layer only controls roles, tasks, context, missing information, and feedback.\n"
+            "The primary runtime must perform parsing, intent recognition, workflow planning, capability routing, tool execution, evidence verification, and final answer synthesis.\n"
+            "Do not create or redefine participants or tasks. Execute only the objective in the JSON envelope.\n"
+            "Return only the participant result needed for the task, as a final user-facing answer.\n"
+            "Never return intermediate node JSON as the final answer.\n"
+            + json.dumps(envelope.to_prompt_payload(), ensure_ascii=False)
         )
 
     def _usable_agent_results(self, agent_results: list[AgentExecutionResult]) -> list[AgentExecutionResult]:
@@ -378,7 +390,7 @@ class PrimaryBrainDelegationClient:
         if pending:
             return "The primary runtime paused before producing a user-facing final answer."
         if isinstance(results, dict) and results:
-            return str(results)
+            return "The primary runtime completed without a user-facing final answer. Intermediate node data was intentionally not exposed."
         return "The primary runtime completed without a user-facing final answer."
 
     def _extract_status(self, state: dict[str, Any]) -> str:
@@ -394,6 +406,8 @@ class PrimaryBrainDelegationClient:
         output = results.get("output") if isinstance(results, dict) else None
         if isinstance(output, dict):
             return str(output.get("status") or output.get("execution_status") or "completed")
+        if isinstance(results, dict) and results:
+            return "incomplete"
         return "completed"
 
     def _extract_missing_inputs(self, state: dict[str, Any]) -> list[dict[str, Any]]:

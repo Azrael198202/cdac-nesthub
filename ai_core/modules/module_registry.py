@@ -12,7 +12,7 @@ class RuntimeModuleRegistry:
     """
     Generic runtime module registry.
 
-    ai_core does not know scheduler/notification/web_query/etc.
+    ai_core does not know domain-specific module types
     It only registers generated modules by capability and metadata.
     """
 

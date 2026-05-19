@@ -60,7 +60,7 @@ class BrowserAutomationBlueprintBuilder:
             "runtime_metadata": metadata,
             "credential_policy": metadata.get("credential_policy", self._default_credential_policy()),
             "safety_policy": metadata.get("safety_policy", self._default_safety_policy()),
-            "temporal_triggers": metadata.get("temporal_triggers", metadata.get("schedule", [])),
+            "temporal_triggers": metadata.get("temporal_triggers", metadata.get("temporal_plan", [])),
             "browser_steps": metadata.get("browser_steps", []),
             "playwright_generation": metadata.get("playwright_generation", self._default_playwright_generation(blueprint_id)),
             "notes": [
