@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from ai_core.runtime.temporal import DateAliasGenerator
 from dataclasses import dataclass, asdict
 from typing import Any
 
@@ -110,15 +111,7 @@ class EvidenceQualityValidator:
             m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
             if m:
                 y, mo, d = m.groups()
-                mi = int(mo)
-                di = int(d)
-                month_names = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
-                mon = month_names[mi]
-                out.extend([
-                    f"{y}/{mo}/{d}", f"{y}.{mo}.{d}", f"{mi}/{di}", f"{mi}-{di}", f"{di}. {mi}.",
-                    f"{mon} {di}", f"{mon} {di}, {y}", f"{di} {mon}", f"{di} {mon} {y}",
-                    f"{mo}/{d}", f"{mo}-{d}", f"{di}",
-                ])
+                out.extend(DateAliasGenerator().aliases_for(s))
         add(value)
         return out
 

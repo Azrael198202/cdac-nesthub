@@ -117,9 +117,27 @@ class FinalAnswerSynthesizer:
 
     def _deterministic_summary(self, *, facts: list[dict[str, Any]], sanitized: list[dict[str, Any]], trust_summary: dict[str, Any]) -> str:
         if facts:
+            aligned_records = [f for f in facts if f.get("kind") == "aligned_record"]
             statements = [f for f in facts if f.get("kind") == "supporting_statement"]
-            values = [f for f in facts if f.get("kind") != "supporting_statement"]
+            values = [f for f in facts if f.get("kind") not in {"supporting_statement", "aligned_record"}]
             lines: list[str] = []
+
+            if aligned_records:
+                lines.append("Details:")
+                seen_records: set[str] = set()
+                for fact in aligned_records[:8]:
+                    text = self._clean_sentence(str(fact.get("value") or fact.get("context") or ""))
+                    if not text or text in seen_records:
+                        continue
+                    seen_records.add(text)
+                    lines.append(f"- {text}")
+                sources = sorted({str(f.get("source_url")) for f in aligned_records if str(f.get("source_url") or "").startswith("http")})
+                if sources:
+                    lines.append("Source:")
+                    lines.append(f"- {sources[0]}")
+                answer = "\n".join(line for line in lines if line).strip()
+                if answer:
+                    return answer
 
             clean_statements = []
             for fact in statements[:3]:

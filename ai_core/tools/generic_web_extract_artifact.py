@@ -105,6 +105,7 @@ import html
 import json
 import re
 import urllib.request
+from ai_core.runtime.temporal import DateAliasGenerator
 from datetime import datetime
 
 CANDIDATE_URL = {json.dumps(url, ensure_ascii=False)}
@@ -218,26 +219,7 @@ def _aliases(value) -> list[str]:
         if not s:
             return
         out.append(s)
-        m = re.match(r"^(\d{{4}})-(\d{{2}})-(\d{{2}})$", s)
-        if m:
-            y, mo, d = m.groups(); mi = int(mo); di = int(d)
-            months = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
-            months_short = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-            weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-            mon = months[mi]; mon_s = months_short[mi]
-            try:
-                weekday = weekdays[datetime(int(y), mi, di).weekday()]
-            except Exception:
-                weekday = ""
-            out.extend([
-                f"{{y}}/{{mo}}/{{d}}", f"{{y}}.{{mo}}.{{d}}", f"{{y}}/{{mi}}/{{di}}",
-                f"{{mi}}/{{di}}", f"{{mi}}-{{di}}", f"{{mo}}/{{d}}", f"{{mo}}-{{d}}",
-                f"{{di}}. {{mi}}.", f"{{di}}.{{mi}}.", f"{{di}}/{{mi}}",
-                f"{{mon}} {{di}}", f"{{mon}} {{di}}, {{y}}", f"{{di}} {{mon}}", f"{{di}} {{mon}} {{y}}",
-                f"{{mon_s}} {{di}}", f"{{mon_s}} {{di}}, {{y}}", f"{{di}} {{mon_s}}", f"{{di}} {{mon_s}} {{y}}",
-            ])
-            if weekday:
-                out.extend([weekday, weekday[:3], f"{{weekday}} {{di}}", f"{{weekday[:3]}} {{di}}", f"{{weekday}}, {{mon}} {{di}}", f"{{weekday[:3]}} {{mon_s}} {{di}}"])
+        out.extend(DateAliasGenerator().aliases_for(s))
     add(value)
     return list(dict.fromkeys(out))
 

@@ -29,7 +29,9 @@ class FactTypeInferencer:
         combined = " ".join(x for x in (label, value, unit, context) if x)
 
         semantic_type = "text"
-        if self._looks_like_coordinate(value=value, unit=unit, context=context):
+        if str(fact.get("kind") or "") == "aligned_record":
+            semantic_type = "record"
+        elif self._looks_like_coordinate(value=value, unit=unit, context=context):
             semantic_type = "coordinate"
         elif unit == "%":
             semantic_type = "bounded_ratio"

@@ -5,6 +5,8 @@ from dataclasses import dataclass, asdict
 from typing import Any
 
 from ai_core.runtime.semantic import RuntimeSemanticContractEngine
+from ai_core.presentation.date_aligned_record_extractor import DateAlignedRecordExtractor
+from ai_core.runtime.temporal import DateAliasGenerator
 
 
 _DEBUG_MARKERS = (
@@ -42,6 +44,10 @@ class StructuredFactNormalizer:
     VALUE_PATTERN = re.compile(
         r"(?P<value>[-+]?\d+(?:\.\d+)?)\s*(?P<unit>°\s*[CFcf]?|%|mm|cm|m|km/h|mph|hPa|kPa|kg|g|ml|L|l|円|¥|\$|€)?"
     )
+
+    def __init__(self) -> None:
+        self.date_aligned_extractor = DateAlignedRecordExtractor()
+        self.date_alias_generator = DateAliasGenerator()
 
     def normalize(self, *, materials: list[dict[str, Any]], state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         runtime_variables = self._runtime_variables(state or {})
@@ -123,6 +129,15 @@ class StructuredFactNormalizer:
         # records next to those traces; those records are handled separately.
         if self.reject_debug_text(compact):
             return []
+        aligned_records = self.date_aligned_extractor.extract(
+            text=compact,
+            runtime_variables=runtime_variables,
+            source_url=source_url,
+            runtime_state=getattr(self, "_current_state", {}) if hasattr(self, "_current_state") else {},
+        )
+        if aligned_records:
+            return [self._fact_from_aligned_record(item) for item in aligned_records]
+
         relevant_windows = self._relevant_windows(compact, runtime_variables)
         if not relevant_windows:
             relevant_windows = self._signal_windows(compact)
@@ -161,6 +176,18 @@ class StructuredFactNormalizer:
                     source_url=source_url,
                 ))
         return facts
+
+
+    def _fact_from_aligned_record(self, item: dict[str, Any]) -> NormalizedFact:
+        return NormalizedFact(
+            kind=str(item.get("kind") or "aligned_record"),
+            label=str(item.get("label") or "target_record"),
+            value=str(item.get("value") or ""),
+            unit=str(item.get("unit") or ""),
+            context=str(item.get("context") or ""),
+            confidence=float(item.get("confidence") or 0.9),
+            source_url=str(item.get("source_url") or ""),
+        )
 
     def _signal_windows(self, text: str) -> list[str]:
         """Find generic windows with measurement-like signal.
@@ -219,7 +246,10 @@ class StructuredFactNormalizer:
         sample = str(context or "")[:240]
         tokens = re.findall(r"[A-Za-z]{3,}", sample)
         punctuation_density = sample.count("/") + sample.count("|") + sample.count("→")
-        if number <= 31 and re.search(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b", sample):
+        # Calendar/menu-like sequences with many short unit-less numbers are
+        # not measurements.  Language-specific month names are intentionally
+        # not hard-coded here.
+        if number <= 31 and len(re.findall(r"(?<![\d.])\d{1,2}(?![\d.])", sample)) >= 4 and not unit:
             return True
         if len(tokens) > 18 and punctuation_density >= 2:
             return True
@@ -274,7 +304,7 @@ class StructuredFactNormalizer:
             after_match = re.search(value_pattern + r"\s*" + unit_pattern + r"\s*/?\s*([A-Za-z][A-Za-z_-]{1,24}(?:\s+[A-Za-z][A-Za-z_-]{1,24}){0,2})", sample)
             if after_match:
                 words = after_match.group(1).strip()
-                if not re.match(r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b", words):
+                if not re.match(r"^\d", words):
                     return words.split()[0][:48]
         before = sample.split(":", 1)[0].strip()
         if before and len(before) <= 48:
@@ -288,45 +318,8 @@ class StructuredFactNormalizer:
         return "value"
 
     def _runtime_variables(self, state: dict[str, Any]) -> dict[str, list[str]]:
-        result: dict[str, list[str]] = {}
-        def add(name: str, value: Any) -> None:
-            if value is None:
-                return
-            text = str(value).strip()
-            if not text:
-                return
-            result.setdefault(name, [])
-            if text not in result[name]:
-                result[name].append(text)
-            # Add simple date aliases without domain knowledge.
-            m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", text)
-            if m:
-                y, mo, d = m.groups()
-                for alias in (f"{int(mo)}/{int(d)}", f"{mo}/{d}", f"{int(mo)}-{int(d)}", f"{mo}-{d}", str(int(d)), f"{y}"):
-                    if alias not in result[name]:
-                        result[name].append(alias)
-        # direct runtime_variables list
-        for item in state.get("runtime_variables", []) if isinstance(state.get("runtime_variables"), list) else []:
-            if isinstance(item, dict):
-                name = str(item.get("name") or "value")
-                for alias in item.get("aliases") or []:
-                    add(name, alias)
-        # common result sections and workflow params, without domain terms.
-        for section_name in ("runtime_request_semantics", "parameters", "known", "input", "results"):
-            section = state.get(section_name)
-            self._collect_named_values(section, add)
-        return result
-
-    def _collect_named_values(self, value: Any, add) -> None:
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if isinstance(item, (str, int, float)):
-                    add(str(key), item)
-                elif isinstance(item, (dict, list)):
-                    self._collect_named_values(item, add)
-        elif isinstance(value, list):
-            for item in value[:20]:
-                self._collect_named_values(item, add)
+        self._current_state = state
+        return self.date_alias_generator.aliases_from_state(state)
 
     def _source_url(self, material: dict[str, Any]) -> str:
         for key in ("source_url", "url"):

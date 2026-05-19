@@ -15,3 +15,6 @@ runtime/traces/
 runtime/deliveries/
 runtime/checkpoints/
 runtime/configs/secrets/
+
+tests/
+scripts/

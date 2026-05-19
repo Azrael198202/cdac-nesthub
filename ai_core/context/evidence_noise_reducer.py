@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from ai_core.runtime.temporal import DateAliasGenerator
 from typing import Any
 
 from ai_core.codegen.runtime_variable_inferencer import RuntimeVariableInferencer
@@ -289,7 +290,7 @@ class EvidenceNoiseReducer:
             m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
             if m:
                 y, mo, d = m.groups()
-                values.extend([f"{int(mo)}/{int(d)}", f"{mo}/{d}", f"{mo}-{d}", f"{int(d)}", f"{int(d)} May" if mo == "05" else f"{int(mo)}/{int(d)}"])
+                values.extend(DateAliasGenerator().aliases_for(s))
         add(value)
         dedup = []
         for v in values:
