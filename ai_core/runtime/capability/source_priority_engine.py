@@ -11,7 +11,7 @@ class SourcePriorityEngine:
     contracts.
     """
 
-    DEFAULT_ORDER = ["runtime_native", "structured_provider", "web_retrieval"]
+    DEFAULT_ORDER = ["structured_provider", "web_retrieval", "runtime_native"]
 
     def order(self, policy: dict[str, Any] | None = None) -> list[str]:
         policy = policy or {}

@@ -178,7 +178,14 @@ class OutputExecutor:
         network_declared = any(bool((p.get("execution_claims") or {}).get("network_declared")) for p in provenance_records)
         live_verified = any(bool((p.get("execution_claims") or {}).get("live_verification_passed")) for p in provenance_records)
         api_discovery = any(bool((p.get("execution_claims") or {}).get("api_discovery_trace_id")) for p in provenance_records)
-        verified_real_execution = bool(real_declared and no_mock_declared and network_declared and live_verified)
+        runtime_native_verified = any(
+            bool((p.get("execution_claims") or {}).get("real_execution_declared"))
+            and bool((p.get("execution_claims") or {}).get("no_mock_data_declared"))
+            and bool((p.get("execution_claims") or {}).get("live_verification_passed"))
+            and str(p.get("source") or "") == "runtime_native"
+            for p in provenance_records
+        )
+        verified_real_execution = bool(real_declared and no_mock_declared and (network_declared or runtime_native_verified) and live_verified)
         trust_level = "verified_real_execution" if verified_real_execution else "evidence_supported_result" if evidence_supported else "unverified_generated_result"
         return {
             "trace_available": True,

@@ -6,6 +6,7 @@ from typing import Any
 
 from ai_core.config.paths import CONFIGS_DIR, RUNTIME_GENERATED
 from ai_core.runtime.capability.source_priority_engine import SourcePriorityEngine
+from ai_core.runtime.capability.semantic.semantic_capability_classifier import SemanticCapabilityClassifier
 
 
 class ExecutionModeSelector:
@@ -17,28 +18,82 @@ class ExecutionModeSelector:
 
     def __init__(self) -> None:
         self.priority = SourcePriorityEngine()
+        self.classifier = SemanticCapabilityClassifier()
 
     def select(self, *, step: dict[str, Any], plan: dict[str, Any], state: dict[str, Any], capability: str) -> str:
         policy = self.policy_for(step=step, plan=plan, state=state, capability=capability)
         explicit = self._explicit_mode(step, plan, state)
         if explicit:
             return explicit
-        text = self._contract_text([step, plan, state.get("runtime_request_semantics"), capability])
+
+        classification = self.classifier.classify(step=step, plan=plan, state=state, capability=capability)
+        category = str(classification.get("category") or "")
+        mode = self._mode_from_category(category, policy)
+        if mode:
+            return mode
+
+        strategy = self._strategy_values(step)
+        if any(v in {"web_evidence", "web_retrieval", "external_evidence"} for v in strategy):
+            return "web_retrieval"
+
+        # Routing indicators are only applied to compact capability semantics, not
+        # to the full delegated prompt. This prevents generic wrapper phrases such
+        # as "primary runtime" from forcing runtime-native execution.
+        text = self._contract_text([capability, step.get("step_type"), step.get("required_capability"), strategy])
         for rule in policy.get("routing_rules", []):
             if not isinstance(rule, dict):
+                continue
+            scope = str(rule.get("match_scope") or "capability_semantics")
+            if scope not in {"capability_semantics", "execution_strategy"}:
                 continue
             indicators = [str(x).casefold() for x in rule.get("indicators", []) if str(x).strip()]
             if indicators and any(item in text for item in indicators):
                 mode = str(rule.get("execution_mode") or "").strip()
                 if mode:
                     return mode
-        # Default to the first non-runtime-native mode unless runtime-native is
-        # explicitly requested by contract or routing rule. This prevents local
-        # runtime state from swallowing external or generated capabilities.
+
+        default = str(policy.get("unknown_capability_default") or "").strip()
+        if default:
+            return default
         for mode in self.priority.order(policy):
             if mode != "runtime_native":
                 return mode
         return self.priority.order(policy)[0]
+
+
+    def _strategy_values(self, *items: Any) -> list[str]:
+        result: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            strategy = item.get("execution_strategy")
+            if isinstance(strategy, list):
+                result.extend(str(x).strip() for x in strategy if str(x).strip())
+            steps = item.get("planned_steps")
+            if isinstance(steps, list):
+                for step in steps:
+                    if isinstance(step, dict):
+                        result.extend(self._strategy_values(step))
+        return result
+
+    def _mode_from_category(self, category: str, policy: dict[str, Any]) -> str:
+        if not category:
+            return ""
+        for rule in policy.get("routing_rules", []):
+            if not isinstance(rule, dict):
+                continue
+            categories = [str(x) for x in rule.get("semantic_categories", [])]
+            if category in categories:
+                mode = str(rule.get("execution_mode") or "").strip()
+                if mode:
+                    return mode
+        graph = self.classifier._load_graph()
+        node = graph.get(category) if isinstance(graph, dict) else None
+        if isinstance(node, dict):
+            modes = node.get("preferred_modes")
+            if isinstance(modes, list) and modes:
+                return str(modes[0])
+        return ""
 
     def policy_for(self, *, step: dict[str, Any], plan: dict[str, Any], state: dict[str, Any], capability: str) -> dict[str, Any]:
         merged: dict[str, Any] = {}

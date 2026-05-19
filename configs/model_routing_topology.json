@@ -1,5 +1,5 @@
 {
-  "version": "2.8.14",
+  "version": "2.8.15",
   "description": "Generic cognitive model routing topology. No business-domain rules are stored here.",
   "medium_prompt_chars": 4000,
   "large_prompt_chars": 10000,
@@ -59,5 +59,20 @@
     "always_escalate_levels": [
       "critical"
     ]
+  },
+  "bootstrap_managed": true,
+  "bootstrap_policy": {
+    "allow_external_strong_model_for_topology": true,
+    "persist_generated_topology_to": "runtime/generated/system_topology/model_routing_topology.json",
+    "fallback_to_seed_topology": true,
+    "missing_model_action": "request_or_install_when_supported"
+  },
+  "routes_by_cognitive_task": {
+    "low_structured_json": "local_light",
+    "medium_planning": "local_capable",
+    "semantic_governance": "strong_reasoning",
+    "artifact_generation": "artifact_strong",
+    "code_generation": "code_strong",
+    "unknown_capability_discovery": "strong_reasoning"
   }
 }

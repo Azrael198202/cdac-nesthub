@@ -158,3 +158,21 @@ configs/model_routing_topology.json
 ai_core/llm/provider_router.py
 ai_core/llm/model_capability_matcher.py
 ```
+
+
+## V2.8.15 Runtime Self-Governance Bootstrap
+
+Goal: initialize a generic runtime governance graph at startup and use it to stabilize model selection, capability routing, MCP discovery, and feedback-based model escalation.
+
+Implemented:
+- Startup Runtime Bootstrap Service.
+- Provider and model inventory discovery from runtime provider config.
+- Strong-model topology generation when available, deterministic seed fallback otherwise.
+- Runtime-generated governance graph under `runtime/generated/system_topology/`.
+- Semantic capability taxonomy layer for generic source classification.
+- Capability routing now respects semantic source category before fallback.
+- Runtime-native execution no longer swallows external evidence steps.
+- MCP registry preserved as a capability discovery source.
+- Unknown capability discovery path added for future tool/model/MCP expansion.
+- Feedback rejection records model escalation signals.
+- Packaging excludes tests, scripts, caches, and runtime generated artifacts.

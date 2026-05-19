@@ -19,6 +19,7 @@ from ai_core.runtime.runtime_template_generator import RuntimeTemplateGenerator
 from ai_core.validation.recoverable_validation_error import RecoverableValidationError
 from ai_core.execution.continuation_engine import ContinuationEngine
 from ai_core.workflow.workflow_state_merger import WorkflowStateMerger
+from ai_core.runtime.modeling.feedback_escalator import FeedbackEscalator
 
 
 class WorkflowRuntime:
@@ -37,6 +38,7 @@ class WorkflowRuntime:
         self.correction_learning = RuntimeLearningService()
         self.continuation_engine = ContinuationEngine()
         self.workflow_state_merger = WorkflowStateMerger()
+        self.model_feedback = FeedbackEscalator()
         self._event_listeners: dict[str, list[Callable[[dict], Any]]] = {}
 
     def _load_workflow(self) -> Dict[str, Any]:
@@ -330,6 +332,11 @@ class WorkflowRuntime:
                     user_input=state.get("input", ""),
                     original_output=original_output,
                     feedback=combined_feedback,
+                )
+                self.model_feedback.record_event(
+                    node_id=node_id,
+                    adapter={"runtime_role": executor_type or "llm_json"},
+                    event={"kind": "dissatisfied", "feedback": combined_feedback},
                 )
 
                 evolution = self.template_generator.evolve_from_feedback(

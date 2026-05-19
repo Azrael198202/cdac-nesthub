@@ -1,0 +1,70 @@
+{
+  "version": "2.8.15",
+  "description": "Generic semantic capability taxonomy. Indicators are runtime/config data and can be replaced by bootstrap-generated topology.",
+  "capability_semantic_graph": {
+    "runtime_state_observation": {
+      "preferred_modes": ["runtime_native"],
+      "fallback_modes": [],
+      "indicators": [
+        "runtime_state",
+        "runtime native",
+        "local runtime",
+        "system state",
+        "system clock",
+        "current time",
+        "now",
+        "local machine"
+      ]
+    },
+    "structured_external_observation": {
+      "preferred_modes": ["structured_provider", "web_retrieval"],
+      "fallback_modes": ["web_retrieval", "mcp_orchestration"],
+      "indicators": [
+        "external state",
+        "external observation",
+        "live external",
+        "forecast",
+        "weather",
+        "market",
+        "currency",
+        "traffic",
+        "schedule data"
+      ]
+    },
+    "web_retrieval": {
+      "preferred_modes": ["web_retrieval"],
+      "fallback_modes": ["structured_provider", "mcp_orchestration"],
+      "indicators": [
+        "web evidence",
+        "web_evidence",
+        "search",
+        "external evidence",
+        "latest",
+        "current external"
+      ]
+    },
+    "artifact_generation": {
+      "preferred_modes": ["specialized_model", "tool_generation"],
+      "fallback_modes": ["strong_reasoning", "mcp_orchestration"],
+      "indicators": [
+        "artifact",
+        "file generation",
+        "document generation",
+        "image generation",
+        "slide generation",
+        "pdf generation",
+        "code generation"
+      ]
+    },
+    "mcp_orchestration": {
+      "preferred_modes": ["mcp_orchestration", "tool_generation"],
+      "fallback_modes": ["web_retrieval"],
+      "indicators": [
+        "mcp",
+        "external tool server",
+        "capability manifest",
+        "tool discovery"
+      ]
+    }
+  }
+}

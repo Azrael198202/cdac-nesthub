@@ -235,6 +235,35 @@ class ToolCallExecutor:
                 })
                 continue
 
+            selected_execution_mode = self.capability_router.select_mode(
+                step=step,
+                plan=normalized_plan,
+                state=state,
+                capability=required_capability or "unknown_capability",
+            )
+            if selected_execution_mode in {"structured_provider", "web_retrieval"}:
+                routed_web_result = await self._try_strategy_web_evidence_execution(
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    capability=required_capability or "generic_information_access",
+                    step=step,
+                    state=state,
+                    reason="capability_source_routing_" + selected_execution_mode,
+                )
+                if routed_web_result:
+                    execution_steps.append({
+                        "step_id": step_id,
+                        "status": "executed",
+                        "tool": routed_web_result.get("tool"),
+                        "input": routed_web_result.get("input"),
+                        "result": routed_web_result.get("result"),
+                        "provenance": (routed_web_result.get("result") or {}).get("provenance") if isinstance(routed_web_result.get("result"), dict) else None,
+                        "source_step": step,
+                        "priority_path": selected_execution_mode + "_before_local",
+                    })
+                    continue
+
             # v70.9 priority layer: local/model knowledge first.
             # If previous successful runtime knowledge already covers the current
             # parameters, answer from local knowledge and avoid web/API/codegen.

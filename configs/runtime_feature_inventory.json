@@ -1,0 +1,44 @@
+{
+  "version": "2.8.15",
+  "description": "Generic runtime feature inventory used by bootstrap. No domain-specific implementation is stored here.",
+  "features": [
+    {
+      "id": "conversation_runtime",
+      "capabilities": [
+        "input_understanding",
+        "intent_recognition",
+        "workflow_planning",
+        "stable_synthesis"
+      ]
+    },
+    {
+      "id": "agent_delegation_runtime",
+      "capabilities": [
+        "participant_registry",
+        "task_registry",
+        "delegation_execution",
+        "durable_resume"
+      ]
+    },
+    {
+      "id": "execution_runtime",
+      "capabilities": [
+        "runtime_state_observation",
+        "structured_external_observation",
+        "web_retrieval",
+        "tool_generation",
+        "mcp_orchestration"
+      ]
+    },
+    {
+      "id": "artifact_runtime",
+      "capabilities": [
+        "document_generation",
+        "spreadsheet_generation",
+        "slide_generation",
+        "code_generation",
+        "image_generation_request_routing"
+      ]
+    }
+  ]
+}

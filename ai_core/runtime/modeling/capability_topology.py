@@ -17,8 +17,9 @@ class RuntimeModelTopology:
     def load(self) -> dict[str, Any]:
         base = self._load_json(CONFIGS_DIR / "model_routing_topology.json")
         runtime_overlay = self._load_json(RUNTIME_GENERATED / "modeling" / "routing_topology.json")
+        governance_overlay = self._load_json(RUNTIME_GENERATED / "system_topology" / "runtime_governance_graph.json")
         config_overlay = self._load_yaml(RUNTIME_CONFIGS / "models" / "model_routing_topology.yaml")
-        return self._merge(self._merge(base, config_overlay), runtime_overlay)
+        return self._merge(self._merge(self._merge(base, config_overlay), runtime_overlay), governance_overlay)
 
     def ensure_defaults(self) -> None:
         path = CONFIGS_DIR / "model_routing_topology.json"
@@ -28,7 +29,7 @@ class RuntimeModelTopology:
 
     def default_topology(self) -> dict[str, Any]:
         return {
-            "version": "2.8.14",
+            "version": "2.8.15",
             "description": "Generic cognitive model routing topology. No business-domain rules are stored here.",
             "medium_prompt_chars": 4000,
             "large_prompt_chars": 10000,

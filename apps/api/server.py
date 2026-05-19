@@ -9,11 +9,13 @@ from ai_core.evolution.approval_learning import ApprovalLearningService
 from ai_core.orchestration.workflow_runtime import WorkflowRuntime
 from ai_core.events.event_bus import event_bus
 from auxiliary_brain.studio import AgentStudioService
+from ai_core.runtime.bootstrap import RuntimeBootstrapService
 
 approval_learning = ApprovalLearningService()
 app = FastAPI()
 runtime = WorkflowRuntime()
 studio_service = AgentStudioService()
+bootstrap_service = RuntimeBootstrapService()
 
 
 class ChatRequest(BaseModel):
@@ -42,6 +44,26 @@ class ResumeRequest(BaseModel):
     feedback: str | None = None
 
 
+@app.on_event("startup")
+async def runtime_bootstrap_on_startup():
+    try:
+        await bootstrap_service.bootstrap(force=False)
+    except Exception:
+        # Bootstrap must never prevent the API from starting. Runtime will fall
+        # back to static configs and can be re-bootstrapped via API.
+        pass
+
+
+@app.post("/api/runtime/bootstrap")
+async def runtime_bootstrap():
+    return JSONResponse(await bootstrap_service.bootstrap(force=True))
+
+
+@app.get("/api/runtime/bootstrap")
+async def runtime_bootstrap_state():
+    return JSONResponse(await bootstrap_service.bootstrap(force=False))
+
+
 @app.get("/")
 async def home():
     html = open("apps/web/index.html", "r", encoding="utf-8").read()
@@ -51,7 +73,7 @@ async def home():
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
             "Expires": "0",
-            "X-AI-Core-Version": "v70.29",
+            "X-AI-Core-Version": "v2.8.15",
         },
     )
 
@@ -100,7 +122,7 @@ async def agent_studio_resume_run(req: AgentStudioResumeRunRequest):
 
 @app.get("/api/version")
 async def version():
-    return JSONResponse({"version": "v70.29", "name": "structured_fact_synthesis_and_credential_recovery_v70_29"})
+    return JSONResponse({"version": "v2.8.15", "name": "runtime_self_governance_bootstrap_v2_8_15"})
 
 
 @app.post("/api/chat")

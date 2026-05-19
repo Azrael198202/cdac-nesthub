@@ -1,35 +1,77 @@
 {
+  "version": "2.8.15",
+  "description": "Generic runtime execution-source policy. Capability labels and indicators are config/runtime data, not core logic.",
   "preferred_execution_modes": [
-    "runtime_native",
     "structured_provider",
-    "web_retrieval"
+    "web_retrieval",
+    "runtime_native"
   ],
+  "strict_source_alignment": true,
   "routing_rules": [
     {
       "execution_mode": "runtime_native",
+      "match_scope": "capability_semantics",
+      "semantic_categories": [
+        "runtime_state_observation"
+      ],
       "indicators": [
+        "runtime_state",
         "runtime_native",
-        "primary_runtime",
-        "native_observation",
+        "system_state",
         "local_runtime",
-        "system_clock",
-        "current runtime",
+        "current_runtime_state",
         "current time",
         "now"
       ]
     },
     {
       "execution_mode": "structured_provider",
+      "match_scope": "capability_semantics",
+      "semantic_categories": [
+        "external_state_observation",
+        "structured_external_observation",
+        "remote_structured_data"
+      ],
       "indicators": [
+        "external_state",
+        "external_observation",
         "structured_provider",
         "structured source",
-        "structured data",
-        "api preferred"
+        "api preferred",
+        "forecast",
+        "weather",
+        "stock",
+        "currency"
+      ]
+    },
+    {
+      "execution_mode": "web_retrieval",
+      "match_scope": "execution_strategy",
+      "strategy_values": [
+        "web_evidence",
+        "web_retrieval",
+        "external_evidence"
       ]
     }
   ],
   "fallback_modes": [
     "structured_provider",
     "web_retrieval"
-  ]
+  ],
+  "deny_runtime_native_when": [
+    {
+      "execution_strategy_contains": [
+        "web_evidence",
+        "web_retrieval",
+        "external_evidence"
+      ]
+    },
+    {
+      "source_required": [
+        "structured_provider",
+        "web_retrieval"
+      ]
+    }
+  ],
+  "unknown_capability_default": "web_retrieval"
 }
