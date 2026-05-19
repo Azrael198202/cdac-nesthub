@@ -77,7 +77,7 @@ class AgentDelegationRuntime:
                     participant_name=participant_name,
                 ),
             )
-            result_payload = result.__dict__
+            result_payload = self._sanitize_result_payload(result.__dict__)
             agent_results.append(result)
             run_payload["agent_results"].append(result_payload)
             self._record_progress(
@@ -238,7 +238,7 @@ class AgentDelegationRuntime:
                     ),
                     provided_inputs=provided_inputs,
                 )
-                resumed_payload = resumed.__dict__
+                resumed_payload = self._sanitize_result_payload(resumed.__dict__)
                 existing_results[idx] = resumed_payload
                 existing_results = self._dedupe_result_payloads(existing_results)
                 run_payload["agent_results"] = existing_results
@@ -296,7 +296,7 @@ class AgentDelegationRuntime:
                     participant_name=participant_name,
                 ),
             )
-            payload = result.__dict__
+            payload = self._sanitize_result_payload(result.__dict__)
             existing_results.append(payload)
             agent_results.append(result)
             self._record_progress(run_payload, f"participant_{index + 1}_complete", f"Participant finished: {participant_name}", "completed" if result.status == "completed" else result.status)
@@ -394,6 +394,15 @@ class AgentDelegationRuntime:
     def _clear_waiting_fields(self, run_payload: dict[str, Any]) -> None:
         for key in ["pending_action", "missing_inputs"]:
             run_payload.pop(key, None)
+
+    def _sanitize_result_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return payload
+        status = str(payload.get("status") or "")
+        if status not in {"requires_key", "requires_input", "paused"}:
+            payload.pop("pending_action", None)
+            payload["missing_inputs"] = []
+        return payload
 
     async def _execute_agent_request_with_progress(self, request, progress_callback):
         try:

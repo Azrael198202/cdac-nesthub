@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import asyncio
 from collections.abc import Callable
 import uuid
 from typing import Any
 
 from ai_core.orchestration.workflow_runtime import WorkflowRuntime
 from ai_core.llm.provider_router import ProviderRouter
+from ai_core.runtime.governance import RuntimeCostPolicy
 from auxiliary_brain.protocols.runtime_protocol import PrimaryRuntimeRequestEnvelope, PrimaryRuntimeExecutionPolicy
 
 
@@ -53,7 +55,7 @@ class PrimaryBrainDelegationClient:
         if progress_callback:
             self.runtime.add_event_listener(core_run_id, progress_callback)
         try:
-            await self.runtime.run_prepared(state)
+            await self._run_runtime_with_timeout(core_run_id, state, self.runtime.run_prepared(state))
         finally:
             if progress_callback:
                 self.runtime.remove_event_listener(core_run_id, progress_callback)
@@ -178,7 +180,8 @@ class PrimaryBrainDelegationClient:
             if retry_index is not None:
                 state["node_index"] = int(retry_index)
 
-        state.pop("pending_action", None)
+        self._clear_waiting_state(state)
+        state["status"] = "resuming"
         self.runtime.checkpoints.save(core_run_id, state)
         await self.runtime._emit(core_run_id, {
             "type": "DURABLE_RESUME_STARTED",
@@ -189,7 +192,39 @@ class PrimaryBrainDelegationClient:
             "progress": state.get("progress", 0),
             "origin": "ai_core",
         })
-        await self.runtime._continue(state)
+        await self._run_runtime_with_timeout(core_run_id, state, self.runtime._continue(state))
+
+    async def _run_runtime_with_timeout(self, core_run_id: str, state: dict[str, Any], awaitable) -> None:
+        snapshot = RuntimeCostPolicy().snapshot(state)
+        timeout_seconds = max(30, int(getattr(snapshot, "operation_timeout_seconds", 45)) + 30)
+        try:
+            await asyncio.wait_for(awaitable, timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            state["status"] = "failed"
+            state["timeout"] = {
+                "status": "timeout",
+                "timeout_seconds": timeout_seconds,
+                "current_node_index": state.get("node_index"),
+            }
+            self._clear_waiting_state(state)
+            state.setdefault("results", {})["runtime_timeout_finalizer"] = {
+                "status": "failed",
+                "reason": "Primary runtime exceeded the configured execution timeout and was finalized instead of remaining in running state.",
+                "timeout_seconds": timeout_seconds,
+            }
+            self.runtime.checkpoints.save(core_run_id, state)
+            await self.runtime._emit(core_run_id, {
+                "type": "RUN_FAILED",
+                "title": "Primary runtime timed out",
+                "message": "Execution exceeded the configured timeout and was finalized as failed.",
+                "origin": "ai_core",
+            })
+
+    def _clear_waiting_state(self, state: dict[str, Any]) -> None:
+        state.pop("pending_action", None)
+        state.pop("missing_inputs", None)
+        state.pop("waiting_input", None)
+        state.pop("requires_key", None)
 
     def _merge_human_inputs_into_result(self, original: Any, provided_inputs: dict[str, Any]) -> Any:
         """Merge form values into a JSON-like node result without domain rules.
@@ -505,6 +540,8 @@ class PrimaryBrainDelegationClient:
         return "The primary runtime completed without a user-facing final answer."
 
     def _extract_status(self, state: dict[str, Any]) -> str:
+        if isinstance(state, dict) and str(state.get("status") or "") in {"failed", "completed", "timeout"}:
+            return "failed" if str(state.get("status")) == "timeout" else str(state.get("status"))
         pending = state.get("pending_action") if isinstance(state, dict) else None
         if isinstance(pending, dict):
             kind = str(pending.get("kind") or "pending")

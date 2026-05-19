@@ -8,6 +8,7 @@ from ai_core.context.prompt_budget_manager import PromptBudgetManager
 from ai_core.llm.model_capability_matcher import ModelCapabilityMatcher
 from ai_core.runtime.modeling import ModelRoutingPlanner, ModelStagePolicy, RuntimeExecutionPolicy
 from ai_core.runtime.governance import RuntimeCostPolicy
+from ai_core.secrets.secret_store import SecretStore
 
 
 class ProviderRouter:
@@ -201,6 +202,14 @@ class ProviderRouter:
 
                 if "MISSING_SECRET:" in str(exc):
                     secret_key = str(exc).split("MISSING_SECRET:", 1)[1].split()[0].strip() or "provider_secret"
+                    # The secret may have been provided by a previous participant
+                    # during the same delegation run. Re-check the canonical store
+                    # before emitting another UI interaction. This prevents repeated
+                    # API-key prompts when resume state is stale or multiple agents
+                    # share the same provider credential.
+                    if SecretStore().has(secret_key):
+                        last_error = f"MISSING_SECRET_ALREADY_SATISFIED:{secret_key}"
+                        continue
                     await self._emit_missing_secret_interaction(
                         run_id=run_id,
                         node_id=node_id,
