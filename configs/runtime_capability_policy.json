@@ -1,0 +1,35 @@
+{
+  "preferred_execution_modes": [
+    "runtime_native",
+    "structured_provider",
+    "web_retrieval"
+  ],
+  "routing_rules": [
+    {
+      "execution_mode": "runtime_native",
+      "indicators": [
+        "runtime_native",
+        "primary_runtime",
+        "native_observation",
+        "local_runtime",
+        "system_clock",
+        "current runtime",
+        "current time",
+        "now"
+      ]
+    },
+    {
+      "execution_mode": "structured_provider",
+      "indicators": [
+        "structured_provider",
+        "structured source",
+        "structured data",
+        "api preferred"
+      ]
+    }
+  ],
+  "fallback_modes": [
+    "structured_provider",
+    "web_retrieval"
+  ]
+}

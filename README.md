@@ -126,3 +126,13 @@ Generated runtime files are not included in the source archive.
 - Agent delegation prompts now ask the primary runtime to prefer runtime-native observations when a task can be satisfied from current runtime state.
 - Final synthesis still uses verified facts only; no business/domain field names were added to ai_core.
 - Production source package excludes `tests/`, `scripts/`, `__pycache__/`, and runtime-generated files.
+
+## V2.8.13 Runtime Capability Routing Engine
+
+- Added a generic capability source routing layer.
+- Execution mode selection is driven by config/runtime contracts instead of hard-coded business logic.
+- Runtime-native observation, structured-provider, and web-retrieval are separated as source modes.
+- Runtime-native observation can satisfy current local runtime state without web retrieval when the contract/policy selects that mode.
+- Web retrieval remains a fallback instead of the default for every request.
+- Added `.gitignore` to prevent cache/runtime artifacts from entering source packages.
+- Production package excludes `tests/`, `scripts/`, `__pycache__/`, `.pyc`, and runtime-generated files.

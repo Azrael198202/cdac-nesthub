@@ -36,6 +36,7 @@ from ai_core.execution.evidence_direct_answer import EvidenceDirectAnswerBuilder
 from ai_core.execution.execution_continuation_coordinator import ExecutionContinuationCoordinator
 from ai_core.execution.answer_sufficiency_evaluator import AnswerSufficiencyEvaluator
 from ai_core.execution.evidence_satisfied_short_circuit import EvidenceSatisfiedShortCircuit
+from ai_core.runtime.capability.capability_router import CapabilityRouter
 from ai_core.research.web_research_tool import GenericWebResearchTool
 from ai_core.context.evidence_noise_reducer import EvidenceNoiseReducer
 from ai_core.knowledge.knowledge_service import KnowledgeService
@@ -87,6 +88,7 @@ class ToolCallExecutor:
         self.answer_sufficiency = AnswerSufficiencyEvaluator()
         self.web_research = GenericWebResearchTool()
         self.evidence_short_circuit = EvidenceSatisfiedShortCircuit()
+        self.capability_router = CapabilityRouter()
 
     async def execute(
         self,
@@ -211,14 +213,14 @@ class ToolCallExecutor:
                 })
                 continue
 
-            runtime_native_result = self._try_runtime_native_observation(
+            runtime_native_result = self.capability_router.try_runtime_native(
                 run_id=run_id,
                 node_id=node_id,
                 step_id=step_id,
                 capability=required_capability or "unknown_capability",
                 step=step,
                 state=state,
-                normalized_plan=normalized_plan,
+                plan=normalized_plan,
             )
             if runtime_native_result:
                 execution_steps.append({
