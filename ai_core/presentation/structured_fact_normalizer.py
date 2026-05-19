@@ -28,6 +28,7 @@ class NormalizedFact:
     context: str = ""
     confidence: float = 0.6
     source_url: str = ""
+    target: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -187,6 +188,7 @@ class StructuredFactNormalizer:
             context=str(item.get("context") or ""),
             confidence=float(item.get("confidence") or 0.9),
             source_url=str(item.get("source_url") or ""),
+            target=str(item.get("target") or ""),
         )
 
     def _signal_windows(self, text: str) -> list[str]:
@@ -351,6 +353,7 @@ class StructuredFactNormalizer:
             context=str(item.get("context") or ""),
             confidence=float(item.get("confidence") or 0.7),
             source_url=str(item.get("source_url") or source_url or ""),
+            target=str(item.get("target") or ""),
         )
 
     def _dedupe(self, facts: list[dict[str, Any]]) -> list[dict[str, Any]]:

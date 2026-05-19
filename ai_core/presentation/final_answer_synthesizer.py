@@ -124,14 +124,19 @@ class FinalAnswerSynthesizer:
 
             if aligned_records:
                 lines.append("Details:")
+                selected_records = self._best_aligned_records(aligned_records)
                 seen_records: set[str] = set()
-                for fact in aligned_records[:8]:
+                for fact in selected_records[:8]:
                     text = self._clean_sentence(str(fact.get("value") or fact.get("context") or ""))
                     if not text or text in seen_records:
                         continue
                     seen_records.add(text)
                     lines.append(f"- {text}")
-                sources = sorted({str(f.get("source_url")) for f in aligned_records if str(f.get("source_url") or "").startswith("http")})
+                sources = []
+                for fact in selected_records:
+                    src = str(fact.get("source_url") or "")
+                    if src.startswith("http") and src not in sources:
+                        sources.append(src)
                 if sources:
                     lines.append("Source:")
                     lines.append(f"- {sources[0]}")
@@ -182,6 +187,21 @@ class FinalAnswerSynthesizer:
         if trust_summary and trust_summary.get("verified_real_execution") is False:
             return "I could not produce a verified answer from the available result material."
         return "The runtime completed, but no user-facing answer material was available."
+
+    def _best_aligned_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        best_by_target: dict[str, dict[str, Any]] = {}
+        untargeted: list[dict[str, Any]] = []
+        for record in records:
+            target = str(record.get("target") or "")
+            if not target:
+                untargeted.append(record)
+                continue
+            existing = best_by_target.get(target)
+            if existing is None or float(record.get("confidence") or 0) > float(existing.get("confidence") or 0):
+                best_by_target[target] = record
+        selected = list(best_by_target.values()) if best_by_target else untargeted
+        selected.sort(key=lambda item: (str(item.get("target") or ""), -float(item.get("confidence") or 0)))
+        return selected
 
     def _friendly_label(self, label: str) -> str:
         text = " ".join(str(label or "value").replace("_", " ").split())

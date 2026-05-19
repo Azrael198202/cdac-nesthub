@@ -1,4 +1,4 @@
-# AI Runtime OS V2.8.18 Language-Neutral Temporal Alignment Runtime
+# AI Runtime OS V2.8.19 Source-Row Evidence Alignment Runtime
 
 This package keeps the V2.8.x agent-studio / ai_core delegation architecture and replaces hard-coded natural-language temporal aliases with runtime-driven temporal alias generation.
 
@@ -34,3 +34,11 @@ Excluded from package:
 - `tests/`
 - `scripts/`
 - runtime generated traces/checkpoints/deliveries/cache
+
+
+## V2.8.19 Source-Row Evidence Alignment Runtime
+
+- Date-aligned extraction now rejects calendar/menu strips before measurement rows.
+- Target records are selected by confidence and target date, so lower-quality row fragments do not override better source-backed records.
+- The extractor remains language-neutral: natural-language date aliases are still supplied by runtime state or generated contracts, not hard-coded in ai_core.
+- Runtime package excludes generated runtime artifacts, tests, scripts, __pycache__, and *.pyc.
