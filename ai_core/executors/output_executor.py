@@ -8,6 +8,7 @@ from ai_core.presentation.result_presenter import ResultPresenter
 from ai_core.presentation.result_material_builder import ResultMaterialBuilder
 from ai_core.presentation.final_answer_synthesizer import FinalAnswerSynthesizer
 from ai_core.validation.schema_validator import SchemaValidator
+from ai_core.knowledge.knowledge_service import KnowledgeService
 
 
 class OutputExecutor:
@@ -34,6 +35,7 @@ class OutputExecutor:
         self.presenter = ResultPresenter()
         self.material_builder = ResultMaterialBuilder()
         self.final_synthesizer = FinalAnswerSynthesizer()
+        self.knowledge = KnowledgeService()
 
     async def execute(self, workflow_node, node_config, state, capability_result):
         result = await self._build(state, node_config)
@@ -119,6 +121,8 @@ class OutputExecutor:
         if trust_summary.get("trust_level") == "unverified_generated_result":
             final_answer = final_answer + "\n\nTrust: unverified generated result. The runtime did not confirm live network verification, no-mock execution, or evidence-supported material quality."
 
+        self._save_verified_answer_to_knowledge(state=state, final_answer=final_answer, synthesized=synthesized, trust_summary=trust_summary)
+
         return {
             "_executor_type": "output",
             "_node_id": node_config.get("node_id", "output"),
@@ -135,6 +139,21 @@ class OutputExecutor:
             "blocked_steps": blocked_steps,
             "previous_result_keys": list(results.keys()),
         }
+
+
+    def _save_verified_answer_to_knowledge(self, *, state: dict[str, Any], final_answer: str, synthesized: dict[str, Any], trust_summary: dict[str, Any]) -> None:
+        try:
+            if not final_answer or trust_summary.get("trust_level") == "unverified_generated_result":
+                return
+            self.knowledge.save_answer_result(
+                run_id=str(state.get("run_id") or state.get("id") or ""),
+                query=str(state.get("input") or ""),
+                final_answer=final_answer,
+                facts=((synthesized.get("result_material") or [{}])[0].get("content") or {}).get("normalized_facts", []) if isinstance(synthesized.get("result_material"), list) else [],
+                trust_summary=trust_summary,
+            )
+        except Exception:
+            return
 
     def _optional_upgrade_request(self, interactions: list[dict[str, Any]]) -> dict[str, Any]:
         first = interactions[0] if interactions and isinstance(interactions[0], dict) else {}

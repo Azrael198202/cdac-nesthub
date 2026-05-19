@@ -491,15 +491,30 @@ class PrimaryBrainDelegationClient:
     ) -> str:
         if not agent_results:
             return "The delegated task completed, but no completed participant result was available for final synthesis."
-        lines = ["Final Answer", "", f"Task: {task_name}"]
+        successful: list[tuple[str, str]] = []
+        failed: list[str] = []
         for result in agent_results:
             label = result.participant_name or result.participant_id or "participant"
-            status = result.status or "completed"
+            status = str(result.status or "completed")
             answer = self._clean_participant_answer((result.final_answer or "").strip())
-            if not answer:
-                answer = "No user-facing answer was produced."
-            lines.extend(["", f"{label} ({status})", answer])
-        return "\n".join(lines).strip()
+            if status == "completed" and answer:
+                successful.append((label, answer))
+            else:
+                failed.append(label)
+
+        lines: list[str] = []
+        if successful:
+            if len(successful) == 1:
+                lines.append(successful[0][1])
+            else:
+                for label, answer in successful:
+                    lines.append(f"{label}:")
+                    lines.append(answer)
+                    lines.append("")
+        if failed:
+            lines.append("Some requested parts could not be completed with verified result material: " + ", ".join(failed) + ".")
+        answer = "\n".join(line for line in lines if line is not None).strip()
+        return answer or "I could not produce a verified final answer for this task."
 
     def _clean_participant_answer(self, answer: str) -> str:
         text = str(answer or "").strip()

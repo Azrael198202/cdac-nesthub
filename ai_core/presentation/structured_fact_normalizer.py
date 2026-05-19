@@ -82,13 +82,34 @@ class StructuredFactNormalizer:
 
     def _facts_from_dict(self, value: dict[str, Any], *, runtime_variables: dict[str, list[str]], source_url: str) -> list[NormalizedFact]:
         facts: list[NormalizedFact] = []
-        if isinstance(value.get("normalized_facts"), list):
-            for item in value["normalized_facts"][:20]:
-                if isinstance(item, dict):
-                    fact = self._coerce_fact(item, source_url=source_url)
-                    if fact:
-                        facts.append(fact)
-            return facts
+
+        # Prefer contract-aligned records from fetched source documents and
+        # selected evidence blocks before accepting generic value slices. This
+        # keeps the core domain-neutral: it only requires alignment to
+        # runtime-supplied target values such as dates, ids, or other normalized
+        # parameters.
+        doc_facts = self._facts_from_source_text_carriers(value, runtime_variables=runtime_variables, source_url=source_url)
+        if doc_facts:
+            return doc_facts
+        block_facts = self._facts_from_selected_blocks(value, runtime_variables=runtime_variables, source_url=source_url)
+        if block_facts:
+            return block_facts
+
+        quality = value.get("answer_material_quality") if isinstance(value.get("answer_material_quality"), dict) else {}
+        raw_normalized = value.get("normalized_facts")
+        if isinstance(raw_normalized, list):
+            # When the extraction stage explicitly says the answer material did
+            # not pass quality, do not recycle unaligned numeric fragments into
+            # final synthesis. Continue to other structured carriers instead.
+            if quality.get("passed") is False:
+                pass
+            else:
+                for item in raw_normalized[:20]:
+                    if isinstance(item, dict):
+                        fact = self._coerce_fact(item, source_url=source_url)
+                        if fact:
+                            facts.append(fact)
+                return facts
 
         if isinstance(value.get("source_documents"), list):
             for doc in value.get("source_documents")[:6]:
@@ -114,7 +135,7 @@ class StructuredFactNormalizer:
         # rather than user-facing facts.  This is not domain logic; it is a
         # runtime artifact hygiene boundary.
         for key, item in value.items():
-            if key in {"raw", "html", "trace", "debug", "extracted_material", "normalized_facts", "answer_material", "attempt_summary"}:
+            if key in {"raw", "html", "trace", "debug", "extracted_material", "normalized_facts", "structured_evidence", "selected_evidence_blocks", "answer_sufficiency", "answer_material", "attempt_summary"}:
                 continue
             if isinstance(item, (str, int, float)):
                 text = f"{key}: {item}"
@@ -122,6 +143,79 @@ class StructuredFactNormalizer:
             elif isinstance(item, (dict, list)):
                 facts.extend(self._facts_from_value(item, runtime_variables=runtime_variables, source_url=source_url))
         return facts
+
+
+
+    def _facts_from_source_text_carriers(self, value: dict[str, Any], *, runtime_variables: dict[str, list[str]], source_url: str) -> list[NormalizedFact]:
+        carriers: list[tuple[str, str]] = []
+
+        def walk(obj: Any, inherited_url: str = "") -> None:
+            if len(carriers) >= 12:
+                return
+            if isinstance(obj, dict):
+                url = inherited_url
+                for key in ("source_url", "url", "official_documentation_url"):
+                    raw = obj.get(key)
+                    if isinstance(raw, str) and raw.startswith(("http://", "https://")):
+                        url = raw
+                        break
+                for key in ("text_excerpt", "visible_text_excerpt", "dom_evidence_text"):
+                    text = obj.get(key)
+                    if isinstance(text, str) and text.strip():
+                        carriers.append((text, url or source_url))
+                for nested in obj.values():
+                    if isinstance(nested, (dict, list)):
+                        walk(nested, url)
+            elif isinstance(obj, list):
+                for item in obj[:24]:
+                    walk(item, inherited_url)
+
+        walk(value, source_url)
+        facts: list[NormalizedFact] = []
+        seen: set[str] = set()
+        for text, url in carriers:
+            key = text[:240]
+            if key in seen:
+                continue
+            seen.add(key)
+            aligned = self.date_aligned_extractor.extract(
+                text=" ".join(text.split()),
+                runtime_variables=runtime_variables,
+                source_url=url or source_url,
+                runtime_state=getattr(self, "_current_state", {}) if hasattr(self, "_current_state") else {},
+            )
+            for item in aligned:
+                facts.append(self._fact_from_aligned_record(item))
+        return facts
+
+    def _facts_from_selected_blocks(self, value: dict[str, Any], *, runtime_variables: dict[str, list[str]], source_url: str) -> list[NormalizedFact]:
+        blocks = value.get("selected_evidence_blocks")
+        if not isinstance(blocks, list):
+            return []
+        facts: list[NormalizedFact] = []
+        for block in blocks[:8]:
+            text = block if isinstance(block, str) else self._flatten_text(block)
+            if not isinstance(text, str) or not text.strip():
+                continue
+            block_url = source_url or str(value.get("source_url") or "")
+            aligned = self.date_aligned_extractor.extract(
+                text=" ".join(text.split()),
+                runtime_variables=runtime_variables,
+                source_url=block_url,
+                runtime_state=getattr(self, "_current_state", {}) if hasattr(self, "_current_state") else {},
+            )
+            for item in aligned:
+                facts.append(self._fact_from_aligned_record(item))
+        return facts
+
+    def _flatten_text(self, value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            return " ".join(self._flatten_text(v) for v in value.values())
+        if isinstance(value, list):
+            return " ".join(self._flatten_text(v) for v in value[:40])
+        return str(value or "")
 
     def _facts_from_text(self, text: str, *, runtime_variables: dict[str, list[str]], source_url: str) -> list[NormalizedFact]:
         compact = " ".join(str(text or "").split())

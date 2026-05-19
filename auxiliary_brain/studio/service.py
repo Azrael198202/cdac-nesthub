@@ -9,6 +9,7 @@ from auxiliary_brain.runtime import new_id
 from auxiliary_brain.storage import JsonStore
 from auxiliary_brain.studio.command_router import StudioCommandRouter
 from ai_core.runtime.adaptation import FeedbackClassifier, ModelUpgradeController, RerunStrategy
+from ai_core.interaction.natural_conversation import NaturalConversationService
 
 
 class AgentStudioService:
@@ -21,6 +22,7 @@ class AgentStudioService:
         self.feedback_classifier = FeedbackClassifier()
         self.model_upgrade_controller = ModelUpgradeController()
         self.rerun_strategy = RerunStrategy()
+        self.natural_conversation = NaturalConversationService()
         self.store.ensure_workspace()
         self.community_id = self._ensure_community()
 
@@ -37,14 +39,7 @@ class AgentStudioService:
         feedback = self.feedback_classifier.classify(message, fallback_target=self._latest_task_name())
         if feedback.get("matched"):
             return await self.handle_feedback(message, feedback.get("target_task"))
-        return {
-            "action": "conversation_message",
-            "origin": "auxiliary_brain",
-            "status": "completed",
-            "message": "I received your message. You can create participants, create tasks, execute tasks, continue missing-information collection, or give natural-language feedback to re-optimize the latest result.",
-            "conversation_intent": "general_chat",
-            "latest_task": self._latest_task_name(),
-        }
+        return await self.natural_conversation.reply(message, latest_task=self._latest_task_name())
 
 
     async def handle_feedback(self, message: str, task_name: str | None = None) -> dict[str, Any]:

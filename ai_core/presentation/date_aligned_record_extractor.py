@@ -78,7 +78,8 @@ class DateAlignedRecordExtractor:
         targets: list[TargetRecord] = []
         seen: set[str] = set()
         for aliases in runtime_variables.values():
-            for raw in aliases:
+            alias_bucket = [str(a or "").strip() for a in aliases if str(a or "").strip()]
+            for raw in alias_bucket:
                 text = str(raw or "").strip()
                 match = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$", text)
                 if not match:
@@ -93,6 +94,12 @@ class DateAlignedRecordExtractor:
                     continue
                 seen.add(canonical)
                 alias_candidates = self.alias_generator.aliases_for(canonical, runtime_state=runtime_state)
+                # Preserve runtime-supplied aliases that share the same parameter
+                # bucket. This is how upstream parsing can pass locale or
+                # user-expression aliases without hard-coding them in core.
+                for bucket_alias in alias_bucket:
+                    if bucket_alias not in alias_candidates:
+                        alias_candidates.append(bucket_alias)
                 targets.append(TargetRecord(canonical=canonical, aliases=tuple(alias_candidates)))
         return targets
 
@@ -255,11 +262,19 @@ class DateAlignedRecordExtractor:
         body = text[len(prefix):].strip(" :;-|,") if prefix else text
         body = self._cut_noise_tail(body)
         body = self._cut_at_embedded_later_anchor(body)
+        body = self._trim_dangling_connector(body)
         if len(body) > 220:
             body = body[:220].rsplit(" ", 1)[0].strip()
         if not body:
             return prefix or target.canonical
         return f"{prefix or target.canonical}: {body}"
+
+
+    def _trim_dangling_connector(self, text: str) -> str:
+        sample = str(text or "").strip()
+        # Generic cleanup for snippets cut from larger sentences. This list is
+        # connector-only, not domain-specific vocabulary.
+        return re.sub(r"\s+[^\W\d_]{1,12}\s*$", lambda m: "" if len(sample[:m.start()].split()) >= 4 else m.group(0), sample, flags=re.UNICODE).strip()
 
     def _cut_at_embedded_later_anchor(self, text: str) -> str:
         sample = str(text or "")

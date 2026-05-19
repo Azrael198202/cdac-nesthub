@@ -123,7 +123,7 @@ class FinalAnswerSynthesizer:
             lines: list[str] = []
 
             if aligned_records:
-                lines.append("Details:")
+                lines.append("I found the following:")
                 selected_records = self._best_aligned_records(aligned_records)
                 seen_records: set[str] = set()
                 for fact in selected_records[:8]:
@@ -172,7 +172,7 @@ class FinalAnswerSynthesizer:
                 if len(value_parts) >= 10:
                     break
             if value_parts:
-                lines.append("Details:")
+                lines.append("I found the following:")
                 lines.extend(f"- {item}" for item in value_parts)
 
             sources = sorted({str(f.get("source_url")) for f in facts if str(f.get("source_url") or "").startswith("http")})

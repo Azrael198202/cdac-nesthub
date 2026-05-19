@@ -306,6 +306,16 @@ class ToolCallExecutor:
                     state=state,
                     plan=normalized_plan,
                 )
+                if not runtime_native_result and method_contract.reason == "runtime_native_temporal_contract_enforced":
+                    runtime_native_result = self._try_runtime_native_observation(
+                        run_id=run_id,
+                        node_id=node_id,
+                        step_id=step_id,
+                        capability=required_capability or "runtime_current_observation",
+                        step={**step, "required_source_level": "runtime_native"},
+                        state=state,
+                        normalized_plan=normalized_plan,
+                    )
                 if runtime_native_result:
                     runtime_result = runtime_native_result.get("result") if isinstance(runtime_native_result.get("result"), dict) else {}
                     runtime_result.setdefault("data", {})["execution_method_contract"] = method_contract.to_dict()
@@ -1117,7 +1127,11 @@ class ToolCallExecutor:
 
         forced = ""
         reason = ""
-        if family == "external_information" and method_contract.method in {"runtime_generated_tool", "model_knowledge"}:
+        if self._step_has_runtime_native_temporal_contract(step=step, contract=contract):
+            forced = "runtime_generated_tool"
+            reason = "runtime_native_temporal_contract_enforced"
+            family = "runtime_observation"
+        elif family == "external_information" and method_contract.method in {"runtime_generated_tool", "model_knowledge"}:
             forced = next((m for m in ["web_search", "api_call", "existing_tool"] if m in preferred and m not in disabled), "web_search")
             reason = "locked_external_information_contract_blocked_runtime_method"
         elif family == "external_information" and method_contract.method == "api_call" and "web_search" not in disabled:
@@ -1149,6 +1163,36 @@ class ToolCallExecutor:
             proposal_source=method_contract.proposal_source,
             decision_source="intent_contract_enforcer",
         )
+
+
+    def _step_has_runtime_native_temporal_contract(self, *, step: dict[str, Any], contract: dict[str, Any]) -> bool:
+        """Detect generic runtime-native temporal observations.
+
+        This is not a domain rule. It only checks whether the planner already
+        supplied a concrete timestamp-like value as a runtime parameter. In that
+        case the runtime can answer from its native state and must not browse
+        external pages for the same value.
+        """
+        values: list[Any] = []
+        params = step.get("parameters") if isinstance(step.get("parameters"), dict) else {}
+        for section_name in ("known", "optional"):
+            section = params.get(section_name) if isinstance(params.get(section_name), dict) else {}
+            for key, value in section.items():
+                key_text = str(key or "").casefold()
+                if "datetime" in key_text or "timestamp" in key_text:
+                    values.append(value)
+        for value in contract.get("target_values") or []:
+            values.append(value)
+        import re
+        iso_datetime = re.compile(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}T\d{1,2}:\d{2}")
+        has_timestamp = any(iso_datetime.search(str(v or "")) for v in values)
+        if not has_timestamp:
+            return False
+        # If the same step has concrete non-temporal external parameters, let the
+        # external-information contract handle it. Field names are generic.
+        known = params.get("known") if isinstance(params.get("known"), dict) else {}
+        non_temporal_keys = [k for k in known.keys() if "datetime" not in str(k).casefold() and "timestamp" not in str(k).casefold() and "timezone" not in str(k).casefold()]
+        return len(non_temporal_keys) == 0
 
     def _contract_allows_external_fallback(self, method_contract: ExecutionMethodContract) -> bool:
         allowed = set(method_contract.fallback or [])

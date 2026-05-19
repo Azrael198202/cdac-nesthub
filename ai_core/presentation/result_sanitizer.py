@@ -84,7 +84,7 @@ class ResultSanitizer:
         "debug",
         "trace",
     }
-    TEXT_LIMIT = 1800
+    TEXT_LIMIT = 12000
     ROW_LIMIT = 8
 
     def sanitize_materials(self, materials: list[dict[str, Any]]) -> list[dict[str, Any]]:

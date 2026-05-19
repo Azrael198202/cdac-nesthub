@@ -50,7 +50,20 @@ class StudioCommandRouter:
             return {}
 
     def _matches(self, lowered: str, options: list[str]) -> bool:
-        return any(str(option).lower() in lowered for option in options)
+        for option in options:
+            phrase = str(option).lower().strip()
+            if not phrase:
+                continue
+            # Single-word management verbs are only commands when they appear at
+            # the beginning of the message. This keeps normal conversation from
+            # being accidentally routed into task execution.
+            if " " not in phrase:
+                if lowered == phrase or lowered.startswith(phrase + " "):
+                    return True
+                continue
+            if phrase in lowered:
+                return True
+        return False
 
     def _extract_named_value(self, text: str) -> str | None:
         patterns = [

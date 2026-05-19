@@ -204,6 +204,60 @@ class KnowledgeService:
         walk(row)
         return found_answer and quality_passed
 
+
+    def save_answer_result(self, *, run_id: str, query: str, final_answer: str, facts: list[dict[str, Any]] | None = None, trust_summary: dict[str, Any] | None = None) -> None:
+        """Persist a verified user-facing answer for later local retrieval.
+
+        Runtime outputs are stored as data, not shipped with source packages.
+        This method intentionally writes only final-answer evidence records and
+        compact verified facts, not raw pages or intermediate node JSON.
+        """
+        RUNTIME_KNOWLEDGE.mkdir(parents=True, exist_ok=True)
+        record = {
+            "memory_type": "answer_result",
+            "usage_scope": "final_answer_evidence",
+            "run_id": run_id,
+            "query": query,
+            "final_answer": final_answer,
+            "facts": facts or [],
+            "trust_summary": trust_summary or {},
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        with (RUNTIME_KNOWLEDGE / "answer_results.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def answer_from_knowledge(self, query: str, *, required_terms: dict[str, list[str]] | None = None) -> dict[str, Any] | None:
+        item = self.best_covered(query, required_terms=required_terms, min_score=1.0, final_answer_only=True)
+        if not item:
+            return None
+        row = item.get("record") if isinstance(item.get("record"), dict) else {}
+        answer = row.get("final_answer") or row.get("answer") or row.get("message")
+        if not isinstance(answer, str) or not answer.strip():
+            return None
+        return {
+            "answer": answer.strip(),
+            "source": item.get("source"),
+            "score": item.get("score"),
+            "memory_type": item.get("memory_type"),
+        }
+
+    def status(self) -> dict[str, Any]:
+        files = self._knowledge_files()
+        rows = 0
+        eligible = 0
+        for path in files:
+            for row in self._read_jsonl(path):
+                rows += 1
+                if self.classify_record(row, source_path=path, flattened_text=self._flatten_text(row)).get("final_answer_eligible"):
+                    eligible += 1
+        return {
+            "enabled": True,
+            "paths": [str(RUNTIME_KNOWLEDGE), str(RUNTIME_DATASETS)],
+            "file_count": len(files),
+            "record_count": rows,
+            "final_answer_eligible_count": eligible,
+        }
+
     def save_success_case(self, run_id: str, data: dict) -> None:
         RUNTIME_KNOWLEDGE.mkdir(parents=True, exist_ok=True)
         with (RUNTIME_KNOWLEDGE / "success_cases.jsonl").open("a", encoding="utf-8") as f:
