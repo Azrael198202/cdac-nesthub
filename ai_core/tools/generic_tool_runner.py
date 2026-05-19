@@ -27,7 +27,7 @@ class GenericToolRunner:
         if not isinstance(implementation, dict):
             return self._error("invalid_tool_spec", "Tool implementation metadata must be an object.")
 
-        if implementation.get("type") not in {"python_function", "python_module", "runtime_python"}:
+        if implementation.get("type") not in {"python_function", "python_module", "runtime_python", "runtime_provider"}:
             return self._error(
                 "unsupported_tool_implementation",
                 f"Unsupported implementation type: {implementation.get('type')}",
@@ -36,6 +36,19 @@ class GenericToolRunner:
         input_validation = self.schema_validator.validate_input(tool_spec.get("input_schema"), input_data)
         if not input_validation.get("valid"):
             return self._error("tool_input_schema_validation_failed", "; ".join(input_validation.get("errors", [])))
+
+        if implementation.get("type") == "runtime_provider":
+            from ai_core.providers.runtime_provider_invoker import RuntimeProviderInvoker
+            from ai_core.providers.runtime_provider_registry import RuntimeProviderRegistry
+            provider = implementation.get("provider") if isinstance(implementation.get("provider"), dict) else None
+            provider_id = implementation.get("provider_id")
+            if provider is None and provider_id:
+                provider = RuntimeProviderRegistry().get(str(provider_id))
+            if not isinstance(provider, dict):
+                return self._error("runtime_provider_not_found", "runtime provider artifact is missing or not registered.")
+            output = RuntimeProviderInvoker().invoke(provider, input_data)
+            output = self._normalize_tool_output(output, source=str(tool_spec.get("tool_id") or provider.get("provider_id") or "runtime_provider"))
+            return output
 
         module_path = implementation.get("module_path") or implementation.get("path")
         function_name = implementation.get("function") or implementation.get("callable") or "run"

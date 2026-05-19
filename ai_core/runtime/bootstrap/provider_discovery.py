@@ -38,4 +38,5 @@ class ProviderDiscovery:
             "providers": normalized,
             "routes": routes,
             "default_route": config.get("default_route") or [],
+            "policy": config.get("policy") if isinstance(config.get("policy"), dict) else {},
         }

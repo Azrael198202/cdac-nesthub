@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["provider_id", "provider_type", "input_schema", "output_schema", "invoke"],
+  "properties": {
+    "provider_id": {"type": "string", "minLength": 1},
+    "provider_type": {"type": "string", "minLength": 1},
+    "capabilities": {"type": "array", "items": {"type": "string"}},
+    "modalities": {"type": "object", "additionalProperties": true},
+    "prepare": {"type": "object", "additionalProperties": true},
+    "invoke": {
+      "type": "object",
+      "required": ["method"],
+      "properties": {
+        "method": {"type": "string"},
+        "base_url": {"type": "string"},
+        "path": {"type": "string"},
+        "url": {"type": "string"},
+        "model": {"type": "string"},
+        "command": {"type": "array", "items": {"type": "string"}},
+        "module_path": {"type": "string"},
+        "function": {"type": "string"},
+        "timeout_seconds": {"type": "number"}
+      },
+      "additionalProperties": true
+    },
+    "auth": {"type": "object", "additionalProperties": true},
+    "input_schema": {"type": "object"},
+    "output_schema": {"type": "object"},
+    "safety": {"type": "object", "additionalProperties": true},
+    "source": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": true
+}

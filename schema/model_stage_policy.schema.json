@@ -1,4 +1,6 @@
 {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Runtime Model Stage Policy",
   "type": "object",
   "required": [
     "version",
@@ -6,56 +8,123 @@
     "model_catalog",
     "stages"
   ],
+  "additionalProperties": true,
   "properties": {
     "version": {
+      "type": "string"
+    },
+    "policy_kind": {
       "type": "string"
     },
     "description": {
       "type": "string"
     },
+    "governance_principles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "global_policy": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "capability_taxonomy": {
       "type": "object",
       "additionalProperties": true
     },
     "model_catalog": {
       "type": "object",
+      "minProperties": 1,
       "additionalProperties": {
         "type": "object",
         "required": [
           "provider_template",
+          "provider_model",
+          "family",
           "tier",
           "cost_class",
           "install_strategy",
           "capabilities"
         ],
+        "additionalProperties": true,
         "properties": {
           "provider_template": {
             "type": "string"
           },
+          "provider_model": {
+            "type": "string"
+          },
           "family": {
+            "type": "string"
+          },
+          "vendor": {
             "type": "string"
           },
           "tier": {
             "type": "string"
           },
           "cost_class": {
+            "type": "string",
+            "enum": [
+              "free",
+              "paid",
+              "metered",
+              "internal"
+            ]
+          },
+          "deployment": {
             "type": "string"
           },
           "install_strategy": {
             "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "allow_external": {
+            "type": "boolean"
+          },
+          "modalities": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "input": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "output": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "capabilities": {
             "type": "array",
             "items": {
               "type": "string"
             }
+          },
+          "context_window_hint": {
+            "type": "integer"
+          },
+          "priority_bias": {
+            "type": "integer"
           }
-        },
-        "additionalProperties": true
+        }
       }
+    },
+    "stage_defaults": {
+      "type": "object",
+      "additionalProperties": true
     },
     "stages": {
       "type": "object",
+      "minProperties": 1,
       "additionalProperties": {
         "type": "object",
         "required": [
@@ -65,6 +134,7 @@
           "lower_substitutes",
           "validation"
         ],
+        "additionalProperties": true,
         "properties": {
           "default": {
             "type": "string"
@@ -87,6 +157,19 @@
               "type": "string"
             }
           },
+          "required_capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "required_modalities": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "execution_mode": {
+            "type": "string"
+          },
           "validation": {
             "type": "object",
             "additionalProperties": true
@@ -94,11 +177,17 @@
           "raw_evidence_policy": {
             "type": "object",
             "additionalProperties": true
+          },
+          "privacy_policy": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "selection": {
+            "type": "object",
+            "additionalProperties": true
           }
-        },
-        "additionalProperties": true
+        }
       }
     }
-  },
-  "additionalProperties": true
+  }
 }

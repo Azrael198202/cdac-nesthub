@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from ai_core.config.paths import (
     RUNTIME_DIR, RUNTIME_CONFIGS, RUNTIME_CHECKPOINTS, RUNTIME_TRACES,
     RUNTIME_KNOWLEDGE, RUNTIME_DATASETS, RUNTIME_GENERATED, RUNTIME_REGISTRY
@@ -41,6 +43,7 @@ class RuntimeBootstrap:
             RUNTIME_GENERATED / "modules",
             RUNTIME_GENERATED / "models",
             RUNTIME_GENERATED / "modeling",
+            RUNTIME_GENERATED / "providers",
             RUNTIME_GENERATED / "system_topology",
             RUNTIME_GENERATED / "api_discovery_requests",
             RUNTIME_GENERATED / "connectors",
@@ -57,6 +60,7 @@ class RuntimeBootstrap:
 
         self._ensure_model_topology()
         self._ensure_model_stage_policy()
+        self._ensure_provider_runtime_templates()
         self._ensure_model_providers()
         self._ensure_workflow()
         self._ensure_node_configs()
@@ -78,6 +82,15 @@ class RuntimeBootstrap:
     def _ensure_model_stage_policy(self) -> None:
         self.model_stage_policy.ensure_defaults()
 
+
+    def _ensure_provider_runtime_templates(self) -> None:
+        source = Path("configs/provider_runtime_templates.seed.json")
+        target = RUNTIME_GENERATED / "system_topology" / "provider_runtime_templates.json"
+        if target.exists():
+            return
+        if source.exists():
+            target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
     def _ensure_model_providers(self) -> None:
         """Ensure provider config prefers the local base model qwen3:8b.
 
@@ -96,50 +109,48 @@ class RuntimeBootstrap:
 
     def _default_model_providers_config(self) -> dict:
         return {
-            "default_route": ["ollama", "openai"],
+            "default_route": ["vllm", "ollama", "openai"],
             "routes": {
-                "local_light": ["ollama", "openai"],
-                "local_capable": ["ollama", "vllm", "lmstudio", "openai"],
-                "strong_reasoning": ["openai", "vllm", "lmstudio", "ollama"],
-                "input_parsing": ["ollama", "openai"],
-                "intent_simple": ["ollama", "openai"],
-                "intent_complex": ["openai", "vllm", "lmstudio", "ollama"],
-                "intent_recognition": ["ollama", "openai"],
-                "workflow_basic": ["ollama", "vllm", "lmstudio", "openai"],
-                "workflow_complex": ["openai", "vllm", "lmstudio", "ollama"],
-                "workflow_planning": ["ollama", "openai"],
-                "semantic_grounding": ["openai", "vllm", "lmstudio", "ollama"],
-                "tool_selection": ["ollama", "vllm", "lmstudio", "openai"],
-                "stable_synthesis": ["ollama", "openai"],
-                "stable_synthesis_strong": ["openai", "vllm", "lmstudio", "ollama"],
-                "reasoning": ["ollama", "openai"],
+                "local_light": ["vllm", "ollama", "openai"],
+                "local_capable": ["vllm", "ollama", "lmstudio", "openai"],
+                "strong_reasoning": ["openai", "vllm", "ollama", "lmstudio"],
+                "input_parsing": ["vllm", "ollama", "openai"],
+                "intent_simple": ["vllm", "ollama", "openai"],
+                "intent_complex": ["openai", "vllm", "ollama", "lmstudio"],
+                "intent_recognition": ["vllm", "ollama", "openai"],
+                "workflow_basic": ["vllm", "ollama", "openai"],
+                "workflow_complex": ["openai", "vllm", "ollama", "lmstudio"],
+                "workflow_planning": ["vllm", "ollama", "openai"],
+                "semantic_grounding": ["openai", "vllm", "ollama", "lmstudio"],
+                "tool_selection": ["vllm", "ollama", "openai"],
+                "stable_synthesis": ["vllm", "ollama", "openai"],
+                "stable_synthesis_strong": ["openai", "vllm", "ollama", "lmstudio"],
+                "reasoning": ["vllm", "ollama", "openai"],
                 # Code artifact generation uses code-specialized local models first.
                 # The generic vision/reasoning model is kept later as fallback only.
                 "code_generation": [
+                    "vllm_coder",
                     "ollama_coder_qwen25",
                     "ollama_coder_deepseek",
-                    "vllm_coder",
                     "lmstudio_coder",
-                    "ollama",
                     "openai"
                 ],
                 "adapter_generation": [
+                    "vllm_coder",
                     "ollama_coder_qwen25",
                     "ollama_coder_deepseek",
-                    "vllm_coder",
                     "lmstudio_coder",
-                    "ollama",
                     "openai"
                 ],
                 "schema_repair": [
+                    "vllm_coder",
                     "ollama_coder_qwen25",
                     "ollama_coder_deepseek",
-                    "ollama",
                     "openai"
                 ],
-                "api_discovery_local": ["ollama"],
-                "api_discovery_external": ["ollama", "openai"],
-                "fallback": ["ollama", "openai"]
+                "api_discovery_local": ["vllm", "ollama"],
+                "api_discovery_external": ["vllm", "ollama", "openai"],
+                "fallback": ["vllm", "ollama", "openai"]
             },
             "role_model_preferences": {
                 "information_retrieval_agent": ["structured_extraction", "reasoning"],
@@ -373,7 +384,7 @@ class RuntimeBootstrap:
                     "auth_type": "bearer_env",
                     "auth_env": "OPENAI_API_KEY",
                     "model": "gpt-4o-mini",
-                    "timeout_seconds": 60,
+                    "timeout_seconds": 30,
                     "max_prompt_tokens": 12000,
                     "max_schema_chars": 12000,
                     "cache_enabled": True,
@@ -407,7 +418,7 @@ class RuntimeBootstrap:
                 },
 
                 "vllm_coder": {
-                    "enabled": False,
+                    "enabled": True,
                     "type": "universal_model",
                     "protocol": "openai_compatible",
                     "base_url": "http://127.0.0.1:8002",
@@ -439,7 +450,7 @@ class RuntimeBootstrap:
                     "priority": 5
                 },
                 "vllm": {
-                    "enabled": False,
+                    "enabled": True,
                     "type": "universal_model",
                     "protocol": "openai_compatible",
                     "base_url": "http://127.0.0.1:8001",
@@ -471,10 +482,18 @@ class RuntimeBootstrap:
                 "require_real_provider": True,
                 "allow_placeholder_result": False,
                 "prefer_local_base_model": True,
-                "base_model_provider": "ollama",
-                "base_model": "qwen3:8b",
-                "code_generation_provider": "ollama_coder_qwen25",
-                "code_generation_model": "qwen2.5-coder:7b",
+                "local_models_enabled": True,
+                "local_provider_order": ["vllm", "ollama"],
+                "api_only_when_local_disabled": True,
+                "api_provider_order": ["openai", "claude"],
+                "base_model_provider": "vllm",
+                "base_model": "Qwen/Qwen2.5-7B-Instruct",
+                "local_fallback_provider": "ollama",
+                "local_fallback_model": "qwen3:8b",
+                "code_generation_provider": "vllm_coder",
+                "code_generation_model": "Qwen/Qwen2.5-Coder-7B-Instruct",
+                "code_generation_fallback_provider": "ollama_coder_qwen25",
+                "code_generation_fallback_model": "qwen2.5-coder:7b",
                 "external_provider_is_fallback": True
             }
         }
@@ -497,7 +516,7 @@ class RuntimeBootstrap:
         for provider_id, desired_provider in desired_providers.items():
             existing = dict(providers.get(provider_id) or {})
             merged = {**desired_provider, **existing}
-            if provider_id in {"ollama", "ollama_coder_qwen25", "ollama_coder_deepseek"}:
+            if provider_id in {"vllm", "vllm_coder", "ollama", "ollama_coder_qwen25", "ollama_coder_deepseek"}:
                 # Force core runtime model lines while preserving user-specific
                 # endpoint/binary/install overrides where possible.
                 for key in [
@@ -839,7 +858,7 @@ class RuntimeBootstrap:
             "input_parsing": {
                 "adapter_id": "input_parsing_adapter",
                 "type": "llm_json",
-                "provider_route": ["ollama", "openai"],
+                "provider_route": ["vllm", "ollama", "openai"],
                 "route_name": "input_parsing",
                 "model_complexity": "low",
                 "model_capabilities": ["json_generation", "structured_extraction"],
@@ -850,7 +869,7 @@ class RuntimeBootstrap:
             "intent_recognition": {
                 "adapter_id": "intent_recognition_adapter",
                 "type": "llm_json",
-                "provider_route": ["ollama", "openai"],
+                "provider_route": ["vllm", "ollama", "openai"],
                 "route_name": "intent_simple",
                 "model_complexity": "low",
                 "model_capabilities": ["json_generation", "structured_extraction"],
@@ -861,7 +880,7 @@ class RuntimeBootstrap:
             "workflow_planning": {
                 "adapter_id": "workflow_planning_adapter",
                 "type": "llm_json",
-                "provider_route": ["ollama", "openai"],
+                "provider_route": ["vllm", "ollama", "openai"],
                 "route_name": "workflow_basic",
                 "model_complexity": "medium",
                 "model_capabilities": ["workflow_planning", "json_generation"],

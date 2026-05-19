@@ -69,3 +69,9 @@ runtime/checkpoints/*
 ```
 
 Business/domain-specific routing terms must be generated into runtime contracts, not hardcoded into `ai_core` source.
+
+## v2.9.2 Runtime Model Governance Policy
+
+This package expands the model stage policy from a coarse routing list into a reusable runtime model governance layer. It includes a richer model catalog, multimodal capability taxonomy, stage-level validation/escalation/downgrade rules, paid/free controls, privacy controls, and generic support for audio, image, video, code, file, document, slide, spreadsheet, PDF, diagram, plan, report, evidence, and final synthesis stages.
+
+See `docs/MODEL_STAGE_POLICY_DESIGN.md`.
