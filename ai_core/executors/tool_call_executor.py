@@ -44,7 +44,7 @@ from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.utils.safe_json import make_json_safe
 from ai_core.runtime.governance import RuntimeCostPolicy
 from ai_core.runtime.evidence import EvidenceBudgetAllocator, CandidateEvidenceRanker, AdaptiveEvidenceReducer
-from ai_core.execution.execution_method_contract import ExecutionMethodProposalEngine, ExecutionMethodResolver
+from ai_core.execution.execution_method_contract import ExecutionMethodContract, ExecutionMethodProposalEngine, ExecutionMethodResolver
 from ai_core.research.deep_web_research import DeepWebResearchPipeline
 
 
@@ -140,6 +140,9 @@ class ToolCallExecutor:
             runtime_context=state.get("runtime_context") if isinstance(state.get("runtime_context"), dict) else {},
         )
         normalized_plan = self.intent_contract_guard.apply(normalized_plan, previous_results)
+        if isinstance(normalized_plan.get("intent_contract"), dict):
+            previous_results["intent_contract"] = normalized_plan.get("intent_contract")
+            state["intent_contract"] = normalized_plan.get("intent_contract")
         previous_results["workflow_planning"] = normalized_plan
         planned_steps = normalized_plan.get("planned_steps", [])
 
@@ -264,6 +267,13 @@ class ToolCallExecutor:
                     step=step, plan=normalized_plan, state=state, capability=required_capability or "unknown_capability"
                 ),
             )
+            method_contract = self._enforce_intent_execution_contract(
+                method_contract=method_contract,
+                step=step,
+                plan=normalized_plan,
+                state=state,
+            )
+            step["execution_method_decision"] = method_contract.to_dict()
             await event_bus.emit(run_id, {
                 "type": "EXECUTION_METHOD_RESOLVED",
                 "title": "Execution method resolved",
@@ -348,17 +358,32 @@ class ToolCallExecutor:
             else:
                 strategy = self._execution_strategy(step, normalized_plan)
 
+            if method_contract.method == "runtime_generated_tool" and not method_contract.fallback:
+                # A strict runtime-native contract must never fall through to
+                # generic web or knowledge fallback. Runtime native was already
+                # attempted above; no result means execution is unavailable.
+                blocked_steps.append({
+                    "step_id": step_id,
+                    "status": "execution_method_unavailable",
+                    "reason": "Strict runtime-native execution did not return a result and fallback is disabled.",
+                    "execution_method_contract": method_contract.to_dict(),
+                    "source_step": step,
+                })
+                continue
+
             # v70.9 priority layer: local/model knowledge first.
             # If previous successful runtime knowledge already covers the current
             # parameters, answer from local knowledge and avoid web/API/codegen.
-            local_knowledge_result = await self._try_local_knowledge_execution(
-                run_id=run_id,
-                node_id=node_id,
-                step_id=step_id,
-                capability=required_capability or "unknown_capability",
-                step=step,
-                state=state,
-            )
+            local_knowledge_result = None
+            if method_contract.method in {"knowledge_base", "model_knowledge"}:
+                local_knowledge_result = await self._try_local_knowledge_execution(
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    capability=required_capability or "unknown_capability",
+                    step=step,
+                    state=state,
+                )
             if local_knowledge_result:
                 execution_steps.append({
                     "step_id": step_id,
@@ -938,7 +963,7 @@ class ToolCallExecutor:
                     )
                     tool_result = self._enforce_evidence_quality(tool_result, tool_input)
 
-            if tool_result.get("status") != "success":
+            if tool_result.get("status") != "success" and self._contract_allows_external_fallback(method_contract):
                 fallback_execution = await self._try_multi_candidate_fallback_execution(
                     run_id=run_id,
                     node_id=node_id,
@@ -985,6 +1010,9 @@ class ToolCallExecutor:
                         }
                 elif fallback_execution and fallback_execution.get("attempts"):
                     tool_result.setdefault("fallback_attempts", self._compact_attempts(fallback_execution.get("attempts", [])))
+            elif tool_result.get("status") != "success":
+                tool_result.setdefault("execution_method_contract", method_contract.to_dict())
+                tool_result.setdefault("contract_fallback_blocked", not self._contract_allows_external_fallback(method_contract))
 
             if isinstance(tool_result, dict) and tool_result.get("provenance"):
                 await event_bus.emit(run_id, {
@@ -1049,6 +1077,66 @@ class ToolCallExecutor:
             "result": result,
         })
         return result
+
+    def _enforce_intent_execution_contract(
+        self,
+        *,
+        method_contract: ExecutionMethodContract,
+        step: dict[str, Any],
+        plan: dict[str, Any],
+        state: dict[str, Any],
+    ) -> ExecutionMethodContract:
+        """Final runtime guard between planning and execution.
+
+        This is the last deterministic checkpoint. It keeps downstream tool
+        execution from bypassing the locked upstream intent contract. The logic
+        is generic: it only reads the contract family and method policy.
+        """
+        contract = {}
+        if isinstance(plan.get("intent_contract"), dict):
+            contract = plan.get("intent_contract") or {}
+        elif isinstance(state.get("intent_contract"), dict):
+            contract = state.get("intent_contract") or {}
+        family = str(contract.get("intent_family") or "")
+        step_policy = step.get("execution_method_policy") if isinstance(step.get("execution_method_policy"), dict) else {}
+        disabled = {str(x) for x in step_policy.get("disabled_methods", []) if str(x).strip()}
+        preferred = [str(x) for x in step_policy.get("preferred_methods", []) if str(x).strip()]
+
+        forced = ""
+        reason = ""
+        if family == "external_information" and method_contract.method in {"runtime_generated_tool", "model_knowledge"}:
+            forced = next((m for m in preferred if m not in disabled and m in {"api_call", "web_search", "existing_tool"}), "web_search")
+            reason = "locked_external_information_contract_blocked_runtime_method"
+        elif family == "runtime_observation" and method_contract.method in {"web_search", "api_call", "knowledge_base", "model_knowledge"}:
+            forced = next((m for m in preferred if m not in disabled and m in {"runtime_generated_tool", "existing_tool"}), "runtime_generated_tool")
+            reason = "locked_runtime_observation_contract_blocked_external_method"
+        elif method_contract.method in disabled:
+            forced = next((m for m in preferred if m not in disabled), "web_search")
+            reason = "method_disabled_by_step_policy"
+
+        if not forced:
+            return method_contract
+
+        fallback_allowed = bool(step_policy.get("fallback_allowed", bool(method_contract.fallback)))
+        if family == "runtime_observation":
+            fallback_allowed = False
+        fallback = list(method_contract.fallback or []) if fallback_allowed else []
+        return ExecutionMethodContract(
+            method=forced,
+            confidence=max(float(method_contract.confidence or 0), 0.91),
+            cost_level=self.execution_method_resolver._cost(forced),
+            latency_level=self.execution_method_resolver._latency(forced),
+            input_schema=method_contract.input_schema,
+            output_schema=method_contract.output_schema,
+            fallback=fallback,
+            reason=reason,
+            proposal_source=method_contract.proposal_source,
+            decision_source="intent_contract_enforcer",
+        )
+
+    def _contract_allows_external_fallback(self, method_contract: ExecutionMethodContract) -> bool:
+        allowed = set(method_contract.fallback or [])
+        return bool(allowed.intersection({"web_search", "api_call"}))
 
     async def _try_autonomous_codegen_and_execute(
         self,

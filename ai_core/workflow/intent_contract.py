@@ -81,37 +81,43 @@ class IntentContractGuard:
         inferred = bool(inference) and str(inference.get("status") or "") == "inferred"
         strategy = step.get("execution_strategy") if isinstance(step.get("execution_strategy"), list) else []
 
-        # If the upstream intent is an external information request, a later
-        # similarity-based inference must not turn it into a runtime-native
-        # observation.  The code uses only generic intent-family metadata.
-        if family == "external_information" and inferred and capability == self.RUNTIME_OBSERVATION_CAPABILITY:
-            step.pop("required_capability", None)
-            step.pop("capability_inference", None)
-            step["required_capability"] = "generic_information_access"
+        # A locked upstream contract is stronger than downstream capability
+        # similarity.  The guard applies to the whole family, not just to one
+        # concrete capability name, so later stages cannot drift from an
+        # external-source task into a runtime-local observation.
+        if family == "external_information":
+            if inferred and capability == self.RUNTIME_OBSERVATION_CAPABILITY:
+                step.pop("capability_inference", None)
+                reason = "inferred_runtime_capability_conflicted_with_locked_intent_contract"
+            else:
+                reason = "external_information_contract_enforced"
+            if capability == self.RUNTIME_OBSERVATION_CAPABILITY or not capability:
+                step["required_capability"] = "generic_information_access"
             step["execution_strategy"] = self._ensure_external_strategy(strategy)
             step["semantic_category"] = "structured_external_observation"
+            step["required_source_level"] = "external_content"
             step["execution_method_policy"] = {
                 "preferred_methods": ["api_call", "web_search", "existing_tool"],
                 "disabled_methods": ["runtime_generated_tool", "model_knowledge"],
                 "fallback_allowed": True,
             }
-            step["_intent_guard_event"] = {
-                "status": "repaired",
-                "reason": "inferred_runtime_capability_conflicted_with_locked_intent_contract",
-            }
+            step["_intent_guard_event"] = {"status": "checked", "reason": reason}
             return step
 
         # Runtime-native observation contracts are kept strict.  If runtime is
         # selected, the executor must not silently fall back to external web
         # evidence, because that changes the source semantics.
-        if capability == self.RUNTIME_OBSERVATION_CAPABILITY:
+        if family == "runtime_observation" or capability == self.RUNTIME_OBSERVATION_CAPABILITY:
+            step["required_capability"] = self.RUNTIME_OBSERVATION_CAPABILITY
             step["semantic_category"] = "runtime_state_observation"
+            step["execution_strategy"] = ["tool_generation", "local_knowledge"]
             step["execution_method_policy"] = {
                 "preferred_methods": ["runtime_generated_tool", "existing_tool"],
                 "disabled_methods": ["web_search", "api_call", "knowledge_base", "model_knowledge"],
                 "fallback_allowed": False,
             }
             step["required_source_level"] = "runtime_native"
+            step["_intent_guard_event"] = {"status": "checked", "reason": "runtime_observation_contract_enforced"}
         return step
 
     def _ensure_external_strategy(self, strategy: list[Any]) -> list[str]:
@@ -123,11 +129,15 @@ class IntentContractGuard:
 
     def _intent_family(self, *, intent_type: str, normalized: dict[str, Any], parsed: dict[str, Any]) -> str:
         text = " ".join([intent_type, *[str(k) for k in normalized.keys()], *[str(k) for k in parsed.keys()]]).casefold()
-        # Generic category labels only.  Concrete business terms are not encoded.
+        # Generic category labels only. Concrete business terms are not encoded.
+        has_external_targets = bool(normalized) and any(
+            isinstance(v, (list, dict)) or str(v).strip()
+            for v in normalized.values()
+        )
+        if ("current" in text or "runtime" in text or "remind" in text) and not ("information" in text and has_external_targets):
+            return "runtime_observation"
         if "information" in text or "retrieval" in text or "lookup" in text or "search" in text:
             return "external_information"
-        if "current" in text or "runtime" in text or "remind" in text:
-            return "runtime_observation"
         return "general"
 
     def _target_values(self, *items: Any) -> list[str]:
