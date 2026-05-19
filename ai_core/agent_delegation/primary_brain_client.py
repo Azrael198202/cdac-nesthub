@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 
 from ai_core.orchestration.workflow_runtime import WorkflowRuntime
+from ai_core.llm.provider_router import ProviderRouter
 
 
 @dataclass
@@ -41,6 +42,7 @@ class PrimaryBrainDelegationClient:
 
     def __init__(self, runtime: WorkflowRuntime | None = None) -> None:
         self.runtime = runtime or WorkflowRuntime()
+        self.router = ProviderRouter()
 
     async def execute_agent_request(self, request: AgentExecutionRequest, progress_callback: Callable[[dict[str, Any]], Any] | None = None) -> AgentExecutionResult:
         message = self._build_agent_message(request)
@@ -186,10 +188,12 @@ class PrimaryBrainDelegationClient:
         """
         core_run_id = uuid.uuid4().hex[:12]
         usable_results = self._usable_agent_results(agent_results)
-        final_answer = self._compose_delegated_final_answer(
+        final_answer = await self._compose_or_escalate_delegated_final_answer(
+            core_run_id=core_run_id,
             task_name=task_name,
             task_instruction=task_instruction,
             agent_results=usable_results,
+            shared_context=shared_context or {},
         )
         return {
             "origin": "ai_core",
@@ -239,6 +243,72 @@ class PrimaryBrainDelegationClient:
                 continue
             usable.append(result)
         return list(reversed(usable))
+
+    async def _compose_or_escalate_delegated_final_answer(
+        self,
+        *,
+        core_run_id: str,
+        task_name: str,
+        task_instruction: str,
+        agent_results: list[AgentExecutionResult],
+        shared_context: dict[str, Any],
+    ) -> str:
+        fallback = self._compose_delegated_final_answer(
+            task_name=task_name,
+            task_instruction=task_instruction,
+            agent_results=agent_results,
+        )
+        if not agent_results:
+            return fallback
+        if not bool(shared_context.get("model_escalation_requested")):
+            return fallback
+        try:
+            import json
+            payload = {
+                "task_name": task_name,
+                "task_instruction": task_instruction,
+                "feedback": shared_context.get("feedback") if isinstance(shared_context.get("feedback"), dict) else {},
+                "participant_results": [
+                    {
+                        "participant_name": r.participant_name,
+                        "status": r.status,
+                        "result": self._clean_participant_answer(r.final_answer),
+                    }
+                    for r in agent_results
+                ],
+                "instructions": [
+                    "Create one clean user-facing final answer.",
+                    "Do not include internal routing, trace, or debug text.",
+                    "Do not invent facts not present in participant_results.",
+                    "If participant output is noisy, extract only clearly supported facts and state uncertainty briefly.",
+                    "Return JSON with key final_answer only.",
+                ],
+            }
+            adapter = {
+                "adapter_id": "delegated_final_synthesis_escalated",
+                "runtime_role": "final_user_response",
+                "route_name": "stable_synthesis_strong",
+                "model_route_name": "stable_synthesis_strong",
+                "preferred_capabilities": ["stable_synthesis", "structured_output", "semantic_compression"],
+                "prompt_policy": {"max_context_tokens": 2800},
+            }
+            prompt = {"id": "delegated_final_synthesis", "system": "Return valid JSON only."}
+            schema = {"type": "object", "properties": {"final_answer": {"type": "string"}}, "required": ["final_answer"]}
+            result = await self.router.generate_json(
+                run_id=core_run_id,
+                node_id="output",
+                adapter=adapter,
+                prompt=prompt,
+                rendered_user_prompt=json.dumps(payload, ensure_ascii=False),
+                schema=schema,
+            )
+            value = result.get("final_answer") if isinstance(result, dict) else None
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        except Exception:
+            return fallback
+        return fallback
+
 
     def _compose_delegated_final_answer(
         self,

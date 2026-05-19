@@ -8,6 +8,7 @@ from auxiliary_brain.delegation import AgentDelegationRuntime
 from auxiliary_brain.runtime import new_id
 from auxiliary_brain.storage import JsonStore
 from auxiliary_brain.studio.command_router import StudioCommandRouter
+from ai_core.runtime.adaptation import FeedbackClassifier, ModelUpgradeController, RerunStrategy
 
 
 class AgentStudioService:
@@ -17,6 +18,9 @@ class AgentStudioService:
         self.store = store or JsonStore()
         self.router = router or StudioCommandRouter()
         self.delegation_runtime = AgentDelegationRuntime(store=self.store)
+        self.feedback_classifier = FeedbackClassifier()
+        self.model_upgrade_controller = ModelUpgradeController()
+        self.rerun_strategy = RerunStrategy()
         self.store.ensure_workspace()
         self.community_id = self._ensure_community()
 
@@ -28,12 +32,100 @@ class AgentStudioService:
             return self.create_task_graph(message, routed.name)
         if routed.action == "execute_task":
             return await self.execute_task(routed.name)
+        if routed.action == "feedback_adaptation":
+            return await self.handle_feedback(message, routed.name)
+        feedback = self.feedback_classifier.classify(message, fallback_target=self._latest_task_name())
+        if feedback.get("matched"):
+            return await self.handle_feedback(message, feedback.get("target_task"))
         return {
-            "action": "unrouted_message",
+            "action": "conversation_message",
             "origin": "auxiliary_brain",
-            "status": "needs_instruction",
-            "message": "No configured studio command matched this input.",
+            "status": "completed",
+            "message": "I received your message. You can create participants, create tasks, execute tasks, or give feedback to re-optimize the latest result.",
+            "conversation_intent": "general_chat",
         }
+
+
+    async def handle_feedback(self, message: str, task_name: str | None = None) -> dict[str, Any]:
+        feedback = self.feedback_classifier.classify(message, fallback_target=task_name or self._latest_task_name())
+        target_task = str(feedback.get("target_task") or task_name or self._latest_task_name() or "").strip()
+        self.model_upgrade_controller.record_upgrade_request(
+            target_node=str(feedback.get("target_node") or "output"),
+            reason=str(feedback.get("intent") or "studio_feedback"),
+            message=message,
+        )
+        if not target_task:
+            return {
+                "action": "runtime_feedback",
+                "origin": "auxiliary_brain",
+                "status": "recorded",
+                "message": "Feedback was recorded, but no previous task was found for re-optimization.",
+                "feedback": feedback,
+            }
+        task_graph = self.store.read_json(f"generated/tasks/{target_task}.json")
+        if not task_graph:
+            return {
+                "action": "runtime_feedback",
+                "origin": "auxiliary_brain",
+                "status": "not_found",
+                "task_name": target_task,
+                "message": "Feedback was recorded, but the target task graph was not found.",
+                "feedback": feedback,
+            }
+        latest_run = self._latest_run_for_task(target_task)
+        if not latest_run:
+            return {
+                "action": "runtime_feedback",
+                "origin": "auxiliary_brain",
+                "status": "blocked",
+                "task_name": target_task,
+                "message": "Feedback was recorded, but no previous run result was found to re-optimize.",
+                "feedback": feedback,
+            }
+        strategy = self.rerun_strategy.choose(feedback=feedback, run_payload=latest_run)
+        if strategy.get("strategy") != "node_level_resynthesis":
+            return {
+                "action": "runtime_feedback",
+                "origin": "auxiliary_brain",
+                "status": "recorded",
+                "task_name": target_task,
+                "message": "Feedback was recorded.",
+                "feedback": feedback,
+                "strategy": strategy,
+            }
+        result = await self.delegation_runtime.reoptimize_result(
+            run_payload=latest_run,
+            task_graph=task_graph,
+            feedback=feedback,
+            strategy=strategy,
+        )
+        synthesis = result.get("synthesis") if isinstance(result.get("synthesis"), dict) else {}
+        return {
+            "action": "runtime_feedback",
+            "origin": "auxiliary_brain",
+            "status": result.get("status", "completed"),
+            "task_name": target_task,
+            "run_id": result.get("run_id"),
+            "message": "Feedback was applied and the result was re-optimized with model escalation.",
+            "feedback": feedback,
+            "strategy": strategy,
+            "final_answer": synthesis.get("final_answer"),
+            "delivery": result.get("delivery"),
+        }
+
+    def _latest_task_name(self) -> str | None:
+        runs = self.store.list_json("generated/results")
+        if not runs:
+            return None
+        runs.sort(key=lambda item: str(item.get("completed_at") or item.get("started_at") or ""), reverse=True)
+        return str(runs[0].get("task_name") or "").strip() or None
+
+    def _latest_run_for_task(self, task_name: str) -> dict[str, Any] | None:
+        runs = [r for r in self.store.list_json("generated/results") if str(r.get("task_name") or "") == task_name]
+        if not runs:
+            return None
+        runs.sort(key=lambda item: str(item.get("completed_at") or item.get("started_at") or ""), reverse=True)
+        return runs[0]
 
     def snapshot(self) -> dict[str, Any]:
         return {

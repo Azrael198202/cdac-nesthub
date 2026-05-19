@@ -11,6 +11,48 @@
     ],
     "execute_task": [
       "execute"
+    ],
+    "feedback_adaptation": [
+      "upgrade model",
+      "upgrading the model",
+      "stronger model",
+      "re-optimize",
+      "reoptimized",
+      "re-optimized",
+      "optimize again",
+      "too complex",
+      "not satisfied",
+      "not good",
+      "wrong result",
+      "result is wrong",
+      "rerun with",
+      "try again"
+    ]
+  },
+  "feedback_intents": {
+    "upgrade_quality": [
+      "upgrade model",
+      "upgrading the model",
+      "stronger model",
+      "higher quality model",
+      "better model"
+    ],
+    "retry_or_reoptimize": [
+      "re-optimize",
+      "reoptimized",
+      "re-optimized",
+      "optimize again",
+      "rerun",
+      "try again"
+    ],
+    "dissatisfaction": [
+      "not satisfied",
+      "not good",
+      "wrong result",
+      "result is wrong",
+      "too complex",
+      "too messy",
+      "needs to be improved"
     ]
   }
 }

@@ -42,3 +42,15 @@ Excluded from package:
 - Target records are selected by confidence and target date, so lower-quality row fragments do not override better source-backed records.
 - The extractor remains language-neutral: natural-language date aliases are still supplied by runtime state or generated contracts, not hard-coded in ai_core.
 - Runtime package excludes generated runtime artifacts, tests, scripts, __pycache__, and *.pyc.
+
+
+## V2.8.21 Agent Studio Conversational Adaptation Runtime
+
+This version adds a conversation-aware Agent Studio input layer. Natural-language feedback such as result dissatisfaction, re-optimization requests, or model upgrade requests is routed as runtime feedback instead of being rejected as an unknown command. The auxiliary layer records the feedback, requests model escalation for the final-response node, and re-synthesizes the previous task result without restarting completed participant work.
+
+Key runtime behavior:
+- command input still creates participants, creates tasks, and executes named tasks;
+- conversational feedback is accepted as runtime adaptation input;
+- model escalation signals are stored in the generic feedback store;
+- re-optimization uses node-level final synthesis where possible;
+- completed participant results are reused instead of rerunning the full task.

@@ -131,6 +131,65 @@ class AgentDelegationRuntime:
         return run_payload
 
 
+    async def reoptimize_result(
+        self,
+        *,
+        run_payload: dict[str, Any],
+        task_graph: dict[str, Any],
+        feedback: dict[str, Any],
+        strategy: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Re-synthesize an existing run without restarting completed work."""
+        run_id = str(run_payload.get("run_id") or new_id("delegation_run"))
+        task_name = str(task_graph.get("task_name") or run_payload.get("task_name") or "task")
+        task_instruction = str(task_graph.get("instruction") or "")
+        community_id = str(task_graph.get("community_id") or run_payload.get("community_id") or "default")
+        run_payload.setdefault("progress_events", [])
+        run_payload["status"] = "reoptimizing"
+        run_payload["current_stage"] = "adaptive_resynthesis"
+        run_payload.setdefault("adaptation_events", []).append({
+            "at": self._now(),
+            "feedback": feedback,
+            "strategy": strategy,
+        })
+        self._record_progress(run_payload, "adaptive_resynthesis", "Applying feedback and re-optimizing final result", "running")
+        agent_results = self._to_agent_results(self._dedupe_result_payloads(run_payload.get("agent_results") or []))
+        synthesis = await self.primary_client.synthesize_delegated_results(
+            task_name=task_name,
+            task_instruction=task_instruction,
+            agent_results=agent_results,
+            shared_context={
+                "community_id": community_id,
+                "feedback": feedback,
+                "strategy": strategy,
+                "model_escalation_requested": bool(strategy.get("model_escalation")),
+            },
+        )
+        self._record_progress(run_payload, "adaptive_resynthesis_complete", "Adaptive final synthesis completed", "completed")
+        delivery_id = new_id("delivery")
+        delivery_payload = {
+            "delivery_id": delivery_id,
+            "origin": "auxiliary_brain",
+            "upstream_origin": "ai_core",
+            "task_name": task_name,
+            "run_id": run_id,
+            "final_answer": synthesis.get("final_answer"),
+            "synthesis": synthesis,
+            "adaptation": {"feedback": feedback, "strategy": strategy},
+            "created_at": self._now(),
+        }
+        delivery_path = self.store.write_json(f"deliveries/{delivery_id}.json", delivery_payload)
+        run_payload.update({
+            "status": "completed",
+            "current_stage": "completed",
+            "completed_at": self._now(),
+            "synthesis": synthesis,
+            "delivery": str(delivery_path),
+        })
+        self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+        return run_payload
+
+
     async def resume_task(self, run_payload: dict[str, Any], task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
         """Resume the same delegation run from its paused participant checkpoint.
 

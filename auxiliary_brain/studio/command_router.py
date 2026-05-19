@@ -26,6 +26,8 @@ class StudioCommandRouter:
         phrases = self.config.get("command_phrases", {})
         if self._matches(lowered, phrases.get("execute_task", [])):
             return RoutedCommand("execute_task", self._extract_execute_name(text), text)
+        if self._matches(lowered, phrases.get("feedback_adaptation", [])):
+            return RoutedCommand("feedback_adaptation", self._extract_feedback_target(text), text)
         if self._matches(lowered, phrases.get("create_task", [])):
             return RoutedCommand("create_task", self._extract_named_value(text), text)
         if self._matches(lowered, phrases.get("create_participant", [])):
@@ -67,3 +69,11 @@ class StudioCommandRouter:
         if len(parts) >= 2:
             return parts[-1].strip(" .,:;\"'") or None
         return self._extract_named_value(text)
+
+    def _extract_feedback_target(self, text: str) -> str | None:
+        # Generic compact identifier extraction for feedback messages.
+        # It does not encode any domain or business vocabulary.
+        match = re.search(r"\btask\s*[:=#-]?\s*([A-Za-z0-9_\-]+)\b", text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip() or None
+        return None
