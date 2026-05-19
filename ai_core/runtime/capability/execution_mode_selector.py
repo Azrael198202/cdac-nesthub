@@ -23,6 +23,17 @@ class ExecutionModeSelector:
     def select(self, *, step: dict[str, Any], plan: dict[str, Any], state: dict[str, Any], capability: str) -> str:
         policy = self.policy_for(step=step, plan=plan, state=state, capability=capability)
         strategy = self._strategy_values(step)
+
+        # v2.9.16: semantic runtime-local capability signals are allowed to
+        # override weak workflow strategy hints.  A model may propose a generic
+        # web/source strategy, but the runtime must make the final method
+        # decision from capability semantics and contracts.
+        classification = self.classifier.classify(step=step, plan=plan, state=state, capability=capability)
+        category = str(classification.get("category") or "")
+        semantic_mode = self._mode_from_category(category, policy)
+        if semantic_mode == "runtime_native" and not self._runtime_native_denied(semantic_mode, [], policy):
+            return semantic_mode
+
         strategy_mode = self._mode_from_strategy(strategy, policy)
         if strategy_mode:
             return strategy_mode
@@ -31,9 +42,7 @@ class ExecutionModeSelector:
         if explicit and not self._runtime_native_denied(explicit, strategy, policy):
             return explicit
 
-        classification = self.classifier.classify(step=step, plan=plan, state=state, capability=capability)
-        category = str(classification.get("category") or "")
-        mode = self._mode_from_category(category, policy)
+        mode = semantic_mode
         if mode and not self._runtime_native_denied(mode, strategy, policy):
             return mode
 

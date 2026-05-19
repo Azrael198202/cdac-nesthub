@@ -75,14 +75,16 @@ class EvidenceDirectAnswerBuilder:
         structured_records = normalized.get("normalized_facts") if isinstance(normalized.get("normalized_facts"), list) else []
         answer_material = str(normalized.get("answer_material") or "").strip()
         quality = normalized.get("answer_material_quality") if isinstance(normalized.get("answer_material_quality"), dict) else {}
-        if not answer_material or quality.get("passed") is False:
-            # Fall back to the legacy generic extractor only when the normalized
-            # path cannot produce compact source-backed material.
+        if (not structured_records) or (not answer_material) or quality.get("passed") is False:
+            # Fall back only to a structured generic extractor.  Raw source text
+            # must not be promoted to answer material merely because it contains
+            # a known parameter.
             legacy_records = self._extract_structured_records(text, known)
-            answer_material = self._build_answer_material(text, known, legacy_records)
-            structured_records = legacy_records[:8]
-            quality = {"passed": bool(answer_material), "legacy_path_used": True, "domain_specific_rules_used": False}
-        if not answer_material:
+            if legacy_records:
+                answer_material = self._build_answer_material(text, known, legacy_records)
+                structured_records = legacy_records[:8]
+                quality = {"passed": bool(answer_material and structured_records), "legacy_path_used": True, "domain_specific_rules_used": False}
+        if not answer_material or not structured_records:
             return None
 
         data = {

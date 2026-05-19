@@ -1,5 +1,5 @@
 {
-  "version": "2.9.0",
+  "version": "2.9.16",
   "description": "Generic runtime execution-source policy. Concrete domain vocabulary belongs to runtime-generated contracts, not source code.",
   "preferred_execution_modes": [
     "structured_provider",
@@ -71,5 +71,35 @@
       ]
     }
   ],
-  "unknown_capability_default": "web_retrieval"
+  "unknown_capability_default": "web_retrieval",
+  "execution_method_policy": {
+    "description": "Generic method-selection policy. LLM/workflow output is treated as proposal; runtime resolver makes the final decision from contracts.",
+    "allowed_methods": [
+      "runtime_generated_tool",
+      "existing_tool",
+      "web_search",
+      "knowledge_base",
+      "model_knowledge",
+      "api_call"
+    ],
+    "contract_required": true,
+    "llm_output_role": "proposal_only",
+    "runtime_decision_role": "deterministic_resolver",
+    "required_contract_fields": [
+      "input_schema",
+      "output_schema",
+      "confidence",
+      "cost_level",
+      "latency_level",
+      "fallback"
+    ]
+  },
+  "preferred_methods": [
+    "existing_tool",
+    "runtime_generated_tool",
+    "api_call",
+    "web_search",
+    "knowledge_base",
+    "model_knowledge"
+  ]
 }

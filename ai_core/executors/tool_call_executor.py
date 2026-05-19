@@ -43,6 +43,8 @@ from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.utils.safe_json import make_json_safe
 from ai_core.runtime.governance import RuntimeCostPolicy
 from ai_core.runtime.evidence import EvidenceBudgetAllocator, CandidateEvidenceRanker, AdaptiveEvidenceReducer
+from ai_core.execution.execution_method_contract import ExecutionMethodProposalEngine, ExecutionMethodResolver
+from ai_core.research.deep_web_research import DeepWebResearchPipeline
 
 
 class ToolCallExecutor:
@@ -95,6 +97,9 @@ class ToolCallExecutor:
         self.evidence_budget_allocator = EvidenceBudgetAllocator()
         self.candidate_evidence_ranker = CandidateEvidenceRanker()
         self.adaptive_evidence_reducer = AdaptiveEvidenceReducer()
+        self.execution_method_proposer = ExecutionMethodProposalEngine()
+        self.execution_method_resolver = ExecutionMethodResolver()
+        self.deep_web_research = DeepWebResearchPipeline()
 
     async def execute(
         self,
@@ -228,35 +233,69 @@ class ToolCallExecutor:
                 })
                 continue
 
-            runtime_native_result = self.capability_router.try_runtime_native(
-                run_id=run_id,
-                node_id=node_id,
-                step_id=step_id,
-                capability=required_capability or "unknown_capability",
-                step=step,
-                state=state,
-                plan=normalized_plan,
-            )
-            if runtime_native_result:
-                execution_steps.append({
-                    "step_id": step_id,
-                    "status": "executed",
-                    "tool": {"id": "runtime_native_observation", "source": "primary_runtime"},
-                    "input": runtime_native_result.get("input"),
-                    "result": runtime_native_result.get("result"),
-                    "provenance": (runtime_native_result.get("result") or {}).get("provenance") if isinstance(runtime_native_result.get("result"), dict) else None,
-                    "source_step": step,
-                    "priority_path": "runtime_native_observation",
-                })
-                continue
-
             selected_execution_mode = self.capability_router.select_mode(
                 step=step,
                 plan=normalized_plan,
                 state=state,
                 capability=required_capability or "unknown_capability",
             )
-            if selected_execution_mode in {"structured_provider", "web_retrieval"}:
+            try:
+                classifier_result = self.capability_router.selector.classifier.classify(
+                    step=step, plan=normalized_plan, state=state, capability=required_capability or "unknown_capability"
+                )
+            except Exception:
+                classifier_result = {}
+            early_tool = self.tool_registry.find_by_capability(required_capability) if required_capability else None
+            method_proposals = self.execution_method_proposer.propose(
+                step=step,
+                plan=normalized_plan,
+                state=state,
+                selected_mode=selected_execution_mode,
+                has_existing_tool=bool(early_tool and self._has_executable_implementation(early_tool)),
+                classifier_category=str(classifier_result.get("category") or ""),
+            )
+            method_contract = self.execution_method_resolver.resolve(
+                proposals=method_proposals,
+                step=step,
+                policy=self.capability_router.selector.policy_for(
+                    step=step, plan=normalized_plan, state=state, capability=required_capability or "unknown_capability"
+                ),
+            )
+            await event_bus.emit(run_id, {
+                "type": "EXECUTION_METHOD_RESOLVED",
+                "title": "Execution method resolved",
+                "message": method_contract.method,
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": {"contract": method_contract.to_dict(), "proposals": method_proposals, "selected_mode": selected_execution_mode},
+            })
+
+            if method_contract.method == "runtime_generated_tool":
+                runtime_native_result = self.capability_router.try_runtime_native(
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    capability=required_capability or "unknown_capability",
+                    step=step,
+                    state=state,
+                    plan=normalized_plan,
+                )
+                if runtime_native_result:
+                    runtime_result = runtime_native_result.get("result") if isinstance(runtime_native_result.get("result"), dict) else {}
+                    runtime_result.setdefault("data", {})["execution_method_contract"] = method_contract.to_dict()
+                    execution_steps.append({
+                        "step_id": step_id,
+                        "status": "executed",
+                        "tool": {"id": "runtime_native_observation", "source": "primary_runtime"},
+                        "input": runtime_native_result.get("input"),
+                        "result": runtime_result,
+                        "provenance": runtime_result.get("provenance") if isinstance(runtime_result, dict) else None,
+                        "source_step": step,
+                        "priority_path": "execution_method_runtime_generated_tool",
+                    })
+                    continue
+
+            if method_contract.method in {"web_search", "api_call"} and selected_execution_mode in {"structured_provider", "web_retrieval"}:
                 routed_web_result = await self._try_strategy_web_evidence_execution(
                     run_id=run_id,
                     node_id=node_id,
@@ -264,18 +303,20 @@ class ToolCallExecutor:
                     capability=required_capability or "generic_information_access",
                     step=step,
                     state=state,
-                    reason="capability_source_routing_" + selected_execution_mode,
+                    reason="execution_method_" + method_contract.method,
                 )
                 if routed_web_result:
+                    result_obj = routed_web_result.get("result") if isinstance(routed_web_result.get("result"), dict) else {}
+                    result_obj.setdefault("data", {})["execution_method_contract"] = method_contract.to_dict()
                     execution_steps.append({
                         "step_id": step_id,
                         "status": "executed",
                         "tool": routed_web_result.get("tool"),
                         "input": routed_web_result.get("input"),
-                        "result": routed_web_result.get("result"),
-                        "provenance": (routed_web_result.get("result") or {}).get("provenance") if isinstance(routed_web_result.get("result"), dict) else None,
+                        "result": result_obj,
+                        "provenance": (result_obj or {}).get("provenance") if isinstance(result_obj, dict) else None,
                         "source_step": step,
-                        "priority_path": selected_execution_mode + "_before_local",
+                        "priority_path": "execution_method_" + method_contract.method,
                     })
                     continue
 
@@ -2583,132 +2624,68 @@ class ToolCallExecutor:
         state: dict[str, Any] | None = None,
         objective: str = "",
     ) -> list[dict[str, Any]]:
-        fetched: list[dict[str, Any]] = []
-        seen: set[str] = set()
         state = state if isinstance(state, dict) else {}
         known_parameters = known_parameters if isinstance(known_parameters, dict) else {}
         cost_snapshot = self.runtime_cost_policy.snapshot(state)
-        budget = self.evidence_budget_allocator.allocate(
-            known=known_parameters,
-            objective=objective,
-            candidates=selected_evidence,
-            policy=cost_snapshot.evidence_policy(),
-        )
-        ranked_evidence = self.candidate_evidence_ranker.rank(
-            candidates=selected_evidence,
-            known=known_parameters,
-            budget=budget,
-        )
         await event_bus.emit(run_id, {
-            "type": "ADAPTIVE_EVIDENCE_FETCH_STARTED",
-            "title": "Adaptive evidence fetch started",
-            "message": "Fetching ranked evidence incrementally until compact evidence is sufficient or budget is exhausted.",
+            "type": "DEEP_WEB_RESEARCH_STARTED",
+            "title": "Deep web research started",
+            "message": "Planning, fetching, extracting, reducing, and validating web evidence before synthesis.",
             "node_id": node_id,
             "step_id": step_id,
-            "result": {"budget": budget.to_dict(), "candidate_count": len(selected_evidence), "ranked_count": len(ranked_evidence)},
+            "result": {"candidate_count": len(selected_evidence), "policy": cost_snapshot.evidence_policy()},
         })
-
-        next_batch_size = budget.initial_fetches
-        cursor = 0
-        reduced: dict[str, Any] = {}
-        while cursor < len(ranked_evidence) and len(fetched) < budget.max_fetches:
-            batch = ranked_evidence[cursor: cursor + next_batch_size]
-            cursor += next_batch_size
-            next_batch_size = budget.incremental_fetches
-            for item in batch:
-                if len(fetched) >= budget.max_fetches:
-                    break
-                url = self._evidence_url(item)
-                if not url or url in seen:
-                    continue
-                seen.add(url)
-                try:
-                    doc = await asyncio.wait_for(
-                        self.web_research.fetch(url=url, max_chars=budget.fetch_chars_per_source),
-                        timeout=cost_snapshot.operation_timeout_seconds,
-                    )
-                    if isinstance(doc, dict) and doc.get("status") == "success":
-                        fetched.append({
-                            "source": "fetched_selected_page",
-                            "source_search_result": item,
-                            "document": doc,
-                        })
-                        await event_bus.emit(run_id, {
-                            "type": "ADAPTIVE_EVIDENCE_PAGE_FETCHED",
-                            "title": "Evidence page fetched",
-                            "message": doc.get("title") or url,
-                            "node_id": node_id,
-                            "step_id": step_id,
-                            "result": {"url": url, "trace": doc.get("web_research_trace"), "fetched_count": len(fetched)},
-                        })
-                    else:
-                        await event_bus.emit(run_id, {
-                            "type": "ADAPTIVE_EVIDENCE_PAGE_SKIPPED",
-                            "title": "Evidence page was not usable",
-                            "message": str((doc or {}).get("error") or (doc or {}).get("status") or url),
-                            "node_id": node_id,
-                            "step_id": step_id,
-                            "result": {"url": url, "status": (doc or {}).get("status") if isinstance(doc, dict) else None},
-                        })
-                except Exception as exc:
-                    await event_bus.emit(run_id, {
-                        "type": "ADAPTIVE_EVIDENCE_PAGE_FAILED",
-                        "title": "Evidence page fetch failed",
-                        "message": str(exc),
-                        "node_id": node_id,
-                        "step_id": step_id,
-                        "result": {"url": url},
-                    })
-
-            if fetched:
-                reduced = self.adaptive_evidence_reducer.reduce(
-                    documents=fetched,
+        try:
+            result = await asyncio.wait_for(
+                self.deep_web_research.run(
+                    candidates=selected_evidence,
                     known=known_parameters,
                     state=state,
-                    budget=budget,
-                )
-                await event_bus.emit(run_id, {
-                    "type": "ADAPTIVE_EVIDENCE_REDUCED",
-                    "title": "Evidence reduced locally",
-                    "message": "Raw evidence was converted into compact structured material.",
-                    "node_id": node_id,
-                    "step_id": step_id,
-                    "result": {
-                        "quality": reduced.get("answer_material_quality"),
-                        "fact_count": len(reduced.get("normalized_facts") or []),
-                        "block_count": len(reduced.get("selected_evidence_blocks") or []),
-                    },
-                })
-                if self.evidence_budget_allocator.should_stop(normalized=reduced, fetched_count=len(fetched), budget=budget):
-                    break
-
-        if reduced:
-            # Add one compact synthetic document so downstream candidate extraction
-            # and synthesis read structured facts instead of raw fetched pages.
-            fetched.insert(0, {
-                "source": "adaptive_evidence_reduction",
-                "document": {
-                    "status": "success",
-                    "title": "Adaptive evidence material",
-                    "url": "",
-                    "text_excerpt": str(reduced.get("answer_material") or ""),
-                    "visible_text_excerpt": str(reduced.get("answer_material") or ""),
-                    "normalized_facts": reduced.get("normalized_facts") or [],
-                    "selected_evidence_blocks": reduced.get("selected_evidence_blocks") or [],
-                    "answer_material_quality": reduced.get("answer_material_quality") or {},
-                    "source_summaries": reduced.get("source_summaries") or [],
-                },
+                    objective=objective,
+                    policy=cost_snapshot.evidence_policy(),
+                ),
+                timeout=cost_snapshot.operation_timeout_seconds,
+            )
+        except Exception as exc:
+            await event_bus.emit(run_id, {
+                "type": "DEEP_WEB_RESEARCH_FAILED",
+                "title": "Deep web research failed",
+                "message": str(exc),
+                "node_id": node_id,
+                "step_id": step_id,
             })
-
+            return []
+        data = result.get("data") if isinstance(result, dict) else {}
+        data = data if isinstance(data, dict) else {}
         await event_bus.emit(run_id, {
-            "type": "ADAPTIVE_EVIDENCE_FETCH_DONE",
-            "title": "Adaptive evidence fetching completed",
-            "message": f"Fetched {len([x for x in fetched if x.get('source') == 'fetched_selected_page'])} source page(s).",
+            "type": "DEEP_WEB_RESEARCH_COMPLETED",
+            "title": "Deep web research completed",
+            "message": "Web evidence was converted into compact answer material.",
             "node_id": node_id,
             "step_id": step_id,
-            "result": {"fetched_count": len(fetched), "budget": budget.to_dict(), "reduced_quality": reduced.get("answer_material_quality") if reduced else None},
+            "result": {
+                "quality": data.get("answer_material_quality"),
+                "fact_count": len(data.get("normalized_facts") or []),
+                "trace": data.get("deep_research_trace"),
+            },
         })
-        return fetched
+        if not data:
+            return []
+        return [{
+            "source": "deep_web_research_material",
+            "document": {
+                "status": "success",
+                "title": "Deep web research material",
+                "url": "",
+                "text_excerpt": str(data.get("answer_material") or ""),
+                "visible_text_excerpt": str(data.get("answer_material") or ""),
+                "normalized_facts": data.get("normalized_facts") or [],
+                "selected_evidence_blocks": data.get("selected_evidence_blocks") or [],
+                "answer_material_quality": data.get("answer_material_quality") or {},
+                "source_summaries": data.get("source_summaries") or [],
+                "deep_research_trace": data.get("deep_research_trace") or {},
+            },
+        }]
 
     def _runtime_known_parameters(self, payload: dict[str, Any]) -> dict[str, Any]:
         known: dict[str, Any] = {}

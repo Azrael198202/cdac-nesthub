@@ -118,8 +118,9 @@ class RuntimeEvidenceNormalizer:
         clean_blocks = self._extract_blocks(text)
         variables = self._runtime_variables(known=known, state=state or {})
         aligned_records = self._aligned_records(blocks=clean_blocks, variables=variables, source_url=source_url, state=state or {})
+        numeric_row_records = self._numeric_row_records(blocks=clean_blocks, variables=variables, source_url=source_url)
         generic_records = self._generic_records(blocks=clean_blocks, variables=variables, source_url=source_url)
-        records = self._dedupe_records(aligned_records + generic_records)
+        records = self._dedupe_records(aligned_records + numeric_row_records + generic_records)
         selected_blocks = self._selected_blocks(blocks=clean_blocks, variables=variables)
         quality = self._quality(records=records, blocks=selected_blocks, variables=variables)
         material = self._material(records=records, selected_blocks=selected_blocks)
@@ -204,6 +205,115 @@ class RuntimeEvidenceNormalizer:
                 source_url=source_url,
             ))
         return records
+
+
+    def _numeric_row_records(self, *, blocks: list[str], variables: dict[str, list[str]], source_url: str) -> list[EvidenceRecord]:
+        """Extract target-aligned compact numeric rows.
+
+        This is a generic table/list fallback. It uses only runtime-provided
+        target aliases and measurement-shaped tokens, not domain vocabulary.
+        """
+        records: list[EvidenceRecord] = []
+        target_aliases: dict[str, list[str]] = {}
+        for aliases in variables.values():
+            for alias in aliases:
+                m = self.ISO_DATE.match(str(alias or "").strip())
+                if not m:
+                    continue
+                y, mo, d = m.groups()
+                canonical = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+                bucket = target_aliases.setdefault(canonical, [])
+                for candidate in self.alias_generator.aliases_for(canonical):
+                    if candidate not in bucket:
+                        bucket.append(candidate)
+        if not target_aliases:
+            return records
+
+        joined = " ".join(blocks[:900])
+        for target, aliases in target_aliases.items():
+            candidates: list[tuple[float, str]] = []
+            for alias in sorted(set(str(a).strip() for a in aliases if str(a).strip()), key=len, reverse=True):
+                weak = bool(re.fullmatch(r"\d{1,2}", alias))
+                if weak:
+                    pattern = re.compile(r"(?<![\d./-])" + re.escape(alias) + r"(?![\d./-])", re.I)
+                else:
+                    pattern = re.compile(r"(?<![\w./-])" + re.escape(alias) + r"(?![\w./-])", re.I)
+                for match in pattern.finditer(joined):
+                    sample = joined[match.start(): min(len(joined), match.start() + 260)]
+                    if weak and self._looks_like_embedded_measure(sample, alias):
+                        continue
+                    sample = self._cut_dense_numeric_row(sample, alias)
+                    score = self._numeric_row_quality(sample, weak=weak)
+                    if score >= (0.68 if weak else 0.58):
+                        candidates.append((score, sample.strip(" ,;|")))
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            for score, row in candidates[:2]:
+                if not row:
+                    continue
+                values = self.VALUE_WITH_UNIT.findall(row)
+                if not values:
+                    # A compact rendered table sometimes omits units in each row.
+                    # Keep a dense numeric row if it has enough structure.
+                    nums = self.NUMBER.findall(row)
+                    if len(nums) < 3:
+                        continue
+                records.append(EvidenceRecord(
+                    kind="aligned_record",
+                    label="target_numeric_record",
+                    value=row,
+                    context=row,
+                    target=target,
+                    confidence=min(0.96, score),
+                    source_url=source_url,
+                ))
+        return records
+
+
+    def _looks_like_embedded_measure(self, text: str, alias: str) -> bool:
+        sample = str(text or "")
+        after = sample[len(str(alias or "")):].lstrip()
+        return bool(after.startswith(("°", "%", "/", ".")) or re.match(r"^(?:mm|cm|m|km/h|mph|hPa|kPa)\b", after, flags=re.IGNORECASE))
+
+    def _cut_dense_numeric_row(self, sample: str, alias: str) -> str:
+        text = " ".join(str(sample or "").split())
+        if not text:
+            return ""
+        # Stop at the next likely row start after the current row has enough
+        # numeric/measurement signal.
+        best = min(len(text), 220)
+        for match in re.finditer(r"(?<![\d./-])\d{1,2}(?![\d./-])", text):
+            if match.start() <= max(2, len(alias) + 1):
+                continue
+            prefix = text[:match.start()]
+            if len(self.NUMBER.findall(prefix)) >= 3 or self.VALUE_WITH_UNIT.search(prefix):
+                tail = text[match.start(): match.start() + 80]
+                token = match.group(0)
+                if self._looks_like_embedded_measure(tail, token):
+                    continue
+                if len(self.NUMBER.findall(tail)) >= 2 or self.VALUE_WITH_UNIT.search(tail):
+                    best = min(best, match.start())
+                    break
+        return text[:best]
+
+    def _numeric_row_quality(self, text: str, *, weak: bool) -> float:
+        sample = str(text or "")
+        numbers = self.NUMBER.findall(sample)
+        measures = self.VALUE_WITH_UNIT.findall(sample)
+        if len(numbers) < 2 and not measures:
+            return 0.0
+        score = 0.45 + min(len(numbers), 6) * 0.06 + min(len(measures), 4) * 0.10
+        if "/" in sample or "|" in sample:
+            score += 0.06
+        if weak:
+            score -= 0.10
+        # Reject long navigation-like chains with too many small integers before
+        # any unit-bearing measurement.
+        head = sample[:140]
+        first_measure = self.VALUE_WITH_UNIT.search(head)
+        before = head[: first_measure.start()] if first_measure else head
+        if len(re.findall(r"(?<![\d.])\d{1,2}(?![\d.])", before)) >= 6:
+            score -= 0.25
+        return max(0.0, min(0.98, score))
 
     def _generic_records(self, *, blocks: list[str], variables: dict[str, list[str]], source_url: str) -> list[EvidenceRecord]:
         records: list[EvidenceRecord] = []
