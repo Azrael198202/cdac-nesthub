@@ -42,6 +42,23 @@ class ExecutionStateRepair:
         "inspect",
         "check",
         "compare",
+        "obtain",
+        "fetch",
+        "get",
+        "collect",
+        "observe",
+        "access",
+    }
+
+    DEFAULT_READ_ONLY_STRATEGY_HINTS = {
+        "evidence",
+        "retrieval",
+        "retrieve",
+        "search",
+        "lookup",
+        "knowledge",
+        "observation",
+        "read",
     }
 
     DEFAULT_IRREVERSIBLE_ACTION_HINTS = {
@@ -52,9 +69,7 @@ class ExecutionStateRepair:
         "send",
         "submit",
         "commit",
-        "execute",
         "install",
-        "download",
     }
 
     def __init__(self, config_path: Path | None = None) -> None:
@@ -63,6 +78,7 @@ class ExecutionStateRepair:
         self.optional_refinement_fields = set(config.get("optional_refinement_fields") or self.DEFAULT_OPTIONAL_REFINEMENT_FIELDS)
         self.read_only_action_hints = set(config.get("read_only_action_hints") or self.DEFAULT_READ_ONLY_ACTION_HINTS)
         self.irreversible_action_hints = set(config.get("irreversible_action_hints") or self.DEFAULT_IRREVERSIBLE_ACTION_HINTS)
+        self.read_only_strategy_hints = set(config.get("read_only_strategy_hints") or self.DEFAULT_READ_ONLY_STRATEGY_HINTS)
 
     def repair(self, workflow_plan: dict[str, Any], *, runtime_context: dict[str, Any] | None = None) -> dict[str, Any]:
         plan = deepcopy(workflow_plan or {})
@@ -106,7 +122,24 @@ class ExecutionStateRepair:
             step["parameters"] = params
             step["missing_fields"] = genuinely_missing
 
-            if not genuinely_missing and self._can_mark_ready(step):
+            structurally_requires_confirmation = self._requires_confirmation_by_structure(step)
+
+            if not genuinely_missing and not structurally_requires_confirmation:
+                # Planner output may set confirmation/execution_ready=false for
+                # read-only observation/retrieval steps.  In auto-run contexts,
+                # a step with complete parameters and no structural side effect
+                # must be executable.  This is a generic execution-state repair;
+                # it does not depend on any domain keyword.
+                if step.get("execution_ready") is not True:
+                    repair_notes["execution_ready_changed"].append({"step_id": step_id, "from": step.get("execution_ready"), "to": True})
+                step["execution_ready"] = True
+                step["requires_human_confirmation"] = False
+                human_interaction = step.get("human_interaction")
+                if isinstance(human_interaction, dict) and human_interaction.get("required"):
+                    step["human_interaction"] = {"required": False, "type": "none", "fields": {}}
+                    repair_notes["human_interaction_removed"].append({"step_id": step_id})
+
+            elif not genuinely_missing and self._can_mark_ready(step):
                 if step.get("execution_ready") is not True:
                     repair_notes["execution_ready_changed"].append({"step_id": step_id, "from": step.get("execution_ready"), "to": True})
                 step["execution_ready"] = True
@@ -117,7 +150,7 @@ class ExecutionStateRepair:
                         step["human_interaction"] = {"required": False, "type": "none", "fields": {}}
                         repair_notes["human_interaction_removed"].append({"step_id": step_id})
 
-            if self._requires_confirmation_by_structure(step):
+            if structurally_requires_confirmation:
                 step["requires_human_confirmation"] = True
                 hi = step.get("human_interaction") if isinstance(step.get("human_interaction"), dict) else {}
                 hi.setdefault("required", True)
@@ -163,7 +196,7 @@ class ExecutionStateRepair:
         return normalized.endswith("_preference") or normalized.endswith("_preferences") or normalized.endswith("_style")
 
     def _can_mark_ready(self, step: dict[str, Any]) -> bool:
-        if bool(step.get("requires_human_confirmation")):
+        if bool(step.get("requires_human_confirmation")) and self._requires_confirmation_by_structure(step):
             return False
         if self._requires_confirmation_by_structure(step):
             return False
@@ -175,14 +208,28 @@ class ExecutionStateRepair:
         return True
 
     def _requires_confirmation_by_structure(self, step: dict[str, Any]) -> bool:
-        text = " ".join(
+        # Do not treat orchestration fields such as next_action="execute" as
+        # user-facing side effects. Confirmation is based on the step's target
+        # operation and strategy, not the scheduler verb used to advance it.
+        operation_text = " ".join(
             str(step.get(k, ""))
-            for k in ["task_type", "action", "step_type", "next_action", "objective"]
+            for k in ["task_type", "action", "step_type", "objective"]
         ).lower()
-        tokens = self._tokens(text)
+        strategy_text = " ".join(str(x) for x in self._strategy_values(step)).lower()
+        tokens = self._tokens(operation_text)
+        strategy_tokens = self._tokens(strategy_text)
+        strategy_is_read_only = bool(strategy_tokens.intersection(self.read_only_strategy_hints))
         has_irreversible = bool(tokens.intersection(self.irreversible_action_hints))
-        has_read_only = bool(tokens.intersection(self.read_only_action_hints))
+        has_read_only = bool(tokens.intersection(self.read_only_action_hints)) or strategy_is_read_only
         return has_irreversible and not has_read_only
+
+    def _strategy_values(self, step: dict[str, Any]) -> list[str]:
+        raw = step.get("execution_strategy")
+        if isinstance(raw, list):
+            return [str(x) for x in raw]
+        if isinstance(raw, str):
+            return [raw]
+        return []
 
     def _human_interaction_only_optional(self, fields: Any) -> bool:
         if isinstance(fields, dict):

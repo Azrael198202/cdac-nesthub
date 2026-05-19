@@ -51,7 +51,9 @@ class StructuredFactNormalizer:
         self.date_alias_generator = DateAliasGenerator()
 
     def normalize(self, *, materials: list[dict[str, Any]], state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        runtime_variables = self._runtime_variables(state or {})
+        current_state = state or {}
+        self._current_state = current_state
+        runtime_variables = self._runtime_variables(current_state)
         facts: list[NormalizedFact] = []
         for material in materials:
             if not isinstance(material, dict):
