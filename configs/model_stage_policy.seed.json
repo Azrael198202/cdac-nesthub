@@ -70,14 +70,16 @@
       ]
     },
     "runtime_switch": {
-      "local_models_enabled": true,
+      "local_models_enabled": false,
+      "deprecated": true,
+      "replaced_by": "global_policy.runtime_execution_policy.local_enabled",
       "switch_sources": [
-        "runtime/generated/system_topology/model_stage_policy.json",
+        "global_policy.runtime_execution_policy.local_enabled",
         "AI_CORE_LOCAL_MODELS_ENABLED"
       ]
     },
     "local_model_policy": {
-      "enabled": true,
+      "enabled": false,
       "default_provider_order": [
         "vllm",
         "ollama"
@@ -95,7 +97,31 @@
       "local_unavailable_action": "try_next_local_then_api_fallback",
       "default_local_runtime": "vllm",
       "fallback_local_runtime": "ollama",
-      "selection_rule": "policy_resolver_expands_one_model_catalog_entry_into_runtime_ordered_provider_templates"
+      "selection_rule": "policy_resolver_expands_one_model_catalog_entry_into_runtime_ordered_provider_templates",
+      "deprecated_authority": true,
+      "replaced_by": "global_policy.runtime_execution_policy"
+    },
+    "runtime_execution_policy": {
+      "source_of_truth": true,
+      "default_mode": "api_only",
+      "local_enabled": false,
+      "api_only_when_local_disabled": true,
+      "api_provider_order": [
+        "openai",
+        "claude"
+      ],
+      "local_provider_order": [
+        "vllm",
+        "ollama"
+      ],
+      "local_code_provider_order": [
+        "vllm_coder",
+        "ollama_coder_qwen25",
+        "ollama_coder_deepseek"
+      ],
+      "credential_recovery_enabled": true,
+      "credential_storage": "runtime/configs/secrets/secrets.json",
+      "environment_override": "AI_CORE_LOCAL_MODELS_ENABLED"
     }
   },
   "capability_taxonomy": {

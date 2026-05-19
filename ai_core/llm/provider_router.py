@@ -6,7 +6,7 @@ from ai_core.llm.provider_handler_registry import ProviderHandlerRegistry
 from ai_core.llm.provider_handlers.base import ProviderUnavailableError
 from ai_core.context.prompt_budget_manager import PromptBudgetManager
 from ai_core.llm.model_capability_matcher import ModelCapabilityMatcher
-from ai_core.runtime.modeling import ModelRoutingPlanner, ModelStagePolicy
+from ai_core.runtime.modeling import ModelRoutingPlanner, ModelStagePolicy, RuntimeExecutionPolicy
 
 
 class ProviderRouter:
@@ -23,43 +23,24 @@ class ProviderRouter:
         self.model_matcher = ModelCapabilityMatcher()
         self.routing_planner = ModelRoutingPlanner()
         self.stage_policy = ModelStagePolicy()
+        self.runtime_execution_policy = RuntimeExecutionPolicy()
 
     def _config(self) -> dict:
         return self.loader.load_yaml(RUNTIME_CONFIGS / "models" / "providers.yaml")
 
 
     def _apply_local_model_switch(self, *, route: list[str], providers: dict, config: dict, stage_policy_meta: dict | None) -> list[str]:
-        """Enforce API-only mode even when adapters still contain legacy local routes."""
-        cost_policy = (stage_policy_meta or {}).get("cost_policy") if isinstance(stage_policy_meta, dict) else {}
-        policy = config.get("policy") if isinstance(config.get("policy"), dict) else {}
-        local_enabled = policy.get("local_models_enabled", True)
-        import os
-        env_value = os.getenv("AI_CORE_LOCAL_MODELS_ENABLED")
-        if env_value is not None:
-            local_enabled = str(env_value).strip().lower() not in {"0", "false", "no", "off", "api_only", "api-only"}
-        if local_enabled:
-            return route
-        filtered = []
-        for provider_name in route:
-            provider = providers.get(provider_name, {}) if isinstance(providers, dict) else {}
-            if not self._provider_is_local(provider_name=provider_name, provider=provider):
-                filtered.append(provider_name)
-        return filtered or [x for x in ["openai", "claude"] if x in providers]
+        """Apply the canonical runtime execution switch.
+
+        New code must not read legacy local_model_policy/runtime_switch directly.
+        The RuntimeExecutionPolicy object centralizes environment overrides,
+        runtime policy JSON, and backward-compatible mirrors.
+        """
+        snapshot = self.runtime_execution_policy.snapshot(provider_config=config)
+        return snapshot.filter_route(route, providers)
 
     def _provider_is_local(self, *, provider_name: str, provider: dict) -> bool:
-        base_url = str(provider.get("base_url") or "").lower() if isinstance(provider, dict) else ""
-        protocol = str(provider.get("protocol") or "").lower() if isinstance(provider, dict) else ""
-        tags = {str(x).lower() for x in (provider.get("model_tags", []) if isinstance(provider, dict) else []) or []}
-        role = str(provider.get("role") or "").lower() if isinstance(provider, dict) else ""
-        if role.startswith("external"):
-            return False
-        return (
-            provider_name in {"vllm", "vllm_coder", "ollama", "ollama_coder_qwen25", "ollama_coder_deepseek", "ollama_embedding", "lmstudio", "lmstudio_coder"}
-            or protocol.startswith("ollama")
-            or "local" in tags
-            or "127.0.0.1" in base_url
-            or "localhost" in base_url
-        )
+        return self.runtime_execution_policy.snapshot().provider_is_local(provider_name, provider)
 
     def _apply_runtime_model_override(self, *, provider_name: str, provider: dict, adapter: dict) -> dict:
         """Apply user-selected local model to generic local providers only.
@@ -209,13 +190,14 @@ class ProviderRouter:
                 })
 
                 if "MISSING_SECRET:" in str(exc):
-                    secret_key = str(exc).split("MISSING_SECRET:", 1)[1].strip() or "provider_secret"
+                    secret_key = str(exc).split("MISSING_SECRET:", 1)[1].split()[0].strip() or "provider_secret"
                     await self._emit_missing_secret_interaction(
                         run_id=run_id,
                         node_id=node_id,
                         provider_name=provider_name,
                         secret_key=secret_key,
                     )
+                    last_error = f"MISSING_SECRET:{secret_key}"
                     continue
 
         raise ProviderUnavailableError(

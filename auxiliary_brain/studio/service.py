@@ -257,7 +257,7 @@ class AgentStudioService:
             response["message"] = "Delegated primary-runtime execution is waiting for required input."
         return response
 
-    async def resume_run(self, run_id: str) -> dict[str, Any]:
+    async def resume_run(self, run_id: str, provided_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         run_id = (run_id or "").strip()
         if not run_id:
             return {
@@ -295,7 +295,7 @@ class AgentStudioService:
         all_participants = self.store.list_json("generated/agents")
         selected_ids = set(task_graph.get("selected_participant_ids") or [])
         participants = [p for p in all_participants if p.get("participant_id") in selected_ids] or all_participants
-        result = await self.delegation_runtime.resume_task(run_payload, task_graph, participants)
+        result = await self.delegation_runtime.resume_task(run_payload, task_graph, participants, provided_inputs=provided_inputs)
         status = result.get("status", "completed")
         response = {
             "action": "resume_task_graph",

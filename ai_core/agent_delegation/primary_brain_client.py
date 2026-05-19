@@ -72,7 +72,7 @@ class PrimaryBrainDelegationClient:
         )
 
 
-    async def resume_agent_request(self, result_payload: dict[str, Any], progress_callback: Callable[[dict[str, Any]], Any] | None = None) -> AgentExecutionResult:
+    async def resume_agent_request(self, result_payload: dict[str, Any], progress_callback: Callable[[dict[str, Any]], Any] | None = None, provided_inputs: dict[str, Any] | None = None) -> AgentExecutionResult:
         """Resume a paused primary-runtime participant run from its saved checkpoint.
 
         This is a durable continuation path: the auxiliary layer passes the
@@ -107,7 +107,7 @@ class PrimaryBrainDelegationClient:
             self.runtime.add_event_listener(core_run_id, progress_callback)
         try:
             if isinstance(pending, dict):
-                await self._resume_state_direct(core_run_id, state, pending)
+                await self._resume_state_direct(core_run_id, state, pending, provided_inputs=provided_inputs)
         finally:
             if progress_callback:
                 self.runtime.remove_event_listener(core_run_id, progress_callback)
@@ -125,36 +125,147 @@ class PrimaryBrainDelegationClient:
         )
 
 
-    async def _resume_state_direct(self, core_run_id: str, state: dict[str, Any], pending: dict[str, Any]) -> None:
+    async def _resume_state_direct(self, core_run_id: str, state: dict[str, Any], pending: dict[str, Any], provided_inputs: dict[str, Any] | None = None) -> None:
         """Continue a saved primary-runtime state without restarting earlier nodes."""
         kind = str(pending.get("kind") or "")
         retry_index = pending.get("retry_node_index")
         node_id = pending.get("node_id")
 
+        provided_inputs = provided_inputs if isinstance(provided_inputs, dict) else {}
+
         if kind in {"secret_input", "optional_credential_choice"}:
-            modified = self._build_resume_modified_result(pending)
-            secret_key = str(modified.get("secret_key") or "runtime_access_key")
+            modified = dict(provided_inputs) if provided_inputs else self._build_resume_modified_result(pending)
+            secret_key = str(modified.get("secret_key") or modified.get("field") or "runtime_access_key")
             secret_value = str(modified.get("value") or modified.get("credential") or modified.get("api_key") or "")
             if not secret_value:
                 return
+            from ai_core.secrets.secret_store import SecretStore
+            SecretStore().set(secret_key, secret_value)
             state.setdefault("runtime_credentials", {})[secret_key] = "***"
             state.setdefault("runtime_execution_preferences", {})["credential_mode"] = "provided"
+            if node_id:
+                state.get("results", {}).pop(node_id, None)
+            if retry_index is not None:
+                state["node_index"] = int(retry_index)
 
-        if node_id:
-            state.get("results", {}).pop(node_id, None)
-        if retry_index is not None:
-            state["node_index"] = int(retry_index)
+        elif kind == "validation_recovery" and node_id:
+            original = state.get("results", {}).get(node_id, {})
+            repaired = self._merge_human_inputs_into_result(original, provided_inputs)
+            state.setdefault("results", {})[node_id] = repaired
+            state.setdefault("human_information_history", []).append({
+                "node_id": node_id,
+                "provided": provided_inputs,
+                "recovery_kind": kind,
+            })
+            if retry_index is not None:
+                state["node_index"] = int(retry_index) + 1
+
+        elif kind == "human_information_required":
+            state.setdefault("human_information_history", []).append({
+                "node_id": node_id,
+                "provided": provided_inputs,
+                "recovery_kind": kind,
+            })
+            if node_id:
+                existing = state.get("results", {}).get(node_id, {})
+                state.setdefault("results", {})[node_id] = self._merge_human_inputs_into_result(existing, provided_inputs)
+            if retry_index is not None:
+                state["node_index"] = int(retry_index) + 1
+
+        else:
+            if node_id:
+                state.get("results", {}).pop(node_id, None)
+            if retry_index is not None:
+                state["node_index"] = int(retry_index)
+
         state.pop("pending_action", None)
         self.runtime.checkpoints.save(core_run_id, state)
         await self.runtime._emit(core_run_id, {
             "type": "DURABLE_RESUME_STARTED",
             "title": "Durable resume started",
-            "message": "Continuing from the saved primary-runtime checkpoint instead of restarting the workflow.",
+            "message": "Continuing from the saved primary-runtime checkpoint with provided human input.",
             "node_id": node_id,
+            "provided_input_keys": list(provided_inputs.keys()),
             "progress": state.get("progress", 0),
             "origin": "ai_core",
         })
         await self.runtime._continue(state)
+
+    def _merge_human_inputs_into_result(self, original: Any, provided_inputs: dict[str, Any]) -> Any:
+        """Merge form values into a JSON-like node result without domain rules.
+
+        Supports simple field names and dotted paths such as
+        ``items.0.value_type``. Empty values are ignored so users can submit
+        only the fields they want to repair.
+        """
+        import copy
+
+        result = copy.deepcopy(original) if isinstance(original, (dict, list)) else {}
+        if not isinstance(provided_inputs, dict):
+            return result
+        for raw_key, raw_value in provided_inputs.items():
+            key = str(raw_key or "").strip()
+            if not key:
+                continue
+            value = raw_value
+            if isinstance(value, str) and value == "":
+                continue
+            self._assign_path_value(result, key, value)
+        return result
+
+    def _assign_path_value(self, target: Any, path: str, value: Any) -> None:
+        parts = [p for p in path.replace("[", ".").replace("]", "").split(".") if p != ""]
+        if not parts:
+            return
+        current = target
+        for part in parts[:-1]:
+            if isinstance(current, list):
+                try:
+                    idx = int(part)
+                except Exception:
+                    return
+                while len(current) <= idx:
+                    current.append({})
+                if current[idx] is None:
+                    current[idx] = {}
+                current = current[idx]
+            elif isinstance(current, dict):
+                nxt = current.get(part)
+                if not isinstance(nxt, (dict, list)):
+                    nxt = {}
+                    current[part] = nxt
+                current = nxt
+            else:
+                return
+        last = parts[-1]
+        if isinstance(current, list):
+            try:
+                idx = int(last)
+            except Exception:
+                return
+            while len(current) <= idx:
+                current.append(None)
+            current[idx] = value
+        elif isinstance(current, dict):
+            current[last] = value
+
+    def _collect_null_paths(self, value: Any, prefix: str = "") -> list[str]:
+        paths: list[str] = []
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_prefix = f"{prefix}.{key}" if prefix else str(key)
+                if child is None:
+                    paths.append(child_prefix)
+                else:
+                    paths.extend(self._collect_null_paths(child, child_prefix))
+        elif isinstance(value, list):
+            for idx, child in enumerate(value):
+                child_prefix = f"{prefix}.{idx}" if prefix else str(idx)
+                if child is None:
+                    paths.append(child_prefix)
+                else:
+                    paths.extend(self._collect_null_paths(child, child_prefix))
+        return paths
 
     def _build_resume_modified_result(self, pending: dict[str, Any]) -> dict[str, Any]:
         kind = str(pending.get("kind") or "")
@@ -433,4 +544,19 @@ class PrimaryBrainDelegationClient:
             fields = request.get("fields") or request.get("missing_fields") or []
             if isinstance(fields, list):
                 return [{"kind": "human_information_required", "field": str(f), "message": str(request.get("message") or "Additional information is required.")} for f in fields]
+        if kind == "validation_recovery":
+            node_id = str(pending.get("node_id") or "")
+            result = state.get("results", {}).get(node_id, {}) if isinstance(state.get("results"), dict) else {}
+            paths = self._collect_null_paths(result)
+            if not paths:
+                paths = ["corrected_json"]
+            message = "Schema validation failed. Please provide a valid value for the highlighted field."
+            validation_error = str(pending.get("validation_error") or "")
+            return [{
+                "kind": "validation_recovery",
+                "field": path,
+                "message": message,
+                "validation_error": validation_error,
+                "node_id": node_id,
+            } for path in paths]
         return []

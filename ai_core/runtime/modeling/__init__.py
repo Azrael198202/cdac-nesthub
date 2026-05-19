@@ -4,4 +4,6 @@ from ai_core.runtime.modeling.feedback_escalator import FeedbackEscalator
 
 from ai_core.runtime.modeling.model_stage_policy import ModelStagePolicy
 
-__all__ = ["ModelRoutingPlanner", "ComplexityEstimator", "FeedbackEscalator", "ModelStagePolicy"]
+__all__ = ["ModelRoutingPlanner", "ComplexityEstimator", "FeedbackEscalator", "ModelStagePolicy", "RuntimeExecutionPolicy", "RuntimeExecutionPolicySnapshot"]
+
+from ai_core.runtime.modeling.runtime_execution_policy import RuntimeExecutionPolicy, RuntimeExecutionPolicySnapshot

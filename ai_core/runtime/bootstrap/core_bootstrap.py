@@ -8,6 +8,7 @@ from ai_core.config.loader import ConfigLoader
 from ai_core.runtime.runtime_template_generator import RuntimeTemplateGenerator
 from ai_core.runtime.modeling.capability_topology import RuntimeModelTopology
 from ai_core.runtime.modeling.model_stage_policy import ModelStagePolicy
+from ai_core.runtime.modeling.runtime_execution_policy import RuntimeExecutionPolicy
 
 
 class RuntimeBootstrap:
@@ -16,6 +17,7 @@ class RuntimeBootstrap:
         self.template_generator = RuntimeTemplateGenerator()
         self.model_topology = RuntimeModelTopology()
         self.model_stage_policy = ModelStagePolicy()
+        self.runtime_execution_policy = RuntimeExecutionPolicy()
 
     def ensure(self) -> None:
         for d in [
@@ -109,23 +111,23 @@ class RuntimeBootstrap:
 
     def _default_model_providers_config(self) -> dict:
         return {
-            "default_route": ["vllm", "ollama", "openai"],
+            "default_route": ["openai", "claude", "vllm", "ollama"],
             "routes": {
                 "local_light": ["vllm", "ollama", "openai"],
                 "local_capable": ["vllm", "ollama", "lmstudio", "openai"],
-                "strong_reasoning": ["openai", "vllm", "ollama", "lmstudio"],
-                "input_parsing": ["vllm", "ollama", "openai"],
-                "intent_simple": ["vllm", "ollama", "openai"],
-                "intent_complex": ["openai", "vllm", "ollama", "lmstudio"],
-                "intent_recognition": ["vllm", "ollama", "openai"],
-                "workflow_basic": ["vllm", "ollama", "openai"],
-                "workflow_complex": ["openai", "vllm", "ollama", "lmstudio"],
-                "workflow_planning": ["vllm", "ollama", "openai"],
-                "semantic_grounding": ["openai", "vllm", "ollama", "lmstudio"],
-                "tool_selection": ["vllm", "ollama", "openai"],
-                "stable_synthesis": ["vllm", "ollama", "openai"],
-                "stable_synthesis_strong": ["openai", "vllm", "ollama", "lmstudio"],
-                "reasoning": ["vllm", "ollama", "openai"],
+                "strong_reasoning": ["openai", "claude", "vllm", "ollama", "lmstudio"],
+                "input_parsing": ["openai", "claude", "vllm", "ollama"],
+                "intent_simple": ["openai", "claude", "vllm", "ollama"],
+                "intent_complex": ["openai", "claude", "vllm", "ollama", "lmstudio"],
+                "intent_recognition": ["openai", "claude", "vllm", "ollama"],
+                "workflow_basic": ["openai", "claude", "vllm", "ollama"],
+                "workflow_complex": ["openai", "claude", "vllm", "ollama", "lmstudio"],
+                "workflow_planning": ["openai", "claude", "vllm", "ollama"],
+                "semantic_grounding": ["openai", "claude", "vllm", "ollama", "lmstudio"],
+                "tool_selection": ["openai", "claude", "vllm", "ollama"],
+                "stable_synthesis": ["openai", "claude", "vllm", "ollama"],
+                "stable_synthesis_strong": ["openai", "claude", "vllm", "ollama", "lmstudio"],
+                "reasoning": ["openai", "claude", "vllm", "ollama"],
                 # Code artifact generation uses code-specialized local models first.
                 # The generic vision/reasoning model is kept later as fallback only.
                 "code_generation": [
@@ -149,8 +151,8 @@ class RuntimeBootstrap:
                     "openai"
                 ],
                 "api_discovery_local": ["vllm", "ollama"],
-                "api_discovery_external": ["vllm", "ollama", "openai"],
-                "fallback": ["vllm", "ollama", "openai"]
+                "api_discovery_external": ["openai", "claude", "vllm", "ollama"],
+                "fallback": ["openai", "claude", "vllm", "ollama"]
             },
             "role_model_preferences": {
                 "information_retrieval_agent": ["structured_extraction", "reasoning"],
@@ -481,12 +483,22 @@ class RuntimeBootstrap:
             "policy": {
                 "require_real_provider": True,
                 "allow_placeholder_result": False,
-                "prefer_local_base_model": True,
-                "local_models_enabled": True,
+                "prefer_local_base_model": False,
+                "runtime_execution_policy": {
+                    "source_of_truth": "runtime_execution_policy",
+                    "default_mode": "api_only",
+                    "local_enabled": False,
+                    "api_only_when_local_disabled": True,
+                    "api_provider_order": ["openai", "claude"],
+                    "local_provider_order": ["vllm", "ollama"],
+                    "local_code_provider_order": ["vllm_coder", "ollama_coder_qwen25", "ollama_coder_deepseek"],
+                    "credential_recovery_enabled": True
+                },
+                "local_models_enabled": False,
                 "local_provider_order": ["vllm", "ollama"],
                 "api_only_when_local_disabled": True,
                 "api_provider_order": ["openai", "claude"],
-                "base_model_provider": "vllm",
+                "base_model_provider": "openai",
                 "base_model": "Qwen/Qwen2.5-7B-Instruct",
                 "local_fallback_provider": "ollama",
                 "local_fallback_model": "qwen3:8b",
@@ -494,7 +506,7 @@ class RuntimeBootstrap:
                 "code_generation_model": "Qwen/Qwen2.5-Coder-7B-Instruct",
                 "code_generation_fallback_provider": "ollama_coder_qwen25",
                 "code_generation_fallback_model": "qwen2.5-coder:7b",
-                "external_provider_is_fallback": True
+                "external_provider_is_fallback": False
             }
         }
 
@@ -536,7 +548,15 @@ class RuntimeBootstrap:
 
         policy = dict(current.get("policy") or {})
         policy.update(desired.get("policy", {}))
+        snapshot = self.runtime_execution_policy.snapshot(provider_config={"policy": policy})
+        policy.update(snapshot.to_provider_policy())
         current["policy"] = policy
+        current["default_route"] = snapshot.filter_route(current.get("default_route", []), current.get("providers", {})) or snapshot.api_provider_order
+        routes = current.get("routes", {}) if isinstance(current.get("routes"), dict) else {}
+        for route_name, route in list(routes.items()):
+            if isinstance(route, list):
+                routes[route_name] = snapshot.filter_route(route, current.get("providers", {})) or snapshot.api_provider_order
+        current["routes"] = routes
         return current
 
     def _ensure_workflow(self) -> None:

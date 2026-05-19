@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import copy
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import CONFIGS_DIR, RUNTIME_GENERATED
+from ai_core.runtime.modeling.runtime_execution_policy import RuntimeExecutionPolicy
 
 
 class ModelStagePolicy:
@@ -101,6 +101,7 @@ class ModelStagePolicy:
 
     def __init__(self) -> None:
         self.loader = ConfigLoader()
+        self.runtime_execution_policy = RuntimeExecutionPolicy()
 
     def ensure_defaults(self) -> None:
         target = RUNTIME_GENERATED / "system_topology" / "model_stage_policy.json"
@@ -390,18 +391,13 @@ class ModelStagePolicy:
         )
 
     def _local_model_policy(self, policy: dict[str, Any]) -> dict[str, Any]:
-        global_policy = policy.get("global_policy") if isinstance(policy.get("global_policy"), dict) else {}
-        local_policy = global_policy.get("local_model_policy") if isinstance(global_policy.get("local_model_policy"), dict) else {}
-        runtime_switch = global_policy.get("runtime_switch") if isinstance(global_policy.get("runtime_switch"), dict) else {}
-        enabled = runtime_switch.get("local_models_enabled", local_policy.get("enabled", True))
-        env_value = os.getenv("AI_CORE_LOCAL_MODELS_ENABLED")
-        if env_value is not None:
-            enabled = str(env_value).strip().lower() not in {"0", "false", "no", "off", "api_only", "api-only"}
+        snapshot = self.runtime_execution_policy.snapshot(policy=policy)
         return {
-            "enabled": bool(enabled),
-            "default_provider_order": [str(x) for x in local_policy.get("default_provider_order", ["vllm", "ollama"]) if str(x).strip()],
-            "api_provider_order": [str(x) for x in local_policy.get("api_provider_order", ["openai", "claude"]) if str(x).strip()],
-            "api_only_when_disabled": bool(local_policy.get("api_only_when_disabled", True)),
+            "enabled": snapshot.local_enabled,
+            "default_provider_order": snapshot.local_provider_order,
+            "code_provider_order": snapshot.local_code_provider_order,
+            "api_provider_order": snapshot.api_provider_order,
+            "api_only_when_disabled": snapshot.api_only_when_local_disabled,
         }
 
     def _is_local_model(self, model_meta: dict[str, Any]) -> bool:
@@ -435,7 +431,8 @@ class ModelStagePolicy:
         if self._is_local_model(model_meta):
             if not runtime_policy["enabled"] and runtime_policy["api_only_when_disabled"]:
                 return []
-            preferred = runtime_policy["default_provider_order"]
+            provider_order_key = "code_provider_order" if ("code_generation" in {str(x) for x in model_meta.get("capabilities", []) or []}) else "default_provider_order"
+            preferred = runtime_policy.get(provider_order_key) or runtime_policy["default_provider_order"]
             local_known = {"vllm", "vllm_coder", "ollama", "ollama_coder_qwen25", "ollama_coder_deepseek", "ollama_embedding", "lmstudio", "lmstudio_coder"}
             compatible = [x for x in preferred if self._provider_can_host_model(provider_template=x, model_meta=model_meta)]
             compatible.extend(x for x in templates if x in local_known and x not in compatible)

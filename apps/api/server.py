@@ -35,6 +35,7 @@ class AgentStudioSecretRequest(BaseModel):
 
 class AgentStudioResumeRunRequest(BaseModel):
     run_id: str
+    provided_inputs: dict[str, Any] | None = None
 
 
 class ResumeRequest(BaseModel):
@@ -73,7 +74,7 @@ async def home():
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
             "Expires": "0",
-            "X-AI-Core-Version": "v2.9.0",
+            "X-AI-Core-Version": "v2.9.6",
         },
     )
 
@@ -117,12 +118,12 @@ async def agent_studio_secret(req: AgentStudioSecretRequest):
 
 @app.post("/api/agent-studio/resume-run")
 async def agent_studio_resume_run(req: AgentStudioResumeRunRequest):
-    return JSONResponse(await studio_service.resume_run(req.run_id))
+    return JSONResponse(await studio_service.resume_run(req.run_id, provided_inputs=req.provided_inputs))
 
 
 @app.get("/api/version")
 async def version():
-    return JSONResponse({"version": "v2.9.0", "name": "runtime_boundary_stabilization_v2_9_0"})
+    return JSONResponse({"version": "v2.9.6", "name": "runtime_execution_policy_and_credential_recovery"})
 
 
 @app.post("/api/chat")

@@ -190,7 +190,7 @@ class AgentDelegationRuntime:
         return run_payload
 
 
-    async def resume_task(self, run_payload: dict[str, Any], task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
+    async def resume_task(self, run_payload: dict[str, Any], task_graph: dict[str, Any], participants: list[dict[str, Any]], provided_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         """Resume the same delegation run from its paused participant checkpoint.
 
         This method must not create a new run id and must not restart already
@@ -396,16 +396,17 @@ class AgentDelegationRuntime:
                 raise
             return await self.primary_client.execute_agent_request(request)
 
-    async def _resume_agent_request_with_progress(self, payload, progress_callback):
+    async def _resume_agent_request_with_progress(self, payload, progress_callback, provided_inputs: dict[str, Any] | None = None):
         try:
             return await self.primary_client.resume_agent_request(
                 payload,
                 progress_callback=progress_callback,
+                provided_inputs=provided_inputs,
             )
         except TypeError as exc:
             if "progress_callback" not in str(exc):
                 raise
-            return await self.primary_client.resume_agent_request(payload)
+            return await self.primary_client.resume_agent_request(payload, provided_inputs=provided_inputs)
 
     def _build_primary_runtime_progress_bridge(
         self,
