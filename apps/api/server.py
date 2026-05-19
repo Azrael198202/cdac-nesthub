@@ -74,7 +74,7 @@ async def home():
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
             "Expires": "0",
-            "X-AI-Core-Version": "v2.9.12",
+            "X-AI-Core-Version": "v2.9.20",
         },
     )
 
@@ -123,7 +123,7 @@ async def agent_studio_resume_run(req: AgentStudioResumeRunRequest):
 
 @app.get("/api/version")
 async def version():
-    return JSONResponse({"version": "v2.9.12", "name": "resume_waiting_state_cleanup"})
+    return JSONResponse({"version": "v2.9.20", "name": "credential-skip-and-continue"})
 
 
 @app.post("/api/chat")

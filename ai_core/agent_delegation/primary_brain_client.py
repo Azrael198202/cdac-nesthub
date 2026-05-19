@@ -137,14 +137,28 @@ class PrimaryBrainDelegationClient:
 
         if kind in {"secret_input", "optional_credential_choice"}:
             modified = dict(provided_inputs) if provided_inputs else self._build_resume_modified_result(pending)
-            secret_key = str(modified.get("secret_key") or modified.get("field") or "runtime_access_key")
+            action = str(modified.get("action") or modified.get("choice") or "").strip().lower()
+            skip_requested = bool(modified.get("skip_credential")) or action in {"skip", "skip_credential", "continue_without_key", "continue_without_credential"}
+            secret_key = str(modified.get("secret_key") or modified.get("field") or pending.get("secret_key") or "runtime_access_key")
             secret_value = str(modified.get("value") or modified.get("credential") or modified.get("api_key") or "")
-            if not secret_value:
-                return
-            from ai_core.secrets.secret_store import SecretStore
-            SecretStore().set(secret_key, secret_value)
-            state.setdefault("runtime_credentials", {})[secret_key] = "***"
-            state.setdefault("runtime_execution_preferences", {})["credential_mode"] = "provided"
+            if skip_requested:
+                prefs = state.setdefault("runtime_execution_preferences", {})
+                prefs["credential_mode"] = "skip"
+                prefs["skip_credential_candidates"] = True
+                prefs.setdefault("skipped_secret_keys", [])
+                if secret_key not in prefs["skipped_secret_keys"]:
+                    prefs["skipped_secret_keys"].append(secret_key)
+                state.setdefault("runtime_credentials", {})[secret_key] = "skipped"
+            else:
+                if not secret_value:
+                    state.setdefault("runtime_execution_preferences", {})["credential_mode"] = "missing"
+                    self._clear_waiting_state(state)
+                    self.runtime.checkpoints.save(core_run_id, state)
+                    return
+                from ai_core.secrets.secret_store import SecretStore
+                SecretStore().set(secret_key, secret_value)
+                state.setdefault("runtime_credentials", {})[secret_key] = "***"
+                state.setdefault("runtime_execution_preferences", {})["credential_mode"] = "provided"
             if node_id:
                 state.get("results", {}).pop(node_id, None)
             if retry_index is not None:
@@ -567,14 +581,18 @@ class PrimaryBrainDelegationClient:
             return [{
                 "kind": "secret_input",
                 "field": str(pending.get("secret_key") or "runtime_access_key"),
-                "message": "A runtime access key is required to continue this delegated execution.",
+                "message": "A credential-protected method is available. Enter the key to use it, or continue without this key to try another allowed method.",
+                "input_type": "password",
+                "required": False,
             }]
         if kind == "optional_credential_choice":
             request = pending.get("request") if isinstance(pending.get("request"), dict) else {}
             return [{
                 "kind": "optional_credential_choice",
                 "field": str(request.get("secret_key") or request.get("provider") or "runtime_access_key"),
-                "message": str(request.get("message") or pending.get("message") or "A runtime access key can improve this execution."),
+                "message": str(request.get("message") or pending.get("message") or "A credential-protected method can improve this execution. Enter the key to use it, or continue without this key."),
+                "input_type": "password",
+                "required": False,
             }]
         if kind == "human_information_required":
             request = pending.get("request") if isinstance(pending.get("request"), dict) else {}

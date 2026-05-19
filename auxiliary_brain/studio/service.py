@@ -324,9 +324,9 @@ class AgentStudioService:
             return [{
                 "kind": kind,
                 "field": str(pending.get("secret_key") or "runtime_access_key"),
-                "message": str(pending.get("message") or "A runtime access key is required to continue."),
+                "message": str(pending.get("message") or "A credential-protected method is available. Enter the key to use it, or continue without this key to try another allowed method."),
                 "input_type": "password",
-                "required": True,
+                "required": False,
             }]
         if kind == "human_information_required":
             request = pending.get("request") if isinstance(pending.get("request"), dict) else {}

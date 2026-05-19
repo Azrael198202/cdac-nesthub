@@ -267,35 +267,67 @@ class WorkflowRuntime:
             return
 
         if pending.get("kind") == "secret_input":
-            if decision != "approve" or not modified_result:
+            modified = modified_result if isinstance(modified_result, dict) else {}
+            action = str(modified.get("action") or modified.get("choice") or decision or "").strip().lower()
+            skip_requested = bool(modified.get("skip_credential")) or action in {"skip", "skip_credential", "continue_without_key", "continue_without_credential"}
+            node_id = pending.get("node_id")
+            retry_index = pending.get("retry_node_index")
+            if retry_index is None and node_id:
+                retry_index = self._node_index_by_id(state.get("workflow", {}), node_id)
+
+            if skip_requested or decision in {"skip", "continue"}:
+                prefs = state.setdefault("runtime_execution_preferences", {})
+                prefs["credential_mode"] = "skip"
+                prefs["skip_credential_candidates"] = True
+                secret_key = str(pending.get("secret_key") or modified.get("secret_key") or "runtime_access_key")
+                prefs.setdefault("skipped_secret_keys", [])
+                if secret_key not in prefs["skipped_secret_keys"]:
+                    prefs["skipped_secret_keys"].append(secret_key)
                 await self._emit(run_id, {
-                    "type": "RUN_CANCELLED",
-                    "title": "Secret input cancelled",
-                    "message": "API key was not provided.",
+                    "type": "SECRET_SKIPPED",
+                    "title": "Continuing without API key",
+                    "message": "The credential-protected method was skipped. Runtime will continue with another allowed method when available.",
+                    "progress": state.get("progress", 0),
                 })
-                return
+            else:
+                if decision != "approve" or not modified_result:
+                    await self._emit(run_id, {
+                        "type": "RUN_CANCELLED",
+                        "title": "Secret input cancelled",
+                        "message": "API key was not provided.",
+                    })
+                    return
 
-            from ai_core.secrets.secret_store import SecretStore
-            secret_key = pending.get("secret_key")
-            secret_value = modified_result.get("value")
+                from ai_core.secrets.secret_store import SecretStore
+                secret_key = pending.get("secret_key") or modified.get("secret_key")
+                secret_value = modified.get("value") or modified.get("credential") or modified.get("api_key")
 
-            if not secret_key or not secret_value:
+                if not secret_key or not secret_value:
+                    await self._emit(run_id, {
+                        "type": "RUN_FAILED",
+                        "title": "Secret input failed",
+                        "message": "Missing secret key or value.",
+                    })
+                    return
+
+                SecretStore().set(secret_key, secret_value)
+                state.setdefault("runtime_credentials", {})[str(secret_key)] = "***"
+                state.setdefault("runtime_execution_preferences", {})["credential_mode"] = "provided"
+
                 await self._emit(run_id, {
-                    "type": "RUN_FAILED",
-                    "title": "Secret input failed",
-                    "message": "Missing secret key or value.",
+                    "type": "SECRET_SAVED",
+                    "title": "API key saved",
+                    "message": f"{secret_key} saved to runtime config.",
+                    "progress": state.get("progress", 0),
                 })
-                return
 
-            SecretStore().set(secret_key, secret_value)
-
-            await self._emit(run_id, {
-                "type": "SECRET_SAVED",
-                "title": "API key saved",
-                "message": f"{secret_key} saved to runtime config.",
-                "progress": state.get("progress", 0),
-            })
-
+            state.pop("pending_action", None)
+            state.pop("missing_inputs", None)
+            state.pop("waiting_input", None)
+            state.pop("requires_key", None)
+            if node_id:
+                state.get("results", {}).pop(node_id, None)
+                state["node_index"] = int(retry_index if retry_index is not None else self._node_index_by_id(state.get("workflow", {}), node_id))
             await self._continue(state)
             return
 

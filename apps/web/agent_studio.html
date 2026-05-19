@@ -24,7 +24,7 @@
   <section class="panel"><h2>Generated Participants <span id="participantCount" class="small"></span></h2><div class="scroll" id="participants"></div></section>
   <section class="panel"><h2>Workflow / Results / Traces <span id="graphCount" class="small"></span></h2><div class="scroll" id="rightPane"></div></section>
 </main>
-<div id="missingInputModal" class="modalBackdrop"><div class="modal"><h3>Required input</h3><div class="small" id="missingInputSummary"></div><div id="missingInputFields"></div><div class="modalActions"><button class="btn" onclick="closeMissingInputModal()">Cancel</button><button class="btn primary" onclick="submitMissingInputs()">Submit & Continue</button></div></div></div>
+<div id="missingInputModal" class="modalBackdrop"><div class="modal"><h3>Required input</h3><div class="small" id="missingInputSummary"></div><div id="missingInputFields"></div><div class="modalActions"><button class="btn" onclick="closeMissingInputModal()">Cancel</button><button id="skipCredentialBtn" class="btn" style="display:none" onclick="skipCredentialAndContinue()">Continue without this key</button><button class="btn primary" onclick="submitMissingInputs()">Submit & Continue</button></div></div></div>
 <script>
 const messages = document.getElementById('messages');
 function renderJson(obj){ return JSON.stringify(obj, null, 2); }
@@ -94,6 +94,9 @@ function openMissingInputModal(items, runId){
   const summary=document.getElementById('missingInputSummary');
   fields.innerHTML='';
   const safeItems=Array.isArray(items)?items:[];
+  const hasCredentialChoice = safeItems.some(it => ['secret_input','optional_credential_choice'].includes(String(it.kind||'')));
+  const skipBtn=document.getElementById('skipCredentialBtn');
+  if(skipBtn){ skipBtn.style.display = hasCredentialChoice ? 'inline-block' : 'none'; }
   summary.innerHTML=`<span class="badge">run: ${escapeHtml(runId||lastPendingRunId||'pending')}</span> ${safeItems.length} field(s) need input before runtime can continue.`;
   safeItems.forEach((it,idx)=>{
     const kind=String(it.kind||'human_information_required');
@@ -125,6 +128,21 @@ function openMissingInputModal(items, runId){
   modal.classList.add('show');
 }
 function closeMissingInputModal(){ document.getElementById('missingInputModal').classList.remove('show'); }
+async function skipCredentialAndContinue(){
+  closeMissingInputModal();
+  const provided={action:'skip_credential', choice:'skip_credential', skip_credential:true, credential_mode:'skip'};
+  if(lastPendingRunId){
+    await resumePendingRun(lastPendingRunId, provided);
+    return;
+  }
+  const text=lastPendingInstruction || lastSubmittedInstruction;
+  if(text){
+    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, provided_inputs:provided})});
+    const data=await res.json();
+    addMessage(renderJson(data), data.status==='completed'?'item':'item error');
+    await refreshState();
+  }
+}
 async function submitMissingInputs(){
   const provided={};
   const inputs=document.querySelectorAll('[id^="missing_form_"]');
@@ -243,7 +261,7 @@ function deriveMissingInputs(run){
     return [{kind:'validation_recovery', field, message:'Schema validation failed. Please provide a valid value.', validation_error:err}];
   }
   if(kind==='secret_input' || kind==='optional_credential_choice'){
-    return [{kind:kind, field:String(pending.secret_key||'runtime_access_key'), message:String(pending.message||'A runtime access key is required to continue.'), input_type:'password'}];
+    return [{kind:kind, field:String(pending.secret_key||'runtime_access_key'), message:String(pending.message||'A credential-protected method is available. Enter a key to use it, or continue without this key to try another allowed method.'), input_type:'password'}];
   }
   if(kind==='human_information_required'){
     const request = pending.request || {};
