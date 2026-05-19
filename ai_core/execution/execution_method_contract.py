@@ -174,6 +174,8 @@ class ExecutionMethodResolver:
         policy: dict[str, Any] | None = None,
     ) -> ExecutionMethodContract:
         policy = policy if isinstance(policy, dict) else {}
+        step_policy = step.get("execution_method_policy") if isinstance(step.get("execution_method_policy"), dict) else {}
+        policy = self._merge_policy(policy, step_policy)
         disabled = {str(x) for x in policy.get("disabled_methods", []) if str(x).strip()}
         preferred = [str(x) for x in policy.get("preferred_methods", []) if str(x).strip()]
         candidates = [p for p in proposals if str(p.get("method") or "") not in disabled]
@@ -188,6 +190,8 @@ class ExecutionMethodResolver:
 
         chosen = candidates[0] if candidates else {"method": "web_search", "confidence": 0.4, "source": "runtime_default", "reason": "no candidate"}
         method = str(chosen.get("method") or "web_search")
+        fallback_allowed = bool(policy.get("fallback_allowed", True))
+        fallback = [m for m in self.DEFAULT_FALLBACKS.get(method, ["web_search"]) if m not in disabled] if fallback_allowed else []
         return ExecutionMethodContract(
             method=method,
             confidence=float(chosen.get("confidence") or 0.5),
@@ -195,10 +199,24 @@ class ExecutionMethodResolver:
             latency_level=self._latency(method),
             input_schema=self._input_schema(step),
             output_schema=self._output_schema(),
-            fallback=[m for m in self.DEFAULT_FALLBACKS.get(method, ["web_search"]) if m not in disabled],
+            fallback=fallback,
             reason=str(chosen.get("reason") or ""),
             proposal_source=str(chosen.get("source") or "runtime"),
         )
+
+
+    def _merge_policy(self, base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(base or {})
+        for key, value in (override or {}).items():
+            if isinstance(value, list):
+                merged[key] = list(value)
+            elif isinstance(value, dict) and isinstance(merged.get(key), dict):
+                nested = dict(merged[key])
+                nested.update(value)
+                merged[key] = nested
+            else:
+                merged[key] = value
+        return merged
 
     def _input_schema(self, step: dict[str, Any]) -> dict[str, Any]:
         return {

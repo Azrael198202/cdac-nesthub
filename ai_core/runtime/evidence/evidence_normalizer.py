@@ -386,8 +386,9 @@ class RuntimeEvidenceNormalizer:
             coverage_bonus = min(0.25, len(aligned_targets) / max(1, target_count) * 0.25)
         score = 0.2 + min(len(records), 16) * 0.035 + min(len(unit_records), 8) * 0.03 + coverage_bonus - noise_penalty
         score = max(0.0, min(0.99, score))
+        target_aligned = (len(aligned_targets) > 0) if target_count else True
         return {
-            "passed": bool(records) and (bool(unit_records) or bool(aligned_targets)),
+            "passed": bool(records) and target_aligned and (bool(unit_records) or bool(aligned_targets)),
             "score": round(score, 3),
             "record_count": len(records),
             "unit_record_count": len(unit_records),

@@ -13,6 +13,7 @@ from ai_core.modules.autonomous_codegen_executor import AutonomousCodegenExecuto
 from ai_core.modules.module_artifact_generator import RuntimeModuleArtifactGenerator
 from ai_core.modules.runtime_generated_module_installer import RuntimeGeneratedModuleInstaller
 from ai_core.workflow.workflow_normalizer import WorkflowNormalizer
+from ai_core.workflow.intent_contract import IntentContractGuard
 from ai_core.workflow.planning_recovery import PlanningRecoveryService
 from ai_core.workflow.execution_state_repair import ExecutionStateRepair
 from ai_core.tools.generic_tool_runner import GenericToolRunner
@@ -65,6 +66,7 @@ class ToolCallExecutor:
         self.module_artifact_generator = RuntimeModuleArtifactGenerator()
         self.module_installer = RuntimeGeneratedModuleInstaller()
         self.normalizer = WorkflowNormalizer()
+        self.intent_contract_guard = IntentContractGuard()
         self.planning_recovery = PlanningRecoveryService()
         self.execution_state_repair = ExecutionStateRepair()
         self.tool_runner = GenericToolRunner()
@@ -137,6 +139,7 @@ class ToolCallExecutor:
             normalized_plan,
             runtime_context=state.get("runtime_context") if isinstance(state.get("runtime_context"), dict) else {},
         )
+        normalized_plan = self.intent_contract_guard.apply(normalized_plan, previous_results)
         previous_results["workflow_planning"] = normalized_plan
         planned_steps = normalized_plan.get("planned_steps", [])
 
@@ -294,8 +297,17 @@ class ToolCallExecutor:
                         "priority_path": "execution_method_runtime_generated_tool",
                     })
                     continue
+                if not method_contract.fallback:
+                    blocked_steps.append({
+                        "step_id": step_id,
+                        "status": "execution_method_unavailable",
+                        "reason": "The resolved execution contract required a runtime method, but no runtime implementation returned a result.",
+                        "execution_method_contract": method_contract.to_dict(),
+                        "source_step": step,
+                    })
+                    continue
 
-            if method_contract.method in {"web_search", "api_call"} and selected_execution_mode in {"structured_provider", "web_retrieval"}:
+            if method_contract.method in {"web_search", "api_call"}:
                 routed_web_result = await self._try_strategy_web_evidence_execution(
                     run_id=run_id,
                     node_id=node_id,
@@ -319,6 +331,22 @@ class ToolCallExecutor:
                         "priority_path": "execution_method_" + method_contract.method,
                     })
                     continue
+
+            if method_contract.method not in {"web_search", "api_call", "knowledge_base", "model_knowledge", "existing_tool", "runtime_generated_tool"}:
+                blocked_steps.append({
+                    "step_id": step_id,
+                    "status": "unsupported_execution_method",
+                    "execution_method_contract": method_contract.to_dict(),
+                    "source_step": step,
+                })
+                continue
+
+            if method_contract.method not in {"web_search", "api_call"}:
+                # The resolver did not choose external evidence. Do not let a
+                # generic strategy fallback silently change the source contract.
+                strategy = []
+            else:
+                strategy = self._execution_strategy(step, normalized_plan)
 
             # v70.9 priority layer: local/model knowledge first.
             # If previous successful runtime knowledge already covers the current
@@ -349,7 +377,6 @@ class ToolCallExecutor:
             # ["local_knowledge", "web_evidence", "tool_generation"].  This
             # keeps planning domain-neutral and prevents a stale generated
             # module from blocking direct evidence retrieval.
-            strategy = self._execution_strategy(step, normalized_plan)
             if self._strategy_prefers(strategy, "web_evidence", before="tool_generation"):
                 web_strategy_result = await self._try_strategy_web_evidence_execution(
                     run_id=run_id,
