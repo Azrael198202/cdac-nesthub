@@ -13,6 +13,7 @@ from ai_core.evolution.approval_learning import ApprovalLearningService
 from ai_core.context.runtime_context_reducer import RuntimeContextReducer
 from ai_core.roles import RoleProfileSelector, PromptPackLoader, RoleScopedContextReducer
 from ai_core.runtime.modeling import ModelStagePolicy
+from ai_core.runtime.governance import RuntimeCostPolicy
 
 
 class LLMJsonExecutor:
@@ -36,6 +37,7 @@ class LLMJsonExecutor:
         self.prompt_pack_loader = PromptPackLoader()
         self.role_context_reducer = RoleScopedContextReducer()
         self.stage_policy = ModelStagePolicy()
+        self.runtime_cost_policy = RuntimeCostPolicy()
 
     async def execute(self, workflow_node: dict, node_config: dict, state: dict, capability_result: dict) -> dict:
         run_id = state["run_id"]
@@ -145,6 +147,7 @@ class LLMJsonExecutor:
         }
         if role_budget and not adapter.get("max_prompt_tokens"):
             adapter = {**adapter, "max_prompt_tokens": int(role_budget)}
+        adapter = self.runtime_cost_policy.apply_adapter_budget(adapter)
 
         result = await self.router.generate_json(
             run_id=run_id,
@@ -181,7 +184,8 @@ class LLMJsonExecutor:
                 adapter=adapter,
                 route_name=adapter.get("route_name") or adapter.get("model_route_name"),
             )
-            if not adapter.get("force_model_escalation") and self.stage_policy.should_escalate_on_validation_failure(stage_id):
+            cost_snapshot = self.runtime_cost_policy.snapshot()
+            if (not cost_snapshot.prefer_repair_before_model_escalation) and not adapter.get("force_model_escalation") and self.stage_policy.should_escalate_on_validation_failure(stage_id):
                 escalated_adapter = self.stage_policy.escalation_adapter(
                     adapter=adapter,
                     stage_id=stage_id,
@@ -301,20 +305,59 @@ class LLMJsonExecutor:
                             schema_path=str(schema_path),
                         ) from second_exc
                 else:
-                    await event_bus.emit(run_id, {
-                        "type": "LLM_JSON_VALIDATION_FAILED",
-                        "title": "JSON validation failed",
-                        "message": original_error,
-                        "node_id": node_id,
-                        "result": result,
-                        "schema_path": str(schema_path),
-                    })
-                    raise RecoverableValidationError(
-                        message=original_error,
-                        node_id=node_id,
-                        result=result,
-                        schema_path=str(schema_path),
-                    ) from exc
+                    cost_snapshot = self.runtime_cost_policy.snapshot()
+                    if cost_snapshot.prefer_repair_before_model_escalation and cost_snapshot.allow_paid_model_escalation and not adapter.get("force_model_escalation") and self.stage_policy.should_escalate_on_validation_failure(stage_id):
+                        escalated_adapter = self.stage_policy.escalation_adapter(
+                            adapter=adapter,
+                            stage_id=stage_id,
+                            reason="schema_validation_failed_after_repair",
+                        )
+                        await event_bus.emit(run_id, {
+                            "type": "LLM_JSON_VALIDATION_ESCALATING",
+                            "title": "Validation failed after repair; escalating model",
+                            "message": f"node={node_id}, stage={stage_id}, reason=schema_validation_failed_after_repair",
+                            "node_id": node_id,
+                            "stage_id": stage_id,
+                            "original_error": original_error,
+                        })
+                        escalated_result = await self.router.generate_json(
+                            run_id=run_id,
+                            node_id=node_id,
+                            adapter=escalated_adapter,
+                            prompt=prompt,
+                            rendered_user_prompt=rendered,
+                            schema=schema,
+                        )
+                        try:
+                            self.validator.validate_data(escalated_result, schema)
+                            result = escalated_result
+                            validation_ok = True
+                            adapter = escalated_adapter
+                            await event_bus.emit(run_id, {
+                                "type": "LLM_JSON_VALIDATED",
+                                "title": "JSON validated after post-repair escalation",
+                                "message": node_id,
+                                "node_id": node_id,
+                                "stage_id": stage_id,
+                            })
+                        except Exception as escalation_exc:
+                            result = escalated_result
+                            original_error = str(escalation_exc)
+                    if not validation_ok:
+                        await event_bus.emit(run_id, {
+                            "type": "LLM_JSON_VALIDATION_FAILED",
+                            "title": "JSON validation failed",
+                            "message": original_error,
+                            "node_id": node_id,
+                            "result": result,
+                            "schema_path": str(schema_path),
+                        })
+                        raise RecoverableValidationError(
+                            message=original_error,
+                            node_id=node_id,
+                            result=result,
+                            schema_path=str(schema_path),
+                        ) from exc
 
         if not validation_ok:
             raise RecoverableValidationError(

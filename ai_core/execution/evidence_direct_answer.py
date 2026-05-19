@@ -57,12 +57,21 @@ class EvidenceDirectAnswerBuilder:
             text = aggregate_text
 
         source_url = top_candidate.get("url") or top_candidate.get("official_documentation_url")
-        normalized = RuntimeEvidenceNormalizer().normalize(
-            text=text,
-            known=known,
-            source_url=str(source_url or ""),
-            state=state or {},
-        )
+        document = top_candidate.get("document") if isinstance(top_candidate.get("document"), dict) else {}
+        if isinstance(document, dict) and isinstance(document.get("normalized_facts"), list):
+            normalized = {
+                "normalized_facts": document.get("normalized_facts") or [],
+                "selected_evidence_blocks": document.get("selected_evidence_blocks") or [],
+                "answer_material": document.get("text_excerpt") or document.get("visible_text_excerpt") or "",
+                "answer_material_quality": document.get("answer_material_quality") or {"passed": True, "score": 0.8},
+            }
+        else:
+            normalized = RuntimeEvidenceNormalizer().normalize(
+                text=text,
+                known=known,
+                source_url=str(source_url or ""),
+                state=state or {},
+            )
         structured_records = normalized.get("normalized_facts") if isinstance(normalized.get("normalized_facts"), list) else []
         answer_material = str(normalized.get("answer_material") or "").strip()
         quality = normalized.get("answer_material_quality") if isinstance(normalized.get("answer_material_quality"), dict) else {}
@@ -175,15 +184,27 @@ class EvidenceDirectAnswerBuilder:
             if not isinstance(container, dict):
                 continue
             for key in (
-                "text_excerpt", "visible_text_excerpt", "html_excerpt", "dom_evidence_text",
+                "text_excerpt", "visible_text_excerpt", "answer_material", "html_excerpt", "dom_evidence_text",
                 "snippet", "sample", "title", "url", "description", "notes", "raw_html_sample"
             ):
                 value = container.get(key)
                 if isinstance(value, str):
                     parts.append(value)
+            normalized_facts = container.get("normalized_facts")
+            if isinstance(normalized_facts, list):
+                for fact in normalized_facts[:80]:
+                    if isinstance(fact, dict):
+                        fact_line = " ".join(str(fact.get(k, "")) for k in ("target", "label", "value", "unit", "context") if fact.get(k))
+                        if fact_line.strip():
+                            parts.append(fact_line)
+            blocks = container.get("selected_evidence_blocks")
+            if isinstance(blocks, list):
+                for block in blocks[:40]:
+                    if isinstance(block, str):
+                        parts.append(block)
             dom_items = container.get("dom_evidence_items") if isinstance(container, dict) else None
             if isinstance(dom_items, list):
-                for entry in dom_items[:200]:
+                for entry in dom_items[:80]:
                     if isinstance(entry, dict) and isinstance(entry.get("text"), str):
                         parts.append(entry.get("text", ""))
         return "\n".join(p for p in parts if p).strip()

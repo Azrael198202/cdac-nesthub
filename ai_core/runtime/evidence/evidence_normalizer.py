@@ -111,6 +111,9 @@ class RuntimeEvidenceNormalizer:
         known: dict[str, Any],
         source_url: str = "",
         state: dict[str, Any] | None = None,
+        fact_limit: int | None = None,
+        block_limit: int | None = None,
+        material_chars: int | None = None,
     ) -> dict[str, Any]:
         clean_blocks = self._extract_blocks(text)
         variables = self._runtime_variables(known=known, state=state or {})
@@ -120,10 +123,13 @@ class RuntimeEvidenceNormalizer:
         selected_blocks = self._selected_blocks(blocks=clean_blocks, variables=variables)
         quality = self._quality(records=records, blocks=selected_blocks, variables=variables)
         material = self._material(records=records, selected_blocks=selected_blocks)
+        fact_limit = int(fact_limit or 24)
+        block_limit = int(block_limit or 16)
+        material_chars = int(material_chars or 1800)
         return {
-            "normalized_facts": [r.to_dict() for r in records[:24]],
-            "selected_evidence_blocks": selected_blocks[:16],
-            "answer_material": material,
+            "normalized_facts": [r.to_dict() for r in records[:fact_limit]],
+            "selected_evidence_blocks": selected_blocks[:block_limit],
+            "answer_material": material[:material_chars],
             "answer_material_quality": quality,
         }
 
@@ -264,8 +270,15 @@ class RuntimeEvidenceNormalizer:
         aligned_targets = {r.target for r in records if r.target}
         unit_records = [r for r in records if r.unit]
         long_blocks = [b for b in blocks if len(b) > 700]
+        noise_penalty = min(0.35, len(long_blocks) * 0.04)
+        coverage_bonus = 0.0
+        if target_count:
+            coverage_bonus = min(0.25, len(aligned_targets) / max(1, target_count) * 0.25)
+        score = 0.2 + min(len(records), 16) * 0.035 + min(len(unit_records), 8) * 0.03 + coverage_bonus - noise_penalty
+        score = max(0.0, min(0.99, score))
         return {
             "passed": bool(records) and (bool(unit_records) or bool(aligned_targets)),
+            "score": round(score, 3),
             "record_count": len(records),
             "unit_record_count": len(unit_records),
             "target_count": target_count,

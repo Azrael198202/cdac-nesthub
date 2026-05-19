@@ -1,5 +1,5 @@
 {
-  "version": "2.9.4",
+  "version": "2.9.14",
   "policy_kind": "runtime_model_governance_policy",
   "description": "Domain-neutral model governance policy for stage-bound model selection, multimodal capabilities, validation, cost control, on-demand installation, fallback, escalation, and recommendation intake.",
   "governance_principles": [
@@ -121,7 +121,35 @@
       ],
       "credential_recovery_enabled": true,
       "credential_storage": "runtime/configs/secrets/secrets.json",
-      "environment_override": "AI_CORE_LOCAL_MODELS_ENABLED"
+      "environment_override": "AI_CORE_LOCAL_MODELS_ENABLED",
+      "runtime_cost_policy": {
+        "enabled": true,
+        "max_prompt_tokens": 6000,
+        "max_provider_attempts": 1,
+        "max_external_discovery_attempts": 1,
+        "max_generated_component_attempts": 1,
+        "max_evidence_pages": 5,
+        "max_evidence_page_chars": 18000,
+        "operation_timeout_seconds": 45,
+        "sandbox_timeout_seconds": 25,
+        "prefer_repair_before_model_escalation": true,
+        "allow_paid_model_escalation": true,
+        "notes": "Domain-neutral runtime budget and convergence controls.",
+        "adaptive_evidence": {
+          "enabled": true,
+          "min_sources": 2,
+          "max_sources": 5,
+          "candidate_window": 6,
+          "initial_fetches": 2,
+          "incremental_fetches": 1,
+          "max_fetches": 5,
+          "fetch_chars_per_source": 18000,
+          "llm_material_chars": 6000,
+          "fact_limit": 48,
+          "block_limit": 32,
+          "stop_quality_score": 0.78
+        }
+      }
     }
   },
   "capability_taxonomy": {

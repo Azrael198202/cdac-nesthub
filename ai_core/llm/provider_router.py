@@ -7,6 +7,7 @@ from ai_core.llm.provider_handlers.base import ProviderUnavailableError
 from ai_core.context.prompt_budget_manager import PromptBudgetManager
 from ai_core.llm.model_capability_matcher import ModelCapabilityMatcher
 from ai_core.runtime.modeling import ModelRoutingPlanner, ModelStagePolicy, RuntimeExecutionPolicy
+from ai_core.runtime.governance import RuntimeCostPolicy
 
 
 class ProviderRouter:
@@ -24,6 +25,7 @@ class ProviderRouter:
         self.routing_planner = ModelRoutingPlanner()
         self.stage_policy = ModelStagePolicy()
         self.runtime_execution_policy = RuntimeExecutionPolicy()
+        self.runtime_cost_policy = RuntimeCostPolicy()
 
     def _config(self) -> dict:
         return self.loader.load_yaml(RUNTIME_CONFIGS / "models" / "providers.yaml")
@@ -76,6 +78,7 @@ class ProviderRouter:
 
     async def generate_json(self, run_id: str, node_id: str, adapter: dict, prompt: dict, rendered_user_prompt: str, schema: dict) -> dict:
         config = self._config()
+        adapter = self.runtime_cost_policy.apply_adapter_budget(adapter, config)
         route = list(adapter.get("provider_route") or config.get("default_route", []))
         providers = config.get("providers", {})
         route_plan = self.routing_planner.plan(
@@ -99,7 +102,9 @@ class ProviderRouter:
         providers = config.get("providers", {})
         route = self._apply_local_model_switch(route=route, providers=providers, config=config, stage_policy_meta=stage_policy_meta)
         route = self.model_matcher.rank_route(route=route, providers=providers, config=config, adapter=adapter)
+        route = self.runtime_cost_policy.trim_route(route, source=config, escalated=bool(route_plan.get("escalated")))
         last_error = None
+        cost_snapshot = self.runtime_cost_policy.snapshot(config)
 
         await event_bus.emit(run_id, {
             "type": "LLM_ROUTE_START",
@@ -110,6 +115,11 @@ class ProviderRouter:
             "stage_policy": stage_policy_meta,
             "complexity": route_plan.get("complexity"),
             "escalated": route_plan.get("escalated"),
+            "cost_policy": {
+                "enabled": cost_snapshot.enabled,
+                "max_prompt_tokens": cost_snapshot.max_prompt_tokens,
+                "max_provider_attempts": cost_snapshot.max_provider_attempts,
+            },
         })
 
         for provider_name in route:

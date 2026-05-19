@@ -41,6 +41,8 @@ from ai_core.research.web_research_tool import GenericWebResearchTool
 from ai_core.context.evidence_noise_reducer import EvidenceNoiseReducer
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.utils.safe_json import make_json_safe
+from ai_core.runtime.governance import RuntimeCostPolicy
+from ai_core.runtime.evidence import EvidenceBudgetAllocator, CandidateEvidenceRanker, AdaptiveEvidenceReducer
 
 
 class ToolCallExecutor:
@@ -89,6 +91,10 @@ class ToolCallExecutor:
         self.web_research = GenericWebResearchTool()
         self.evidence_short_circuit = EvidenceSatisfiedShortCircuit()
         self.capability_router = CapabilityRouter()
+        self.runtime_cost_policy = RuntimeCostPolicy()
+        self.evidence_budget_allocator = EvidenceBudgetAllocator()
+        self.candidate_evidence_ranker = CandidateEvidenceRanker()
+        self.adaptive_evidence_reducer = AdaptiveEvidenceReducer()
 
     async def execute(
         self,
@@ -157,8 +163,17 @@ class ToolCallExecutor:
         missing_tools: list[dict[str, Any]] = []
         safety_holds: list[dict[str, Any]] = []
         generated_modules: list[dict[str, Any]] = []
+        cost_snapshot = self.runtime_cost_policy.snapshot(state)
+        execution_started_at = datetime.now(timezone.utc)
 
         for index, step in enumerate(planned_steps):
+            if self._execution_budget_exhausted(execution_started_at, cost_snapshot.operation_timeout_seconds):
+                blocked_steps.append({
+                    "step_id": f"step_{index + 1}",
+                    "status": "execution_timeout",
+                    "reason": "Execution budget was exhausted before this step could start.",
+                })
+                break
             step_id = str(step.get("step_id") or step.get("task_id") or f"step_{index + 1}")
             # v57: perform a final per-step structural repair immediately before
             # execution decisions. This prevents stale or over-blocked planner output
@@ -1468,14 +1483,15 @@ class ToolCallExecutor:
             "result": {"reason": reason, "strategy": self._execution_strategy(step, {})},
         })
         try:
-            external_discovery = await self.external_discovery.discover(
+            cost_snapshot = self.runtime_cost_policy.snapshot(state)
+            external_discovery = await asyncio.wait_for(self.external_discovery.discover(
                 run_id=run_id,
                 node_id=node_id,
                 capability=capability,
                 step=step,
                 user_input=state.get("input", ""),
-            )
-            direct_execution = await self._try_direct_evidence_execution_from_discovery(
+            ), timeout=cost_snapshot.operation_timeout_seconds)
+            direct_execution = await asyncio.wait_for(self._try_direct_evidence_execution_from_discovery(
                 run_id=run_id,
                 node_id=node_id,
                 step_id=step_id,
@@ -1485,15 +1501,15 @@ class ToolCallExecutor:
                 api_discovery={},
                 external_discovery=external_discovery,
                 reason=reason,
-            )
+            ), timeout=cost_snapshot.operation_timeout_seconds)
             if not direct_execution:
-                api_discovery = await self.api_discovery.discover(
+                api_discovery = await asyncio.wait_for(self.api_discovery.discover(
                     run_id=run_id,
                     node_id=node_id,
                     capability=capability,
                     step=step,
                     user_input=state.get("input", ""),
-                )
+                ), timeout=cost_snapshot.operation_timeout_seconds)
                 if self.evidence_short_circuit.should_bypass_generated_execution(api_discovery, external_discovery):
                     await event_bus.emit(run_id, {
                         "type": "EVIDENCE_SATISFIED_SHORT_CIRCUIT",
@@ -1502,7 +1518,7 @@ class ToolCallExecutor:
                         "node_id": node_id,
                         "step_id": step_id,
                     })
-                direct_execution = await self._try_direct_evidence_execution_from_discovery(
+                direct_execution = await asyncio.wait_for(self._try_direct_evidence_execution_from_discovery(
                     run_id=run_id,
                     node_id=node_id,
                     step_id=step_id,
@@ -1512,7 +1528,7 @@ class ToolCallExecutor:
                     api_discovery=api_discovery,
                     external_discovery=external_discovery,
                     reason=reason + "_with_secondary_discovery",
-                )
+                ), timeout=cost_snapshot.operation_timeout_seconds)
             if direct_execution and direct_execution.get("status") == "success":
                 tool_input = self._build_tool_input(
                     step=step,
@@ -1870,12 +1886,14 @@ class ToolCallExecutor:
                     "result": artifact,
                 })
                 return None
+            cost_snapshot = self.runtime_cost_policy.snapshot(state)
             verification = self.sandbox_verifier.verify_tool_artifact(
                 artifact=artifact,
                 test_input=self._build_tool_input(
                     step=step, run_id=run_id, node_id=node_id, step_id=step_id, user_input=state.get("input", "")
                 ),
                 allow_network=bool(((artifact.get("manifest") or {}).get("execution_claims") or {}).get("uses_network") or artifact.get("uses_network")),
+                timeout_seconds=cost_snapshot.sandbox_timeout_seconds,
             )
             artifact.setdefault("verification", {})["sandbox_verification"] = verification
             await event_bus.emit(run_id, {
@@ -2100,10 +2118,12 @@ class ToolCallExecutor:
             external_discovery=external_discovery,
             reason=reason,
         )
+        cost_snapshot = self.runtime_cost_policy.snapshot(state)
         verification = self.sandbox_verifier.verify_tool_artifact(
             artifact=artifact,
             test_input=tool_input,
             allow_network=True,
+            timeout_seconds=cost_snapshot.sandbox_timeout_seconds,
         )
         artifact.setdefault("verification", {})["generic_web_extract_sandbox_verification"] = verification
         await event_bus.emit(run_id, {
@@ -2265,12 +2285,14 @@ class ToolCallExecutor:
                 failed_artifact={"tool": failed_tool},
                 error=error,
             )
+            cost_snapshot = self.runtime_cost_policy.snapshot(state)
             verification = self.sandbox_verifier.verify_tool_artifact(
                 artifact=artifact,
                 test_input=self._build_tool_input(
                     step=step, run_id=run_id, node_id=node_id, step_id=step_id, user_input=state.get("input", "")
                 ),
                 allow_network=bool(((artifact.get("manifest") or {}).get("execution_claims") or {}).get("uses_network") or artifact.get("uses_network")),
+                timeout_seconds=cost_snapshot.sandbox_timeout_seconds,
             )
             artifact.setdefault("verification", {})["sandbox_verification"] = verification
             if not verification.get("safe_to_register") and verification.get("status") != "passed":
@@ -2470,6 +2492,9 @@ class ToolCallExecutor:
                 node_id=node_id,
                 step_id=step_id,
                 selected_evidence=sufficiency.get("selected_evidence") or no_key_candidates,
+                known_parameters=known_parameters,
+                state=state,
+                objective=str(step.get("objective") or ""),
             )
             if fetched_documents:
                 fetched_candidates = self.candidate_extractor.extract({"documents": fetched_documents})
@@ -2554,62 +2579,134 @@ class ToolCallExecutor:
         node_id: str,
         step_id: str,
         selected_evidence: list[dict[str, Any]],
+        known_parameters: dict[str, Any] | None = None,
+        state: dict[str, Any] | None = None,
+        objective: str = "",
     ) -> list[dict[str, Any]]:
         fetched: list[dict[str, Any]] = []
         seen: set[str] = set()
+        state = state if isinstance(state, dict) else {}
+        known_parameters = known_parameters if isinstance(known_parameters, dict) else {}
+        cost_snapshot = self.runtime_cost_policy.snapshot(state)
+        budget = self.evidence_budget_allocator.allocate(
+            known=known_parameters,
+            objective=objective,
+            candidates=selected_evidence,
+            policy=cost_snapshot.evidence_policy(),
+        )
+        ranked_evidence = self.candidate_evidence_ranker.rank(
+            candidates=selected_evidence,
+            known=known_parameters,
+            budget=budget,
+        )
         await event_bus.emit(run_id, {
-            "type": "FETCH_SELECTED_PAGES_STARTED",
-            "title": "Fetching selected evidence pages",
-            "message": f"Fetching up to {min(len(selected_evidence), 7)} selected evidence page(s).",
+            "type": "ADAPTIVE_EVIDENCE_FETCH_STARTED",
+            "title": "Adaptive evidence fetch started",
+            "message": "Fetching ranked evidence incrementally until compact evidence is sufficient or budget is exhausted.",
             "node_id": node_id,
             "step_id": step_id,
+            "result": {"budget": budget.to_dict(), "candidate_count": len(selected_evidence), "ranked_count": len(ranked_evidence)},
         })
-        for item in selected_evidence[:7]:
-            url = self._evidence_url(item)
-            if not url or url in seen:
-                continue
-            seen.add(url)
-            try:
-                doc = await self.web_research.fetch(url=url, max_chars=26000)
-                if isinstance(doc, dict) and doc.get("status") == "success":
-                    fetched.append({
-                        "source": "fetched_selected_page",
-                        "source_search_result": item,
-                        "document": doc,
-                    })
+
+        next_batch_size = budget.initial_fetches
+        cursor = 0
+        reduced: dict[str, Any] = {}
+        while cursor < len(ranked_evidence) and len(fetched) < budget.max_fetches:
+            batch = ranked_evidence[cursor: cursor + next_batch_size]
+            cursor += next_batch_size
+            next_batch_size = budget.incremental_fetches
+            for item in batch:
+                if len(fetched) >= budget.max_fetches:
+                    break
+                url = self._evidence_url(item)
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                try:
+                    doc = await asyncio.wait_for(
+                        self.web_research.fetch(url=url, max_chars=budget.fetch_chars_per_source),
+                        timeout=cost_snapshot.operation_timeout_seconds,
+                    )
+                    if isinstance(doc, dict) and doc.get("status") == "success":
+                        fetched.append({
+                            "source": "fetched_selected_page",
+                            "source_search_result": item,
+                            "document": doc,
+                        })
+                        await event_bus.emit(run_id, {
+                            "type": "ADAPTIVE_EVIDENCE_PAGE_FETCHED",
+                            "title": "Evidence page fetched",
+                            "message": doc.get("title") or url,
+                            "node_id": node_id,
+                            "step_id": step_id,
+                            "result": {"url": url, "trace": doc.get("web_research_trace"), "fetched_count": len(fetched)},
+                        })
+                    else:
+                        await event_bus.emit(run_id, {
+                            "type": "ADAPTIVE_EVIDENCE_PAGE_SKIPPED",
+                            "title": "Evidence page was not usable",
+                            "message": str((doc or {}).get("error") or (doc or {}).get("status") or url),
+                            "node_id": node_id,
+                            "step_id": step_id,
+                            "result": {"url": url, "status": (doc or {}).get("status") if isinstance(doc, dict) else None},
+                        })
+                except Exception as exc:
                     await event_bus.emit(run_id, {
-                        "type": "FETCH_SELECTED_PAGE_DONE",
-                        "title": "Selected evidence page fetched",
-                        "message": doc.get("title") or url,
+                        "type": "ADAPTIVE_EVIDENCE_PAGE_FAILED",
+                        "title": "Evidence page fetch failed",
+                        "message": str(exc),
                         "node_id": node_id,
                         "step_id": step_id,
-                        "result": {"url": url, "trace": doc.get("web_research_trace")},
+                        "result": {"url": url},
                     })
-                else:
-                    await event_bus.emit(run_id, {
-                        "type": "FETCH_SELECTED_PAGE_SKIPPED",
-                        "title": "Selected evidence page was not usable",
-                        "message": str((doc or {}).get("error") or (doc or {}).get("status") or url),
-                        "node_id": node_id,
-                        "step_id": step_id,
-                        "result": {"url": url, "status": (doc or {}).get("status") if isinstance(doc, dict) else None},
-                    })
-            except Exception as exc:
+
+            if fetched:
+                reduced = self.adaptive_evidence_reducer.reduce(
+                    documents=fetched,
+                    known=known_parameters,
+                    state=state,
+                    budget=budget,
+                )
                 await event_bus.emit(run_id, {
-                    "type": "FETCH_SELECTED_PAGE_FAILED",
-                    "title": "Selected evidence page fetch failed",
-                    "message": str(exc),
+                    "type": "ADAPTIVE_EVIDENCE_REDUCED",
+                    "title": "Evidence reduced locally",
+                    "message": "Raw evidence was converted into compact structured material.",
                     "node_id": node_id,
                     "step_id": step_id,
-                    "result": {"url": url},
+                    "result": {
+                        "quality": reduced.get("answer_material_quality"),
+                        "fact_count": len(reduced.get("normalized_facts") or []),
+                        "block_count": len(reduced.get("selected_evidence_blocks") or []),
+                    },
                 })
+                if self.evidence_budget_allocator.should_stop(normalized=reduced, fetched_count=len(fetched), budget=budget):
+                    break
+
+        if reduced:
+            # Add one compact synthetic document so downstream candidate extraction
+            # and synthesis read structured facts instead of raw fetched pages.
+            fetched.insert(0, {
+                "source": "adaptive_evidence_reduction",
+                "document": {
+                    "status": "success",
+                    "title": "Adaptive evidence material",
+                    "url": "",
+                    "text_excerpt": str(reduced.get("answer_material") or ""),
+                    "visible_text_excerpt": str(reduced.get("answer_material") or ""),
+                    "normalized_facts": reduced.get("normalized_facts") or [],
+                    "selected_evidence_blocks": reduced.get("selected_evidence_blocks") or [],
+                    "answer_material_quality": reduced.get("answer_material_quality") or {},
+                    "source_summaries": reduced.get("source_summaries") or [],
+                },
+            })
+
         await event_bus.emit(run_id, {
-            "type": "FETCH_SELECTED_PAGES_DONE",
-            "title": "Selected evidence page fetching completed",
-            "message": f"Fetched {len(fetched)} page(s).",
+            "type": "ADAPTIVE_EVIDENCE_FETCH_DONE",
+            "title": "Adaptive evidence fetching completed",
+            "message": f"Fetched {len([x for x in fetched if x.get('source') == 'fetched_selected_page'])} source page(s).",
             "node_id": node_id,
             "step_id": step_id,
-            "result": {"fetched_count": len(fetched)},
+            "result": {"fetched_count": len(fetched), "budget": budget.to_dict(), "reduced_quality": reduced.get("answer_material_quality") if reduced else None},
         })
         return fetched
 
@@ -2758,8 +2855,9 @@ class ToolCallExecutor:
 
         credential_candidates = [c for c in candidates if self._candidate_requires_credential(c)]
         no_key_candidates = [c for c in candidates if not self._candidate_requires_credential(c)]
-        max_parallel = 4
-        max_total = 8
+        cost_snapshot = self.runtime_cost_policy.snapshot(state)
+        max_parallel = max(1, cost_snapshot.max_generated_component_attempts)
+        max_total = max(1, cost_snapshot.max_generated_component_attempts)
         attempt_candidates = no_key_candidates[:max_parallel]
         credential_attempts = [self._credential_skip_attempt(i + 1, c) for i, c in enumerate(credential_candidates[:max_total])]
 
@@ -2796,7 +2894,10 @@ class ToolCallExecutor:
         ]
         attempts: list[dict[str, Any]] = []
         if tasks:
-            gathered = await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                gathered = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=cost_snapshot.operation_timeout_seconds)
+            except asyncio.TimeoutError:
+                gathered = [TimeoutError("candidate evaluation timeout") for _ in tasks]
             for index, item in enumerate(gathered, start=1):
                 if isinstance(item, BaseException):
                     candidate = attempt_candidates[index - 1]
@@ -3360,6 +3461,13 @@ class ToolCallExecutor:
             "candidates": candidates,
             "source_step": step,
         }
+
+    def _execution_budget_exhausted(self, started_at: datetime, timeout_seconds: int) -> bool:
+        try:
+            elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
+            return elapsed >= max(1, int(timeout_seconds))
+        except Exception:
+            return False
 
     def _overall_status(self, execution_steps, blocked_steps, human_interactions, missing_tools, safety_holds, optional_human_interactions=None) -> str:
         if any(bool(item.get("required", True)) for item in human_interactions if isinstance(item, dict)):
