@@ -120,21 +120,42 @@ class FinalAnswerSynthesizer:
             statements = [f for f in facts if f.get("kind") == "supporting_statement"]
             values = [f for f in facts if f.get("kind") != "supporting_statement"]
             lines: list[str] = []
-            if statements:
-                lines.append(str(statements[0].get("value") or statements[0].get("context") or "").strip())
-            if values:
-                value_parts = []
-                for fact in values[:8]:
-                    label = str(fact.get("label") or "value").strip()
-                    value = str(fact.get("value") or "").strip()
-                    unit = str(fact.get("unit") or "").strip()
-                    if value:
-                        value_parts.append(f"{label}: {value}{unit}")
-                if value_parts:
-                    lines.append("Key values: " + "; ".join(value_parts))
+
+            clean_statements = []
+            for fact in statements[:3]:
+                text = self._clean_sentence(str(fact.get("value") or fact.get("context") or ""))
+                if text and text not in clean_statements:
+                    if text[:1] and text[:1].islower():
+                        continue
+                    clean_statements.append(text)
+            if clean_statements:
+                lines.append("Summary:")
+                lines.extend(f"- {item}" for item in clean_statements[:3])
+
+            value_parts = []
+            for fact in values:
+                label = self._friendly_label(str(fact.get("label") or "value"))
+                value = str(fact.get("value") or "").strip()
+                unit = str(fact.get("unit") or "").strip()
+                if not value:
+                    continue
+                if not unit and str(fact.get("semantic_type") or "") != "temporal_marker" and str(fact.get("source_level") or "") != "runtime_native":
+                    continue
+                if not unit and label == "value":
+                    continue
+                item = f"{label}: {value}{unit}"
+                if item not in value_parts:
+                    value_parts.append(item)
+                if len(value_parts) >= 10:
+                    break
+            if value_parts:
+                lines.append("Details:")
+                lines.extend(f"- {item}" for item in value_parts)
+
             sources = sorted({str(f.get("source_url")) for f in facts if str(f.get("source_url") or "").startswith("http")})
             if sources:
-                lines.append("Source: " + sources[0])
+                lines.append("Source:")
+                lines.append(f"- {sources[0]}")
             answer = "\n".join(line for line in lines if line).strip()
             if answer:
                 return answer
@@ -143,6 +164,22 @@ class FinalAnswerSynthesizer:
         if trust_summary and trust_summary.get("verified_real_execution") is False:
             return "I could not produce a verified answer from the available result material."
         return "The runtime completed, but no user-facing answer material was available."
+
+    def _friendly_label(self, label: str) -> str:
+        text = " ".join(str(label or "value").replace("_", " ").split())
+        if not text or len(text) > 64:
+            return "value"
+        return text[:1].upper() + text[1:]
+
+    def _clean_sentence(self, text: str) -> str:
+        clean = " ".join(str(text or "").split())
+        for marker in self.DEBUG_MARKERS:
+            clean = clean.replace(marker, "")
+        # Avoid returning long navigation/menu fragments. Keep the part that has
+        # measurement signal and a manageable length.
+        if len(clean) > 520:
+            clean = clean[:520].rsplit(" ", 1)[0]
+        return clean.strip(" -;,.|")
 
     def _assert_no_debug_material_in_final_answer(self, answer: str, *, fallback: str) -> str:
         text = str(answer or "")

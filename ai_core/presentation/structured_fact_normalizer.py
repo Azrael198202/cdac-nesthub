@@ -81,6 +81,14 @@ class StructuredFactNormalizer:
                         facts.append(fact)
             return facts
 
+        if isinstance(value.get("source_documents"), list):
+            for doc in value.get("source_documents")[:6]:
+                if isinstance(doc, dict):
+                    doc_url = str(doc.get("source_url") or source_url or "")
+                    text = doc.get("text")
+                    if isinstance(text, str):
+                        facts.extend(self._facts_from_text(text, runtime_variables=runtime_variables, source_url=doc_url))
+
         extracted = value.get("extracted_material") if isinstance(value.get("extracted_material"), dict) else value
         records = extracted.get("records") if isinstance(extracted, dict) else None
         if isinstance(records, list):
@@ -117,16 +125,32 @@ class StructuredFactNormalizer:
             return []
         relevant_windows = self._relevant_windows(compact, runtime_variables)
         if not relevant_windows:
-            relevant_windows = [compact[:600]]
+            relevant_windows = self._signal_windows(compact)
+        if not relevant_windows:
+            relevant_windows = [compact[:900]]
         facts: list[NormalizedFact] = []
-        for window in relevant_windows[:8]:
+        for window in relevant_windows[:10]:
+            # Keep one concise source-backed statement for synthesis. It gives
+            # the final composer enough context to write a natural answer while
+            # still avoiding raw page dumps.
+            if self._is_source_backed_statement(window, runtime_variables):
+                facts.append(NormalizedFact(
+                    kind="supporting_statement",
+                    label="statement",
+                    value=self._statement_from_window(window),
+                    context=self._statement_from_window(window),
+                    confidence=0.76,
+                    source_url=source_url,
+                ))
             for match in self.VALUE_PATTERN.finditer(window):
                 value = match.group("value")
                 unit = (match.group("unit") or "").replace(" ", "")
                 if not value:
                     continue
                 context = self._trim_context(window, match.start(), match.end())
-                label = self._label_from_context(context)
+                if self._looks_like_navigation_or_date_only(context=context, value=value, unit=unit):
+                    continue
+                label = self._label_from_context(context, value=value, unit=unit)
                 facts.append(NormalizedFact(
                     kind="observed_value",
                     label=label,
@@ -136,17 +160,74 @@ class StructuredFactNormalizer:
                     confidence=self._confidence(context, runtime_variables),
                     source_url=source_url,
                 ))
-            # Also keep concise descriptive windows containing runtime values.
-            if self._mentions_runtime_value(window, runtime_variables) and not self.reject_debug_text(window):
-                facts.append(NormalizedFact(
-                    kind="supporting_statement",
-                    label="statement",
-                    value=window[:360],
-                    context=window[:360],
-                    confidence=0.72,
-                    source_url=source_url,
-                ))
         return facts
+
+    def _signal_windows(self, text: str) -> list[str]:
+        """Find generic windows with measurement-like signal.
+
+        This is deliberately domain-neutral: it searches for units, ratios,
+        dates, and source-style records rather than business nouns.
+        """
+        windows: list[str] = []
+        for match in self.VALUE_PATTERN.finditer(text):
+            unit = (match.group("unit") or "").strip()
+            if not unit:
+                continue
+            start = max(0, match.start() - 260)
+            end = min(len(text), match.end() + 420)
+            sample = text[start:end]
+            if sample not in windows:
+                windows.append(sample)
+            if len(windows) >= 12:
+                break
+        return windows
+
+    def _is_source_backed_statement(self, window: str, runtime_variables: dict[str, list[str]]) -> bool:
+        if self.reject_debug_text(window):
+            return False
+        has_measure = bool(re.search(r"\d+(?:\.\d+)?\s*(?:°\s*[CFcf]?|%|mm|km/h|mph|hPa|kPa)", window))
+        has_runtime_anchor = self._mentions_runtime_value(window, runtime_variables)
+        return has_measure and (has_runtime_anchor or len(window) < 900)
+
+    def _statement_from_window(self, window: str) -> str:
+        text = " ".join(str(window or "").split())
+        # Remove leading calendar/navigation sequences before selecting the
+        # source-backed statement. This is generic page-cleanup, not domain
+        # reasoning.
+        text = re.sub(r"^(?:\d{1,2}\s+[A-Za-z]{3,9}\s*){2,}", "", text).strip()
+        # Keep the sentence-like part around the densest measurement section.
+        matches = list(self.VALUE_PATTERN.finditer(text))
+        if not matches:
+            return text[:420]
+        mid = matches[min(len(matches) // 2, len(matches) - 1)].start()
+        start = max(0, mid - 220)
+        end = min(len(text), mid + 360)
+        sample = text[start:end].strip(" ,;|-")
+        sample = re.sub(r"^(?:\d{1,2}\s+[A-Za-z]{3,9}\s*){1,}", "", sample).strip()
+        return sample[:520]
+
+    def _looks_like_navigation_or_date_only(self, *, context: str, value: str, unit: str) -> bool:
+        # Generic hygiene: unit-less short integers in calendar-like or menu-like
+        # contexts are usually navigation, not measurements. Unit-bearing values
+        # remain eligible and are validated later by the semantic contract engine.
+        if unit:
+            return False
+        try:
+            number = float(value)
+        except Exception:
+            return True
+        sample = str(context or "")[:240]
+        tokens = re.findall(r"[A-Za-z]{3,}", sample)
+        punctuation_density = sample.count("/") + sample.count("|") + sample.count("→")
+        if number <= 31 and re.search(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b", sample):
+            return True
+        if len(tokens) > 18 and punctuation_density >= 2:
+            return True
+        # Unit-less long numeric values may still be useful ids/timestamps, but
+        # they are not user-facing measurements unless explicitly structured.
+        if len(str(value).split(".")[0]) >= 6:
+            return True
+        return False
 
     def _relevant_windows(self, text: str, runtime_variables: dict[str, list[str]]) -> list[str]:
         aliases = [alias for aliases in runtime_variables.values() for alias in aliases if len(alias) >= 2]
@@ -183,10 +264,27 @@ class StructuredFactNormalizer:
     def _trim_context(self, text: str, start: int, end: int) -> str:
         return " ".join(text[max(0, start - 90): min(len(text), end + 120)].split())[:260]
 
-    def _label_from_context(self, context: str) -> str:
-        before = context.split(":", 1)[0].strip()
+    def _label_from_context(self, context: str, value: str = "", unit: str = "") -> str:
+        sample = str(context or "")
+        value_pattern = re.escape(str(value or ""))
+        unit_pattern = re.escape(str(unit or "")) if unit else r"(?:°\s*[CFcf]?|%|mm|cm|m|km/h|mph|hPa|kPa|kg|g|ml|L|l|円|¥|\$|€)?"
+        # Prefer a concise label that appears immediately after a measurement;
+        # many tables are rendered as "28 ° Temp 0% Ratio ...".
+        if value_pattern:
+            after_match = re.search(value_pattern + r"\s*" + unit_pattern + r"\s*/?\s*([A-Za-z][A-Za-z_-]{1,24}(?:\s+[A-Za-z][A-Za-z_-]{1,24}){0,2})", sample)
+            if after_match:
+                words = after_match.group(1).strip()
+                if not re.match(r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b", words):
+                    return words.split()[0][:48]
+        before = sample.split(":", 1)[0].strip()
         if before and len(before) <= 48:
             return before
+        # Generic fallback: use the closest short alphabetic phrase before the
+        # value rather than a whole page fragment.
+        prefix = re.sub(r"[-+]?\d+(?:\.\d+)?\s*(?:°\s*[CFcf]?|%|mm|cm|m|km/h|mph|hPa|kPa|kg|g|ml|L|l|円|¥|\$|€)?.*$", "", sample).strip()
+        words = re.findall(r"[A-Za-z][A-Za-z_-]{1,24}", prefix)
+        if words:
+            return " ".join(words[-4:])[:48]
         return "value"
 
     def _runtime_variables(self, state: dict[str, Any]) -> dict[str, list[str]]:

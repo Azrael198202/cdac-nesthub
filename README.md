@@ -1,4 +1,7 @@
-# CDAC NestHub - AI Runtime OS Source Clean
+# cdac-nesthub V2.8.16 Evidence-to-Final-Answer Runtime
+
+This package extends V2.8.15 with a generic evidence normalization and final answer synthesis path. Tool outputs and scraped/source materials are treated as intermediate evidence; user-facing responses are generated from normalized, verified facts instead of raw extraction traces.
+
 
 This source package keeps the runtime workspace clean. Runtime artifacts are generated only when the server or a workflow runs.
 

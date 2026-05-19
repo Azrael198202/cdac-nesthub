@@ -54,17 +54,88 @@ class ResultMaterialBuilder:
             # Prefer structured runtime evidence over pre-composed answer text.
             # Pre-composed text may contain extractor traces; structured evidence
             # can be normalized and validated by the semantic contract engine.
+            source_docs = self._source_documents(data)
             if isinstance(data.get("normalized_facts"), list):
-                return {"normalized_facts": data.get("normalized_facts"), "source_url": data.get("source_url"), "source_title": data.get("source_title")}
+                return {
+                    "normalized_facts": data.get("normalized_facts"),
+                    "source_url": data.get("source_url"),
+                    "source_title": data.get("source_title"),
+                    "source_documents": source_docs,
+                }
             if isinstance(data.get("structured_evidence"), list):
-                return {"structured_evidence": data.get("structured_evidence"), "source_url": data.get("source_url"), "source_title": data.get("source_title"), "known_parameters": data.get("known_parameters")}
+                return {
+                    "structured_evidence": data.get("structured_evidence"),
+                    "source_documents": source_docs,
+                    "source_url": data.get("source_url"),
+                    "source_title": data.get("source_title"),
+                    "known_parameters": data.get("known_parameters"),
+                }
             public = {k: v for k, v in data.items() if k not in self.INTERNAL_KEYS}
+            if source_docs:
+                public["source_documents"] = source_docs
             return public if public else {}
         if data is not None:
             return data
         if result.get("error"):
             return {"error": result.get("error")}
         return {}
+
+
+    def _source_documents(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+        """Extract public document excerpts from nested research evidence.
+
+        This keeps the runtime generic: it does not know any domain. It only
+        looks for source URL/title plus visible text excerpts that were produced
+        by research tools.
+        """
+        docs: list[dict[str, Any]] = []
+
+        def visit(value: Any) -> None:
+            if len(docs) >= 6:
+                return
+            if isinstance(value, dict):
+                text = value.get("visible_text_excerpt") or value.get("text_excerpt") or value.get("dom_evidence_text")
+                url = value.get("url") or value.get("source_url")
+                title = value.get("title") or value.get("source_title") or value.get("name")
+                if isinstance(text, str) and text.strip():
+                    docs.append({
+                        "text": text.strip(),
+                        "source_url": str(url or ""),
+                        "source_title": str(title or ""),
+                    })
+                for key in ("selected_evidence", "evidence", "document", "source_search_result", "answer_sufficiency"):
+                    if key in value:
+                        visit(value.get(key))
+                # Scan short lists only; these are usually evidence candidate arrays.
+                for key in ("selected_evidence", "candidates", "items"):
+                    item = value.get(key)
+                    if isinstance(item, list):
+                        for child in item[:6]:
+                            visit(child)
+                # Shallow generic recursion for nested research envelopes. Skip
+                # scalar strings because raw page text is captured above via the
+                # public excerpt keys.
+                for child in value.values():
+                    if isinstance(child, dict):
+                        visit(child)
+                    elif isinstance(child, list) and len(child) <= 8:
+                        for nested in child[:6]:
+                            if isinstance(nested, (dict, list)):
+                                visit(nested)
+            elif isinstance(value, list):
+                for item in value[:6]:
+                    visit(item)
+
+        visit(data)
+        unique: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for doc in docs:
+            key = (doc.get("source_url") or "") + "|" + (doc.get("text") or "")[:120]
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(doc)
+        return unique
 
     def _metadata(self, step: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
         metadata: dict[str, Any] = {}
