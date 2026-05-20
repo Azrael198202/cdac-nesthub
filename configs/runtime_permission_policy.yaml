@@ -1,0 +1,11 @@
+# Generic runtime permission policy.
+# Default is high privilege for local development/self-healing.
+# It can be downgraded later for managed environments.
+level: administrator
+allow_shell: true
+allow_python: true
+allow_install: true
+allow_system_package_install: true
+allow_network_install: true
+require_human_approval: false
+command_timeout_seconds: 900

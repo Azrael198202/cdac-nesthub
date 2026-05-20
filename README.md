@@ -1,3 +1,16 @@
+# v2.9.32 Runtime Dependency Self-Healing
+
+This version adds a generic runtime dependency repair layer. When a runtime capability needs a Python package, CLI command, or browser runtime, the execution layer can check, install, verify, and continue under a configurable permission policy. The default local-development policy is administrator-level and allows shell, Python, package install, and system dependency repair.
+
+Key additions:
+- `ai_core/runtime/environment/permission_policy.py`
+- `ai_core/runtime/environment/runtime_command_executor.py`
+- `ai_core/runtime/environment/runtime_dependency_manager.py`
+- `ai_core/runtime/generated_execution/runtime_command_service.py`
+- Playwright browser auto-repair before browser/network observation
+- Dependency recovery traces under `runtime/traces/dependency_recovery/`
+- Source packaging manifest that preserves source modules such as `ai_core/secrets/*` while excluding runtime secret values.
+
 # cdac-nesthub v2.9.10
 
 # AI Runtime OS v2.9.0 Runtime Boundary Stabilization

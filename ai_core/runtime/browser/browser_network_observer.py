@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass, field, asdict
 from typing import Any
 
+from ai_core.runtime.environment import RuntimeDependencyManager
+
 
 @dataclass
 class ObservedNetworkResponse:
@@ -41,6 +43,7 @@ class BrowserObservationResult:
     network_responses: list[ObservedNetworkResponse] = field(default_factory=list)
     console_messages: list[str] = field(default_factory=list)
     error: str = ""
+    dependency_recovery: dict[str, Any] | None = None
 
     def to_document(self) -> dict[str, Any]:
         return {
@@ -56,6 +59,7 @@ class BrowserObservationResult:
                 "network_response_count": len(self.network_responses),
                 "structured_response_count": len([r for r in self.network_responses if r.is_structured]),
                 "error": self.error,
+                "dependency_recovery": self.dependency_recovery or {},
             },
         }
 
@@ -77,18 +81,40 @@ class BrowserNetworkObserver:
         self.max_body_chars = max_body_chars
         self.max_responses = max_responses
 
-    async def observe(self, *, url: str, wait_until: str = "domcontentloaded") -> BrowserObservationResult:
+    async def observe(self, *, url: str, wait_until: str = "domcontentloaded", run_id: str = "") -> BrowserObservationResult:
+        dependency_result: dict[str, Any] | None = None
         try:
             from playwright.async_api import async_playwright  # type: ignore
-        except Exception as exc:  # pragma: no cover - optional runtime dependency
-            return BrowserObservationResult(url=url, status="unavailable", error=f"playwright_unavailable: {exc}")
+        except Exception:
+            repaired = await RuntimeDependencyManager(run_id=run_id or "browser_observation").ensure(
+                "playwright_browser",
+                context={"reason": "import_unavailable", "url": url},
+            )
+            dependency_result = repaired.to_dict()
+            try:
+                from playwright.async_api import async_playwright  # type: ignore
+            except Exception as exc:  # pragma: no cover - optional runtime dependency
+                return BrowserObservationResult(
+                    url=url,
+                    status="unavailable",
+                    error=f"playwright_unavailable_after_repair: {exc}",
+                    dependency_recovery=dependency_result,
+                )
 
         responses: list[ObservedNetworkResponse] = []
         console_messages: list[str] = []
         browser = None
         try:
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
+                try:
+                    browser = await p.chromium.launch(headless=True)
+                except Exception as launch_exc:
+                    repaired = await RuntimeDependencyManager(run_id=run_id or "browser_observation").ensure(
+                        "playwright_browser",
+                        context={"reason": "launch_failed", "url": url, "error": str(launch_exc)},
+                    )
+                    dependency_result = repaired.to_dict()
+                    browser = await p.chromium.launch(headless=True)
                 context = await browser.new_context(ignore_https_errors=True)
                 page = await context.new_page()
 
@@ -173,6 +199,7 @@ class BrowserNetworkObserver:
                     html_excerpt=html,
                     network_responses=self._dedupe_responses(responses),
                     console_messages=list(dict.fromkeys(console_messages))[:40],
+                    dependency_recovery=dependency_result,
                 )
         except Exception as exc:
             try:
@@ -180,7 +207,7 @@ class BrowserNetworkObserver:
                     await browser.close()
             except Exception:
                 pass
-            return BrowserObservationResult(url=url, status="error", error=str(exc))
+            return BrowserObservationResult(url=url, status="error", error=str(exc), dependency_recovery=dependency_result)
 
     def _should_keep(self, *, response_url: str, content_type: str, resource_type: str) -> bool:
         if self.STRUCTURED_CT.search(content_type):

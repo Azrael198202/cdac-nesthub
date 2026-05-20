@@ -302,8 +302,8 @@ class DeepWebResearchPipeline:
             browser_doc: dict[str, Any] | None = None
             if policy.get("browser_network_discovery_enabled", True):
                 whitebox.record(stage="playwright_observation_start", status="ok", data={"url": url})
-                observed = await self.browser_observer.observe(url=url)
-                whitebox.record(stage="playwright_observation_result", status="success" if observed.status == "success" else "failed", data={"url": url, "status": observed.status, "final_url": observed.final_url, "title": observed.title, "visible_text_chars": len(observed.visible_text or ""), "html_chars": len(observed.html_excerpt or ""), "network_response_count": len(observed.network_responses), "structured_response_count": len([r for r in observed.network_responses if r.is_structured]), "console_count": len(observed.console_messages), "error": observed.error})
+                observed = await self.browser_observer.observe(url=url, run_id=run_id)
+                whitebox.record(stage="playwright_observation_result", status="success" if observed.status == "success" else "failed", data={"url": url, "status": observed.status, "final_url": observed.final_url, "title": observed.title, "visible_text_chars": len(observed.visible_text or ""), "html_chars": len(observed.html_excerpt or ""), "network_response_count": len(observed.network_responses), "structured_response_count": len([r for r in observed.network_responses if r.is_structured]), "console_count": len(observed.console_messages), "error": observed.error, "dependency_recovery": observed.dependency_recovery or {}})
                 if observed.status == "success":
                     browser_doc = observed.to_document()
                     browser_doc = self._materialize_browser_document(browser_doc=browser_doc, known=known, source_url=url, budget=budget, whitebox=whitebox)
