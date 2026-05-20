@@ -1,50 +1,111 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from ai_core.knowledge.knowledge_service import KnowledgeService
+from ai_core.llm.provider_router import ProviderRouter
+from ai_core.llm.provider_handlers.base import ProviderUnavailableError
+from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 
 
 class NaturalConversationService:
-    """Small deterministic natural-conversation layer for the studio shell.
+    """Natural conversation path for Agent Studio.
 
-    This is intentionally separate from task execution.  If a message is not a
-    management command, the user should still receive a normal conversational
-    answer instead of operational guidance.  The service first checks verified
-    local knowledge and then falls back to a concise conversational response.
+    This layer is intentionally outside participant/task execution.  It handles
+    ordinary user messages with knowledge lookup first and model-backed chat
+    second.  It returns a user-facing answer, not internal runtime JSON.
     """
 
     def __init__(self) -> None:
         self.knowledge = KnowledgeService()
+        self.router = ProviderRouter()
+        self.model_selection = UserModelSelectionStore()
 
     async def reply(self, message: str, *, latest_task: str | None = None) -> dict[str, Any]:
         text = str(message or "").strip()
-        kb = self.knowledge.answer_from_knowledge(text) if text else None
+        if not text:
+            answer = "可以。请直接输入问题、说明、写作要求，或使用明确指令创建智能体、创建任务、执行任务。"
+            return self._payload(answer, latest_task=latest_task, intent="empty_message")
+
+        kb = self.knowledge.answer_from_knowledge(text)
         if kb:
-            return {
-                "action": "conversation_message",
-                "origin": "auxiliary_brain",
-                "status": "completed",
-                "message": kb.get("answer"),
-                "conversation_intent": "knowledge_answer",
-                "knowledge_used": True,
-                "knowledge_status": self.knowledge.status(),
-                "latest_task": latest_task,
-            }
+            return self._payload(
+                str(kb.get("answer") or ""),
+                latest_task=latest_task,
+                intent="knowledge_answer",
+                knowledge_used=True,
+            )
+
+        answer = await self._model_answer(text)
+        if not answer:
+            answer = self._safe_fallback_answer(text)
+        return self._payload(answer, latest_task=latest_task, intent="general_chat", knowledge_used=False)
+
+    def _payload(self, answer: str, *, latest_task: str | None, intent: str, knowledge_used: bool = False) -> dict[str, Any]:
         return {
             "action": "conversation_message",
             "origin": "auxiliary_brain",
             "status": "completed",
-            "message": self._fallback_message(text),
-            "conversation_intent": "general_chat",
-            "knowledge_used": False,
+            "message": answer,
+            "final_answer": answer,
+            "conversation_intent": intent,
+            "knowledge_used": knowledge_used,
             "knowledge_status": self.knowledge.status(),
             "latest_task": latest_task,
+            "user_facing": True,
         }
 
-    def _fallback_message(self, text: str) -> str:
-        if not text:
-            return "可以。你可以直接和我交流，也可以让我创建智能体、创建任务或执行任务。"
+    async def _model_answer(self, text: str) -> str:
+        schema = {
+            "type": "object",
+            "required": ["answer"],
+            "properties": {
+                "answer": {"type": "string"},
+                "needs_task_runtime": {"type": "boolean"},
+                "notes": {"type": "string"},
+            },
+            "additionalProperties": True,
+        }
+        prompt = {
+            "id": "agent_studio_conversation_response",
+            "system": (
+                "You are a helpful conversational assistant inside a runtime studio. "
+                "Answer the user's ordinary message directly. Do not expose internal JSON, runtime state, "
+                "task routing, participants, traces, or implementation details. If the user asks for writing, "
+                "planning, explanation, translation, or general advice, provide the requested content directly. "
+                "Return only valid JSON matching the schema."
+            ),
+            "runtime_rules": [
+                "Do not create or execute tasks unless the user explicitly asks for runtime task execution.",
+                "Do not mention internal routing decisions in the answer.",
+                "Use the user's language when it is clear; otherwise answer naturally.",
+            ],
+        }
+        rendered = "User message:\n" + text
+        adapter = self.model_selection.initial_adapter_overrides({
+            "adapter_id": "agent_studio_conversation_adapter",
+            "provider_route": [],
+            "max_prompt_tokens": 3000,
+        })
+        run_id = "conversation_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+        try:
+            result = await self.router.generate_json(
+                run_id=run_id,
+                node_id="conversation_response",
+                adapter=adapter,
+                prompt=prompt,
+                rendered_user_prompt=rendered,
+                schema=schema,
+            )
+        except Exception:
+            return ""
+        answer = str((result or {}).get("answer") or "").strip()
+        return answer
+
+    def _safe_fallback_answer(self, text: str) -> str:
+        # Minimal generic fallback when no model provider is available.  Keep it
+        # user-facing and avoid exposing runtime internals.
         if text.endswith("?") or text.endswith("？"):
-            return "我可以直接回答这类普通问题；如果需要使用已有知识库，我会优先查询已验证的本地知识。"
-        return "明白。我会把这条消息作为普通交流处理；只有明确要求创建智能体、创建任务或执行任务时，才进入任务运行流程。"
+            return "可以回答。当前模型服务暂时不可用，请稍后重试，或切换到可用的本地/API模型后再次发送。"
+        return "收到。当前模型服务暂时不可用，因此无法生成完整内容。请切换到可用模型后再次发送。"
