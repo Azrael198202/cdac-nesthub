@@ -8,6 +8,8 @@ from statistics import median
 from typing import Any
 from urllib.parse import urlparse
 
+from ai_core.runtime.evidence.canonical_schema_normalizer import CanonicalSchemaNormalizer, SourceInvestigationReporter
+
 
 _NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 _MEASURE_RE = re.compile(r"[-+]?\d+(?:\.\d+)?\s*(?:°\s*[A-Za-z]?|%|mm|cm|km/h|mph|m/s|hPa|kPa|¥|\$|€)", re.I)
@@ -47,6 +49,7 @@ class EvidenceConsensusFusion:
     ) -> dict[str, Any]:
         policy = policy or ConsensusPolicy()
         known = known if isinstance(known, dict) else {}
+        canonical_normalizer = CanonicalSchemaNormalizer()
         source_packets = [self._source_packet(doc, known) for doc in documents if isinstance(doc, dict)]
         source_packets = [p for p in source_packets if p.get("url") or p.get("facts") or p.get("material")]
 
@@ -60,7 +63,8 @@ class EvidenceConsensusFusion:
                     fact.setdefault("source_score", packet.get("score", 0.0))
                     all_facts.append(fact)
 
-        aligned_facts = [f for f in all_facts if self._is_aligned_fact(f, known)]
+        canonical_facts = canonical_normalizer.normalize_facts(all_facts)
+        aligned_facts = [f for f in canonical_facts if self._is_aligned_fact(f, known)]
         measured_facts = [f for f in aligned_facts if self._has_measurement(f)]
         filtered_facts, outliers = self._remove_outliers(measured_facts, policy)
         source_count = len({p.get("host") or p.get("url") for p in source_packets if p.get("host") or p.get("url")})
@@ -76,6 +80,7 @@ class EvidenceConsensusFusion:
             and score >= policy.minimum_score
         )
         material = self._build_material(filtered_facts, source_packets, known)
+        investigation_report = SourceInvestigationReporter().build(self._source_summaries(source_packets), consensus={"passed": passed, "quality": {"reason": "multi_source_convergence_not_available" if not passed else "multi_source_convergence_passed"}})
         if not material and filtered_facts:
             material = self._fallback_material(filtered_facts)
         return {
@@ -93,6 +98,7 @@ class EvidenceConsensusFusion:
             "outliers": outliers,
             "answer_material": material,
             "source_summaries": self._source_summaries(source_packets),
+            "investigation_report": investigation_report,
             "quality": {
                 "passed": passed,
                 "score": score,
@@ -164,7 +170,7 @@ class EvidenceConsensusFusion:
     def _remove_outliers(self, facts: list[dict[str, Any]], policy: ConsensusPolicy) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for fact in facts:
-            key = "|".join(str(fact.get(k, "")).casefold() for k in ("target", "unit"))
+            key = str(fact.get("canonical_key") or "|".join(str(fact.get(k, "")).casefold() for k in ("target", "unit")))
             buckets[key].append(fact)
         kept: list[dict[str, Any]] = []
         outliers: list[dict[str, Any]] = []
@@ -220,7 +226,7 @@ class EvidenceConsensusFusion:
             n = self._number(fact)
             if n is None:
                 continue
-            key = "|".join(str(fact.get(k, "")).casefold() for k in ("target", "unit"))
+            key = str(fact.get("canonical_key") or "|".join(str(fact.get(k, "")).casefold() for k in ("target", "unit")))
             buckets[key].append(n)
         if not buckets:
             return min(1.0, len(facts) / 6)
@@ -260,7 +266,7 @@ class EvidenceConsensusFusion:
         seen: set[str] = set()
         for fact in ranked[:36]:
             target = str(fact.get("target") or "").strip()
-            label = str(fact.get("label") or fact.get("kind") or "measurement").strip()
+            label = str(fact.get("canonical_label_signature") or fact.get("label") or fact.get("kind") or "measurement").strip()
             value = str(fact.get("value") or "").strip()
             unit = str(fact.get("unit") or "").strip()
             source = self._source_key(fact)

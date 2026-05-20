@@ -61,6 +61,8 @@ class ResultMaterialBuilder:
                     "source_url": data.get("source_url"),
                     "source_title": data.get("source_title"),
                     "source_documents": source_docs,
+                    "source_summaries": data.get("source_summaries"),
+                    "investigation_report": data.get("investigation_report"),
                 }
             if isinstance(data.get("structured_evidence"), list):
                 return {
@@ -69,6 +71,8 @@ class ResultMaterialBuilder:
                     "source_url": data.get("source_url"),
                     "source_title": data.get("source_title"),
                     "known_parameters": data.get("known_parameters"),
+                    "source_summaries": data.get("source_summaries"),
+                    "investigation_report": data.get("investigation_report"),
                 }
             public = {k: v for k, v in data.items() if k not in self.INTERNAL_KEYS}
             if source_docs:

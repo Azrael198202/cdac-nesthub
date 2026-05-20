@@ -183,10 +183,78 @@ class FinalAnswerSynthesizer:
             if answer:
                 return answer
 
+        source_report = self._source_report_from_materials(sanitized)
+        if source_report:
+            return source_report
+
         # If no facts exist, return a neutral failure without leaking internals.
         if trust_summary and trust_summary.get("verified_real_execution") is False:
             return "I could not produce a verified answer from the available result material."
         return "The runtime completed, but no user-facing answer material was available."
+
+
+    def _source_report_from_materials(self, sanitized: list[dict[str, Any]]) -> str:
+        sources: list[dict[str, Any]] = []
+        consensus: dict[str, Any] = {}
+
+        def visit(value: Any) -> None:
+            nonlocal consensus
+            if isinstance(value, dict):
+                report = value.get("investigation_report")
+                if isinstance(report, dict):
+                    items = report.get("sources") if isinstance(report.get("sources"), list) else []
+                    for item in items[:12]:
+                        if isinstance(item, dict):
+                            sources.append(item)
+                    if not consensus:
+                        consensus = report
+                summaries = value.get("source_summaries")
+                if isinstance(summaries, list):
+                    for item in summaries[:12]:
+                        if isinstance(item, dict):
+                            sources.append(item)
+                for child in value.values():
+                    if isinstance(child, (dict, list)):
+                        visit(child)
+            elif isinstance(value, list):
+                for item in value[:20]:
+                    visit(item)
+
+        visit(sanitized)
+        unique: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in sources:
+            url = str(item.get("url") or item.get("source_url") or "").strip()
+            host = str(item.get("host") or "").strip()
+            key = url or host
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        if not unique:
+            return ""
+        lines = ["I could not create a verified final answer from the collected material.", "Investigated sources:"]
+        for item in unique[:10]:
+            url = str(item.get("url") or item.get("source_url") or "").strip()
+            score = item.get("score")
+            facts = item.get("fact_count")
+            reason = str(item.get("reason") or item.get("status") or "reviewed").strip()
+            suffix_parts = []
+            if score is not None:
+                suffix_parts.append(f"score={score}")
+            if facts is not None:
+                suffix_parts.append(f"facts={facts}")
+            if reason:
+                suffix_parts.append(reason)
+            suffix = " — " + ", ".join(suffix_parts[:3]) if suffix_parts else ""
+            if url:
+                lines.append(f"- {url}{suffix}")
+        status = str(consensus.get("consensus_status") or consensus.get("status") or "").strip()
+        reason = str(consensus.get("consensus_reason") or "").strip()
+        if status or reason:
+            lines.append("Result:")
+            lines.append(f"- Consensus was not sufficient{(': ' + reason) if reason else ''}.")
+        return "\n".join(lines).strip()
 
     def _best_aligned_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         best_by_target: dict[str, dict[str, Any]] = {}

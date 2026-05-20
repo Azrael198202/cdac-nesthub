@@ -398,6 +398,7 @@ class DeepWebResearchPipeline:
                 "answer_material_quality": quality,
                 "consensus_evaluation": reduced.get("consensus_evaluation") or {},
                 "source_summaries": reduced.get("source_summaries") or [],
+                "investigation_report": reduced.get("investigation_report") or {},
                 "raw_evidence_omitted": True,
                 "deep_research_trace": trace.to_dict(),
                 "deepsearch_whitebox_trace": whitebox.summary(),
@@ -421,6 +422,7 @@ class DeepWebResearchPipeline:
                 "quality": consensus.get("quality") or {},
                 "material_preview": str(consensus.get("answer_material") or "")[:1400],
                 "source_summaries": consensus.get("source_summaries") or [],
+                "investigation_report": consensus.get("investigation_report") or {},
                 "outlier_count": len(consensus.get("outliers") or []),
             })
         return consensus
@@ -464,6 +466,9 @@ class DeepWebResearchPipeline:
         summaries = consensus.get("source_summaries") if isinstance(consensus.get("source_summaries"), list) else []
         if summaries:
             reduced["source_summaries"] = summaries
+        investigation = consensus.get("investigation_report") if isinstance(consensus.get("investigation_report"), dict) else {}
+        if investigation:
+            reduced["investigation_report"] = investigation
         return reduced
 
     def _mark_reduced_as_not_converged(self, reduced: dict[str, Any], consensus: dict[str, Any], *, fetched_count: int, budget: Any) -> dict[str, Any]:
@@ -500,6 +505,8 @@ class DeepWebResearchPipeline:
         # fragments to final synthesis as answer material.
         if isinstance(consensus, dict) and isinstance(consensus.get("source_summaries"), list):
             reduced["source_summaries"] = consensus.get("source_summaries")
+        if isinstance(consensus, dict) and isinstance(consensus.get("investigation_report"), dict):
+            reduced["investigation_report"] = consensus.get("investigation_report")
         reduced["answer_material"] = ""
         reduced["selected_evidence_blocks"] = []
         return reduced

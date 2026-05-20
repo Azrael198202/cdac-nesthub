@@ -11,3 +11,5 @@ __all__ = [
 ]
 
 from .consensus_fusion import EvidenceConsensusFusion, ConsensusPolicy
+
+from .canonical_schema_normalizer import CanonicalSchemaNormalizer, SourceInvestigationReporter
