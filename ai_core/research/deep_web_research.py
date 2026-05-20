@@ -26,6 +26,7 @@ from ai_core.research.web_research_tool import GenericWebResearchTool
 from ai_core.runtime.evidence import EvidenceBudgetAllocator, CandidateEvidenceRanker, AdaptiveEvidenceReducer
 from ai_core.runtime.browser import BrowserNetworkObserver, StructuredResponseExtractor, EmbeddedStructureExtractor, DomRelationExtractor
 from ai_core.runtime.evidence.temporal_measurement_sequence import TemporalMeasurementSequenceExtractor
+from ai_core.runtime.evidence.consensus_fusion import EvidenceConsensusFusion, ConsensusPolicy
 from ai_core.config.paths import RUNTIME_TRACES
 from ai_core.utils.safe_json import safe_json_dumps, make_json_safe
 
@@ -268,6 +269,7 @@ class DeepWebResearchPipeline:
         self.temporal_measurement_extractor = TemporalMeasurementSequenceExtractor()
         self.embedded_structure_extractor = EmbeddedStructureExtractor()
         self.dom_relation_extractor = DomRelationExtractor()
+        self.consensus_fusion = EvidenceConsensusFusion()
 
     async def run(
         self,
@@ -318,8 +320,10 @@ class DeepWebResearchPipeline:
                         reduced = self.reducer.reduce(documents=fetched, known=known, state=state, budget=budget)
                         quality = reduced.get("answer_material_quality") if isinstance(reduced.get("answer_material_quality"), dict) else {}
                         whitebox.record(stage="reduction_after_browser_materialization", status="ok", data={"fact_count": len(reduced.get("normalized_facts") or []), "selected_block_count": len(reduced.get("selected_evidence_blocks") or []), "answer_material_preview": str(reduced.get("answer_material") or "")[:1200], "quality": quality})
-                        if quality.get("passed") and self.budget_allocator.should_stop(normalized=reduced, fetched_count=len(fetched), budget=budget):
-                            whitebox.record(stage="adaptive_stop", status="ok", data={"reason": "browser_materialized_evidence_passed", "fetched_count": len(fetched), "quality": quality})
+                        consensus_snapshot = self._consensus_snapshot(documents=fetched, known=known, budget=budget, whitebox=whitebox, stage="consensus_after_browser_materialization")
+                        if self._consensus_should_stop(consensus_snapshot, fetched_count=len(fetched), budget=budget):
+                            reduced = self._apply_consensus_to_reduced(reduced, consensus_snapshot)
+                            whitebox.record(stage="adaptive_stop", status="ok", data={"reason": "multi_source_consensus_passed", "fetched_count": len(fetched), "quality": consensus_snapshot.get("quality") or {}})
                             break
 
             # DOM/text fallback is still useful when no structured network response
@@ -356,12 +360,17 @@ class DeepWebResearchPipeline:
             fetched.append({"source": "deep_web_extraction", "source_search_result": candidate, "document": extracted})
             reduced = self.reducer.reduce(documents=fetched, known=known, state=state, budget=budget)
             whitebox.record(stage="reduction_after_fallback", status="ok", data={"url": url, "fact_count": len(reduced.get("normalized_facts") or []), "selected_block_count": len(reduced.get("selected_evidence_blocks") or []), "answer_material_preview": str(reduced.get("answer_material") or "")[:1200], "quality": reduced.get("answer_material_quality") if isinstance(reduced.get("answer_material_quality"), dict) else {}})
-            if self.budget_allocator.should_stop(normalized=reduced, fetched_count=len(fetched), budget=budget):
-                whitebox.record(stage="adaptive_stop", status="ok", data={"reason": "fallback_evidence_passed", "fetched_count": len(fetched), "quality": reduced.get("answer_material_quality") if isinstance(reduced.get("answer_material_quality"), dict) else {}})
+            consensus_snapshot = self._consensus_snapshot(documents=fetched, known=known, budget=budget, whitebox=whitebox, stage="consensus_after_fallback")
+            if self._consensus_should_stop(consensus_snapshot, fetched_count=len(fetched), budget=budget):
+                reduced = self._apply_consensus_to_reduced(reduced, consensus_snapshot)
+                whitebox.record(stage="adaptive_stop", status="ok", data={"reason": "multi_source_consensus_passed", "fetched_count": len(fetched), "quality": consensus_snapshot.get("quality") or {}})
                 break
 
+        final_consensus = self._consensus_snapshot(documents=fetched, known=known, budget=budget, whitebox=whitebox, stage="final_consensus") if fetched else {}
+        if final_consensus:
+            reduced = self._apply_consensus_to_reduced(reduced, final_consensus)
         quality = reduced.get("answer_material_quality") if isinstance(reduced.get("answer_material_quality"), dict) else {}
-        whitebox.record(stage="final_material", status="success" if reduced else "no_material", data={"fact_count": len(reduced.get("normalized_facts") or []) if isinstance(reduced, dict) else 0, "answer_material_preview": str(reduced.get("answer_material") or "")[:1600] if isinstance(reduced, dict) else "", "quality": quality})
+        whitebox.record(stage="final_material", status="success" if reduced else "no_material", data={"fact_count": len(reduced.get("normalized_facts") or []) if isinstance(reduced, dict) else 0, "answer_material_preview": str(reduced.get("answer_material") or "")[:1600] if isinstance(reduced, dict) else "", "quality": quality, "consensus": final_consensus.get("quality") if isinstance(final_consensus, dict) else {}})
         trace = DeepSearchTrace(
             planned_queries=self._queries_from_candidates(candidates),
             fetched_urls=urls,
@@ -383,6 +392,65 @@ class DeepWebResearchPipeline:
                 "deepsearch_whitebox_trace": whitebox.summary(),
             },
         }
+
+    def _consensus_snapshot(self, *, documents: list[dict[str, Any]], known: dict[str, Any], budget: Any, whitebox: DeepSearchWhiteboxTrace | None, stage: str) -> dict[str, Any]:
+        policy = ConsensusPolicy(
+            minimum_sources=max(3, int(getattr(budget, "min_sources", 2) or 2)),
+            minimum_aligned_sources=2,
+            minimum_fact_count=max(3, int(getattr(budget, "stop_min_fact_count", 4) or 4)),
+            minimum_score=max(0.72, float(getattr(budget, "stop_quality_score", 0.78) or 0.78) - 0.04),
+        )
+        consensus = self.consensus_fusion.fuse(documents=documents, known=known, policy=policy)
+        if whitebox:
+            whitebox.record(stage=stage, status="success" if consensus.get("passed") else "insufficient", data={
+                "source_count": consensus.get("source_count"),
+                "aligned_source_count": consensus.get("aligned_source_count"),
+                "fact_count": consensus.get("fact_count"),
+                "score": consensus.get("score"),
+                "quality": consensus.get("quality") or {},
+                "material_preview": str(consensus.get("answer_material") or "")[:1400],
+                "source_summaries": consensus.get("source_summaries") or [],
+                "outlier_count": len(consensus.get("outliers") or []),
+            })
+        return consensus
+
+    def _consensus_should_stop(self, consensus: dict[str, Any], *, fetched_count: int, budget: Any) -> bool:
+        if consensus.get("passed") is True:
+            return True
+        # Do not stop on a single good-looking source. Continue until the
+        # generic multi-source budget is exhausted.
+        return fetched_count >= int(getattr(budget, "max_fetches", 5) or 5)
+
+    def _apply_consensus_to_reduced(self, reduced: dict[str, Any], consensus: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(reduced, dict):
+            reduced = {}
+        if not isinstance(consensus, dict) or not consensus:
+            return reduced
+        facts = consensus.get("facts") if isinstance(consensus.get("facts"), list) else []
+        material = str(consensus.get("answer_material") or "").strip()
+        quality = consensus.get("quality") if isinstance(consensus.get("quality"), dict) else {}
+        if facts:
+            reduced["normalized_facts"] = facts
+            reduced["structured_evidence"] = facts
+        if material:
+            reduced["answer_material"] = material
+            reduced["selected_evidence_blocks"] = [line for line in material.splitlines() if line.strip()][:32]
+        if quality:
+            reduced["answer_material_quality"] = quality
+        reduced["consensus_evaluation"] = {
+            "passed": consensus.get("passed"),
+            "score": consensus.get("score"),
+            "source_count": consensus.get("source_count"),
+            "aligned_source_count": consensus.get("aligned_source_count"),
+            "field_coverage": consensus.get("field_coverage"),
+            "agreement_score": consensus.get("agreement_score"),
+            "structure_score": consensus.get("structure_score"),
+            "outlier_count": len(consensus.get("outliers") or []),
+        }
+        summaries = consensus.get("source_summaries") if isinstance(consensus.get("source_summaries"), list) else []
+        if summaries:
+            reduced["source_summaries"] = summaries
+        return reduced
 
     def _materialize_browser_document(self, *, browser_doc: dict[str, Any], known: dict[str, Any], source_url: str, budget: Any, whitebox: DeepSearchWhiteboxTrace | None = None) -> dict[str, Any]:
         layers: list[str] = ["browser_network_observation"]

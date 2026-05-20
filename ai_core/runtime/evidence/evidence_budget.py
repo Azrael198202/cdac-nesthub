@@ -18,7 +18,7 @@ class EvidenceBudget:
     """
 
     candidate_window: int = 6
-    min_sources: int = 2
+    min_sources: int = 3
     max_sources: int = 5
     initial_fetches: int = 2
     incremental_fetches: int = 1
@@ -59,13 +59,13 @@ class EvidenceBudgetAllocator:
         complexity += 1 if source_count > 4 else 0
 
         max_sources = self._configured_int(policy, "adaptive_max_sources", 5)
-        min_sources = self._configured_int(policy, "adaptive_min_sources", 2)
+        min_sources = self._configured_int(policy, "adaptive_min_sources", 3)
         fetch_chars = self._configured_int(policy, "fetch_chars_per_source", 18000)
         llm_chars = self._configured_int(policy, "llm_material_chars", 6000)
 
         # More variables need more cross-source evidence, but the budget grows
         # gradually and can stop early when quality is sufficient.
-        desired_sources = min(max_sources, max(min_sources, 2 + math.ceil(max(0, complexity - 2) / 2)))
+        desired_sources = min(max_sources, max(min_sources, 3 + math.ceil(max(0, complexity - 2) / 2)))
         return EvidenceBudget(
             candidate_window=max(desired_sources + 1, self._configured_int(policy, "candidate_window", 6)),
             min_sources=min_sources,
@@ -89,7 +89,13 @@ class EvidenceBudgetAllocator:
         if not isinstance(facts, list):
             facts = []
         score = float(quality.get("score") or 0.0)
-        if quality.get("passed") and score >= budget.stop_quality_score and len(facts) >= budget.stop_min_fact_count:
+        source_count = int(quality.get("source_count") or quality.get("aligned_source_count") or 0)
+        if (
+            quality.get("passed")
+            and score >= budget.stop_quality_score
+            and len(facts) >= budget.stop_min_fact_count
+            and source_count >= budget.min_sources
+        ):
             return True
         return fetched_count >= budget.max_fetches
 

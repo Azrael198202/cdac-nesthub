@@ -121,3 +121,12 @@ When enabled, the runtime writes compact JSONL events under `runtime/traces/deep
 8. Evidence reduction and final material selection
 
 The trace records candidate counts, selected URLs, fact counts, material previews, quality gate values, and skip/failure reasons without adding domain-specific logic.
+
+## v2.9.33 - Generic multi-source evidence consensus
+
+- DeepSearch no longer stops on a single source merely because one page has numeric material.
+- Multiple independent sources are materialized first, then normalized into generic observations.
+- A domain-neutral consensus layer evaluates source diversity, runtime-target alignment, numeric agreement, field coverage, structure quality, and outliers.
+- Final LLM material is generated only from compact consensus material, not raw pages or single-source fallback text.
+- Added white-box trace stages for consensus after browser materialization, fallback extraction, and final fusion.
+- No business/domain keyword rules were added.

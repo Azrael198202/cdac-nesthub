@@ -9,3 +9,5 @@ __all__ = [
     "CandidateEvidenceRanker",
     "AdaptiveEvidenceReducer",
 ]
+
+from .consensus_fusion import EvidenceConsensusFusion, ConsensusPolicy
