@@ -22,6 +22,7 @@ except Exception:  # pragma: no cover - optional dependency
 from ai_core.research.web_research_tool import GenericWebResearchTool
 from ai_core.runtime.evidence import EvidenceBudgetAllocator, CandidateEvidenceRanker, AdaptiveEvidenceReducer
 from ai_core.runtime.browser import BrowserNetworkObserver, StructuredResponseExtractor
+from ai_core.runtime.evidence.temporal_measurement_sequence import TemporalMeasurementSequenceExtractor
 
 
 @dataclass
@@ -185,6 +186,7 @@ class DeepWebResearchPipeline:
         self.reducer = AdaptiveEvidenceReducer()
         self.browser_observer = BrowserNetworkObserver()
         self.structured_extractor = StructuredResponseExtractor()
+        self.temporal_measurement_extractor = TemporalMeasurementSequenceExtractor()
 
     async def run(
         self,
@@ -241,6 +243,20 @@ class DeepWebResearchPipeline:
                 extracted["structured_response_extraction"] = browser_doc.get("structured_response_extraction")
                 extracted["normalized_facts"] = browser_doc.get("normalized_facts") or []
                 extracted["answer_material"] = browser_doc.get("answer_material") or ""
+            # Browser/CDP is preferred. If no JSON-like response is available,
+            # recover structured material from temporal measurement rows in the
+            # browser-visible DOM. This is a generic table/sequence parser, not a
+            # domain keyword extractor.
+            visible_packet = "\n".join(str(x or "") for x in [
+                extracted.get("answer_material"), extracted.get("text_excerpt"), extracted.get("visible_text_excerpt")
+            ])
+            temporal = self.temporal_measurement_extractor.extract(text=visible_packet, known=known, source_url=url, max_rows=budget.fact_limit)
+            if temporal.get("normalized_facts"):
+                existing_facts = extracted.get("normalized_facts") if isinstance(extracted.get("normalized_facts"), list) else []
+                extracted["normalized_facts"] = list(temporal.get("normalized_facts") or []) + existing_facts
+                extracted["answer_material"] = str(temporal.get("answer_material") or extracted.get("answer_material") or "")
+                extracted["answer_material_quality"] = temporal.get("quality") or extracted.get("answer_material_quality") or {}
+                extracted.setdefault("extraction_layers", []).append("temporal_measurement_sequence")
             urls.append(url)
             layers.extend(extracted.get("extraction_layers") or [])
             fetched.append({"source": "deep_web_extraction", "source_search_result": candidate, "document": extracted})

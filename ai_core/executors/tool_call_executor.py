@@ -601,7 +601,7 @@ class ToolCallExecutor:
                         execution_steps.append({
                             "step_id": step_id,
                             "status": "executed" if self._is_success_result(tool_result) else "tool_execution_failed",
-                            "tool": {"id": "evidence_direct_answer", "source": "runtime_research_evidence"},
+                            "tool": {"id": "browser_network_deepsearch", "source": "browser_or_web_structured_evidence"},
                             "input": tool_input,
                             "result": tool_result,
                             "provenance": tool_result.get("provenance") if isinstance(tool_result, dict) else None,
@@ -2716,7 +2716,16 @@ class ToolCallExecutor:
         })
 
         working_candidates = no_key_candidates
-        if not sufficiency.get("passed") and sufficiency.get("next_action") == "fetch_selected_pages":
+        # For browser/web evidence, candidate snippets are not answer material.
+        # Always fetch and materialize selected pages before allowing direct
+        # evidence synthesis. This prevents the location-only sufficiency gate
+        # from accepting raw search results and bypassing Playwright/CDP capture.
+        should_fetch_pages = (
+            sufficiency.get("next_action") == "fetch_selected_pages"
+            or str(reason or "").find("web") >= 0
+            or any(str(c.get("tool_type") or "") in {"html_extract", "web_evidence"} for c in no_key_candidates if isinstance(c, dict))
+        )
+        if should_fetch_pages:
             fetched_documents = await self._fetch_selected_pages_for_evidence(
                 run_id=run_id,
                 node_id=node_id,
@@ -2728,7 +2737,9 @@ class ToolCallExecutor:
             )
             if fetched_documents:
                 fetched_candidates = self.candidate_extractor.extract({"documents": fetched_documents})
-                working_candidates = self.candidate_scorer.score_candidates(fetched_candidates + no_key_candidates)
+                # Prefer materialized browser/deep-search documents over raw
+                # candidate snippets. Raw snippets remain fallback only.
+                working_candidates = self.candidate_scorer.score_candidates(fetched_candidates) or self.candidate_scorer.score_candidates(fetched_candidates + no_key_candidates)
                 sufficiency = self.answer_sufficiency.evaluate(
                     user_input=str(state.get("input") or ""),
                     objective=str(step.get("objective") or ""),
@@ -2789,7 +2800,7 @@ class ToolCallExecutor:
             "node_id": node_id,
             "step_id": step_id,
             "result": {
-                "tool": {"id": "evidence_direct_answer", "source": "runtime_research_evidence"},
+                "tool": {"id": "browser_network_deepsearch", "source": "browser_or_web_structured_evidence"},
                 "candidate_count": len(working_candidates),
                 "reason": reason,
                 "result_summary": self._compact_direct_result_for_event(direct_result),
@@ -2798,7 +2809,7 @@ class ToolCallExecutor:
         return {
             "__direct_execution_result__": True,
             "status": "success",
-            "tool": {"id": "evidence_direct_answer", "source": "runtime_research_evidence"},
+            "tool": {"id": "browser_network_deepsearch", "source": "browser_or_web_structured_evidence"},
             "result": direct_result,
         }
 

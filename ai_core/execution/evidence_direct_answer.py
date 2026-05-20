@@ -62,7 +62,7 @@ class EvidenceDirectAnswerBuilder:
             normalized = {
                 "normalized_facts": document.get("normalized_facts") or [],
                 "selected_evidence_blocks": document.get("selected_evidence_blocks") or [],
-                "answer_material": document.get("text_excerpt") or document.get("visible_text_excerpt") or "",
+                "answer_material": document.get("answer_material") or document.get("text_excerpt") or document.get("visible_text_excerpt") or "",
                 "answer_material_quality": document.get("answer_material_quality") or {"passed": True, "score": 0.8},
             }
         else:
@@ -76,9 +76,12 @@ class EvidenceDirectAnswerBuilder:
         answer_material = str(normalized.get("answer_material") or "").strip()
         quality = normalized.get("answer_material_quality") if isinstance(normalized.get("answer_material_quality"), dict) else {}
         if (not structured_records) or (not answer_material) or quality.get("passed") is False:
-            # Fall back only to a structured generic extractor.  Raw source text
-            # must not be promoted to answer material merely because it contains
-            # a known parameter.
+            # Do not promote arbitrary raw HTML/DOM numeric fragments to final
+            # facts when the quality gate failed.  This prevents coordinates,
+            # altitude, menu numbers, and similar page chrome from becoming an
+            # answer.  A caller can still continue to other strategies.
+            if isinstance(document, dict) and document.get("answer_material_quality"):
+                return None
             legacy_records = self._extract_structured_records(text, known)
             if legacy_records:
                 answer_material = self._build_answer_material(text, known, legacy_records)
