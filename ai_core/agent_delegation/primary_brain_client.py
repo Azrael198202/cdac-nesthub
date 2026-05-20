@@ -413,6 +413,8 @@ class PrimaryBrainDelegationClient:
                 continue
             if answer in placeholder_texts:
                 continue
+            if not self._answer_has_result_material(answer):
+                continue
             usable.append(result)
         return list(reversed(usable))
 
@@ -565,6 +567,9 @@ class PrimaryBrainDelegationClient:
         if pending:
             return "The primary runtime paused before producing a user-facing final answer."
         if isinstance(results, dict) and results:
+            report_answer = self._extract_investigation_report_answer(results)
+            if report_answer:
+                return report_answer
             return "The primary runtime completed without a user-facing final answer. Intermediate node data was intentionally not exposed."
         return "The primary runtime completed without a user-facing final answer."
 

@@ -1729,6 +1729,15 @@ class ToolCallExecutor:
                     "node_id": node_id,
                     "step_id": step_id,
                 })
+            if direct_execution and direct_execution.get("status") == "partial":
+                await event_bus.emit(run_id, {
+                    "type": "SEARCH_FIRST_EVIDENCE_PARTIAL",
+                    "title": "Search-first evidence partial",
+                    "message": "Public evidence was investigated but did not satisfy the convergence contract.",
+                    "node_id": node_id,
+                    "step_id": step_id,
+                    "result": self._compact_direct_result_for_event(direct_execution.get("result") or {}),
+                })
             if not direct_execution:
                 api_discovery = {}
                 try:
@@ -1759,7 +1768,7 @@ class ToolCallExecutor:
                         external_discovery=external_discovery,
                         reason=reason + "_api_escalation_after_web_insufficient",
                     ), timeout=cost_snapshot.stage_timeout("api_call", 30))
-            if direct_execution and direct_execution.get("status") == "success":
+            if direct_execution and direct_execution.get("status") in {"success", "partial"}:
                 tool_input = self._build_tool_input(
                     step=step,
                     run_id=run_id,
@@ -1767,16 +1776,17 @@ class ToolCallExecutor:
                     step_id=step_id,
                     user_input=state.get("input", ""),
                 )
+                selected_status = str(direct_execution.get("status") or "success")
                 await event_bus.emit(run_id, {
-                    "type": "EXECUTION_STRATEGY_WEB_EVIDENCE_SELECTED",
-                    "title": "Web evidence strategy selected",
-                    "message": "Generic evidence was sufficient; generated component execution was skipped.",
+                    "type": "EXECUTION_STRATEGY_WEB_EVIDENCE_SELECTED" if selected_status == "success" else "EXECUTION_STRATEGY_WEB_EVIDENCE_PARTIAL_SELECTED",
+                    "title": "Web evidence strategy selected" if selected_status == "success" else "Web evidence investigation report selected",
+                    "message": "Generic evidence was sufficient; generated component execution was skipped." if selected_status == "success" else "Generic evidence was investigated but did not create verified result material; returning the investigation report instead of falling through to unrelated sources.",
                     "node_id": node_id,
                     "step_id": step_id,
                     "result": self._compact_direct_result_for_event(direct_execution.get("result") or {}),
                 })
                 return {
-                    "tool": direct_execution.get("tool") or {"id": "evidence_direct_answer", "source": "runtime_research_evidence"},
+                    "tool": direct_execution.get("tool") or {"id": "browser_network_deepsearch", "source": "browser_or_web_structured_evidence"},
                     "input": tool_input,
                     "result": direct_execution.get("result"),
                 }
@@ -2761,15 +2771,27 @@ class ToolCallExecutor:
                 })
 
         if not sufficiency.get("passed"):
+            partial_result = self._build_incomplete_evidence_result(
+                working_candidates=working_candidates,
+                known_parameters=known_parameters,
+                reason="evidence_sufficiency_not_met",
+                sufficiency=sufficiency,
+                state=state,
+            )
             await event_bus.emit(run_id, {
                 "type": "EVIDENCE_PIPELINE_INSUFFICIENT",
                 "title": "Evidence pipeline insufficient",
-                "message": "Generic evidence did not cover the runtime request sufficiently; later strategies may continue.",
+                "message": "Generic evidence did not cover the runtime request sufficiently; returning an investigation report instead of unrelated fallback.",
                 "node_id": node_id,
                 "step_id": step_id,
                 "result": self._compact_sufficiency_for_event(sufficiency),
             })
-            return None
+            return {
+                "__direct_execution_result__": True,
+                "status": "partial",
+                "tool": {"id": "browser_network_deepsearch", "source": "browser_or_web_structured_evidence"},
+                "result": partial_result,
+            }
 
         direct_result = self.evidence_direct_answer.build(
             candidates=working_candidates,
@@ -2779,25 +2801,45 @@ class ToolCallExecutor:
             state=state,
         )
         if not direct_result or not self.result_classifier.classify(direct_result).get("success"):
+            partial_result = self._build_incomplete_evidence_result(
+                working_candidates=working_candidates,
+                known_parameters=known_parameters,
+                reason="materialization_not_available",
+                sufficiency=sufficiency,
+                state=state,
+            )
             await event_bus.emit(run_id, {
                 "type": "EVIDENCE_PIPELINE_MATERIALIZATION_FAILED",
                 "title": "Evidence pipeline materialization failed",
-                "message": "Evidence was sufficient, but structured answer material could not be created.",
+                "message": "Evidence was sufficient, but structured answer material could not be created; returning the source investigation report.",
                 "node_id": node_id,
                 "step_id": step_id,
                 "result": self._compact_sufficiency_for_event(sufficiency),
             })
-            return None
+            return {
+                "__direct_execution_result__": True,
+                "status": "partial",
+                "tool": {"id": "browser_network_deepsearch", "source": "browser_or_web_structured_evidence"},
+                "result": partial_result,
+            }
         direct_data = direct_result.get("data") if isinstance(direct_result.get("data"), dict) else {}
         material_quality = direct_data.get("answer_material_quality") if isinstance(direct_data.get("answer_material_quality"), dict) else {}
         consensus_eval = direct_data.get("consensus_evaluation") if isinstance(direct_data.get("consensus_evaluation"), dict) else {}
         if material_quality.get("passed") is False or (
             consensus_eval and consensus_eval.get("passed") is not True
         ):
+            partial_result = self._build_incomplete_evidence_result(
+                working_candidates=working_candidates,
+                known_parameters=known_parameters,
+                reason="consensus_not_ready",
+                sufficiency=sufficiency,
+                state=state,
+                direct_result=direct_result,
+            )
             await event_bus.emit(run_id, {
                 "type": "EVIDENCE_PIPELINE_CONSENSUS_NOT_READY",
                 "title": "Evidence consensus not ready",
-                "message": "Materialized evidence did not satisfy the generic convergence contract.",
+                "message": "Materialized evidence did not satisfy the generic convergence contract; returning the source investigation report.",
                 "node_id": node_id,
                 "step_id": step_id,
                 "result": {
@@ -2806,7 +2848,12 @@ class ToolCallExecutor:
                     "sufficiency": self._compact_sufficiency_for_event(sufficiency),
                 },
             })
-            return None
+            return {
+                "__direct_execution_result__": True,
+                "status": "partial",
+                "tool": {"id": "browser_network_deepsearch", "source": "browser_or_web_structured_evidence"},
+                "result": partial_result,
+            }
 
         data = direct_result.setdefault("data", {})
         data["answer_sufficiency"] = sufficiency
