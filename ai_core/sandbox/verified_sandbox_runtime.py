@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -288,5 +289,31 @@ class VerifiedSandboxRuntime:
         project_root = str(self._project_root())
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = project_root if not existing else project_root + os.pathsep + existing
+        checks = []
         proc = run_text([str(py), str(runner)], cwd=str(root), env=env, capture_output=True, text=True, timeout=timeout_seconds)
-        return {"mode": "venv", "returncode": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr, "checks": [{"name": "venv_sandbox_execution", "returncode": proc.returncode}]}
+        checks.append({"name": "venv_sandbox_execution", "returncode": proc.returncode})
+
+        # Generic one-shot dependency recovery for generated artifacts.  This is
+        # not a substitute for the zero-dependency generation policy; it only
+        # prevents a missing optional package from crashing the verification path
+        # without a clear repair attempt.
+        if proc.returncode != 0:
+            missing = self._missing_python_module(proc.stdout + "\n" + proc.stderr)
+            if missing:
+                install = run_text([str(py), "-m", "pip", "install", missing], cwd=str(root), env=env, capture_output=True, text=True, timeout=max(120, timeout_seconds))
+                checks.append({"name": "venv_missing_python_dependency_repair", "package": missing, "returncode": install.returncode, "stderr_tail": (install.stderr or "")[-500:]})
+                if install.returncode == 0:
+                    proc = run_text([str(py), str(runner)], cwd=str(root), env=env, capture_output=True, text=True, timeout=timeout_seconds)
+                    checks.append({"name": "venv_sandbox_execution_after_dependency_repair", "returncode": proc.returncode})
+
+        return {"mode": "venv", "returncode": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr, "checks": checks}
+
+    def _missing_python_module(self, text: str) -> str:
+        match = re.search(r"No module named ['\"]([^'\"]+)['\"]", str(text or ""))
+        if not match:
+            return ""
+        name = match.group(1).split(".")[0].strip()
+        # Keep package recovery generic and conservative.
+        if not name or not re.match(r"^[A-Za-z0-9_.-]{1,80}$", name):
+            return ""
+        return name
