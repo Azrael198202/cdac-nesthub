@@ -231,6 +231,14 @@ class ApiDiscoveryEngine:
         )
         if any(term in text for term in explicit_integration_terms):
             return "api_discovery"
+        # API-first runtime: external structured access should ask the model for
+        # API/SDK/Web options first. Direct answer lookup is reserved for callers
+        # that explicitly configure that mode in generated policy.
+        source_step = step if isinstance(step, dict) else {}
+        policy = source_step.get("execution_method_policy") if isinstance(source_step.get("execution_method_policy"), dict) else {}
+        preferred = [str(x) for x in policy.get("preferred_methods") or []]
+        if "api_call" in preferred or "structured_provider" in [str(x) for x in source_step.get("execution_strategy") or []]:
+            return "api_discovery"
         return "answer_lookup"
 
     def _evaluate_answer_sufficiency(self, evidence: list[dict[str, Any]], request: dict[str, Any]) -> dict[str, Any]:

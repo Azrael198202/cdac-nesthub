@@ -46,6 +46,7 @@ from ai_core.runtime.governance import RuntimeCostPolicy
 from ai_core.runtime.evidence import EvidenceBudgetAllocator, CandidateEvidenceRanker, AdaptiveEvidenceReducer
 from ai_core.execution.execution_method_contract import ExecutionMethodContract, ExecutionMethodProposalEngine, ExecutionMethodResolver
 from ai_core.research.deep_web_research import DeepWebResearchPipeline
+from ai_core.research.structured_provider_executor import StructuredProviderExecutor
 
 
 class ToolCallExecutor:
@@ -102,6 +103,7 @@ class ToolCallExecutor:
         self.execution_method_proposer = ExecutionMethodProposalEngine()
         self.execution_method_resolver = ExecutionMethodResolver()
         self.deep_web_research = DeepWebResearchPipeline()
+        self.structured_provider_executor = StructuredProviderExecutor()
 
     async def execute(
         self,
@@ -1131,12 +1133,11 @@ class ToolCallExecutor:
             forced = "runtime_generated_tool"
             reason = "runtime_native_temporal_contract_enforced"
             family = "runtime_observation"
-        elif family == "external_information" and method_contract.method in {"runtime_generated_tool", "model_knowledge"}:
-            forced = next((m for m in ["web_search", "api_call", "existing_tool"] if m in preferred and m not in disabled), "web_search")
-            reason = "locked_external_information_contract_blocked_runtime_method"
-        elif family == "external_information" and method_contract.method == "api_call" and "web_search" not in disabled:
-            forced = "web_search"
-            reason = "search_first_external_information_contract"
+        elif family == "external_information" and method_contract.method in {"runtime_generated_tool", "model_knowledge", "web_search"}:
+            # API-first contract: for external structured observations, the runtime must first
+            # attempt configured/API-discovered structured providers. Web evidence is only a fallback.
+            forced = next((m for m in ["api_call", "existing_tool", "web_search"] if m in preferred and m not in disabled), "api_call")
+            reason = "api_first_external_information_contract"
         elif family == "runtime_observation" and method_contract.method in {"web_search", "api_call", "knowledge_base", "model_knowledge"}:
             forced = next((m for m in preferred if m not in disabled and m in {"runtime_generated_tool", "existing_tool"}), "runtime_generated_tool")
             reason = "locked_runtime_observation_contract_blocked_external_method"
@@ -1727,7 +1728,27 @@ class ToolCallExecutor:
                     "step_id": step_id,
                 })
 
-            if api_discovery:
+            # Execute configured/free structured providers before any page evidence path.
+            structured_execution = await asyncio.wait_for(self.structured_provider_executor.execute(
+                run_id=run_id,
+                node_id=node_id,
+                step_id=step_id,
+                capability=capability,
+                step=step,
+                state=state,
+                advisory=api_discovery if isinstance(api_discovery, dict) else {},
+            ), timeout=cost_snapshot.stage_timeout("api_call", 45))
+            if structured_execution and structured_execution.get("status") == "success":
+                direct_execution = structured_execution
+                await event_bus.emit(run_id, {
+                    "type": "API_FIRST_STRUCTURED_PROVIDER_SUFFICIENT",
+                    "title": "API-first structured provider sufficient",
+                    "message": "A structured provider produced verified material; web-page fallback was skipped.",
+                    "node_id": node_id,
+                    "step_id": step_id,
+                    "result": self._compact_direct_result_for_event(structured_execution.get("result") or {}),
+                })
+            elif api_discovery:
                 await event_bus.emit(run_id, {
                     "type": "API_FIRST_DISCOVERY_DONE",
                     "title": "API-first discovery completed",

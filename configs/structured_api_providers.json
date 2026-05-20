@@ -1,0 +1,49 @@
+{
+  "version": "1.0",
+  "description": "Runtime structured provider policies. This file is data/config, not core execution logic. Providers may be generated or replaced at runtime.",
+  "providers": [
+    {
+      "id": "open_meteo_forecast",
+      "name": "Open-Meteo Forecast API",
+      "enabled": true,
+      "priority": 100,
+      "cost_level": "free",
+      "quality_level": "high",
+      "requires_secret": false,
+      "documentation_url": "https://open-meteo.com/en/docs",
+      "source_url": "https://api.open-meteo.com/",
+      "match_terms": ["weather", "forecast", "temperature", "precipitation", "external_information", "weather_information_retrieval"],
+      "steps": [
+        {
+          "id": "resolve_place",
+          "method": "GET",
+          "url": "https://geocoding-api.open-meteo.com/v1/search?name={location}&count=1&language=en&format=json",
+          "assign": [
+            {"name": "latitude", "path": "results.0.latitude"},
+            {"name": "longitude", "path": "results.0.longitude"},
+            {"name": "resolved_name", "path": "results.0.name"},
+            {"name": "resolved_country", "path": "results.0.country"}
+          ]
+        },
+        {
+          "id": "fetch_structured_data",
+          "method": "GET",
+          "url": "https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max&timezone=Asia%2FTokyo&forecast_days=3"
+        }
+      ],
+      "output_mapping": {
+        "response": "fetch_structured_data",
+        "records_path": "daily",
+        "max_records": 3,
+        "fields": [
+          {"name": "time", "path": "time", "label": "date", "target": true, "kind": "target"},
+          {"name": "temperature_2m_max", "path": "temperature_2m_max", "label": "maximum", "unit": "°C", "kind": "observed_value"},
+          {"name": "temperature_2m_min", "path": "temperature_2m_min", "label": "minimum", "unit": "°C", "kind": "observed_value"},
+          {"name": "precipitation_probability_max", "path": "precipitation_probability_max", "label": "probability", "unit": "%", "kind": "observed_value"},
+          {"name": "precipitation_sum", "path": "precipitation_sum", "label": "amount", "unit": "mm", "kind": "observed_value"},
+          {"name": "wind_speed_10m_max", "path": "wind_speed_10m_max", "label": "speed", "unit": "km/h", "kind": "observed_value"}
+        ]
+      }
+    }
+  ]
+}
