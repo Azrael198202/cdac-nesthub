@@ -43,6 +43,7 @@ class AdaptiveEvidenceReducer:
             direct_material = str(document.get("answer_material") or "").strip()
             if direct_material:
                 materials.append(direct_material)
+            has_structured_direct = any(isinstance(f, dict) and f.get("structured") for f in direct_facts)
             for fact in direct_facts:
                 if not isinstance(fact, dict):
                     continue
@@ -54,10 +55,17 @@ class AdaptiveEvidenceReducer:
                 if len(facts) >= budget.fact_limit:
                     break
             text = self._document_text(document)
-            normalized = self.normalizer.normalize(text=text, known=known, source_url=source_url, state=state or {})
-            quality = normalized.get("answer_material_quality") if isinstance(normalized.get("answer_material_quality"), dict) else {}
-            if direct_facts:
-                quality = {**quality, "browser_structured_facts": len(direct_facts), "passed": True, "score": max(float(quality.get("score") or 0), 0.82)}
+            normalized: dict[str, Any] = {}
+            if has_structured_direct:
+                quality = document.get("answer_material_quality") if isinstance(document.get("answer_material_quality"), dict) else {}
+                quality = {**quality, "structured_direct_facts": len(direct_facts), "passed": True, "score": max(float(quality.get("score") or 0), 0.86)}
+                # When relation-preserving or machine-readable evidence exists, do
+                # not run free-text numeric extraction over the same raw page. That
+                # prevents metadata and navigation numbers from diluting the answer.
+                normalized = {"normalized_facts": [], "selected_evidence_blocks": [], "answer_material": "", "answer_material_quality": quality}
+            else:
+                normalized = self.normalizer.normalize(text=text, known=known, source_url=source_url, state=state or {})
+                quality = normalized.get("answer_material_quality") if isinstance(normalized.get("answer_material_quality"), dict) else {}
             qualities.append(quality)
             for fact in normalized.get("normalized_facts") or []:
                 if not isinstance(fact, dict):

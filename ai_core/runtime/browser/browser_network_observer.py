@@ -68,7 +68,7 @@ class BrowserNetworkObserver:
     responses, and returns both structured responses and a DOM fallback snapshot.
     """
 
-    API_LIKE_URL = re.compile(r"(?:/api/|/v\d+/|\.json(?:\?|$)|graphql|forecast|data|ajax|xhr)", re.I)
+    API_LIKE_URL = re.compile(r"(?:/api/|/v\d+/|\.json(?:\?|$)|graphql|data|ajax|xhr|rpc|query)", re.I)
     STRUCTURED_CT = re.compile(r"(?:application|text)/(?:json|x-json|javascript)|\+json", re.I)
     AUTH_STATUS = {401, 403}
 

@@ -77,3 +77,11 @@ Business/domain-specific routing terms must be generated into runtime contracts,
 This package expands the model stage policy from a coarse routing list into a reusable runtime model governance layer. It includes a richer model catalog, multimodal capability taxonomy, stage-level validation/escalation/downgrade rules, paid/free controls, privacy controls, and generic support for audio, image, video, code, file, document, slide, spreadsheet, PDF, diagram, plan, report, evidence, and final synthesis stages.
 
 See `docs/MODEL_STAGE_POLICY_DESIGN.md`.
+
+## v2.9.29 Browser materialized structured evidence
+
+- Added a domain-neutral embedded structure extractor for script JSON and data-* payloads.
+- Added a domain-neutral DOM relation extractor for rendered tables and relation-like cells.
+- Deep web research now materializes browser observations in this order: network JSON, embedded machine-readable structures, rendered DOM relations, then generic sequence fallback.
+- Structured browser evidence prevents free-text numeric extraction from polluting results with page metadata/navigation values.
+- Packaging preserves source/runtime code and excludes generated runtime artifacts, traces, checkpoints, caches, secrets, __pycache__, and .pyc files.

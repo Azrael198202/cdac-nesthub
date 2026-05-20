@@ -21,7 +21,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 from ai_core.research.web_research_tool import GenericWebResearchTool
 from ai_core.runtime.evidence import EvidenceBudgetAllocator, CandidateEvidenceRanker, AdaptiveEvidenceReducer
-from ai_core.runtime.browser import BrowserNetworkObserver, StructuredResponseExtractor
+from ai_core.runtime.browser import BrowserNetworkObserver, StructuredResponseExtractor, EmbeddedStructureExtractor, DomRelationExtractor
 from ai_core.runtime.evidence.temporal_measurement_sequence import TemporalMeasurementSequenceExtractor
 
 
@@ -187,6 +187,8 @@ class DeepWebResearchPipeline:
         self.browser_observer = BrowserNetworkObserver()
         self.structured_extractor = StructuredResponseExtractor()
         self.temporal_measurement_extractor = TemporalMeasurementSequenceExtractor()
+        self.embedded_structure_extractor = EmbeddedStructureExtractor()
+        self.dom_relation_extractor = DomRelationExtractor()
 
     async def run(
         self,
@@ -215,19 +217,18 @@ class DeepWebResearchPipeline:
                 observed = await self.browser_observer.observe(url=url)
                 if observed.status == "success":
                     browser_doc = observed.to_document()
-                    structured = self.structured_extractor.extract(browser_document=browser_doc, known=known, max_facts=budget.fact_limit)
-                    browser_doc["normalized_facts"] = structured.normalized_facts
-                    browser_doc["answer_material"] = structured.answer_material
-                    browser_doc["source_summaries"] = structured.source_summaries
-                    browser_doc["structured_response_extraction"] = structured.extraction_trace
+                    browser_doc = self._materialize_browser_document(browser_doc=browser_doc, known=known, source_url=url, budget=budget)
                     urls.append(browser_doc.get("url") or url)
-                    layers.append("browser_network_observation")
-                    if structured.normalized_facts:
-                        layers.append("structured_network_response")
-                    fetched.append({"source": "browser_network_discovery", "source_search_result": candidate, "document": browser_doc})
-                    reduced = self.reducer.reduce(documents=fetched, known=known, state=state, budget=budget)
-                    if self.budget_allocator.should_stop(normalized=reduced, fetched_count=len(fetched), budget=budget):
-                        break
+                    layers.extend(browser_doc.get("extraction_layers") or [])
+                    # Do not let a rendered page snapshot short-circuit the pipeline
+                    # unless it produced machine-structured or relation-preserving
+                    # facts. Plain visible text remains only a later fallback.
+                    if browser_doc.get("normalized_facts"):
+                        fetched.append({"source": "browser_materialized_observation", "source_search_result": candidate, "document": browser_doc})
+                        reduced = self.reducer.reduce(documents=fetched, known=known, state=state, budget=budget)
+                        quality = reduced.get("answer_material_quality") if isinstance(reduced.get("answer_material_quality"), dict) else {}
+                        if quality.get("passed") and self.budget_allocator.should_stop(normalized=reduced, fetched_count=len(fetched), budget=budget):
+                            break
 
             # DOM/text fallback is still useful when no structured network response
             # satisfies the evidence gate. It runs after browser observation.
@@ -238,25 +239,21 @@ class DeepWebResearchPipeline:
                 # Preserve browser-visible material and captured network metadata.
                 doc = {**doc, **{k: v for k, v in browser_doc.items() if v}}
             extracted = self.extractor.extract(doc)
-            if browser_doc and browser_doc.get("browser_network_responses"):
-                extracted["browser_network_responses"] = browser_doc.get("browser_network_responses")
-                extracted["structured_response_extraction"] = browser_doc.get("structured_response_extraction")
-                extracted["normalized_facts"] = browser_doc.get("normalized_facts") or []
-                extracted["answer_material"] = browser_doc.get("answer_material") or ""
-            # Browser/CDP is preferred. If no JSON-like response is available,
-            # recover structured material from temporal measurement rows in the
-            # browser-visible DOM. This is a generic table/sequence parser, not a
-            # domain keyword extractor.
-            visible_packet = "\n".join(str(x or "") for x in [
-                extracted.get("answer_material"), extracted.get("text_excerpt"), extracted.get("visible_text_excerpt")
-            ])
-            temporal = self.temporal_measurement_extractor.extract(text=visible_packet, known=known, source_url=url, max_rows=budget.fact_limit)
-            if temporal.get("normalized_facts"):
-                existing_facts = extracted.get("normalized_facts") if isinstance(extracted.get("normalized_facts"), list) else []
-                extracted["normalized_facts"] = list(temporal.get("normalized_facts") or []) + existing_facts
-                extracted["answer_material"] = str(temporal.get("answer_material") or extracted.get("answer_material") or "")
-                extracted["answer_material_quality"] = temporal.get("quality") or extracted.get("answer_material_quality") or {}
-                extracted.setdefault("extraction_layers", []).append("temporal_measurement_sequence")
+            if browser_doc:
+                extracted = self._merge_materialized_browser_doc(base=extracted, browser_doc=browser_doc)
+            # Last structured fallback: generic temporal/numeric sequence parsing
+            # over the already-rendered material. This is still structural, not a
+            # task-specific text summary.
+            if not extracted.get("normalized_facts"):
+                visible_packet = "\n".join(str(x or "") for x in [
+                    extracted.get("answer_material"), extracted.get("text_excerpt"), extracted.get("visible_text_excerpt")
+                ])
+                temporal = self.temporal_measurement_extractor.extract(text=visible_packet, known=known, source_url=url, max_rows=budget.fact_limit)
+                if temporal.get("normalized_facts"):
+                    extracted["normalized_facts"] = list(temporal.get("normalized_facts") or [])
+                    extracted["answer_material"] = str(temporal.get("answer_material") or extracted.get("answer_material") or "")
+                    extracted["answer_material_quality"] = temporal.get("quality") or extracted.get("answer_material_quality") or {}
+                    extracted.setdefault("extraction_layers", []).append("temporal_measurement_sequence")
             urls.append(url)
             layers.extend(extracted.get("extraction_layers") or [])
             fetched.append({"source": "deep_web_extraction", "source_search_result": candidate, "document": extracted})
@@ -285,6 +282,110 @@ class DeepWebResearchPipeline:
                 "deep_research_trace": trace.to_dict(),
             },
         }
+
+    def _materialize_browser_document(self, *, browser_doc: dict[str, Any], known: dict[str, Any], source_url: str, budget: Any) -> dict[str, Any]:
+        layers: list[str] = ["browser_network_observation"]
+        facts: list[dict[str, Any]] = []
+        materials: list[str] = []
+        source_summaries: list[dict[str, Any]] = []
+
+        structured = self.structured_extractor.extract(browser_document=browser_doc, known=known, max_facts=budget.fact_limit)
+        if structured.normalized_facts:
+            facts.extend(structured.normalized_facts)
+            materials.append(structured.answer_material)
+            source_summaries.extend(structured.source_summaries)
+            layers.append("network_structured_response")
+        browser_doc["structured_response_extraction"] = structured.extraction_trace
+
+        embedded = self.embedded_structure_extractor.extract(document=browser_doc, known=known, max_facts=budget.fact_limit)
+        if embedded.normalized_facts:
+            facts.extend(embedded.normalized_facts)
+            materials.append(embedded.answer_material)
+            layers.append("embedded_machine_readable_structure")
+        browser_doc["embedded_structure_extraction"] = embedded.extraction_trace
+
+        relation = self.dom_relation_extractor.extract(document=browser_doc, known=known, max_facts=budget.fact_limit)
+        if relation.normalized_facts:
+            facts.extend(relation.normalized_facts)
+            materials.append(relation.answer_material)
+            layers.append("rendered_dom_relation")
+        browser_doc["dom_relation_extraction"] = relation.extraction_trace
+
+        facts = self._dedupe_facts(facts)[: budget.fact_limit]
+        browser_doc["normalized_facts"] = facts
+        browser_doc["structured_evidence"] = facts
+        browser_doc["answer_material"] = self._join_materials(materials)
+        browser_doc["source_summaries"] = source_summaries
+        browser_doc["extraction_layers"] = sorted(set(layers))
+        if facts:
+            browser_doc["answer_material_quality"] = {
+                "passed": True,
+                "score": min(0.96, 0.64 + len(facts) * 0.015),
+                "fact_count": len(facts),
+                "source_level": "browser_materialized_structured_evidence",
+                "raw_evidence_omitted": True,
+                "domain_specific_rules_used": False,
+            }
+        return browser_doc
+
+    def _merge_materialized_browser_doc(self, *, base: dict[str, Any], browser_doc: dict[str, Any]) -> dict[str, Any]:
+        merged = {**base}
+        for key in (
+            "browser_network_responses", "structured_response_extraction",
+            "embedded_structure_extraction", "dom_relation_extraction",
+            "browser_observation",
+        ):
+            if browser_doc.get(key):
+                merged[key] = browser_doc.get(key)
+        facts = []
+        for source in (browser_doc.get("normalized_facts"), base.get("normalized_facts")):
+            if isinstance(source, list):
+                facts.extend(x for x in source if isinstance(x, dict))
+        facts = self._dedupe_facts(facts)
+        if facts:
+            merged["normalized_facts"] = facts
+            merged["structured_evidence"] = facts
+            merged["answer_material"] = self._join_materials([str(browser_doc.get("answer_material") or ""), str(base.get("answer_material") or "")])
+            merged["answer_material_quality"] = browser_doc.get("answer_material_quality") or base.get("answer_material_quality") or {
+                "passed": True,
+                "score": min(0.95, 0.62 + len(facts) * 0.015),
+                "fact_count": len(facts),
+                "source_level": "browser_materialized_structured_evidence",
+                "raw_evidence_omitted": True,
+                "domain_specific_rules_used": False,
+            }
+        layers = []
+        for source in (browser_doc.get("extraction_layers"), base.get("extraction_layers")):
+            if isinstance(source, list):
+                layers.extend(str(x) for x in source)
+        merged["extraction_layers"] = sorted(set(layers))
+        return merged
+
+    def _dedupe_facts(self, facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for fact in facts:
+            key = "|".join(str(fact.get(k, "")) for k in ("kind", "label", "value", "unit", "target", "context", "source_url"))[:900].casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(fact)
+        return out
+
+    def _join_materials(self, materials: list[str]) -> str:
+        out: list[str] = []
+        seen: set[str] = set()
+        for material in materials:
+            for line in str(material or "").splitlines():
+                text = " ".join(line.split())
+                if not text:
+                    continue
+                key = text.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(text)
+        return "\n".join(out[:80])
 
     def _url(self, candidate: dict[str, Any]) -> str:
         for key in ("url", "official_documentation_url"):

@@ -11,7 +11,7 @@ class TemporalMeasurementSequenceExtractor:
     units/directions/probabilities. It does not know any business category.
     """
 
-    TIME_TOKEN = re.compile(r"\b\d{1,2}:\d{2}(?:\s+tomorrow)?\b", re.I)
+    TIME_TOKEN = re.compile(r"\b\d{1,2}:\d{2}\b", re.I)
     DATE_TOKEN = re.compile(r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b")
     VALUE_UNIT = re.compile(r"(-?\d+(?:\.\d+)?)\s*(°C|°F|mm|cm|%|km/h|mph|hPa|kPa|m/s)\b", re.I)
     DIRECTION = re.compile(r"\b(N|NE|E|SE|S|SW|W|NW)\b")
@@ -109,11 +109,9 @@ class TemporalMeasurementSequenceExtractor:
                 continue
             token=m.group(0)
             target=""
-            # Generic mapping: explicit "tomorrow" maps to the second known date; otherwise first known date.
-            if "tomorrow" in token.casefold() and len(known_dates)>=2:
-                target=known_dates[1]
-            elif known_dates:
-                target=known_dates[0]
+            # Generic mapping: assign sequential records to known target values when available.
+            if known_dates:
+                target=known_dates[min(i, len(known_dates)-1)] if len(matches) <= len(known_dates) else known_dates[0]
             rows.append(self._row(time=token, target_date=target, measurements=measures, raw=window))
             if len(rows)>=max_rows:
                 break
@@ -135,10 +133,8 @@ class TemporalMeasurementSequenceExtractor:
         for i, cell in enumerate(cells[:min(len(times), max_rows)]):
             token = times[i] if i < len(times) else ""
             target=""
-            if "tomorrow" in token.casefold() and len(known_dates)>=2:
-                target=known_dates[1]
-            elif known_dates:
-                target=known_dates[0]
+            if known_dates:
+                target=known_dates[min(i, len(known_dates)-1)] if len(cells) <= len(known_dates) else known_dates[0]
             measures=[
                 {"label":"degree_value", "value":cell.group(1), "unit":cell.group(2)},
                 {"label":"amount_value", "value":cell.group(3), "unit":cell.group(4)},
