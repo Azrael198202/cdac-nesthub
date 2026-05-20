@@ -1700,74 +1700,95 @@ class ToolCallExecutor:
         })
         try:
             cost_snapshot = self.runtime_cost_policy.snapshot(state)
-            # v2.9.23: search-first adaptive execution.  Public web evidence is
-            # discovered and validated before API discovery/calls.  API discovery
-            # is an escalation path only when public evidence is insufficient.
-            external_discovery = await asyncio.wait_for(self.external_discovery.discover(
-                run_id=run_id,
-                node_id=node_id,
-                capability=capability,
-                step=step,
-                user_input=state.get("input", ""),
-            ), timeout=cost_snapshot.stage_timeout("web_discovery", 30))
-            direct_execution = await asyncio.wait_for(self._try_direct_evidence_execution_from_discovery(
-                run_id=run_id,
-                node_id=node_id,
-                step_id=step_id,
-                capability=capability,
-                step=step,
-                state=state,
-                api_discovery={},
-                external_discovery=external_discovery,
-                reason=reason + "_web_first",
-            ), timeout=cost_snapshot.stage_timeout("web_search", 90))
-            if direct_execution and direct_execution.get("status") == "success":
+            # v2.9.38: API-first adaptive execution.  Browser/page scraping is
+            # intentionally demoted to the last fallback because page structure is
+            # unstable.  The runtime first asks the configured intelligence route
+            # to discover free/no-key structured APIs. If those do not produce a
+            # verified executable result, credential-protected API candidates may
+            # be surfaced by the normal credential interaction path. Only after
+            # the API path fails or is skipped does the runtime investigate web
+            # pages as evidence.
+            api_discovery = {}
+            direct_execution = None
+            try:
+                api_discovery = await asyncio.wait_for(self.api_discovery.discover(
+                    run_id=run_id,
+                    node_id=node_id,
+                    capability=capability,
+                    step=step,
+                    user_input=state.get("input", ""),
+                ), timeout=cost_snapshot.stage_timeout("api_discovery", 30))
+            except Exception as api_exc:
                 await event_bus.emit(run_id, {
-                    "type": "SEARCH_FIRST_EVIDENCE_SUFFICIENT",
-                    "title": "Search-first evidence sufficient",
-                    "message": "Public web evidence satisfied the execution contract; API discovery was skipped.",
+                    "type": "API_FIRST_DISCOVERY_FAILED",
+                    "title": "API-first discovery failed",
+                    "message": str(api_exc),
                     "node_id": node_id,
                     "step_id": step_id,
                 })
-            if direct_execution and direct_execution.get("status") == "partial":
+
+            if api_discovery:
                 await event_bus.emit(run_id, {
-                    "type": "SEARCH_FIRST_EVIDENCE_PARTIAL",
-                    "title": "Search-first evidence partial",
-                    "message": "Public evidence was investigated but did not satisfy the convergence contract.",
+                    "type": "API_FIRST_DISCOVERY_DONE",
+                    "title": "API-first discovery completed",
+                    "message": "Structured API candidates were collected before web-page fallback.",
                     "node_id": node_id,
                     "step_id": step_id,
-                    "result": self._compact_direct_result_for_event(direct_execution.get("result") or {}),
+                    "result": self._compact_api_discovery_for_event(api_discovery),
                 })
-            if not direct_execution:
-                api_discovery = {}
-                try:
-                    api_discovery = await asyncio.wait_for(self.api_discovery.discover(
-                        run_id=run_id,
-                        node_id=node_id,
-                        capability=capability,
-                        step=step,
-                        user_input=state.get("input", ""),
-                    ), timeout=cost_snapshot.stage_timeout("api_discovery", 15))
-                except Exception as api_exc:
+                direct_execution = await asyncio.wait_for(self._try_direct_evidence_execution_from_discovery(
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    capability=capability,
+                    step=step,
+                    state=state,
+                    api_discovery=api_discovery,
+                    external_discovery={},
+                    reason=reason + "_api_first",
+                ), timeout=cost_snapshot.stage_timeout("api_call", 45))
+                if direct_execution and direct_execution.get("status") == "success":
                     await event_bus.emit(run_id, {
-                        "type": "API_DISCOVERY_SKIPPED_OR_FAILED",
-                        "title": "API escalation unavailable",
-                        "message": str(api_exc),
+                        "type": "API_FIRST_EVIDENCE_SUFFICIENT",
+                        "title": "API-first evidence sufficient",
+                        "message": "Structured API evidence satisfied the execution contract; web-page fallback was skipped.",
                         "node_id": node_id,
                         "step_id": step_id,
+                        "result": self._compact_direct_result_for_event(direct_execution.get("result") or {}),
                     })
-                if api_discovery:
-                    direct_execution = await asyncio.wait_for(self._try_direct_evidence_execution_from_discovery(
-                        run_id=run_id,
-                        node_id=node_id,
-                        step_id=step_id,
-                        capability=capability,
-                        step=step,
-                        state=state,
-                        api_discovery=api_discovery,
-                        external_discovery=external_discovery,
-                        reason=reason + "_api_escalation_after_web_insufficient",
-                    ), timeout=cost_snapshot.stage_timeout("api_call", 30))
+                elif direct_execution and direct_execution.get("status") == "partial":
+                    await event_bus.emit(run_id, {
+                        "type": "API_FIRST_EVIDENCE_PARTIAL",
+                        "title": "API-first evidence partial",
+                        "message": "Structured API evidence was investigated but did not satisfy the execution contract.",
+                        "node_id": node_id,
+                        "step_id": step_id,
+                        "result": self._compact_direct_result_for_event(direct_execution.get("result") or {}),
+                    })
+
+            if not direct_execution or direct_execution.get("status") != "success":
+                external_discovery = await asyncio.wait_for(self.external_discovery.discover(
+                    run_id=run_id,
+                    node_id=node_id,
+                    capability=capability,
+                    step=step,
+                    user_input=state.get("input", ""),
+                ), timeout=cost_snapshot.stage_timeout("web_discovery", 30))
+                web_execution = await asyncio.wait_for(self._try_direct_evidence_execution_from_discovery(
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    capability=capability,
+                    step=step,
+                    state=state,
+                    api_discovery={},
+                    external_discovery=external_discovery,
+                    reason=reason + "_web_fallback_after_api",
+                ), timeout=cost_snapshot.stage_timeout("web_search", 90))
+                if web_execution:
+                    web_result = web_execution.get("result") if isinstance(web_execution.get("result"), dict) else {}
+                    web_result.setdefault("api_first_attempt", self._compact_api_discovery_for_event(api_discovery) if api_discovery else {})
+                    direct_execution = web_execution
             if direct_execution and direct_execution.get("status") in {"success", "partial"}:
                 tool_input = self._build_tool_input(
                     step=step,

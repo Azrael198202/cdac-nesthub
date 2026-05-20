@@ -484,6 +484,59 @@ class PrimaryBrainDelegationClient:
         return fallback
 
 
+    def _answer_has_result_material(self, answer: str) -> bool:
+        """Return True only when a participant answer contains user-facing material.
+
+        This guard is intentionally generic. It prevents old fallback paths from
+        being treated as successful answers when they only return provenance,
+        placeholders, or internal failure text.
+        """
+        text = str(answer or "").strip()
+        if not text:
+            return False
+
+        compact = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+        lower = compact.lower()
+
+        placeholder_fragments = [
+            "completed without a user-facing final answer",
+            "paused before producing a user-facing final answer",
+            "intermediate node data was intentionally not exposed",
+            "could not be completed with verified result material",
+            "no completed participant result",
+            "no verified result material",
+            "source only",
+        ]
+        if any(fragment in lower for fragment in placeholder_fragments):
+            return False
+
+        meaningful_lines = []
+        for line in compact.splitlines():
+            l = line.strip()
+            low = l.lower()
+            if not l:
+                continue
+            if low in {"source:", "sources:", "details:", "summary:", "final answer:", "i found the following:"}:
+                continue
+            if low.startswith("source:") or low.startswith("sources:"):
+                continue
+            if low.startswith("- http://") or low.startswith("- https://") or low.startswith("http://") or low.startswith("https://"):
+                continue
+            meaningful_lines.append(l)
+
+        if not meaningful_lines:
+            return False
+
+        # A single label-like line without a value is not enough. Keep this
+        # generic by checking for textual or numeric payload, not domain terms.
+        joined = " ".join(meaningful_lines).strip()
+        alpha_count = sum(1 for ch in joined if ch.isalpha())
+        digit_count = sum(1 for ch in joined if ch.isdigit())
+        if alpha_count + digit_count < 8:
+            return False
+        return True
+
+
     def _compose_delegated_final_answer(
         self,
         *,

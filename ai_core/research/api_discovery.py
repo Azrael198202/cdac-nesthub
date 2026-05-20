@@ -110,15 +110,18 @@ class ApiDiscoveryEngine:
         )
         request["documentation_evidence"] = documentation_evidence
 
-        local = await self._try_model_discovery(run_id=run_id, node_id=node_id, request=request, route_name="api_discovery_local")
-        if self._usable_discovery(local):
-            discovery = self._finalize(request=request, result=local, strategy="local_model", web_evidence=web_evidence, documentation_evidence=documentation_evidence)
+        # API discovery is a high-leverage planning stage. Prefer the configured
+        # external/high-quality route first so the runtime can discover stable
+        # structured providers before falling back to weaker local inference.
+        external = await self._try_model_discovery(run_id=run_id, node_id=node_id, request=request, route_name="api_discovery_external")
+        if self._usable_discovery(external):
+            discovery = self._finalize(request=request, result=external, strategy="external_model", web_evidence=web_evidence, documentation_evidence=documentation_evidence)
             discovery = self.endpoint_verifier.verify_discovery(discovery)
             await self._emit_done(run_id, node_id, discovery)
             return discovery
 
-        external = await self._try_model_discovery(run_id=run_id, node_id=node_id, request=request, route_name="api_discovery_external")
-        discovery = self._finalize(request=request, result=external or {}, strategy="external_model", web_evidence=web_evidence, documentation_evidence=documentation_evidence)
+        local = await self._try_model_discovery(run_id=run_id, node_id=node_id, request=request, route_name="api_discovery_local")
+        discovery = self._finalize(request=request, result=local or external or {}, strategy="local_model_after_external_unavailable", web_evidence=web_evidence, documentation_evidence=documentation_evidence)
         discovery = self.endpoint_verifier.verify_discovery(discovery)
         await self._emit_done(run_id, node_id, discovery)
         return discovery
@@ -144,11 +147,14 @@ class ApiDiscoveryEngine:
                 "must_understand_response_shape": True,
                 "must_support_live_verification": True,
                 "prefer_no_api_key_when_possible": True,
+                "prefer_structured_api_before_web_page": True,
+                "must_disclose_required_secret_name_and_provider": True,
             },
             "strategy": {
-                "first": "generic_web_documentation_search",
-                "second": "runtime_model_api_selection_and_document_understanding",
-                "fallback": "external_model_with_documentation_evidence",
+                "first": "external_model_structured_api_advice",
+                "second": "generic_web_documentation_search",
+                "third": "runtime_model_api_selection_and_document_understanding",
+                "fallback": "web_page_evidence_only_after_api_paths_fail",
             },
         }
 
