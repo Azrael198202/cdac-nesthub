@@ -64,6 +64,8 @@ class EvidenceDirectAnswerBuilder:
                 "selected_evidence_blocks": document.get("selected_evidence_blocks") or [],
                 "answer_material": document.get("answer_material") or document.get("text_excerpt") or document.get("visible_text_excerpt") or "",
                 "answer_material_quality": document.get("answer_material_quality") or {"passed": True, "score": 0.8},
+                "consensus_evaluation": document.get("consensus_evaluation") or {},
+                "source_summaries": document.get("source_summaries") or [],
             }
         else:
             normalized = RuntimeEvidenceNormalizer().normalize(
@@ -101,6 +103,8 @@ class EvidenceDirectAnswerBuilder:
             "known_parameters": known,
             "candidate_score": top_candidate.get("score"),
             "answer_material_quality": quality,
+            "consensus_evaluation": normalized.get("consensus_evaluation") if isinstance(normalized, dict) else {},
+            "source_summaries": normalized.get("source_summaries") if isinstance(normalized, dict) else [],
             "evidence_direct_fallback": True,
             "no_key_path_used": True,
             "raw_evidence_omitted": True,

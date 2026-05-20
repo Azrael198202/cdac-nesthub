@@ -2726,11 +2726,15 @@ class ToolCallExecutor:
             or any(str(c.get("tool_type") or "") in {"html_extract", "web_evidence"} for c in no_key_candidates if isinstance(c, dict))
         )
         if should_fetch_pages:
+            # Deep materialization must see the full public candidate set, not only
+            # the first snippet selected by the preliminary sufficiency scorer.
+            # The scorer is allowed to rank, but not to shrink the evidence pool
+            # before multi-source convergence has run.
             fetched_documents = await self._fetch_selected_pages_for_evidence(
                 run_id=run_id,
                 node_id=node_id,
                 step_id=step_id,
-                selected_evidence=sufficiency.get("selected_evidence") or no_key_candidates,
+                selected_evidence=no_key_candidates,
                 known_parameters=known_parameters,
                 state=state,
                 objective=str(step.get("objective") or ""),
@@ -2782,6 +2786,25 @@ class ToolCallExecutor:
                 "node_id": node_id,
                 "step_id": step_id,
                 "result": self._compact_sufficiency_for_event(sufficiency),
+            })
+            return None
+        direct_data = direct_result.get("data") if isinstance(direct_result.get("data"), dict) else {}
+        material_quality = direct_data.get("answer_material_quality") if isinstance(direct_data.get("answer_material_quality"), dict) else {}
+        consensus_eval = direct_data.get("consensus_evaluation") if isinstance(direct_data.get("consensus_evaluation"), dict) else {}
+        if material_quality.get("passed") is False or (
+            consensus_eval and consensus_eval.get("passed") is not True
+        ):
+            await event_bus.emit(run_id, {
+                "type": "EVIDENCE_PIPELINE_CONSENSUS_NOT_READY",
+                "title": "Evidence consensus not ready",
+                "message": "Materialized evidence did not satisfy the generic convergence contract.",
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": {
+                    "quality": material_quality,
+                    "consensus_evaluation": consensus_eval,
+                    "sufficiency": self._compact_sufficiency_for_event(sufficiency),
+                },
             })
             return None
 
@@ -2882,31 +2905,75 @@ class ToolCallExecutor:
                 "normalized_facts": data.get("normalized_facts") or [],
                 "selected_evidence_blocks": data.get("selected_evidence_blocks") or [],
                 "answer_material_quality": data.get("answer_material_quality") or {},
+                "consensus_evaluation": data.get("consensus_evaluation") or {},
                 "source_summaries": data.get("source_summaries") or [],
                 "deep_research_trace": data.get("deep_research_trace") or {},
             },
         }]
 
     def _runtime_known_parameters(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Collect runtime parameters without dropping arrays or normalized objects.
+
+        The evidence pipeline is schema-driven: all downstream validation depends
+        on the complete target contract.  Lists and dictionaries therefore must
+        be preserved instead of being silently discarded.
+        """
         known: dict[str, Any] = {}
         if not isinstance(payload, dict):
             return known
-        params = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
-        for source in (
-            payload.get("known") if isinstance(payload.get("known"), dict) else {},
-            params.get("known") if isinstance(params.get("known"), dict) else {},
-            payload,
-        ):
+
+        def merge(source: Any) -> None:
             if not isinstance(source, dict):
-                continue
+                return
             for key, value in source.items():
-                if key in {"context", "source_step", "parameters", "known", "optional"}:
+                key_s = str(key)
+                if key_s in {"context", "source_step", "parameters", "known", "optional"}:
                     continue
                 if value is None or value == "":
                     continue
                 if isinstance(value, (str, int, float, bool)):
-                    known[str(key)] = value
+                    known[key_s] = value
+                elif isinstance(value, (list, tuple, set)):
+                    cleaned = [self._compact_runtime_value(v) for v in value]
+                    cleaned = [v for v in cleaned if v not in (None, "", [], {})]
+                    if cleaned:
+                        known[key_s] = cleaned
+                elif isinstance(value, dict):
+                    compact = self._compact_runtime_value(value)
+                    if compact not in (None, "", [], {}):
+                        known[key_s] = compact
+
+        params = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+        source_step = payload.get("source_step") if isinstance(payload.get("source_step"), dict) else {}
+        source_params = source_step.get("parameters") if isinstance(source_step.get("parameters"), dict) else {}
+        intent_ref = source_step.get("intent_contract_ref") if isinstance(source_step.get("intent_contract_ref"), dict) else {}
+
+        for source in (
+            payload.get("known") if isinstance(payload.get("known"), dict) else {},
+            params.get("known") if isinstance(params.get("known"), dict) else {},
+            source_params.get("known") if isinstance(source_params.get("known"), dict) else {},
+            intent_ref,
+            payload,
+        ):
+            merge(source)
+
         return known
+
+    def _compact_runtime_value(self, value: Any) -> Any:
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, (list, tuple, set)):
+            return [self._compact_runtime_value(v) for v in value]
+        if isinstance(value, dict):
+            out: dict[str, Any] = {}
+            for k, v in value.items():
+                if v in (None, ""):
+                    continue
+                out[str(k)] = self._compact_runtime_value(v)
+            if "normalized_value" in out and len(out) <= 3:
+                return out.get("normalized_value")
+            return out
+        return str(value)
 
     def _evidence_url(self, item: dict[str, Any]) -> str:
         if not isinstance(item, dict):
