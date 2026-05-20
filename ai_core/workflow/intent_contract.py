@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any
+import json
+
 
 
 class IntentContractGuard:
@@ -26,14 +28,16 @@ class IntentContractGuard:
         normalized = intent.get("normalized_intent") if isinstance(intent.get("normalized_intent"), dict) else {}
         parsed_entities = parsed.get("parsed_entities") if isinstance(parsed.get("parsed_entities"), dict) else {}
         temporal_expressions = parsed.get("temporal_expressions") if isinstance(parsed.get("temporal_expressions"), list) else []
+        request_objective = self._extract_request_objective(previous_results)
         target_values = self._target_values(normalized, parsed_entities, temporal_expressions)
-        family = self._intent_family(intent_type=intent_type, normalized=normalized, parsed=parsed, temporal_expressions=temporal_expressions)
+        family = self._intent_family(intent_type=intent_type, normalized=normalized, parsed=parsed, temporal_expressions=temporal_expressions, request_objective=request_objective)
         return {
             "status": "locked" if intent_type else "empty",
             "intent_type": intent_type,
             "intent_family": family,
             "normalized_intent": deepcopy(normalized),
             "parsed_entities": deepcopy(parsed_entities),
+            "request_objective": request_objective,
             "target_values": target_values,
             "source_nodes": ["input_parsing", "intent_recognition"],
             "rules": {
@@ -102,7 +106,7 @@ class IntentContractGuard:
             step["semantic_category"] = "structured_external_observation"
             step["required_source_level"] = "external_content"
             step["execution_method_policy"] = {
-                "preferred_methods": ["web_search", "api_call", "existing_tool"],
+                "preferred_methods": ["api_call", "existing_tool", "web_search"],
                 "disabled_methods": ["runtime_generated_tool", "model_knowledge"],
                 "fallback_allowed": True,
             }
@@ -132,7 +136,31 @@ class IntentContractGuard:
                 values.insert(0 if value == "structured_provider" else len(values), value)
         return values
 
-    def _intent_family(self, *, intent_type: str, normalized: dict[str, Any], parsed: dict[str, Any], temporal_expressions: list[Any] | None = None) -> str:
+
+    def _extract_request_objective(self, previous_results: dict[str, Any]) -> str:
+        raw_values: list[str] = []
+        parsed = previous_results.get("input_parsing") if isinstance(previous_results, dict) else {}
+        if isinstance(parsed, dict):
+            for key in ("original_input", "input", "text"):
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    raw_values.append(value.strip())
+        for raw in raw_values:
+            start = raw.find("{")
+            if start < 0:
+                continue
+            payload_text = raw[start:]
+            try:
+                payload = json.loads(payload_text)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                objective = payload.get("objective")
+                if isinstance(objective, str) and objective.strip():
+                    return objective.strip()
+        return ""
+
+    def _intent_family(self, *, intent_type: str, normalized: dict[str, Any], parsed: dict[str, Any], temporal_expressions: list[Any] | None = None, request_objective: str = "") -> str:
         temporal_expressions = temporal_expressions if isinstance(temporal_expressions, list) else []
         temporal_types = []
         temporal_texts = []
@@ -140,26 +168,31 @@ class IntentContractGuard:
             if isinstance(item, dict):
                 temporal_types.append(str(item.get("value_type") or ""))
                 temporal_texts.append(str(item.get("text") or ""))
+        objective_text = str(request_objective or "").casefold()
         text = " ".join([
             intent_type,
+            objective_text,
             *[str(k) for k in normalized.keys()],
             *[str(k) for k in parsed.keys()],
             *temporal_types,
             *temporal_texts,
         ]).casefold()
         # Generic category labels only. This uses structural temporal signals
-        # emitted upstream rather than concrete domain/provider names.
+        # emitted upstream and the delegated objective, not task-specific code.
         has_external_targets = bool(normalized) and any(
             isinstance(v, (list, dict)) or str(v).strip()
             for v in normalized.values()
         )
         has_runtime_temporal_marker = any(str(t).casefold() in {"datetime", "time", "timestamp"} for t in temporal_types)
         has_parameter_entity = any(str(k).casefold() in {"location", "date", "dates"} for k in normalized.keys())
-        if has_runtime_temporal_marker and not has_parameter_entity:
+        temporal_request_terms = {"current", "now", "runtime", "local", "system"}
+        temporal_object_terms = {"time", "datetime", "timestamp"}
+        asks_runtime_temporal_value = bool(temporal_request_terms.intersection(set(text.split()))) and any(term in text for term in temporal_object_terms)
+        external_action_terms = {"information", "retrieval", "lookup", "search", "forecast", "external"}
+        asks_external = any(term in text for term in external_action_terms) and has_external_targets
+        if (has_runtime_temporal_marker and not has_parameter_entity) or (asks_runtime_temporal_value and not asks_external):
             return "runtime_observation"
-        if ("current" in text or "runtime" in text or "remind" in text) and not ("information" in text and has_external_targets):
-            return "runtime_observation"
-        if "information" in text or "retrieval" in text or "lookup" in text or "search" in text:
+        if asks_external or "information" in text or "retrieval" in text or "lookup" in text or "search" in text:
             return "external_information"
         return "general"
 

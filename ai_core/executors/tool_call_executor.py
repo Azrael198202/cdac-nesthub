@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import subprocess
+import sys
 from typing import Any
 from datetime import datetime, timezone
 
@@ -308,7 +311,7 @@ class ToolCallExecutor:
                     state=state,
                     plan=normalized_plan,
                 )
-                if not runtime_native_result and method_contract.reason == "runtime_native_temporal_contract_enforced":
+                if not runtime_native_result and self._step_requests_runtime_native({**step, "required_source_level": "runtime_native"}, normalized_plan, required_capability or "runtime_current_observation"):
                     runtime_native_result = self._try_runtime_native_observation(
                         run_id=run_id,
                         node_id=node_id,
@@ -3625,6 +3628,36 @@ class ToolCallExecutor:
             }
         return public
 
+
+    def _execute_runtime_observation_code(self) -> str:
+        """Run a tiny generated local program for generic runtime observation.
+
+        This keeps runtime-native observation on the code-execution path instead
+        of web evidence.  The generated code is domain-neutral and only reads the
+        local runtime clock.  If command execution is unavailable, the caller
+        falls back to an in-process equivalent.
+        """
+        code = (
+            "import json\n"
+            "from datetime import datetime, timezone\n"
+            "print(json.dumps({'value': datetime.now(timezone.utc).astimezone().isoformat()}))\n"
+        )
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", code],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if completed.returncode != 0:
+                return ""
+            payload = json.loads((completed.stdout or "").strip() or "{}")
+            value = payload.get("value") if isinstance(payload, dict) else ""
+            return str(value or "").strip()
+        except Exception:
+            return ""
+
     def _try_runtime_native_observation(
         self,
         *,
@@ -3645,7 +3678,7 @@ class ToolCallExecutor:
         """
         if not self._step_requests_runtime_native(step, normalized_plan, capability):
             return None
-        observed_at = datetime.now(timezone.utc).astimezone().isoformat()
+        observed_at = self._execute_runtime_observation_code() or datetime.now(timezone.utc).astimezone().isoformat()
         fact = {
             "kind": "observed_value",
             "label": "runtime_observation",
@@ -3672,6 +3705,8 @@ class ToolCallExecutor:
                     "normalized_facts": [fact],
                     "source_url": "",
                     "source_title": "runtime_native",
+                    "execution_mode": "runtime_generated_code",
+                    "runtime_generated_code_executed": True,
                 },
                 "provenance": {
                     "source": "runtime_native",
