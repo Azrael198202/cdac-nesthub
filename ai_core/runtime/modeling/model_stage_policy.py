@@ -8,6 +8,7 @@ from typing import Any
 from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import CONFIGS_DIR, RUNTIME_GENERATED
 from ai_core.runtime.modeling.runtime_execution_policy import RuntimeExecutionPolicy
+from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 
 
 class ModelStagePolicy:
@@ -102,6 +103,7 @@ class ModelStagePolicy:
     def __init__(self) -> None:
         self.loader = ConfigLoader()
         self.runtime_execution_policy = RuntimeExecutionPolicy()
+        self.user_model_selection = UserModelSelectionStore()
 
     def ensure_defaults(self) -> None:
         target = RUNTIME_GENERATED / "system_topology" / "model_stage_policy.json"
@@ -197,6 +199,8 @@ class ModelStagePolicy:
 
         force_escalation = escalated or bool(adapter.get("force_model_escalation"))
         candidates = self._candidate_models(stage=stage, escalated=force_escalation)
+        candidates = self.user_model_selection.reorder_candidates(candidates, escalated=force_escalation)
+        candidates = self._filter_candidates_by_current_mode(policy=policy, candidates=candidates)
         candidates = self._filter_candidates_by_cost(policy=policy, candidates=candidates)
         candidates = self._filter_candidates_by_stage_requirements(policy=policy, stage=stage, candidates=candidates)
         if not candidates:
@@ -318,6 +322,23 @@ class ModelStagePolicy:
             if model and model not in result:
                 result.append(model)
         return result
+
+    def _filter_candidates_by_current_mode(self, *, policy: dict[str, Any], candidates: list[str]) -> list[str]:
+        catalog = policy.get("model_catalog") if isinstance(policy.get("model_catalog"), dict) else {}
+        snap = self.user_model_selection.snapshot()
+        filtered: list[str] = []
+        for model_id in candidates:
+            meta = catalog.get(model_id) if isinstance(catalog, dict) else None
+            if not isinstance(meta, dict):
+                filtered.append(model_id)
+                continue
+            family = self.user_model_selection.family_for_model_meta(meta)
+            if snap.mode == "local_only" and family != "local":
+                continue
+            if snap.mode == "api_only" and family != "api":
+                continue
+            filtered.append(model_id)
+        return filtered
 
     def _filter_candidates_by_cost(self, *, policy: dict[str, Any], candidates: list[str]) -> list[str]:
         global_policy = policy.get("global_policy") if isinstance(policy.get("global_policy"), dict) else {}

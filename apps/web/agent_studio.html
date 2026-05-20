@@ -7,17 +7,28 @@
   <style>
     :root { color-scheme: dark; --bg:#0f172a; --panel:#111827; --card:#1f2937; --line:#334155; --text:#e5e7eb; --muted:#93c5fd; --accent:#0ea5e9; --danger:#991b1b; }
     *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif;font-size:14px}
-    header{height:76px;display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--line)}
+    header{min-height:96px;display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--line)}
     h1{font-size:18px;margin:0 0 4px}.sub{color:#a5b4fc;font-size:12px}.status{color:#bae6fd;display:flex;align-items:center;gap:8px}.status.running::before{content:'';width:10px;height:10px;border:2px solid #38bdf8;border-top-color:transparent;border-radius:50%;display:inline-block;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.btn{border:0;border-radius:10px;background:#334155;color:white;padding:10px 14px;font-weight:700;cursor:pointer}.btn.primary{background:#0369a1}.btn.danger{background:var(--danger)}.btn:disabled{opacity:.6;cursor:not-allowed}
-    main{display:grid;grid-template-columns:26% 44% 30%;gap:12px;height:calc(100vh - 76px);padding:12px}.panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);min-height:0;display:flex;flex-direction:column;overflow:hidden}.panel h2{font-size:14px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}.scroll{padding:12px;overflow:auto;min-height:0;flex:1}.item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}.pill{display:inline-block;margin:3px 4px 0 0;padding:3px 7px;border-radius:999px;background:#0f766e;color:#ccfbf1;font-size:12px}.path{color:#93c5fd;font-size:12px;word-break:break-all}.console{border-top:1px solid var(--line);padding:12px;background:#0b1220}.input{width:100%;height:84px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px;resize:vertical}.row{display:flex;gap:8px;margin-top:10px}.message{white-space:pre-wrap}.user{border-color:#0ea5e9}.error{border-color:#f59e0b}.final{border-color:#22c55e}.pre{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;background:#020617;border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;max-height:260px}.small{font-size:12px;color:#bfdbfe}.sectionTitle{color:#bfdbfe;font-weight:700;margin:12px 0 8px}.empty{color:#94a3b8;font-size:13px}.cardHeader{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.copyBtn{border:1px solid var(--line);border-radius:8px;background:#0b1220;color:#bfdbfe;padding:4px 8px;cursor:pointer;font-size:12px}.copyBtn:hover{border-color:#38bdf8;color:#e0f2fe}.toast{position:fixed;right:20px;bottom:20px;background:#064e3b;border:1px solid #22c55e;color:#dcfce7;padding:10px 14px;border-radius:10px;z-index:50}.progressLine{display:flex;align-items:center;gap:8px;margin:6px 0;color:#bfdbfe}.progressDot{width:8px;height:8px;border-radius:999px;background:#38bdf8;animation:pulse 1.2s ease-in-out infinite}.progressDot.done{background:#22c55e;animation:none}.progressDot.wait{background:#f59e0b;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.15)}}
-    .modalBackdrop{position:fixed;inset:0;background:rgba(2,6,23,.72);display:none;align-items:center;justify-content:center;z-index:80}.modalBackdrop.show{display:flex}.modal{width:min(720px,92vw);max-height:86vh;overflow:auto;background:#111827;border:1px solid var(--line);border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.45);padding:18px}.modal h3{margin:0 0 6px;font-size:18px}.fieldLabel{display:block;margin:14px 0 6px;font-weight:700;color:#bfdbfe}.fieldHint{font-size:12px;color:#cbd5e1;white-space:pre-wrap}.fieldInput{width:100%;min-height:40px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px}.fieldInput.area{min-height:110px;font-family:ui-monospace,Consolas,monospace}.modalActions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}.badge{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 8px;color:#bae6fd;font-size:12px}
+    main{display:grid;grid-template-columns:26% 44% 30%;gap:12px;height:calc(100vh - 96px);padding:12px}.panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);min-height:0;display:flex;flex-direction:column;overflow:hidden}.panel h2{font-size:14px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}.scroll{padding:12px;overflow:auto;min-height:0;flex:1}.item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}.pill{display:inline-block;margin:3px 4px 0 0;padding:3px 7px;border-radius:999px;background:#0f766e;color:#ccfbf1;font-size:12px}.path{color:#93c5fd;font-size:12px;word-break:break-all}.console{border-top:1px solid var(--line);padding:12px;background:#0b1220}.input{width:100%;height:84px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px;resize:vertical}.row{display:flex;gap:8px;margin-top:10px}.message{white-space:pre-wrap}.user{border-color:#0ea5e9}.error{border-color:#f59e0b}.final{border-color:#22c55e}.pre{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;background:#020617;border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;max-height:260px}.small{font-size:12px;color:#bfdbfe}.sectionTitle{color:#bfdbfe;font-weight:700;margin:12px 0 8px}.empty{color:#94a3b8;font-size:13px}.cardHeader{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.copyBtn{border:1px solid var(--line);border-radius:8px;background:#0b1220;color:#bfdbfe;padding:4px 8px;cursor:pointer;font-size:12px}.copyBtn:hover{border-color:#38bdf8;color:#e0f2fe}.toast{position:fixed;right:20px;bottom:20px;background:#064e3b;border:1px solid #22c55e;color:#dcfce7;padding:10px 14px;border-radius:10px;z-index:50}.progressLine{display:flex;align-items:center;gap:8px;margin:6px 0;color:#bfdbfe}.progressDot{width:8px;height:8px;border-radius:999px;background:#38bdf8;animation:pulse 1.2s ease-in-out infinite}.progressDot.done{background:#22c55e;animation:none}.progressDot.wait{background:#f59e0b;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.15)}}
+    .modalBackdrop{position:fixed;inset:0;background:rgba(2,6,23,.72);display:none;align-items:center;justify-content:center;z-index:80}.modalBackdrop.show{display:flex}.modal{width:min(720px,92vw);max-height:86vh;overflow:auto;background:#111827;border:1px solid var(--line);border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.45);padding:18px}.modal h3{margin:0 0 6px;font-size:18px}.fieldLabel{display:block;margin:14px 0 6px;font-weight:700;color:#bfdbfe}.fieldHint{font-size:12px;color:#cbd5e1;white-space:pre-wrap}.fieldInput{width:100%;min-height:40px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px}.fieldInput.area{min-height:110px;font-family:ui-monospace,Consolas,monospace}.modalActions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}.badge{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 8px;color:#bae6fd;font-size:12px}.modelBar{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px;max-width:760px}.modelGroup{display:flex;align-items:center;gap:5px;background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:6px 8px}.modelGroup label{font-size:12px;color:#bfdbfe}.modelSelect{background:#020617;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px;max-width:180px}.radioGroup{display:flex;gap:8px;align-items:center}.radioGroup label{font-size:12px;color:#e0f2fe;white-space:nowrap}.modelHint{width:100%;text-align:right;font-size:11px;color:#93c5fd}
   </style>
 </head>
 <body>
 <header>
   <div><h1>Runtime Agent Studio</h1><div class="sub">Auxiliary layer manages participants and tasks. Primary runtime executes delegated work.</div></div>
-  <div class="status" id="status">ready</div>
-  <button class="btn" onclick="refreshState()">Refresh</button>
+  <div class="modelBar">
+    <div class="modelGroup radioGroup">
+      <label><input type="radio" name="modelMode" value="local_only" onchange="onModelModeChanged()"> Local only</label>
+      <label><input type="radio" name="modelMode" value="api_only" onchange="onModelModeChanged()"> API only</label>
+      <label><input type="radio" name="modelMode" value="hybrid" onchange="onModelModeChanged()"> Hybrid</label>
+    </div>
+    <div class="modelGroup"><label for="initialModelSelect">Initial model</label><select id="initialModelSelect" class="modelSelect" onchange="saveModelSelection()"></select></div>
+    <div class="modelGroup"><label for="localModelSelect">Local</label><select id="localModelSelect" class="modelSelect" onchange="saveModelSelection()"></select></div>
+    <div class="modelGroup"><label for="apiModelSelect">API</label><select id="apiModelSelect" class="modelSelect" onchange="saveModelSelection()"></select></div>
+    <button class="btn" onclick="refreshState()">Refresh</button>
+    <div class="status" id="status">ready</div>
+    <div id="modelPolicyHint" class="modelHint"></div>
+  </div>
 </header>
 <main>
   <section class="panel"><h2>Interactive Console <span id="profileCount" class="small"></span></h2><div class="scroll" id="messages"></div><div class="console"><textarea id="input" class="input" placeholder="Enter a runtime instruction. Command phrases are loaded from configuration."></textarea><div class="row"><button id="sendBtn" class="btn primary" onclick="sendMessage()">Send</button><button class="btn" onclick="quickExecute()">Execute Named Task</button></div></div></section>
@@ -36,13 +47,18 @@ let lastSubmittedInstruction = '';
 let lastMissingInputs = [];
 let lastPendingRunId = '';
 let lastPendingInstruction = '';
+let modelSelectionState = null;
+let suppressModelSave = false;
 
 async function sendMessage(){
   const input=document.getElementById('input');
   const text=input.value.trim();
   if(!text)return;
-  input.value='';
   lastSubmittedInstruction=text;
+  lastPendingInstruction=text;
+  const canStart = await ensureSelectedModelCredential();
+  if(!canStart){ return; }
+  input.value='';
   addMessage(text,'item user');
   const btn=document.getElementById('sendBtn');
   btn.disabled=true;
@@ -239,6 +255,91 @@ function showToast(text){
   setTimeout(()=>el.remove(), 1600);
 }
 
+async function loadModelSelection(){
+  try{
+    const res=await fetch('/api/agent-studio/model-selection');
+    const data=await res.json();
+    modelSelectionState=data;
+    renderModelSelection(data);
+  }catch(e){ console.error(e); }
+}
+function optionText(item){
+  const parts=[item.model_id||'model'];
+  if(item.provider) parts.push(item.provider);
+  if(item.cost_class) parts.push(item.cost_class);
+  return parts.join(' / ');
+}
+function fillSelect(select, items, value){
+  select.innerHTML='';
+  (items||[]).forEach(item=>{
+    const opt=document.createElement('option');
+    opt.value=item.model_id;
+    opt.textContent=optionText(item);
+    if(item.requires_secret){ opt.dataset.secret=item.requires_secret; }
+    select.appendChild(opt);
+  });
+  if(value){ select.value=value; }
+}
+function renderModelSelection(data){
+  const selection=(data&&data.selection)||{};
+  const models=(data&&data.available_models)||{};
+  suppressModelSave=true;
+  document.querySelectorAll('input[name="modelMode"]').forEach(r=>{ r.checked = r.value === (selection.mode||'api_only'); });
+  fillSelect(document.getElementById('localModelSelect'), models.local||[], selection.selected_local_model_id||'qwen3:8b');
+  fillSelect(document.getElementById('apiModelSelect'), models.api||[], selection.selected_api_model_id||'gpt-4o-mini');
+  const mode=selection.mode||'api_only';
+  const initialItems = mode==='local_only' ? (models.local||[]) : (mode==='api_only' ? (models.api||[]) : (models.all||[]));
+  fillSelect(document.getElementById('initialModelSelect'), initialItems, selection.initial_model_id);
+  document.getElementById('localModelSelect').disabled = mode==='api_only';
+  document.getElementById('apiModelSelect').disabled = mode==='local_only';
+  document.getElementById('initialModelSelect').disabled = false;
+  const hint=document.getElementById('modelPolicyHint');
+  hint.textContent = `Mode: ${mode}; initial: ${selection.initial_model_id||''}; escalation: ${selection.allow_escalation ? 'enabled' : 'disabled'}`;
+  suppressModelSave=false;
+}
+function currentModelMode(){
+  const checked=document.querySelector('input[name="modelMode"]:checked');
+  return checked ? checked.value : 'api_only';
+}
+async function onModelModeChanged(){
+  const mode=currentModelMode();
+  const localSel=document.getElementById('localModelSelect');
+  const apiSel=document.getElementById('apiModelSelect');
+  if(mode==='local_only'){
+    if(!localSel.value){ localSel.value='qwen3:8b'; }
+    document.getElementById('initialModelSelect').value=localSel.value;
+  } else if(mode==='api_only'){
+    document.getElementById('initialModelSelect').value=apiSel.value;
+  }
+  await saveModelSelection();
+}
+async function saveModelSelection(){
+  if(suppressModelSave){ return; }
+  const mode=currentModelMode();
+  const payload={
+    mode,
+    selected_local_model_id: document.getElementById('localModelSelect').value || 'qwen3:8b',
+    selected_api_model_id: document.getElementById('apiModelSelect').value || 'gpt-4o-mini',
+    initial_model_id: document.getElementById('initialModelSelect').value || '',
+    allow_escalation: true,
+    ask_for_missing_keys_at_start: true
+  };
+  if(mode==='local_only'){ payload.initial_model_id=payload.selected_local_model_id; }
+  if(mode==='api_only'){ payload.initial_model_id=payload.selected_api_model_id; }
+  const res=await fetch('/api/agent-studio/model-selection',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const data=await res.json();
+  modelSelectionState=data;
+  renderModelSelection(data);
+}
+async function ensureSelectedModelCredential(){
+  await saveModelSelection();
+  const data=modelSelectionState;
+  if(!data || !data.secret_prompt_required){ return true; }
+  const key=data.required_secret;
+  if(!key){ return true; }
+  openMissingInputModal([{kind:'secret_input', field:key, input_type:'password', message:'The selected initial API model requires a credential. Enter the key to continue, or cancel to stop this run.', provider:(data.selection&&data.selection.initial_provider)||'api provider'}], 'model_selection');
+  return false;
+}
 
 function quickExecute(){ const name=prompt('Task name to execute'); if(name){ document.getElementById('input').value='execute '+name; sendMessage(); }}
 async function refreshState(){ try{ const res=await fetch('/api/agent-studio/state'); const data=await res.json(); renderState(data); }catch(e){ console.error(e); }}
@@ -357,6 +458,7 @@ function card(title, body){
   el.appendChild(pre);
   return el;
 }
+loadModelSelection();
 refreshState();
 </script>
 </body>

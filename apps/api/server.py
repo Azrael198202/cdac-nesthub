@@ -10,12 +10,14 @@ from ai_core.orchestration.workflow_runtime import WorkflowRuntime
 from ai_core.events.event_bus import event_bus
 from auxiliary_brain.studio import AgentStudioService
 from ai_core.runtime.bootstrap import RuntimeBootstrapService
+from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 
 approval_learning = ApprovalLearningService()
 app = FastAPI()
 runtime = WorkflowRuntime()
 studio_service = AgentStudioService()
 bootstrap_service = RuntimeBootstrapService()
+model_selection_store = UserModelSelectionStore()
 
 
 class ChatRequest(BaseModel):
@@ -31,6 +33,15 @@ class AgentStudioRequest(BaseModel):
 class AgentStudioSecretRequest(BaseModel):
     key: str
     value: str
+
+
+class AgentStudioModelSelectionRequest(BaseModel):
+    mode: str
+    initial_model_id: str | None = None
+    selected_local_model_id: str | None = None
+    selected_api_model_id: str | None = None
+    allow_escalation: bool = True
+    ask_for_missing_keys_at_start: bool = True
 
 
 class AgentStudioResumeRunRequest(BaseModel):
@@ -93,6 +104,17 @@ async def agent_studio_home():
         },
     )
 
+
+
+
+@app.get("/api/agent-studio/model-selection")
+async def agent_studio_model_selection_state():
+    return JSONResponse(model_selection_store.state())
+
+
+@app.post("/api/agent-studio/model-selection")
+async def agent_studio_model_selection_update(req: AgentStudioModelSelectionRequest):
+    return JSONResponse(model_selection_store.update(req.dict()))
 
 @app.get("/api/agent-studio/state")
 async def agent_studio_state():
