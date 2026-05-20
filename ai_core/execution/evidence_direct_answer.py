@@ -75,7 +75,7 @@ class EvidenceDirectAnswerBuilder:
         structured_records = normalized.get("normalized_facts") if isinstance(normalized.get("normalized_facts"), list) else []
         answer_material = str(normalized.get("answer_material") or "").strip()
         quality = normalized.get("answer_material_quality") if isinstance(normalized.get("answer_material_quality"), dict) else {}
-        if (not structured_records) or (not answer_material) or quality.get("passed") is False:
+        if (not structured_records) or (not answer_material) or quality.get("passed") is False or not self._has_measurement_signal(answer_material, structured_records):
             # Do not promote arbitrary raw HTML/DOM numeric fragments to final
             # facts when the quality gate failed.  This prevents coordinates,
             # altitude, menu numbers, and similar page chrome from becoming an
@@ -232,6 +232,15 @@ class EvidenceDirectAnswerBuilder:
         return covered / considered
 
     def _variants(self, value: Any) -> list[str]:
+        variants: list[str] = []
+        if isinstance(value, dict):
+            for x in value.values():
+                variants.extend(self._variants(x))
+            return [v for v in dict.fromkeys(variants) if v]
+        if isinstance(value, (list, tuple, set)):
+            for x in value:
+                variants.extend(self._variants(x))
+            return [v for v in dict.fromkeys(variants) if v]
         raw = str(value).strip().lower()
         variants = [raw]
         if not (len(raw) >= 10 and raw[4:5] == "-" and raw[7:8] == "-"):
@@ -260,6 +269,13 @@ class EvidenceDirectAnswerBuilder:
             except Exception:
                 pass
         return [self._normalize_text(v) for v in variants if v]
+
+    def _has_measurement_signal(self, material: str, records: list[dict[str, Any]]) -> bool:
+        probe = str(material or "")
+        for record in records[:24]:
+            if isinstance(record, dict):
+                probe += " " + " ".join(str(record.get(k, "")) for k in ("value", "unit", "context"))
+        return bool(re.search(r"[-+]?\d+(?:\.\d+)?\s*(?:°\s*[CFcf]?|%|mm|cm|km/h|mph|m/s|hPa|kPa|¥|\$|€)", probe))
 
     def _build_answer_material(self, text: str, known: dict[str, Any], records: list[dict[str, Any]]) -> str:
         if records:

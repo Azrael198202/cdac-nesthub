@@ -131,8 +131,9 @@ class AdaptiveEvidenceReducer:
 
     def _compact_material(self, *, materials: list[str], facts: list[dict[str, Any]], blocks: list[str], budget: EvidenceBudget) -> str:
         lines: list[str] = []
-        if facts:
-            for fact in facts[: min(len(facts), 16)]:
+        ordered_facts = self._ordered_facts_for_material(facts)
+        if ordered_facts:
+            for fact in ordered_facts[: min(len(ordered_facts), 24)]:
                 value = str(fact.get("value") or "").strip()
                 unit = str(fact.get("unit") or "").strip()
                 label = str(fact.get("label") or fact.get("kind") or "value").strip()
@@ -142,9 +143,15 @@ class AdaptiveEvidenceReducer:
                 if line:
                     lines.append(line)
         if not lines:
-            lines.extend(materials[:6])
+            for material in materials[:6]:
+                text = " ".join(str(material or "").split())
+                if self._measurement_signal(text):
+                    lines.append(text[:900])
         if not lines:
-            lines.extend(blocks[:6])
+            for block in blocks[:6]:
+                text = " ".join(str(block or "").split())
+                if self._measurement_signal(text):
+                    lines.append(text[:700])
         compact = []
         seen: set[str] = set()
         for line in lines:
@@ -155,13 +162,29 @@ class AdaptiveEvidenceReducer:
                 compact.append(text)
         return "\n".join(compact)[: budget.llm_material_chars]
 
+    def _ordered_facts_for_material(self, facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        def score(fact: dict[str, Any]) -> tuple[int, int, int, float]:
+            kind = str(fact.get("kind") or "")
+            structured = 1 if (fact.get("structured") or kind in {"temporal_measurement", "aligned_record"}) else 0
+            targeted = 1 if fact.get("target") else 0
+            measured = 1 if self._measurement_signal(" ".join(str(fact.get(k, "")) for k in ("value", "unit", "context"))) else 0
+            confidence = float(fact.get("confidence") or 0)
+            return (structured, targeted, measured, confidence)
+        usable = [f for f in facts if isinstance(f, dict) and self._measurement_signal(" ".join(str(f.get(k, "")) for k in ("value", "unit", "context")))]
+        usable.sort(key=score, reverse=True)
+        return usable
+
+    def _measurement_signal(self, text: str) -> bool:
+        return bool(__import__("re").search(r"[-+]?\d+(?:\.\d+)?\s*(?:°\s*[CFcf]?|%|mm|cm|km/h|mph|m/s|hPa|kPa|¥|\$|€)", str(text or "")))
+
     def _merged_quality(self, *, qualities: list[dict[str, Any]], facts: list[dict[str, Any]], blocks: list[str], budget: EvidenceBudget) -> dict[str, Any]:
         scores = [float(q.get("score") or 0) for q in qualities if isinstance(q, dict)]
         score = max(scores) if scores else 0.0
-        if facts:
-            score = max(score, min(0.95, 0.45 + len(facts) * 0.035))
+        material_facts = self._ordered_facts_for_material(facts)
+        if material_facts:
+            score = max(score, min(0.95, 0.45 + len(material_facts) * 0.035))
         return {
-            "passed": bool(facts or blocks),
+            "passed": bool(material_facts or any(self._measurement_signal(str(b)) for b in blocks)),
             "score": round(score, 3),
             "fact_count": len(facts),
             "block_count": len(blocks),

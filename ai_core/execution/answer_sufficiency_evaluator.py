@@ -19,10 +19,36 @@ class RuntimeSemanticSignalEvaluator:
     GENERIC_DOC_TITLE_HINTS = ("api", "sdk", "docs", "documentation", "developer", "reference")
 
     def extract_query_terms(self, *, user_input: str, objective: str | None, capability: str | None, known: dict[str, Any]) -> list[str]:
-        raw = " ".join(str(x or "") for x in [user_input, objective, capability])
-        for value in known.values():
+        # Prefer the runtime step objective over a large transport/envelope
+        # message.  The envelope can contain many orchestration words that are
+        # unrelated to the actual evidence need and can otherwise dominate
+        # semantic scoring.
+        objective_text = str(objective or "").strip()
+        capability_text = str(capability or "").strip()
+        raw = " ".join(x for x in [objective_text, capability_text] if x)
+        if not raw:
+            raw = self._extract_embedded_objective(str(user_input or "")) or str(user_input or "")
+        for value in self._flatten_values(known):
             raw = raw.replace(str(value), " ")
         return self._dedupe_keep_order(self._tokens(raw))[:16]
+
+    def _extract_embedded_objective(self, text: str) -> str:
+        match = re.search(r'"objective"\s*:\s*"([^"]+)"', str(text or ""), flags=re.I)
+        return match.group(1) if match else ""
+
+    def _flatten_values(self, value: Any) -> list[Any]:
+        values: list[Any] = []
+        def add(v: Any) -> None:
+            if isinstance(v, dict):
+                for x in v.values():
+                    add(x)
+            elif isinstance(v, (list, tuple, set)):
+                for x in v:
+                    add(x)
+            elif v is not None and str(v).strip():
+                values.append(v)
+        add(value)
+        return values
 
     def semantic_signal(self, text: str, query_terms: list[str]) -> float:
         hay = self._normalize(text)
@@ -221,6 +247,21 @@ class AnswerSufficiencyEvaluator:
                 continue
             if isinstance(value, (str, int, float, bool)):
                 output[str(key)] = value
+            elif isinstance(value, (list, tuple, set)):
+                compact = [x for x in value if isinstance(x, (str, int, float, bool)) and str(x).strip()]
+                if compact:
+                    output[str(key)] = compact
+            elif isinstance(value, dict):
+                compact_dict: dict[str, Any] = {}
+                for child_key, child_value in value.items():
+                    if isinstance(child_value, (str, int, float, bool)) and str(child_value).strip():
+                        compact_dict[str(child_key)] = child_value
+                    elif isinstance(child_value, (list, tuple, set)):
+                        child_list = [x for x in child_value if isinstance(x, (str, int, float, bool)) and str(x).strip()]
+                        if child_list:
+                            compact_dict[str(child_key)] = child_list
+                if compact_dict:
+                    output[str(key)] = compact_dict
         return output
 
     def _evidence_text(self, item: dict[str, Any]) -> str:
@@ -276,6 +317,15 @@ class AnswerSufficiencyEvaluator:
         return {"passed": not missing and not partial, "coverage_ratio": round(ratio, 3), "matched": matched, "missing": missing, "partial": partial}
 
     def _variants(self, value: Any) -> list[str]:
+        variants: list[str] = []
+        if isinstance(value, dict):
+            for x in value.values():
+                variants.extend(self._variants(x))
+            return [v for v in dict.fromkeys(variants) if v]
+        if isinstance(value, (list, tuple, set)):
+            for x in value:
+                variants.extend(self._variants(x))
+            return [v for v in dict.fromkeys(variants) if v]
         raw = self._normalize(str(value).strip())
         variants = [raw]
         if "," in raw:
@@ -300,8 +350,16 @@ class AnswerSufficiencyEvaluator:
         return [v for v in dict.fromkeys(variants) if v]
 
     def _partial_variants(self, value: Any) -> list[str]:
-        raw = self._normalize(str(value).strip())
         variants: list[str] = []
+        if isinstance(value, dict):
+            for x in value.values():
+                variants.extend(self._partial_variants(x))
+            return [v for v in dict.fromkeys(variants) if v]
+        if isinstance(value, (list, tuple, set)):
+            for x in value:
+                variants.extend(self._partial_variants(x))
+            return [v for v in dict.fromkeys(variants) if v]
+        raw = self._normalize(str(value).strip())
         if len(raw) >= 10 and raw[4:5] == "-" and raw[7:8] == "-":
             y, m = raw[:4], raw[5:7]
             try:

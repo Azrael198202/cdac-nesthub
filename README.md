@@ -85,3 +85,26 @@ See `docs/MODEL_STAGE_POLICY_DESIGN.md`.
 - Deep web research now materializes browser observations in this order: network JSON, embedded machine-readable structures, rendered DOM relations, then generic sequence fallback.
 - Structured browser evidence prevents free-text numeric extraction from polluting results with page metadata/navigation values.
 - Packaging preserves source/runtime code and excludes generated runtime artifacts, traces, checkpoints, caches, secrets, __pycache__, and .pyc files.
+
+
+## v2.9.30
+- Tightened generic evidence sufficiency so runtime lists/dates are preserved.
+- Prevented transport/envelope text from dominating semantic scoring.
+- Added stricter measurement-bearing material gates before final synthesis.
+- Preferred structured/target-aligned facts over raw page headings or metadata.
+
+## v2.9.31 DeepSearch white-box trace
+
+Adds a generic, domain-neutral white-box trace for layered browser/web evidence processing.
+When enabled, the runtime writes compact JSONL events under `runtime/traces/deepsearch_whitebox/<run_id>/` for:
+
+1. Playwright/browser observation start and result
+2. Network/XHR/JSON response extraction
+3. Embedded machine-readable payload extraction
+4. Script JSON extraction
+5. DOM relation/table extraction
+6. HTTP fallback extraction
+7. Temporal/numeric sequence fallback
+8. Evidence reduction and final material selection
+
+The trace records candidate counts, selected URLs, fact counts, material previews, quality gate values, and skip/failure reasons without adding domain-specific logic.

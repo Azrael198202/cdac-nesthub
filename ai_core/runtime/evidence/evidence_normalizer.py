@@ -95,7 +95,7 @@ class RuntimeEvidenceNormalizer:
     """
 
     VALUE_WITH_UNIT = re.compile(
-        r"[-+]?\d+(?:\.\d+)?\s*(?:°\s*[CFcf]?|%|mm|cm|m|km/h|mph|hPa|kPa|kg|g|ml|L|l|円|¥|\$|€)"
+        r"[-+]?\d+(?:\.\d+)?\s*(?:°\s*[CFcf]?|%|mm|cm|m|km/h|mph|hPa|kPa|kg|g|ml|円|¥|\$|€)"
     )
     NUMBER = re.compile(r"[-+]?\d+(?:\.\d+)?")
     ISO_DATE = re.compile(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$")
@@ -193,13 +193,20 @@ class RuntimeEvidenceNormalizer:
             if not isinstance(item, dict):
                 continue
             value = str(item.get("value") or item.get("context") or "").strip()
+            context = str(item.get("context") or value)
             if not value:
+                continue
+            # Keep only aligned records that carry actual measurement-like
+            # content.  A date/heading/navigation block can match the target
+            # but is not sufficient answer material.
+            probe = f"{value} {context}"
+            if len(self.VALUE_WITH_UNIT.findall(probe)) < 1:
                 continue
             records.append(EvidenceRecord(
                 kind="aligned_record",
                 label=str(item.get("label") or "target_record"),
                 value=value,
-                context=str(item.get("context") or value),
+                context=context,
                 target=str(item.get("target") or ""),
                 confidence=float(item.get("confidence") or 0.82),
                 source_url=source_url,
@@ -376,7 +383,14 @@ class RuntimeEvidenceNormalizer:
         return count
 
     def _quality(self, *, records: list[EvidenceRecord], blocks: list[str], variables: dict[str, list[str]]) -> dict[str, Any]:
-        target_count = sum(1 for aliases in variables.values() for alias in aliases if self.ISO_DATE.match(str(alias)))
+        target_keys: set[str] = set()
+        for aliases in variables.values():
+            for alias in aliases:
+                m = self.ISO_DATE.match(str(alias))
+                if m:
+                    y, mo, d = m.groups()
+                    target_keys.add(f"{int(y):04d}-{int(mo):02d}-{int(d):02d}")
+        target_count = len(target_keys)
         aligned_targets = {r.target for r in records if r.target}
         unit_records = [r for r in records if r.unit]
         long_blocks = [b for b in blocks if len(b) > 700]
@@ -386,14 +400,26 @@ class RuntimeEvidenceNormalizer:
             coverage_bonus = min(0.25, len(aligned_targets) / max(1, target_count) * 0.25)
         score = 0.2 + min(len(records), 16) * 0.035 + min(len(unit_records), 8) * 0.03 + coverage_bonus - noise_penalty
         score = max(0.0, min(0.99, score))
-        target_aligned = (len(aligned_targets) > 0) if target_count else True
+        measurement_aligned_targets = {
+            r.target for r in records
+            if r.target and self._record_has_measurement_signal(r)
+        }
+        if target_count:
+            required_target_hits = min(target_count, max(1, target_count))
+            target_aligned = (
+                len(measurement_aligned_targets) >= required_target_hits
+                or (len(aligned_targets) >= required_target_hits and bool(unit_records))
+            )
+        else:
+            target_aligned = bool(unit_records)
         return {
-            "passed": bool(records) and target_aligned and (bool(unit_records) or bool(aligned_targets)),
+            "passed": bool(records) and target_aligned and (bool(unit_records) or bool(measurement_aligned_targets)),
             "score": round(score, 3),
             "record_count": len(records),
             "unit_record_count": len(unit_records),
             "target_count": target_count,
             "aligned_target_count": len(aligned_targets),
+            "measurement_aligned_target_count": len(measurement_aligned_targets),
             "long_block_count": len(long_blocks),
             "raw_evidence_omitted": True,
             "domain_specific_rules_used": False,
@@ -401,14 +427,31 @@ class RuntimeEvidenceNormalizer:
 
     def _material(self, *, records: list[EvidenceRecord], selected_blocks: list[str]) -> str:
         lines: list[str] = []
-        aligned = [r for r in records if r.kind == "aligned_record"]
-        if aligned:
-            for record in aligned[:8]:
-                lines.append(record.value)
+        preferred = [
+            r for r in records
+            if (r.kind in {"temporal_measurement", "aligned_record"} or r.target)
+            and self._record_has_measurement_signal(r)
+        ]
+        if preferred:
+            for record in preferred[:12]:
+                target = str(record.target or "").strip()
+                label = str(record.label or record.kind).strip()
+                value = (str(record.value or "") + str(record.unit or "")).strip()
+                context = self._compact(record.context or "")
+                if record.kind == "aligned_record":
+                    line = " | ".join(x for x in [target, record.value] if x)
+                else:
+                    line = " | ".join(x for x in [target, label, value, context[:220]] if x)
+                lines.append(line)
         else:
-            for block in selected_blocks[:3]:
+            compact_blocks = [b for b in selected_blocks if len(b) <= 900 and len(self.VALUE_WITH_UNIT.findall(b)) >= 1]
+            for block in compact_blocks[:3]:
                 lines.append(block[:420])
         return "\n".join(self._dedupe_text([self._compact(x) for x in lines if x]))[:1800]
+
+    def _record_has_measurement_signal(self, record: EvidenceRecord) -> bool:
+        probe = f"{record.value} {record.unit} {record.context}"
+        return bool(record.unit or self.VALUE_WITH_UNIT.search(probe))
 
     def _split_value_unit(self, value_unit: str) -> tuple[str, str]:
         match = re.match(r"^([-+]?\d+(?:\.\d+)?)\s*(.*)$", value_unit.strip())
@@ -471,5 +514,10 @@ class RuntimeEvidenceNormalizer:
                 continue
             seen.add(key)
             result.append(record)
-        result.sort(key=lambda r: (-float(r.confidence or 0), r.target, r.label))
+        def priority(record: EvidenceRecord) -> tuple[int, int, int, float, str, str]:
+            structured = 1 if record.kind in {"temporal_measurement", "aligned_record"} else 0
+            targeted = 1 if record.target else 0
+            measured = 1 if self._record_has_measurement_signal(record) else 0
+            return (-structured, -targeted, -measured, -float(record.confidence or 0), record.target, record.label)
+        result.sort(key=priority)
         return result[:32]
