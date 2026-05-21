@@ -126,6 +126,14 @@ class LLMStageInputSlimmer:
                 if policy:
                     compact[key] = policy
                 continue
+            if key == "context" and isinstance(value, dict):
+                if node_id == "input_parsing":
+                    context = self._compact_input_context(value)
+                else:
+                    context = self._compact_runtime_context(value)
+                if context:
+                    compact[key] = context
+                continue
             if key in self.KEEP_INPUT_KEYS:
                 compact[key] = self._compact_value(value, max_depth=2)
                 continue
@@ -133,10 +141,56 @@ class LLMStageInputSlimmer:
             if isinstance(value, (str, int, float, bool)) or value is None:
                 compact[key] = value
         if node_id == "input_parsing":
-            # The first stage should understand the user/runtime request, not the
-            # entire orchestration envelope.
+            # The first stage should parse the participant's own request only.
+            # Coordination graphs, dependency plans, peer results, and execution
+            # traces belong to graph scheduling / context-awareness / synthesis.
+            # Including them here makes local JSON models emit malformed JSON.
             return compact
         return compact
+
+    def _compact_input_context(self, value: dict[str, Any]) -> dict[str, Any]:
+        keep_scalars = {
+            "task_graph_id",
+            "participant_count",
+            "relationship",
+            "relation",
+            "execution_group",
+        }
+        out: dict[str, Any] = {}
+        for key in keep_scalars:
+            item = value.get(key)
+            if isinstance(item, (str, int, float, bool)) or item is None:
+                out[key] = item
+        policy = value.get("participant_dependency_policy")
+        if isinstance(policy, dict):
+            out["participant_dependency_policy"] = {
+                str(k): v for k, v in policy.items()
+                if isinstance(v, (str, int, float, bool)) or v is None
+            }
+        node = value.get("own_mind_graph_node")
+        if isinstance(node, dict):
+            out["own_mind_graph_node"] = {
+                k: node.get(k)
+                for k in ("node_id", "node_type", "name", "objective", "relation", "depends_on")
+                if k in node
+            }
+        # Never include full task_mind_graph, participant_dependency_plan,
+        # available_peer_results, traces, or previous result payloads in
+        # input_parsing. Dependent agents receive peer summaries only in later
+        # context-aware stages.
+        return out
+
+    def _compact_runtime_context(self, value: dict[str, Any]) -> dict[str, Any]:
+        out = self._compact_input_context(value)
+        peer_results = value.get("available_peer_results")
+        if isinstance(peer_results, list):
+            safe: list[Any] = []
+            for item in peer_results[:5]:
+                if isinstance(item, dict):
+                    safe.append(self._compact_value(item, max_depth=2))
+            if safe:
+                out["available_peer_results"] = safe
+        return out
 
     def _allowed_previous_nodes(self, node_id: str) -> list[str]:
         if node_id == "input_parsing":
