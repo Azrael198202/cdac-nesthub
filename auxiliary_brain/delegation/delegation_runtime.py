@@ -74,7 +74,7 @@ class AgentDelegationRuntime:
         agent_results = []
         execution_order = self._participants_in_mind_graph_order(selected, task_mind_graph)
         for index, participant in enumerate(execution_order):
-            participant_name = str(participant.get("name") or participant.get("participant_id") or "participant")
+            participant_name = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant.get("participant_id") or "participant")
             self._record_progress(
                 run_payload,
                 f"participant_{index + 1}_prepare",
@@ -329,7 +329,7 @@ class AgentDelegationRuntime:
             participant_id = str(participant.get("participant_id") or participant.get("id") or "")
             if participant_id in completed_ids:
                 continue
-            participant_name = str(participant.get("name") or participant_id or "participant")
+            participant_name = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant_id or "participant")
             self._record_progress(run_payload, f"participant_{index + 1}_primary_runtime", f"Primary runtime executing participant: {participant_name}", "running")
             request = AgentExecutionRequest(
                 participant_id=participant_id,
@@ -418,7 +418,7 @@ class AgentDelegationRuntime:
         return str(participant.get("participant_id") or participant.get("id") or participant.get("name") or "").strip()
 
     def _participant_name(self, participant: dict[str, Any]) -> str:
-        return str(participant.get("name") or participant.get("participant_id") or participant.get("id") or "participant").strip()
+        return str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant.get("participant_id") or participant.get("id") or "participant").strip()
 
     def _participant_objective(self, participant: dict[str, Any]) -> str:
         return str(participant.get("execution_objective") or participant.get("instruction") or participant.get("description") or "").strip()

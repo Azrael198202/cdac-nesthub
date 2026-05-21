@@ -220,7 +220,7 @@ class AgentParameterContractService:
 
     def to_missing_input_fields(self, participant: dict[str, Any]) -> list[dict[str, Any]]:
         pid = str(participant.get("participant_id") or "")
-        pname = str(participant.get("name") or pid or "participant")
+        pname = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or pid or "participant")
         fields: list[dict[str, Any]] = []
         for param in self.missing_parameters(participant):
             name = str(param.get("name") or "").strip()

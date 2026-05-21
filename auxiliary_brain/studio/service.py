@@ -181,6 +181,9 @@ class AgentStudioService:
         payload = {
             "participant_id": participant_id,
             "name": participant_name,
+            "agent_name": participant_name,
+            "display_name": participant_name,
+            "role_name": participant_name,
             "instruction": execution_objective,
             "execution_objective": execution_objective,
             "definition_instruction": instruction,
@@ -199,6 +202,8 @@ class AgentStudioService:
             "origin": "auxiliary_brain",
             "status": "completed",
             "participant_id": participant_id,
+            "agent_name": participant_name,
+            "display_name": participant_name,
             "path": str(path),
         }
 
