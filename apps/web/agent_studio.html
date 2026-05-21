@@ -150,15 +150,50 @@ function openMissingInputModal(items, runId){
     input.className='fieldInput '+(area?'area':'');
     input.dataset.field=field;
     input.dataset.kind=kind;
-    input.placeholder=field;
+    input.dataset.inputType=inputType;
+    input.dataset.values='[]';
+    input.placeholder=inputType==='list' ? 'Enter one value, then click Continue or Done' : field;
     wrap.appendChild(label);
     wrap.appendChild(hint);
     wrap.appendChild(input);
+    if(inputType==='list'){
+      const chips=document.createElement('div');
+      chips.className='small';
+      chips.id='missing_values_'+idx;
+      chips.style.marginTop='6px';
+      const actions=document.createElement('div');
+      actions.className='row';
+      const addBtn=document.createElement('button');
+      addBtn.type='button';
+      addBtn.className='btn';
+      addBtn.textContent='Continue / add value';
+      addBtn.onclick=()=>addListValue(input, chips);
+      const doneBtn=document.createElement('button');
+      doneBtn.type='button';
+      doneBtn.className='btn primary';
+      doneBtn.textContent='Done for this parameter';
+      doneBtn.onclick=()=>addListValue(input, chips);
+      actions.appendChild(addBtn);
+      actions.appendChild(doneBtn);
+      wrap.appendChild(chips);
+      wrap.appendChild(actions);
+    }
     fields.appendChild(wrap);
-    if(!area){ input.addEventListener('keydown', (event)=>{ if(event.key==='Enter'){ event.preventDefault(); submitMissingInputs(); }}); }
+    if(!area){ input.addEventListener('keydown', (event)=>{ if(event.key==='Enter'){ event.preventDefault(); if(inputType==='list'){ addListValue(input, document.getElementById('missing_values_'+idx)); } else { submitMissingInputs(); } }}); }
   });
   modal.classList.add('show');
 }
+
+function addListValue(input, chips){
+  if(!input){ return; }
+  const raw=input.value.trim();
+  let values=[];
+  try{ values=JSON.parse(input.dataset.values||'[]'); }catch(e){ values=[]; }
+  if(raw){ values.push(raw); input.value=''; }
+  input.dataset.values=JSON.stringify(values);
+  if(chips){ chips.textContent = values.length ? ('Values: ' + values.join(' | ')) : 'No values added yet.'; }
+}
+
 function closeMissingInputModal(){ document.getElementById('missingInputModal').classList.remove('show'); }
 async function skipCredentialAndContinue(){
   closeMissingInputModal();
@@ -181,16 +216,23 @@ async function submitMissingInputs(){
   inputs.forEach(input=>{
     const field=(input.dataset.field||'').trim();
     const kind=(input.dataset.kind||'').trim();
-    const value=input.value.trim();
+    const inputType=(input.dataset.inputType||'').trim();
+    let value=input.value.trim();
     if(!field){ return; }
+    if(inputType==='list'){
+      let values=[];
+      try{ values=JSON.parse(input.dataset.values||'[]'); }catch(e){ values=[]; }
+      if(value){ values.push(value); }
+      value=values;
+    }
     if(kind==='secret_input' || kind==='optional_credential_choice'){
       provided.secret_key=field;
-      provided.value=value;
+      provided.value=Array.isArray(value) ? value.join(',') : value;
     } else {
       provided[field]=value;
     }
   });
-  const hasValue=Object.values(provided).some(v=>String(v||'').trim()!=='');
+  const hasValue=Object.values(provided).some(v=>Array.isArray(v) ? v.length>0 : String(v||'').trim()!=='');
   if(!hasValue){ addMessage('Please enter at least one value before continuing.','item error'); return; }
   closeMissingInputModal();
   if(provided.secret_key && provided.value){
@@ -417,11 +459,18 @@ function deriveMissingInputs(run){
     const fieldName = firstSecret.name || apiSource.secret_key || pending.secret_key || 'runtime_access_key';
     return [{kind:kind, field:String(fieldName), message:String(pending.message||request.message||'A credential-protected method is available. Enter a key to use it, or continue without this key to try another allowed method.'), input_type:'password', provider:String(provider), source_url:String(sourceUrl), api_source:apiSource, api_sources:apiSources}];
   }
-  if(kind==='human_information_required'){
+  if(kind==='human_information_required' || kind==='agent_parameter_collection'){
     const request = pending.request || {};
     const fields = Array.isArray(request.fields) ? request.fields : [];
     if(fields.length){
-      return fields.map((f,idx)=>({kind:kind, field:String(f.name||f.field||('field_'+idx)), message:String(f.message||f.label||request.message||'Please provide this value.'), input_type:String(f.input_type||'text')}));
+      return fields.map((f,idx)=>({
+        kind:String(f.kind||kind),
+        field:String(f.name||f.field||('field_'+idx)),
+        message:String(f.message||f.label||request.message||'Please provide this value.'),
+        input_type:String(f.input_type||'text'),
+        participant_name:String(f.participant_name||''),
+        parameter_name:String(f.parameter_name||'')
+      }));
     }
     return [{kind:kind, field:'input', message:String(request.message||pending.message||'Please provide the required information.')}];
   }

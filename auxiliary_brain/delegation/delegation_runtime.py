@@ -7,6 +7,7 @@ from ai_core.agent_delegation import AgentExecutionRequest, PrimaryBrainDelegati
 from auxiliary_brain.storage import JsonStore
 from auxiliary_brain.runtime import new_id
 from auxiliary_brain.delegation.task_mind_graph import TaskMindGraphBuilder
+from auxiliary_brain.parameters.agent_parameter_contract import AgentParameterContractService
 
 
 class AgentDelegationRuntime:
@@ -21,6 +22,7 @@ class AgentDelegationRuntime:
     def __init__(self, store: JsonStore | None = None, primary_client: PrimaryBrainDelegationClient | None = None) -> None:
         self.store = store or JsonStore()
         self.primary_client = primary_client or PrimaryBrainDelegationClient()
+        self.parameter_contract_service = AgentParameterContractService()
 
     async def execute_task(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
         run_id = new_id("delegation_run")
@@ -47,6 +49,27 @@ class AgentDelegationRuntime:
         }
         self._record_progress(run_payload, "prepare", "Preparing delegation run", "running")
         self._record_global_mind_graph_progress(run_payload, task_mind_graph)
+
+        missing_parameter_fields = self._collect_missing_agent_parameter_fields(selected)
+        if missing_parameter_fields:
+            pending_action = {
+                "kind": "agent_parameter_collection",
+                "message": "Agent execution requires parameter values before runtime can continue.",
+                "request": {
+                    "input_mode": "multi_value_list",
+                    "fields": missing_parameter_fields,
+                },
+            }
+            run_payload.update({
+                "status": "requires_input",
+                "current_stage": "waiting_for_agent_parameters",
+                "pending_action": pending_action,
+                "missing_inputs": missing_parameter_fields,
+                "completed_at": self._now(),
+            })
+            self._record_progress(run_payload, "waiting_agent_parameters", "Waiting for agent parameter values", "waiting")
+            self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+            return run_payload
 
         agent_results = []
         execution_order = self._participants_in_mind_graph_order(selected, task_mind_graph)
@@ -230,6 +253,10 @@ class AgentDelegationRuntime:
         task_instruction = str(task_graph.get("instruction") or "")
         community_id = str(task_graph.get("community_id") or run_payload.get("community_id") or "default")
         selected = self._select_participants(task_graph, participants)
+        pending = run_payload.get("pending_action") if isinstance(run_payload.get("pending_action"), dict) else {}
+        if str(pending.get("kind") or "") == "agent_parameter_collection":
+            self._apply_agent_parameter_values(selected, provided_inputs or {})
+            return await self.execute_task(task_graph, participants)
         task_mind_graph = self._build_task_mind_graph(task_graph, selected)
         dependency_plan = task_mind_graph.get("agent_relation_analysis") or self._build_participant_dependency_plan(task_graph, selected)
         run_payload["participant_dependency_plan"] = dependency_plan
@@ -531,6 +558,10 @@ class AgentDelegationRuntime:
                 for k in ("node_id", "node_type", "name", "objective", "relation", "depends_on")
                 if k in own_node
             },
+            "agent_parameters": {
+                "values": participant.get("runtime_parameters") or {},
+                "contract": self._compact_parameter_contract(participant.get("parameter_contract") or {}),
+            },
         }
         # Do not send full graph/plan to participant input parsing. The graph is
         # retained in the delegation run and passed only to final synthesis. This
@@ -540,6 +571,39 @@ class AgentDelegationRuntime:
             if peer_results:
                 shared_context["available_peer_results"] = peer_results
         return shared_context
+
+
+
+    def _compact_parameter_contract(self, contract: Any) -> dict[str, Any]:
+        if not isinstance(contract, dict):
+            return {}
+        out = {"parameters": []}
+        params = contract.get("parameters") if isinstance(contract.get("parameters"), list) else []
+        for param in params:
+            if not isinstance(param, dict):
+                continue
+            out["parameters"].append({
+                "name": param.get("name"),
+                "type": param.get("type") or "list",
+                "required": bool(param.get("required", True)),
+                "values": param.get("values") if isinstance(param.get("values"), list) else [],
+            })
+        return out
+
+    def _collect_missing_agent_parameter_fields(self, participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        fields: list[dict[str, Any]] = []
+        for participant in participants:
+            fields.extend(self.parameter_contract_service.to_missing_input_fields(participant))
+        return fields
+
+    def _apply_agent_parameter_values(self, participants: list[dict[str, Any]], provided_inputs: dict[str, Any]) -> None:
+        if not isinstance(provided_inputs, dict):
+            return
+        for participant in participants:
+            updated = self.parameter_contract_service.apply_values(participant, provided_inputs)
+            pid = str(updated.get("participant_id") or "").strip()
+            if pid:
+                self.store.write_json(f"generated/agents/{pid}.json", updated)
 
     def _peer_results_for_participant(self, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> list[dict[str, Any]]:
         pid = self._participant_identity(participant)

@@ -11,6 +11,7 @@ from auxiliary_brain.studio.command_router import StudioCommandRouter
 from ai_core.runtime.adaptation import FeedbackClassifier, ModelUpgradeController, RerunStrategy
 from ai_core.interaction.natural_conversation import NaturalConversationService
 from ai_core.runtime.modeling.model_runtime_preflight import ModelRuntimePreflight
+from auxiliary_brain.parameters.agent_parameter_contract import AgentParameterContractService
 
 
 class AgentStudioService:
@@ -25,6 +26,7 @@ class AgentStudioService:
         self.rerun_strategy = RerunStrategy()
         self.natural_conversation = NaturalConversationService()
         self.model_preflight = ModelRuntimePreflight()
+        self.parameter_contract_service = AgentParameterContractService()
         self.store.ensure_workspace()
         self.community_id = self._ensure_community()
 
@@ -171,12 +173,20 @@ class AgentStudioService:
         participant_id = new_id("participant")
         participant_name = name or participant_id
         execution_objective = self._derive_execution_objective(instruction, participant_name)
+        parameter_contract = self.parameter_contract_service.build_contract(
+            definition_instruction=instruction,
+            execution_objective=execution_objective,
+            participant_name=participant_name,
+        )
         payload = {
             "participant_id": participant_id,
             "name": participant_name,
             "instruction": execution_objective,
             "execution_objective": execution_objective,
             "definition_instruction": instruction,
+            "parameter_contract": parameter_contract,
+            "runtime_parameters": self._runtime_parameters_from_contract(parameter_contract),
+            "missing_information": parameter_contract.get("missing_information", []),
             "origin": "auxiliary_brain",
             "status": "created",
             "created_at": self._now(),
@@ -428,6 +438,21 @@ class AgentStudioService:
             return match.group(1).strip(" .。")
 
         return text
+
+
+    def _runtime_parameters_from_contract(self, parameter_contract: dict[str, Any]) -> dict[str, list[Any]]:
+        params = parameter_contract.get("parameters") if isinstance(parameter_contract, dict) else []
+        out: dict[str, list[Any]] = {}
+        if not isinstance(params, list):
+            return out
+        for param in params:
+            if not isinstance(param, dict):
+                continue
+            name = str(param.get("name") or "").strip()
+            values = param.get("values") if isinstance(param.get("values"), list) else []
+            if name and values:
+                out[name] = values
+        return out
 
     def _ensure_community(self) -> str:
         existing = self.store.list_json("generated/communities")
