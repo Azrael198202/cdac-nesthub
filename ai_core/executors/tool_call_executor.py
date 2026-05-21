@@ -1624,8 +1624,27 @@ class ToolCallExecutor:
                 if key not in tool_input:
                     tool_input[str(key)] = value
 
+        # Keep both the raw planner structure and a flattened schema-friendly
+        # parameters object. Runtime-generated tools often declare required
+        # fields under $.parameters.<field>, while planners place values under
+        # parameters.known / parameters.optional. This generic merge does not
+        # infer field meanings; it only preserves already-known values in the
+        # location most JSON schemas commonly validate.
+        merged_parameters: dict[str, Any] = {}
+        for source in (known, optional):
+            for key, value in source.items():
+                merged_parameters[str(key)] = value
+        for key, value in params.items():
+            if key not in {"known", "optional"} and key not in merged_parameters:
+                merged_parameters[str(key)] = value
+        now_utc = datetime.now(timezone.utc).isoformat()
+        merged_parameters.setdefault("timestamp", now_utc)
+        merged_parameters.setdefault("system_clock", now_utc)
+        merged_parameters.setdefault("timezone", "UTC")
+
         tool_input.update({
-            "parameters": params,
+            "parameters": merged_parameters,
+            "raw_parameters": params,
             "known": known,
             "optional": optional,
             "context": {

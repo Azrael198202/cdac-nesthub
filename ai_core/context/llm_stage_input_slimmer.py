@@ -190,9 +190,49 @@ class LLMStageInputSlimmer:
         if not isinstance(raw_input, str):
             return None
         s = raw_input.strip()
-        if not s or s[0] not in "[{":
+        if not s:
             return None
-        try:
-            return json.loads(s)
-        except Exception:
+        # Accept either a pure JSON payload or an instruction prefix followed by
+        # a JSON envelope. Delegation messages commonly include a short generic
+        # instruction before the canonical envelope. Do not send that whole text
+        # to early JSON stages when the envelope can be extracted safely.
+        candidates: list[str] = []
+        if s[0] in "[{":
+            candidates.append(s)
+        extracted = self._extract_last_json_object(s)
+        if extracted and extracted not in candidates:
+            candidates.append(extracted)
+        for candidate in candidates:
+            try:
+                return json.loads(candidate)
+            except Exception:
+                continue
+        return None
+
+    def _extract_last_json_object(self, text: str) -> str | None:
+        end = text.rfind("}")
+        if end < 0:
             return None
+        depth = 0
+        in_string = False
+        escape = False
+        for idx in range(end, -1, -1):
+            ch = text[idx]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+                continue
+            if ch == "}":
+                depth += 1
+            elif ch == "{":
+                depth -= 1
+                if depth == 0:
+                    return text[idx:end + 1]
+        return None

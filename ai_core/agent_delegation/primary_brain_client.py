@@ -426,13 +426,11 @@ class PrimaryBrainDelegationClient:
             execution_policy=PrimaryRuntimeExecutionPolicy(),
         )
         return (
-            "Execute this canonical auxiliary-to-primary runtime request.\n"
-            "The auxiliary layer only controls roles, tasks, context, missing information, and feedback.\n"
-            "The primary runtime must perform parsing, intent recognition, workflow planning, capability routing, tool execution, evidence verification, and final answer synthesis.\n"
-            "Do not create or redefine participants or tasks. Execute only the objective in the JSON envelope.\n"
-            "Return only the participant result needed for the task, as a final user-facing answer.\n"
-            "Never return intermediate node JSON as the final answer.\n"
-            + json.dumps(envelope.to_prompt_payload(), ensure_ascii=False)
+            "Execute one participant request. Own objective is primary. "
+            "Peer results in context are supporting material only; use them only when they are relevant. "
+            "Do not redefine participants or tasks. Return only the participant final answer.\n"
+            "JSON_ENVELOPE:\n"
+            + json.dumps(envelope.to_prompt_payload(), ensure_ascii=False, separators=(",", ":"))
         )
 
     def _usable_agent_results(self, agent_results: list[AgentExecutionResult]) -> list[AgentExecutionResult]:

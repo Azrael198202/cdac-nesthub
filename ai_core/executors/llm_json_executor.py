@@ -15,6 +15,7 @@ from ai_core.context.llm_stage_input_slimmer import LLMStageInputSlimmer
 from ai_core.roles import RoleProfileSelector, PromptPackLoader, RoleScopedContextReducer
 from ai_core.runtime.modeling import ModelStagePolicy
 from ai_core.runtime.governance import RuntimeCostPolicy
+from ai_core.llm.prompt_io_recorder import PromptIORecorder
 
 
 class LLMJsonExecutor:
@@ -40,6 +41,7 @@ class LLMJsonExecutor:
         self.role_context_reducer = RoleScopedContextReducer()
         self.stage_policy = ModelStagePolicy()
         self.runtime_cost_policy = RuntimeCostPolicy()
+        self.prompt_io_recorder = PromptIORecorder()
 
     async def execute(self, workflow_node: dict, node_config: dict, state: dict, capability_result: dict) -> dict:
         run_id = state["run_id"]
@@ -144,11 +146,31 @@ class LLMJsonExecutor:
                 "node_id": node_id,
             })
 
+        prompt_trace_path = self.prompt_io_recorder.record(
+            run_id=run_id,
+            node_id=node_id,
+            phase="prompt_rendered",
+            payload={
+                "run_id": run_id,
+                "node_id": node_id,
+                "adapter_id": adapter.get("adapter_id"),
+                "prompt_id": prompt.get("id"),
+                "system_prompt": prompt.get("system"),
+                "user_prompt": rendered,
+                "slim_user_input": slim_user_input,
+                "slim_previous_results": slim_previous_results,
+                "runtime_context": runtime_context,
+                "schema_path": str(schema_path),
+                "schema": schema,
+            },
+        )
+
         await event_bus.emit(run_id, {
             "type": "LLM_PROMPT_RENDERED",
             "title": "Prompt rendered",
-            "message": f"Rendered prompt length: {len(rendered)} characters; slim_input_length={len(slim_user_input)}",
+            "message": f"Rendered prompt length: {len(rendered)} characters; slim_input_length={len(slim_user_input)}; trace={prompt_trace_path}",
             "slim_input_length": len(slim_user_input),
+            "prompt_trace_path": prompt_trace_path,
             "node_id": node_id,
         })
 
@@ -164,14 +186,58 @@ class LLMJsonExecutor:
             adapter = {**adapter, "max_prompt_tokens": int(role_budget)}
         adapter = self.runtime_cost_policy.apply_adapter_budget(adapter)
 
-        result = await self.router.generate_json(
-            run_id=run_id,
-            node_id=node_id,
-            adapter=adapter,
-            prompt=prompt,
-            rendered_user_prompt=rendered,
-            schema=schema,
-        )
+        try:
+            result = await self.router.generate_json(
+                run_id=run_id,
+                node_id=node_id,
+                adapter=adapter,
+                prompt=prompt,
+                rendered_user_prompt=rendered,
+                schema=schema,
+            )
+            output_trace_path = self.prompt_io_recorder.record(
+                run_id=run_id,
+                node_id=node_id,
+                phase="llm_output",
+                payload={
+                    "run_id": run_id,
+                    "node_id": node_id,
+                    "adapter_id": adapter.get("adapter_id"),
+                    "prompt_id": prompt.get("id"),
+                    "result": result,
+                },
+            )
+            await event_bus.emit(run_id, {
+                "type": "LLM_OUTPUT_RECORDED",
+                "title": "LLM output recorded",
+                "message": f"LLM output trace={output_trace_path}",
+                "node_id": node_id,
+                "output_trace_path": output_trace_path,
+            })
+        except Exception as exc:
+            error_trace_path = self.prompt_io_recorder.record(
+                run_id=run_id,
+                node_id=node_id,
+                phase="llm_error",
+                payload={
+                    "run_id": run_id,
+                    "node_id": node_id,
+                    "adapter_id": adapter.get("adapter_id"),
+                    "prompt_id": prompt.get("id"),
+                    "error": str(exc),
+                    "system_prompt": prompt.get("system"),
+                    "user_prompt": rendered,
+                    "schema": schema,
+                },
+            )
+            await event_bus.emit(run_id, {
+                "type": "LLM_ERROR_RECORDED",
+                "title": "LLM error recorded",
+                "message": f"LLM error trace={error_trace_path}",
+                "node_id": node_id,
+                "error_trace_path": error_trace_path,
+            })
+            raise
 
         await event_bus.emit(run_id, {
             "type": "LLM_JSON_VALIDATING",

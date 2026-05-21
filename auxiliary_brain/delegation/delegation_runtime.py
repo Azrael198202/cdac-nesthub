@@ -51,6 +51,24 @@ class AgentDelegationRuntime:
                 f"Preparing participant: {participant_name}",
                 "running",
             )
+            shared_context = {
+                "task_graph_id": task_graph.get("graph_id"),
+                "participant_count": len(selected),
+                "participant_execution_policy": {
+                    "own_objective_is_primary": True,
+                    "peer_results_are_supporting_context_only": True,
+                    "use_peer_results_only_when_needed": True,
+                },
+            }
+            if agent_results:
+                shared_context["available_peer_results"] = [
+                    {
+                        "participant_name": r.participant_name,
+                        "status": r.status,
+                        "final_answer": self._compact_text(r.final_answer, 800),
+                    }
+                    for r in agent_results[-4:]
+                ]
             request = AgentExecutionRequest(
                 participant_id=str(participant.get("participant_id") or participant.get("id")),
                 participant_name=participant_name,
@@ -58,10 +76,7 @@ class AgentDelegationRuntime:
                 task_name=task_name,
                 task_instruction=task_instruction,
                 community_id=community_id,
-                shared_context={
-                    "task_graph_id": task_graph.get("graph_id"),
-                    "participant_count": len(selected),
-                },
+                shared_context=shared_context,
             )
             self._record_progress(
                 run_payload,

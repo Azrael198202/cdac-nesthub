@@ -11,6 +11,7 @@ from ai_core.runtime.modeling import ModelRoutingPlanner, ModelStagePolicy, Runt
 from ai_core.runtime.governance import RuntimeCostPolicy
 from ai_core.secrets.secret_store import SecretStore
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
+from ai_core.llm.prompt_io_recorder import PromptIORecorder
 
 
 class ProviderRouter:
@@ -30,6 +31,7 @@ class ProviderRouter:
         self.stage_policy = ModelStagePolicy()
         self.runtime_execution_policy = RuntimeExecutionPolicy()
         self.runtime_cost_policy = RuntimeCostPolicy()
+        self.prompt_io_recorder = PromptIORecorder()
 
     def _config(self) -> dict:
         self.provider_autoconfig.ensure()
@@ -206,6 +208,37 @@ class ProviderRouter:
                         "estimated_tokens": budgeted_prompt.estimated_tokens,
                         "budget_tokens": budget,
                     })
+                provider_request_trace = self.prompt_io_recorder.record(
+                    run_id=run_id,
+                    node_id=node_id,
+                    phase=f"provider_request_{provider_name}",
+                    payload={
+                        "run_id": run_id,
+                        "node_id": node_id,
+                        "provider": provider_name,
+                        "provider_type": provider_type,
+                        "model": provider.get("model"),
+                        "timeout_seconds": provider.get("timeout_seconds"),
+                        "options": provider.get("options"),
+                        "think": provider.get("think"),
+                        "prompt": {"system": prompt.get("system"), "user": budgeted_prompt.text},
+                        "schema": schema,
+                        "budget": {
+                            "budget_tokens": budget,
+                            "estimated_tokens": budgeted_prompt.estimated_tokens,
+                            "truncated": budgeted_prompt.truncated,
+                        },
+                    },
+                )
+                await event_bus.emit(run_id, {
+                    "type": "LLM_PROVIDER_REQUEST_RECORDED",
+                    "title": "LLM provider request recorded",
+                    "message": provider_request_trace,
+                    "node_id": node_id,
+                    "provider": provider_name,
+                    "trace_path": provider_request_trace,
+                })
+
                 result = await handler.generate_json(
                     run_id=run_id,
                     node_id=node_id,
@@ -217,6 +250,20 @@ class ProviderRouter:
                 )
 
                 elapsed = round(time.monotonic() - started, 2)
+                provider_response_trace = self.prompt_io_recorder.record(
+                    run_id=run_id,
+                    node_id=node_id,
+                    phase=f"provider_response_{provider_name}",
+                    payload={
+                        "run_id": run_id,
+                        "node_id": node_id,
+                        "provider": provider_name,
+                        "provider_type": provider_type,
+                        "model": provider.get("model"),
+                        "elapsed_seconds": elapsed,
+                        "result": result,
+                    },
+                )
                 await event_bus.emit(run_id, {
                     "type": "LLM_PROVIDER_DONE",
                     "title": "LLM provider completed",
@@ -225,6 +272,7 @@ class ProviderRouter:
                     "provider": provider_name,
                     "provider_type": provider_type,
                     "elapsed_seconds": elapsed,
+                    "trace_path": provider_response_trace,
                 })
                 return result
 
@@ -232,14 +280,29 @@ class ProviderRouter:
                 elapsed = round(time.monotonic() - started, 2)
                 last_error = f"{provider_name}: {exc}"
 
+                provider_error_trace = self.prompt_io_recorder.record(
+                    run_id=run_id,
+                    node_id=node_id,
+                    phase=f"provider_error_{provider_name}",
+                    payload={
+                        "run_id": run_id,
+                        "node_id": node_id,
+                        "provider": provider_name,
+                        "provider_type": provider_type,
+                        "model": provider.get("model"),
+                        "elapsed_seconds": elapsed,
+                        "error": str(exc),
+                    },
+                )
                 await event_bus.emit(run_id, {
                     "type": "LLM_PROVIDER_ERROR",
                     "title": "LLM provider failed",
-                    "message": f"{provider_name} failed after {elapsed}s: {exc}",
+                    "message": f"{provider_name} failed after {elapsed}s: {exc}; trace={provider_error_trace}",
                     "node_id": node_id,
                     "provider": provider_name,
                     "provider_type": provider_type,
                     "elapsed_seconds": elapsed,
+                    "trace_path": provider_error_trace,
                 })
 
                 if "MISSING_SECRET:" in str(exc):
