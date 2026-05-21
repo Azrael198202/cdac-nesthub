@@ -13,9 +13,9 @@ class LLMStageInputSlimmer:
     """
 
     DEFAULT_TEXT_LIMITS = {
-        "input_parsing": 1800,
-        "intent_recognition": 2600,
-        "workflow_planning": 4200,
+        "input_parsing": 900,
+        "intent_recognition": 1400,
+        "workflow_planning": 2200,
     }
 
     DROP_KEYS = {
@@ -184,13 +184,13 @@ class LLMStageInputSlimmer:
             return ["input_parsing"]
         if node_id == "workflow_planning":
             return ["input_parsing", "intent_recognition", "context_awareness"]
-        return ["input_parsing", "intent_recognition", "workflow_planning", "execution"]
+        return ["input_parsing", "intent_recognition", "workflow_planning"]
 
     def _keep_known_result_fields(self, value: dict[str, Any]) -> dict[str, Any]:
         return {
             key: self._compact_value(item, max_depth=3)
             for key, item in value.items()
-            if key in self.KEEP_RESULT_KEYS or key.startswith("_") is False and len(str(item)) < 300
+            if key in self.KEEP_RESULT_KEYS
         }
 
     def _compact_value(self, value: Any, *, max_depth: int) -> Any:
@@ -209,7 +209,7 @@ class LLMStageInputSlimmer:
         if isinstance(value, list):
             return [self._compact_value(item, max_depth=max_depth - 1) for item in value[:12]]
         if isinstance(value, str):
-            return self._trim(" ".join(value.split()), 800)
+            return self._trim(" ".join(value.split()), 300)
         return value
 
     def _trim_obj(self, value: dict[str, Any], limit: int) -> dict[str, Any]:

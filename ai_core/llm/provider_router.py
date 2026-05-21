@@ -33,6 +33,76 @@ class ProviderRouter:
         self.runtime_cost_policy = RuntimeCostPolicy()
         self.prompt_io_recorder = PromptIORecorder()
 
+
+    def _apply_stage_prompt_guard(self, *, node_id: str, adapter: dict) -> dict:
+        """Apply generic per-stage LLM budgets before provider routing.
+
+        This is not task/domain logic. It prevents local models from receiving
+        large execution traces, candidate pages, or repeated fallback material.
+        Heavy evidence should be reduced deterministically before any LLM call.
+        """
+        updated = dict(adapter or {})
+        node = str(node_id or "")
+        if node == "input_parsing":
+            updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 900), 900)
+            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 60), 60.0)
+            updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1800), 1800)
+        elif node == "intent_recognition":
+            updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 1200), 1200)
+            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 60), 60.0)
+            updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 2200), 2200)
+        elif node == "workflow_planning":
+            updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 1800), 1800)
+            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 90), 90.0)
+            updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 2800), 2800)
+        elif node == "execution":
+            updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 1200), 1200)
+            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 45), 45.0)
+            updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1600), 1600)
+            updated["max_provider_attempts"] = 1
+        return updated
+
+    def _compact_rendered_prompt(self, *, node_id: str, text: str, adapter: dict) -> str:
+        """Shrink LLM prompts without relying on business vocabulary.
+
+        The compactor preserves contract-oriented lines and drops bulky trace /
+        evidence blocks. This keeps local models from looping over repeated
+        execution material.
+        """
+        text = str(text or "")
+        node = str(node_id or "")
+        hard_char_limits = {
+            "input_parsing": 1800,
+            "intent_recognition": 2600,
+            "workflow_planning": 4200,
+            "execution": 3200,
+        }
+        limit = int(adapter.get("max_prompt_chars") or hard_char_limits.get(node, 5000))
+        if len(text) <= limit:
+            return text
+        if node != "execution":
+            return text[: max(0, limit - 24)] + "\n...[prompt_compacted]"
+
+        keep_markers = (
+            "objective", "intent", "parameter", "known", "missing",
+            "schema", "contract", "source_level", "execution",
+            "required", "capability", "step", "status", "error"
+        )
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        kept = []
+        for line in lines:
+            low = line.casefold()
+            if any(marker in low for marker in keep_markers):
+                kept.append(line[:500])
+            if sum(len(x) for x in kept) > limit:
+                break
+        if not kept:
+            kept = lines[:20]
+        compacted = "\n".join(kept)
+        if len(compacted) > limit:
+            compacted = compacted[: max(0, limit - 24)]
+        return compacted + "\n...[execution_prompt_compacted]"
+
     def _config(self) -> dict:
         self.provider_autoconfig.ensure()
         return self.loader.load_yaml(RUNTIME_CONFIGS / "models" / "providers.yaml")
@@ -123,6 +193,7 @@ class ProviderRouter:
     async def generate_json(self, run_id: str, node_id: str, adapter: dict, prompt: dict, rendered_user_prompt: str, schema: dict) -> dict:
         config = self._config()
         adapter = self.runtime_cost_policy.apply_adapter_budget(adapter, config)
+        adapter = self._apply_stage_prompt_guard(node_id=node_id, adapter=adapter)
         route = list(adapter.get("provider_route") or config.get("default_route", []))
         providers = config.get("providers", {})
         route_plan = self.routing_planner.plan(
@@ -195,8 +266,9 @@ class ProviderRouter:
 
             try:
                 handler = self.registry.get(provider_type)
+                rendered_for_provider = self._compact_rendered_prompt(node_id=node_id, text=rendered_user_prompt, adapter=adapter)
                 budget = self.prompt_budget.budget_for(provider=provider, adapter=adapter)
-                budgeted_prompt = self.prompt_budget.fit_text(rendered_user_prompt, budget_tokens=budget)
+                budgeted_prompt = self.prompt_budget.fit_text(rendered_for_provider, budget_tokens=budget)
                 if budgeted_prompt.truncated:
                     await event_bus.emit(run_id, {
                         "type": "LLM_PROMPT_BUDGET_APPLIED",

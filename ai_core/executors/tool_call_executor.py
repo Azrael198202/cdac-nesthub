@@ -301,6 +301,42 @@ class ToolCallExecutor:
                 "result": {"contract": method_contract.to_dict(), "proposals": method_proposals, "selected_mode": selected_execution_mode},
             })
 
+            # If the plan explicitly asks for runtime-native observation, honor it
+            # before any generic web/API/model fallback. This is a generic source
+            # contract, not a domain-specific shortcut.
+            if self._step_requests_runtime_native(step, normalized_plan, required_capability or "runtime_current_observation"):
+                runtime_native_result = self.capability_router.try_runtime_native(
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    capability=required_capability or "runtime_current_observation",
+                    step=step,
+                    state=state,
+                    plan=normalized_plan,
+                ) or self._try_runtime_native_observation(
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    capability=required_capability or "runtime_current_observation",
+                    step={**step, "required_source_level": "runtime_native"},
+                    state=state,
+                    normalized_plan=normalized_plan,
+                )
+                if runtime_native_result:
+                    runtime_result = runtime_native_result.get("result") if isinstance(runtime_native_result.get("result"), dict) else {}
+                    runtime_result.setdefault("data", {})["execution_method_contract"] = method_contract.to_dict()
+                    execution_steps.append({
+                        "step_id": step_id,
+                        "status": "executed",
+                        "tool": {"id": "runtime_native_observation", "source": "primary_runtime"},
+                        "input": runtime_native_result.get("input"),
+                        "result": runtime_result,
+                        "provenance": runtime_result.get("provenance") if isinstance(runtime_result, dict) else None,
+                        "source_step": step,
+                        "priority_path": "runtime_native_contract",
+                    })
+                    continue
+
             if method_contract.method == "runtime_generated_tool":
                 runtime_native_result = self.capability_router.try_runtime_native(
                     run_id=run_id,
@@ -1674,7 +1710,7 @@ class ToolCallExecutor:
             raw = [raw]
         if not isinstance(raw, list):
             raw = ["local_knowledge", "web_evidence", "tool_generation"]
-        allowed = {"local_knowledge", "web_evidence", "tool_generation", "registered_component", "human_interaction"}
+        allowed = {"local_knowledge", "web_evidence", "tool_generation", "registered_component", "human_interaction", "runtime_native", "structured_provider"}
         output: list[str] = []
         for item in raw:
             value = str(item or "").strip().lower().replace("-", "_")

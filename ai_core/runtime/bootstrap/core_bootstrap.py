@@ -693,23 +693,21 @@ class RuntimeBootstrap:
         prompts = {
             "input_parsing": {
                 "id": "input_parsing_prompt",
-                "version": "2.1-slim",
+                "version": "2.2-ultra-slim",
                 "executor_type": "llm_json",
                 "system": (
-                    "You are a generic input parsing engine. Return JSON only according to the output schema. "
-                    "Parse only the compact runtime request supplied by the user message. "
-                    "Do not generate workflow, tools, APIs, providers, or execution decisions."
+                    "Return one JSON object only. Extract request fields. "
+                    "Do not plan, choose tools, name providers, or explain."
                 ),
                 "user_template": (
-                    "Compact input:\n{{ user_input }}\n\n"
-                    "Runtime date context:\n{{ runtime_context }}"
+                    "INPUT_JSON={{ user_input }}\n"
+                    "NOW={{ runtime_context }}"
                 ),
                 "runtime_rules": [
-                    "Only output fields needed for input parsing.",
-                    "Do not output top-level tasks.",
-                    "Do not output planned_steps, required_capabilities, tool names, API names, provider names, or execution decisions.",
-                    "Extract parsed_entities, semantic modifiers, constraints, and temporal expressions from the compact input.",
-                    "If runtime_context can safely normalize a relative expression, include the normalized value as parsed data while preserving the original expression.",
+                    "Output only schema fields.",
+                    "Keep original_input short.",
+                    "Put extracted values under parsed_entities.",
+                    "missing_information must be a list.",
                 ],
                 "output_contract": {
                     "language": "string",
@@ -724,24 +722,21 @@ class RuntimeBootstrap:
             },
             "intent_recognition": {
                 "id": "intent_recognition_prompt",
-                "version": "2.1-slim",
+                "version": "2.2-ultra-slim",
                 "executor_type": "llm_json",
                 "system": (
-                    "You are a generic intent recognition engine. Return JSON only. "
-                    "Classify and summarize intent using compact input and previous parsed fields. "
-                    "Do not generate workflow, tools, APIs, providers, or execution decisions."
+                    "Return one JSON object only. Classify intent from parsed fields. "
+                    "Do not plan or choose execution methods."
                 ),
                 "user_template": (
-                    "Compact input:\n{{ user_input }}\n\n"
-                    "Previous structured results:\n{{ previous_results }}\n\n"
-                    "Runtime date context:\n{{ runtime_context }}"
+                    "INPUT={{ user_input }}\n"
+                    "PARSED={{ previous_results }}\n"
+                    "NOW={{ runtime_context }}"
                 ),
                 "runtime_rules": [
-                    "Only output fields needed for intent recognition.",
-                    "Do not output top-level tasks.",
-                    "Do not output planned_steps, required_capabilities, tool names, API names, provider names, or execution decisions.",
-                    "Use input_parsing results when available instead of re-parsing the raw input.",
-                    "Do not ask human questions unless intent itself is ambiguous.",
+                    "Use parsed_entities first.",
+                    "normalized_intent should contain only required parameters.",
+                    "confidence must be compact.",
                 ],
                 "output_contract": {
                     "intent_type": "string",
@@ -753,25 +748,24 @@ class RuntimeBootstrap:
             },
             "workflow_planning": {
                 "id": "workflow_planning_prompt",
-                "version": "2.1-slim",
+                "version": "2.2-ultra-slim",
                 "executor_type": "llm_json",
                 "system": (
-                    "You are a generic workflow planner. Build executable abstract steps from compact structured results. "
-                    "Return JSON only. Use generic capabilities only; do not choose concrete tools, APIs, providers, libraries, repositories, or implementation files."
+                    "Return one JSON object only. Create minimal abstract execution steps. "
+                    "No concrete tools, APIs, providers, libraries, repositories, or files."
                 ),
                 "user_template": (
-                    "Compact input:\n{{ user_input }}\n\n"
-                    "Previous structured results:\n{{ previous_results }}\n\n"
-                    "Runtime date context:\n{{ runtime_context }}"
+                    "INPUT={{ user_input }}\n"
+                    "STATE={{ previous_results }}\n"
+                    "NOW={{ runtime_context }}"
                 ),
                 "runtime_rules": [
-                    "Only workflow_planning may create planned_steps.",
-                    "planned_steps must be executable step objects, not strings.",
-                    "Copy normalized entities from upstream nodes; do not invent stale values or re-normalize already resolved values.",
-                    "Prefer execution_strategy over concrete capabilities: [local_knowledge, web_evidence, tool_generation].",
-                    "Do not choose concrete tools, APIs, providers, or generated implementations in planning.",
-                    "If required_capability is retained for schema compatibility, keep it generic and do not encode provider/API names.",
-                    "Do not request human_interaction for data already available from upstream nodes.",
+                    "Create the fewest planned_steps possible.",
+                    "Copy parameters from normalized_intent; do not copy full input.",
+                    "Use only generic execution_strategy values.",
+                    "For values already observable from runtime_context, use required_source_level=runtime_native and execution_strategy=[runtime_native].",
+                    "For outside evidence, use execution_strategy=[structured_provider,web_evidence].",
+                    "Do not add concrete provider/API/tool names.",
                 ],
                 "output_contract": {
                     "planned_steps": "array",

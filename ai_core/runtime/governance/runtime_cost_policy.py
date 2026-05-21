@@ -85,7 +85,7 @@ class RuntimeCostPolicy:
         )
         return RuntimeCostSnapshot(
             enabled=self._bool("AI_CORE_TOKEN_SAVER_ENABLED", policy.get("enabled"), True),
-            max_prompt_tokens=self._int("AI_CORE_MAX_PROMPT_TOKENS", policy.get("max_prompt_tokens"), 6000, 1000),
+            max_prompt_tokens=self._int("AI_CORE_MAX_PROMPT_TOKENS", policy.get("max_prompt_tokens"), 2500, 800),
             max_provider_attempts=self._int("AI_CORE_MAX_PROVIDER_ATTEMPTS", policy.get("max_provider_attempts"), 1, 1),
             max_external_discovery_attempts=self._int("AI_CORE_MAX_EXTERNAL_DISCOVERY_ATTEMPTS", policy.get("max_external_discovery_attempts"), 1, 0),
             max_generated_component_attempts=self._int("AI_CORE_MAX_GENERATED_COMPONENT_ATTEMPTS", policy.get("max_generated_component_attempts"), 1, 0),
@@ -98,9 +98,9 @@ class RuntimeCostPolicy:
             adaptive_initial_fetches=self._int("AI_CORE_ADAPTIVE_EVIDENCE_INITIAL_FETCHES", adaptive.get("initial_fetches"), 2, 1),
             adaptive_incremental_fetches=self._int("AI_CORE_ADAPTIVE_EVIDENCE_INCREMENTAL_FETCHES", adaptive.get("incremental_fetches"), 1, 1),
             adaptive_fetch_chars_per_source=chars_per_source,
-            adaptive_llm_material_chars=self._int("AI_CORE_ADAPTIVE_EVIDENCE_LLM_CHARS", adaptive.get("llm_material_chars"), 6000, 1200),
-            adaptive_fact_limit=self._int("AI_CORE_ADAPTIVE_EVIDENCE_FACT_LIMIT", adaptive.get("fact_limit"), 48, 8),
-            adaptive_block_limit=self._int("AI_CORE_ADAPTIVE_EVIDENCE_BLOCK_LIMIT", adaptive.get("block_limit"), 32, 6),
+            adaptive_llm_material_chars=self._int("AI_CORE_ADAPTIVE_EVIDENCE_LLM_CHARS", adaptive.get("llm_material_chars"), 1800, 600),
+            adaptive_fact_limit=self._int("AI_CORE_ADAPTIVE_EVIDENCE_FACT_LIMIT", adaptive.get("fact_limit"), 16, 4),
+            adaptive_block_limit=self._int("AI_CORE_ADAPTIVE_EVIDENCE_BLOCK_LIMIT", adaptive.get("block_limit"), 8, 3),
             adaptive_stop_quality_score=self._float("AI_CORE_ADAPTIVE_EVIDENCE_STOP_SCORE", adaptive.get("stop_quality_score"), 0.78, 0.0, 0.99),
             operation_timeout_seconds=self._int("AI_CORE_OPERATION_TIMEOUT_SECONDS", policy.get("operation_timeout_seconds"), 180, 5),
             sandbox_timeout_seconds=self._int("AI_CORE_SANDBOX_TIMEOUT_SECONDS", policy.get("sandbox_timeout_seconds"), 45, 5),
@@ -175,12 +175,12 @@ def _runtime_cost_policy_stage_timeouts(self, policy: dict[str, Any]) -> dict[st
     configured = policy.get("stage_timeouts") if isinstance(policy.get("stage_timeouts"), dict) else {}
     aliases = policy.get("method_timeout_seconds") if isinstance(policy.get("method_timeout_seconds"), dict) else {}
     values = {
-        "web_discovery": self._int("AI_CORE_STAGE_TIMEOUT_WEB_DISCOVERY", configured.get("web_discovery"), 30, 1),
-        "extraction": self._int("AI_CORE_STAGE_TIMEOUT_EXTRACTION", configured.get("extraction"), 45, 1),
+        "web_discovery": self._int("AI_CORE_STAGE_TIMEOUT_WEB_DISCOVERY", configured.get("web_discovery"), 18, 1),
+        "extraction": self._int("AI_CORE_STAGE_TIMEOUT_EXTRACTION", configured.get("extraction"), 25, 1),
         "evidence_validation": self._int("AI_CORE_STAGE_TIMEOUT_EVIDENCE_VALIDATION", configured.get("evidence_validation"), 20, 1),
         "api_discovery": self._int("AI_CORE_STAGE_TIMEOUT_API_DISCOVERY", configured.get("api_discovery"), 15, 1),
         "api_call": self._int("AI_CORE_STAGE_TIMEOUT_API_CALL", aliases.get("api_call", configured.get("api_call")), 30, 1),
-        "web_search": self._int("AI_CORE_STAGE_TIMEOUT_WEB_SEARCH", aliases.get("web_search", configured.get("web_search")), 90, 1),
+        "web_search": self._int("AI_CORE_STAGE_TIMEOUT_WEB_SEARCH", aliases.get("web_search", configured.get("web_search")), 30, 1),
         "synthesis": self._int("AI_CORE_STAGE_TIMEOUT_SYNTHESIS", configured.get("synthesis"), 20, 1),
     }
     return values
