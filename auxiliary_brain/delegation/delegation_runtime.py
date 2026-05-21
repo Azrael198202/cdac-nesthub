@@ -6,6 +6,7 @@ from typing import Any
 from ai_core.agent_delegation import AgentExecutionRequest, PrimaryBrainDelegationClient
 from auxiliary_brain.storage import JsonStore
 from auxiliary_brain.runtime import new_id
+from auxiliary_brain.delegation.task_mind_graph import TaskMindGraphBuilder
 
 
 class AgentDelegationRuntime:
@@ -27,6 +28,8 @@ class AgentDelegationRuntime:
         task_instruction = str(task_graph.get("instruction") or task_graph.get("objective") or "")
         community_id = str(task_graph.get("community_id") or "default")
         selected = self._select_participants(task_graph, participants)
+        task_mind_graph = self._build_task_mind_graph(task_graph, selected)
+        dependency_plan = task_mind_graph.get("agent_relation_analysis") or self._build_participant_dependency_plan(task_graph, selected)
 
         run_payload: dict[str, Any] = {
             "run_id": run_id,
@@ -39,11 +42,15 @@ class AgentDelegationRuntime:
             "delegation_policy": "participant_requests_are_executed_by_ai_core",
             "progress_events": [],
             "agent_results": [],
+            "participant_dependency_plan": dependency_plan,
+            "task_mind_graph": task_mind_graph,
         }
         self._record_progress(run_payload, "prepare", "Preparing delegation run", "running")
+        self._record_global_mind_graph_progress(run_payload, task_mind_graph)
 
         agent_results = []
-        for index, participant in enumerate(selected):
+        execution_order = self._participants_in_mind_graph_order(selected, task_mind_graph)
+        for index, participant in enumerate(execution_order):
             participant_name = str(participant.get("name") or participant.get("participant_id") or "participant")
             self._record_progress(
                 run_payload,
@@ -54,21 +61,18 @@ class AgentDelegationRuntime:
             shared_context = {
                 "task_graph_id": task_graph.get("graph_id"),
                 "participant_count": len(selected),
-                "participant_execution_policy": {
-                    "own_objective_is_primary": True,
-                    "peer_results_are_supporting_context_only": True,
-                    "use_peer_results_only_when_needed": True,
+                "participant_dependency_policy": {
+                    "default_relationship": "independent",
+                    "peer_results_are_injected_only_for_declared_dependencies": True,
+                    "independent_results_are_merged_only_at_final_synthesis": True,
+                    "peer_result_format": "strict_json_safe_summary",
                 },
+                "participant_dependency_plan": dependency_plan,
+            "task_mind_graph": task_mind_graph,
             }
-            if agent_results:
-                shared_context["available_peer_results"] = [
-                    {
-                        "participant_name": r.participant_name,
-                        "status": r.status,
-                        "final_answer": self._compact_text(r.final_answer, 800),
-                    }
-                    for r in agent_results[-4:]
-                ]
+            peer_results = self._peer_results_for_participant(participant, agent_results, dependency_plan)
+            if peer_results:
+                shared_context["available_peer_results"] = peer_results
             request = AgentExecutionRequest(
                 participant_id=str(participant.get("participant_id") or participant.get("id")),
                 participant_name=participant_name,
@@ -124,7 +128,7 @@ class AgentDelegationRuntime:
             task_name=task_name,
             task_instruction=task_instruction,
             agent_results=agent_results,
-            shared_context={"community_id": community_id},
+            shared_context={"community_id": community_id, "task_mind_graph": task_mind_graph},
         )
         self._record_progress(run_payload, "final_synthesis_complete", "Final synthesis completed", "completed")
         delivery_id = new_id("delivery")
@@ -232,6 +236,9 @@ class AgentDelegationRuntime:
         task_instruction = str(task_graph.get("instruction") or "")
         community_id = str(task_graph.get("community_id") or run_payload.get("community_id") or "default")
         selected = self._select_participants(task_graph, participants)
+        task_mind_graph = self._build_task_mind_graph(task_graph, selected)
+        dependency_plan = task_mind_graph.get("agent_relation_analysis") or self._build_participant_dependency_plan(task_graph, selected)
+        run_payload["participant_dependency_plan"] = dependency_plan
         run_payload["status"] = "resuming"
         run_payload["current_stage"] = "resuming"
         # Once resume has been accepted, the top-level waiting contract must be
@@ -310,7 +317,14 @@ class AgentDelegationRuntime:
                 task_name=task_name,
                 task_instruction=task_instruction,
                 community_id=community_id,
-                shared_context={"task_graph_id": task_graph.get("graph_id"), "participant_count": len(selected)},
+                shared_context=self._build_participant_shared_context(
+                    task_graph=task_graph,
+                    selected=selected,
+                    participant=participant,
+                    completed_results=agent_results,
+                    dependency_plan=dependency_plan,
+                    task_mind_graph=task_mind_graph,
+                ),
             )
             result = await self._execute_agent_request_with_progress(
                 request,
@@ -350,7 +364,7 @@ class AgentDelegationRuntime:
             task_name=task_name,
             task_instruction=task_instruction,
             agent_results=agent_results,
-            shared_context={"community_id": community_id},
+            shared_context={"community_id": community_id, "task_mind_graph": task_mind_graph},
         )
         self._record_progress(run_payload, "final_synthesis_complete", "Final synthesis completed", "completed")
         delivery_id = new_id("delivery")
@@ -377,6 +391,179 @@ class AgentDelegationRuntime:
         self.store.write_json(f"generated/results/{run_id}.json", run_payload)
         return run_payload
 
+
+    def _participant_identity(self, participant: dict[str, Any]) -> str:
+        return str(participant.get("participant_id") or participant.get("id") or participant.get("name") or "").strip()
+
+    def _participant_name(self, participant: dict[str, Any]) -> str:
+        return str(participant.get("name") or participant.get("participant_id") or participant.get("id") or "participant").strip()
+
+    def _participant_objective(self, participant: dict[str, Any]) -> str:
+        return str(participant.get("execution_objective") or participant.get("instruction") or participant.get("description") or "").strip()
+
+    def _build_task_mind_graph(self, task_graph: dict[str, Any], selected: list[dict[str, Any]]) -> dict[str, Any]:
+        """Create the top-level task mind graph before executing agents.
+
+        The graph is stored in runtime results and used only for coordination.
+        Every agent still runs its own primary-runtime flow. Independent agent
+        nodes do not receive peer output. Dependent agent nodes receive only the
+        upstream safe JSON summaries declared by graph edges.
+        """
+        return TaskMindGraphBuilder().build(task_graph, selected)
+
+    def _record_global_mind_graph_progress(self, run_payload: dict[str, Any], task_mind_graph: dict[str, Any]) -> None:
+        stages = [
+            ("global_input_parsing", "Global task input parsing completed"),
+            ("global_intent_recognition", "Global task intent recognition completed"),
+            ("global_workflow_planning", "Global task workflow planning completed"),
+            ("global_agent_relation_analysis", "Agent relation analysis completed"),
+            ("global_graph_generation", "Task mind graph generated"),
+        ]
+        for stage, label in stages:
+            self._record_progress(run_payload, stage, label, "completed")
+        run_payload["current_stage"] = "task_mind_graph_generated"
+
+    def _participants_in_mind_graph_order(self, selected: list[dict[str, Any]], task_mind_graph: dict[str, Any]) -> list[dict[str, Any]]:
+        by_id = {self._participant_identity(p): p for p in selected if self._participant_identity(p)}
+        ordered: list[dict[str, Any]] = []
+        for group in ((task_mind_graph.get("execution_plan") or {}).get("groups") or []):
+            for pid in group:
+                participant = by_id.get(str(pid))
+                if participant and participant not in ordered:
+                    ordered.append(participant)
+        for participant in selected:
+            if participant not in ordered:
+                ordered.append(participant)
+        return ordered
+
+    def _mind_graph_node_for_participant(self, task_mind_graph: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
+        pid = self._participant_identity(participant)
+        for node in task_mind_graph.get("nodes") or []:
+            if isinstance(node, dict) and str(node.get("node_id") or "") == pid:
+                return node
+        return {}
+
+    def _build_participant_dependency_plan(self, task_graph: dict[str, Any], selected: list[dict[str, Any]]) -> dict[str, Any]:
+        """Build a coordination-only dependency plan for participant execution.
+
+        Default is independent. A participant receives another participant's
+        result only when there is an explicit dependency signal in the task
+        graph/participant definition or a clear textual reference to that
+        participant's result. This prevents unrelated agents from polluting each
+        other's LLM input-parsing prompts.
+        """
+        identities = {self._participant_identity(p): p for p in selected if self._participant_identity(p)}
+        name_to_id = {self._participant_name(p).lower(): pid for pid, p in identities.items()}
+        plan: dict[str, Any] = {
+            "default_relationship": "independent",
+            "participants": {},
+            "edges": [],
+        }
+        explicit_by_task: dict[str, list[str]] = {}
+        for task in task_graph.get("tasks") or []:
+            if not isinstance(task, dict):
+                continue
+            target = str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
+            raw_deps = task.get("depends_on") or task.get("requires") or task.get("input_from") or []
+            if isinstance(raw_deps, str):
+                raw_deps = [raw_deps]
+            deps = [str(x).strip() for x in raw_deps if str(x).strip()]
+            if target and deps:
+                explicit_by_task.setdefault(target, []).extend(deps)
+
+        for pid, participant in identities.items():
+            objective = self._participant_objective(participant).lower()
+            raw_deps = participant.get("depends_on") or participant.get("requires") or participant.get("input_from") or explicit_by_task.get(pid) or []
+            if isinstance(raw_deps, str):
+                raw_deps = [raw_deps]
+            deps: list[str] = []
+            for item in raw_deps:
+                dep = str(item).strip()
+                if not dep:
+                    continue
+                dep_id = dep if dep in identities else name_to_id.get(dep.lower(), dep)
+                if dep_id != pid and dep_id not in deps:
+                    deps.append(dep_id)
+            # Clear textual references only. Do not infer dependencies merely
+            # because two participants appear in the same task instruction.
+            dependency_markers = ["result", "output", "answer", "previous", "upstream", "after", "based on"]
+            if any(marker in objective for marker in dependency_markers):
+                for other_id, other in identities.items():
+                    if other_id == pid:
+                        continue
+                    other_name = self._participant_name(other).lower()
+                    if other_name and other_name in objective and other_id not in deps:
+                        deps.append(other_id)
+            relationship = "dependent" if deps else "independent"
+            plan["participants"][pid] = {
+                "participant_id": pid,
+                "participant_name": self._participant_name(participant),
+                "relationship": relationship,
+                "depends_on": deps,
+                "peer_results_injected": bool(deps),
+            }
+            for dep_id in deps:
+                plan["edges"].append({"from": dep_id, "to": pid, "reason": "declared_or_clear_result_reference"})
+        return plan
+
+    def _build_participant_shared_context(
+        self,
+        *,
+        task_graph: dict[str, Any],
+        selected: list[dict[str, Any]],
+        participant: dict[str, Any],
+        completed_results: list[Any],
+        dependency_plan: dict[str, Any],
+        task_mind_graph: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        task_mind_graph = task_mind_graph or self._build_task_mind_graph(task_graph, selected)
+        shared_context = {
+            "task_graph_id": task_graph.get("graph_id"),
+            "participant_count": len(selected),
+            "participant_dependency_policy": {
+                "default_relationship": "independent",
+                "peer_results_are_injected_only_for_declared_dependencies": True,
+                "independent_results_are_merged_only_at_final_synthesis": True,
+                "peer_result_format": "strict_json_safe_summary",
+            },
+            "participant_dependency_plan": dependency_plan,
+            "task_mind_graph": task_mind_graph,
+            "own_mind_graph_node": self._mind_graph_node_for_participant(task_mind_graph, participant),
+        }
+        peer_results = self._peer_results_for_participant(participant, completed_results, dependency_plan)
+        if peer_results:
+            shared_context["available_peer_results"] = peer_results
+        return shared_context
+
+    def _peer_results_for_participant(self, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> list[dict[str, Any]]:
+        pid = self._participant_identity(participant)
+        participant_plan = (dependency_plan.get("participants") or {}).get(pid) or {}
+        deps = {str(x) for x in participant_plan.get("depends_on") or [] if str(x)}
+        if not deps:
+            return []
+        safe_results: list[dict[str, Any]] = []
+        for result in completed_results:
+            result_pid = str(getattr(result, "participant_id", "") or "")
+            result_name = str(getattr(result, "participant_name", "") or "")
+            if result_pid not in deps and result_name not in deps:
+                continue
+            safe_results.append(self._safe_peer_result(result))
+        return safe_results
+
+    def _safe_peer_result(self, result: Any) -> dict[str, Any]:
+        """Return a strict JSON object for dependent-agent context.
+
+        Never use Python repr strings. Keep the summary compact and schema-safe so
+        downstream LLM JSON output is not destabilized by quotes, newlines, or
+        partially trimmed dictionaries.
+        """
+        return {
+            "participant_id": str(getattr(result, "participant_id", "") or ""),
+            "participant_name": str(getattr(result, "participant_name", "") or ""),
+            "status": str(getattr(result, "status", "") or ""),
+            "final_answer_summary": self._compact_text(getattr(result, "final_answer", "") or "", 600),
+            "missing_inputs": list(getattr(result, "missing_inputs", None) or []),
+        }
 
     def _compact_text(self, value: Any, max_chars: int = 800) -> str:
         """Return a short, JSON-safe text preview for peer-agent context.
