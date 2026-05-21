@@ -57,6 +57,14 @@ class PrimaryBrainDelegationClient:
             self.runtime.add_event_listener(core_run_id, progress_callback)
         try:
             await self._run_runtime_with_timeout(core_run_id, state, self.runtime.run_prepared(state))
+        except Exception as exc:
+            state["status"] = "failed"
+            state["error"] = str(exc)
+            state.setdefault("results", {})["runtime_error"] = {
+                "status": "failed",
+                "message": str(exc),
+                "core_run_id": core_run_id,
+            }
         finally:
             if progress_callback:
                 self.runtime.remove_event_listener(core_run_id, progress_callback)
@@ -211,7 +219,7 @@ class PrimaryBrainDelegationClient:
 
     async def _run_runtime_with_timeout(self, core_run_id: str, state: dict[str, Any], awaitable) -> None:
         snapshot = RuntimeCostPolicy().snapshot(state)
-        timeout_seconds = max(300, int(getattr(snapshot, "operation_timeout_seconds", 45)) + 120)
+        timeout_seconds = max(30, int(getattr(snapshot, "operation_timeout_seconds", 45)) + 30)
         try:
             await asyncio.wait_for(awaitable, timeout=timeout_seconds)
         except asyncio.TimeoutError:
@@ -350,17 +358,18 @@ class PrimaryBrainDelegationClient:
         """
         core_run_id = uuid.uuid4().hex[:12]
         usable_results = self._usable_agent_results(agent_results)
+        synthesis_input = usable_results if usable_results else agent_results
         final_answer = await self._compose_or_escalate_delegated_final_answer(
             core_run_id=core_run_id,
             task_name=task_name,
             task_instruction=task_instruction,
-            agent_results=usable_results,
+            agent_results=synthesis_input,
             shared_context=shared_context or {},
         )
         return {
             "origin": "ai_core",
             "core_run_id": core_run_id,
-            "status": "completed" if usable_results else "completed_with_no_participant_result",
+            "status": "completed" if usable_results else "failed",
             "final_answer": final_answer,
             "workflow_results": {
                 "delegated_synthesis": {
@@ -411,6 +420,8 @@ class PrimaryBrainDelegationClient:
             seen.add(key)
             answer = (result.final_answer or "").strip()
             if result.status in blocked_statuses:
+                continue
+            if str(result.status or "").lower() != "completed":
                 continue
             if answer in placeholder_texts:
                 continue
@@ -546,9 +557,10 @@ class PrimaryBrainDelegationClient:
         agent_results: list[AgentExecutionResult],
     ) -> str:
         if not agent_results:
-            return "The delegated task completed, but no completed participant result was available for final synthesis."
+            return "The delegated task failed: no participant result was available for final synthesis."
         successful: list[tuple[str, str]] = []
         failed: list[str] = []
+        failure_details: list[str] = []
         for result in agent_results:
             label = result.participant_name or result.participant_id or "participant"
             status = str(result.status or "completed")
@@ -557,6 +569,8 @@ class PrimaryBrainDelegationClient:
                 successful.append((label, answer))
             else:
                 failed.append(label)
+                if answer:
+                    failure_details.append(f"{label}: {answer}")
 
         lines: list[str] = []
         if successful:
@@ -569,6 +583,9 @@ class PrimaryBrainDelegationClient:
                     lines.append("")
         if failed:
             lines.append("Some requested parts could not be completed with verified result material: " + ", ".join(failed) + ".")
+            if failure_details:
+                lines.append("Failure details:")
+                lines.extend(f"- {item}" for item in failure_details)
         answer = "\n".join(line for line in lines if line is not None).strip()
         return answer or "I could not produce a verified final answer for this task."
 
@@ -605,6 +622,65 @@ class PrimaryBrainDelegationClient:
             + "\nReturn a concise final answer."
         )
 
+
+    def _extract_investigation_report_answer(self, results: dict[str, Any]) -> str:
+        """Extract a safe user-facing answer from generic runtime results.
+
+        This method is intentionally domain-neutral. It only trusts fields that
+        are explicitly answer/result/message fields and ignores node internals,
+        schemas, prompts, provider traces, and empty placeholder structures.
+        """
+        if not isinstance(results, dict):
+            return ""
+
+        preferred_nodes = ["output", "final", "synthesis", "execution", "runtime_error"]
+        preferred_keys = ["final_answer", "answer", "message", "result", "summary", "content", "text"]
+
+        def clean(value: Any) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, (dict, list)):
+                return ""
+            text = str(value).strip()
+            if not text:
+                return ""
+            lowered = text.lower()
+            if "completed without a user-facing final answer" in lowered:
+                return ""
+            if "intermediate node data was intentionally not exposed" in lowered:
+                return ""
+            return text
+
+        for node_id in preferred_nodes:
+            node = results.get(node_id)
+            if isinstance(node, dict):
+                for key in preferred_keys:
+                    text = clean(node.get(key))
+                    if text:
+                        return text
+            else:
+                text = clean(node)
+                if text:
+                    return text
+
+        for node in results.values():
+            if isinstance(node, dict):
+                status = str(node.get("status") or node.get("execution_status") or "").lower()
+                if status in {"failed", "error", "timeout"}:
+                    for key in ["message", "error", "detail", "reason"]:
+                        text = clean(node.get(key))
+                        if text:
+                            return text
+                for key in preferred_keys:
+                    text = clean(node.get(key))
+                    if text:
+                        return text
+            else:
+                text = clean(node)
+                if text:
+                    return text
+        return ""
+
     def _extract_final_answer(self, state: dict[str, Any]) -> str:
         results = state.get("results", {}) if isinstance(state, dict) else {}
         output = results.get("output") if isinstance(results, dict) else None
@@ -617,6 +693,8 @@ class PrimaryBrainDelegationClient:
             value = state.get(key) if isinstance(state, dict) else None
             if value:
                 return str(value)
+        if isinstance(state, dict) and state.get("error"):
+            return str(state.get("error"))
         pending = state.get("pending_action") if isinstance(state, dict) else None
         if pending:
             return "The primary runtime paused before producing a user-facing final answer."
@@ -626,76 +704,6 @@ class PrimaryBrainDelegationClient:
                 return report_answer
             return "The primary runtime completed without a user-facing final answer. Intermediate node data was intentionally not exposed."
         return "The primary runtime completed without a user-facing final answer."
-
-
-    def _extract_investigation_report_answer(self, results: dict[str, Any]) -> str:
-        """Derive a user-facing answer from completed intermediate results.
-
-        This is intentionally generic: it only looks for common result fields,
-        status fields, evidence-like lists, and error material. It does not
-        contain business/domain keywords. It prevents delegated execution from
-        crashing when the output node did not run but earlier nodes produced
-        usable material.
-        """
-        if not isinstance(results, dict) or not results:
-            return ""
-
-        preferred_keys = ["output", "final", "final_result", "synthesis", "execution", "answer"]
-        for key in preferred_keys:
-            value = results.get(key)
-            text = self._coerce_user_text(value)
-            if self._answer_has_result_material(text):
-                return text
-
-        collected: list[str] = []
-        failures: list[str] = []
-        for node_id, value in results.items():
-            if str(node_id).startswith("runtime_timeout"):
-                failures.append(str(value.get("reason") if isinstance(value, dict) else value))
-                continue
-            status = str(value.get("status") or value.get("execution_status") or "") if isinstance(value, dict) else ""
-            text = self._coerce_user_text(value)
-            if status.lower() in {"failed", "error", "timeout", "execution_timeout"}:
-                if text:
-                    failures.append(f"{node_id}: {text}")
-                else:
-                    failures.append(str(node_id))
-                continue
-            if self._answer_has_result_material(text):
-                collected.append(text)
-
-        if collected:
-            return "\n\n".join(collected[:3]).strip()
-        if failures:
-            return "The runtime could not produce a verified final answer. " + "; ".join(failures[:3])
-        return ""
-
-    def _coerce_user_text(self, value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value.strip()
-        if isinstance(value, (int, float, bool)):
-            return str(value)
-        if isinstance(value, list):
-            parts = [self._coerce_user_text(item) for item in value]
-            return "\n".join(p for p in parts if p).strip()
-        if isinstance(value, dict):
-            for key in ["final_answer", "message", "answer", "result", "summary", "content", "text", "output"]:
-                text = self._coerce_user_text(value.get(key))
-                if self._answer_has_result_material(text):
-                    return text
-            pairs: list[str] = []
-            for key, child in value.items():
-                if str(key).startswith("_"):
-                    continue
-                if key in {"raw", "debug", "trace", "metadata", "schema", "input"}:
-                    continue
-                text = self._coerce_user_text(child)
-                if self._answer_has_result_material(text):
-                    pairs.append(f"{key}: {text}")
-            return "\n".join(pairs[:8]).strip()
-        return ""
 
     def _extract_status(self, state: dict[str, Any]) -> str:
         if isinstance(state, dict) and str(state.get("status") or "") in {"failed", "completed", "timeout"}:

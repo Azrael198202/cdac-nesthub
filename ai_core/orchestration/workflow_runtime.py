@@ -545,6 +545,12 @@ class WorkflowRuntime:
                         return
 
                 else:
+                    state["status"] = "failed"
+                    state["error"] = str(cap_result.get("message", ""))
+                    state.setdefault("results", {})[node_id] = {
+                        "status": "failed",
+                        "message": state["error"],
+                    }
                     await self._emit(run_id, {
                         "type": "RUN_FAILED",
                         "title": "Capability unavailable",
@@ -621,6 +627,12 @@ class WorkflowRuntime:
                     })
                     return
 
+                state["status"] = "failed"
+                state["error"] = f"{node_id}: {exc}"
+                state.setdefault("results", {})[node_id] = {
+                    "status": "failed",
+                    "message": state["error"],
+                }
                 await self._emit(run_id, {
                     "type": "RUN_FAILED",
                     "title": "Node execution failed",
@@ -803,6 +815,7 @@ class WorkflowRuntime:
                     "origin": "ai_core",
                 })
 
+        state["status"] = "completed"
         self.knowledge.save_success_case(run_id, state["results"])
         output_result = state.get("results", {}).get("output", {}) if isinstance(state.get("results", {}).get("output"), dict) else {}
         final_message = output_result.get("final_answer") or output_result.get("message") or "Workflow completed."

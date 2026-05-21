@@ -49,3 +49,8 @@ rich>=13.7.1
 loguru>=0.7.2
 tiktoken>=0.7.0
 psutil>=5.9.8
+
+# Optional local OpenAI-compatible runtime server
+# Install only on a GPU/Linux environment that supports vLLM.
+vllm>=0.6.0
+

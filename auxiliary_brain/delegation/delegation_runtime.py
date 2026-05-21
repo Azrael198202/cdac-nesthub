@@ -86,6 +86,11 @@ class AgentDelegationRuntime:
                 f"Participant finished: {participant_name}",
                 "completed" if result.status == "completed" else result.status,
             )
+            if result.status in {"failed", "incomplete", "timeout"}:
+                # Do not mark a failed primary-runtime participant as successful.
+                # Keep executing remaining participants so the final synthesis can
+                # report all failures, but preserve the failure status in payload.
+                pass
             if result.status in {"requires_key", "requires_input", "paused"}:
                 run_payload.update({
                     "status": result.status,
@@ -120,9 +125,11 @@ class AgentDelegationRuntime:
         }
         delivery_path = self.store.write_json(f"deliveries/{delivery_id}.json", delivery_payload)
 
+        final_status = str(synthesis.get("status") or "")
+        failed_statuses = {"failed", "completed_with_no_participant_result", "partial_failed", "no_usable_result"}
         run_payload.update({
-            "status": "completed",
-            "current_stage": "completed",
+            "status": "failed" if final_status in failed_statuses else "completed",
+            "current_stage": "failed" if final_status in failed_statuses else "completed",
             "completed_at": self._now(),
             "synthesis": synthesis,
             "delivery": str(delivery_path),
@@ -179,9 +186,11 @@ class AgentDelegationRuntime:
             "created_at": self._now(),
         }
         delivery_path = self.store.write_json(f"deliveries/{delivery_id}.json", delivery_payload)
+        final_status = str(synthesis.get("status") or "")
+        failed_statuses = {"failed", "completed_with_no_participant_result", "partial_failed", "no_usable_result"}
         run_payload.update({
-            "status": "completed",
-            "current_stage": "completed",
+            "status": "failed" if final_status in failed_statuses else "completed",
+            "current_stage": "failed" if final_status in failed_statuses else "completed",
             "completed_at": self._now(),
             "synthesis": synthesis,
             "delivery": str(delivery_path),
@@ -300,6 +309,11 @@ class AgentDelegationRuntime:
             existing_results.append(payload)
             agent_results.append(result)
             self._record_progress(run_payload, f"participant_{index + 1}_complete", f"Participant finished: {participant_name}", "completed" if result.status == "completed" else result.status)
+            if result.status in {"failed", "incomplete", "timeout"}:
+                # Do not mark a failed primary-runtime participant as successful.
+                # Keep executing remaining participants so the final synthesis can
+                # report all failures, but preserve the failure status in payload.
+                pass
             if result.status in {"requires_key", "requires_input", "paused"}:
                 run_payload.update({
                     "status": result.status,
@@ -336,9 +350,11 @@ class AgentDelegationRuntime:
             "created_at": self._now(),
         }
         delivery_path = self.store.write_json(f"deliveries/{delivery_id}.json", delivery_payload)
+        final_status = str(synthesis.get("status") or "")
+        failed_statuses = {"failed", "completed_with_no_participant_result", "partial_failed", "no_usable_result"}
         run_payload.update({
-            "status": "completed",
-            "current_stage": "completed",
+            "status": "failed" if final_status in failed_statuses else "completed",
+            "current_stage": "failed" if final_status in failed_statuses else "completed",
             "completed_at": self._now(),
             "synthesis": synthesis,
             "delivery": str(delivery_path),

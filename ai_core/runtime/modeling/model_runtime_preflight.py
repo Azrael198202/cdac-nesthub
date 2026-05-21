@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib.util
+import shlex
 from typing import Any
 
 import httpx
@@ -166,9 +168,34 @@ class ModelRuntimePreflight:
                     pass
                 return ProviderHealth(provider_name, model_id, "local", True, "Provider is reachable.", checked_url=url)
         except Exception as exc:
+            missing_module = self._missing_python_module_for_command(str(provider.get("start_command") or ""))
+            if missing_module:
+                return ProviderHealth(
+                    provider_name or "local",
+                    model_id,
+                    "local",
+                    False,
+                    f"Provider auto-start command requires missing Python module: {missing_module}",
+                    checked_url=base_url,
+                )
             if provider.get("auto_start") or provider.get("auto_install"):
                 return ProviderHealth(provider_name or "local", model_id, "local", True, f"Provider is configured for runtime auto-prepare; current health check was not reachable yet: {exc}", checked_url=base_url)
             return ProviderHealth(provider_name or "local", model_id, "local", False, f"Provider is not reachable: {exc}", checked_url=base_url)
+
+    def _missing_python_module_for_command(self, command: str) -> str | None:
+        if not command:
+            return None
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            return None
+        for idx, part in enumerate(parts[:-1]):
+            if part == "-m":
+                module = parts[idx + 1]
+                root = module.split(".", 1)[0]
+                if root and importlib.util.find_spec(root) is None:
+                    return root
+        return None
 
     async def _check_api_provider(self, provider_name: str, model_id: str) -> ProviderHealth:
         provider = self._provider_config(provider_name)

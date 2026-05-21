@@ -1,0 +1,3 @@
+# Optional local OpenAI-compatible runtime server
+# Install only on a GPU/Linux environment that supports vLLM.
+vllm>=0.6.0

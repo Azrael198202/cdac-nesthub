@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import shlex
 import time
 from typing import Any
 
@@ -10,7 +12,7 @@ from ai_core.context.token_estimator import TokenEstimator
 from ai_core.events.event_bus import event_bus
 from ai_core.llm.model_response_cache import ModelResponseCache
 from ai_core.llm.provider_handlers.base import ProviderUnavailableError
-from ai_core.llm.provider_handlers.utils import build_system_prompt, parse_json_content, response_json_or_error
+from ai_core.llm.provider_handlers.utils import build_system_prompt, parse_json_content
 from ai_core.llm.token_usage_logger import TokenUsageLogger
 from ai_core.secrets.secret_store import SecretStore
 
@@ -94,6 +96,14 @@ class UniversalModelProviderHandler:
         command = str(provider.get("start_command") or "").strip()
         if not command:
             return
+
+        missing_module = self._missing_python_module_for_command(command)
+        if missing_module:
+            raise ProviderUnavailableError(
+                f"Local provider cannot auto-start because Python module '{missing_module}' is not installed. "
+                f"provider={provider_name}; command={command}. Install the optional runtime dependency or disable this provider."
+            )
+
         await event_bus.emit(run_id, {
             "type": "LLM_PROVIDER_AUTOSTART",
             "title": "Starting provider service",
@@ -101,11 +111,29 @@ class UniversalModelProviderHandler:
             "node_id": node_id,
             "provider": provider_name,
         })
-        await asyncio.create_subprocess_shell(
+        process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
+        await asyncio.sleep(float(provider.get("startup_probe_delay_seconds") or 1.0))
+        if process.returncode is not None and process.returncode != 0:
+            raise ProviderUnavailableError(
+                f"Local provider start command exited immediately. provider={provider_name}; returncode={process.returncode}; command={command}"
+            )
+
+    def _missing_python_module_for_command(self, command: str) -> str | None:
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            return None
+        for idx, part in enumerate(parts[:-1]):
+            if part == "-m":
+                module = parts[idx + 1]
+                root = module.split(".", 1)[0]
+                if root and importlib.util.find_spec(root) is None:
+                    return root
+        return None
 
     async def _wait_openai_compatible_ready(self, base_url: str, provider: dict[str, Any]) -> bool:
         timeout = int(provider.get("ready_timeout_seconds") or 60)
@@ -189,7 +217,7 @@ class UniversalModelProviderHandler:
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
                 response = await client.post(url, headers=headers, json=payload)
                 response.raise_for_status()
-                data = response_json_or_error(response, provider_name=provider_name, endpoint=endpoint)
+                data = response.json()
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError) as exc:
             if self._is_local_openai_compatible(provider) and provider.get("auto_start"):
                 await self._start_openai_compatible_service(run_id, node_id, provider_name, provider)
@@ -198,7 +226,7 @@ class UniversalModelProviderHandler:
                     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
                         response = await client.post(url, headers=headers, json=payload)
                         response.raise_for_status()
-                        data = response_json_or_error(response, provider_name=provider_name, endpoint=endpoint)
+                        data = response.json()
                 else:
                     raise ProviderUnavailableError(f"Local provider did not become ready after auto-start. provider={provider_name}, base_url={base_url}") from exc
             else:
@@ -431,7 +459,7 @@ class UniversalModelProviderHandler:
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
-                data = response_json_or_error(response, provider_name=provider_name, endpoint=endpoint)
+                data = response.json()
         except httpx.TimeoutException as exc:
             raise ProviderUnavailableError(
                 f"Model request timed out. provider={provider_name}, model={model}, timeout_seconds={timeout}"

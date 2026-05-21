@@ -248,18 +248,7 @@ class AgentStudioService:
         all_participants = self.store.list_json("generated/agents")
         selected_ids = set(task_graph.get("selected_participant_ids") or [])
         participants = [p for p in all_participants if p.get("participant_id") in selected_ids] or all_participants
-        try:
-            result = await self.delegation_runtime.execute_task(task_graph, participants)
-        except Exception as exc:
-            return {
-                "action": "execute_task_graph",
-                "origin": "auxiliary_brain",
-                "status": "failed",
-                "task_name": task_name,
-                "message": "Task execution failed inside the runtime. The server returned a structured JSON error instead of an HTTP 500 text body.",
-                "error_type": type(exc).__name__,
-                "error": str(exc),
-            }
+        result = await self.delegation_runtime.execute_task(task_graph, participants)
         status = result.get("status", "completed")
         response = {
             "action": "execute_task_graph",
