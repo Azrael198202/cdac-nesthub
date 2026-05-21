@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import json
 from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import PROJECT_ROOT
 from ai_core.executors.template_engine import TemplateEngine
@@ -243,29 +244,59 @@ class LLMJsonExecutor:
                 "output_trace_path": output_trace_path,
             })
         except Exception as exc:
-            error_trace_path = self.prompt_io_recorder.record(
-                run_id=run_id,
+            recovered = self._recover_stage_result_after_provider_error(
                 node_id=node_id,
-                phase="llm_error",
-                payload={
-                    "run_id": run_id,
-                    "node_id": node_id,
-                    "adapter_id": adapter.get("adapter_id"),
-                    "prompt_id": prompt.get("id"),
-                    "error": str(exc),
-                    "system_prompt": prompt.get("system"),
-                    "user_prompt": rendered,
-                    "schema": schema,
-                },
+                state=state,
+                slim_user_input=slim_user_input,
+                slim_previous_results=slim_previous_results,
+                error=str(exc),
             )
-            await event_bus.emit(run_id, {
-                "type": "LLM_ERROR_RECORDED",
-                "title": "LLM error recorded",
-                "message": f"LLM error trace={error_trace_path}",
-                "node_id": node_id,
-                "error_trace_path": error_trace_path,
-            })
-            raise
+            if recovered is not None:
+                result = recovered
+                output_trace_path = self.prompt_io_recorder.record(
+                    run_id=run_id,
+                    node_id=node_id,
+                    phase="llm_output_recovered",
+                    payload={
+                        "run_id": run_id,
+                        "node_id": node_id,
+                        "adapter_id": adapter.get("adapter_id"),
+                        "prompt_id": prompt.get("id"),
+                        "provider_error": str(exc),
+                        "result": result,
+                    },
+                )
+                await event_bus.emit(run_id, {
+                    "type": "LLM_OUTPUT_RECOVERED",
+                    "title": "LLM stage recovered from provider error",
+                    "message": f"node={node_id}; trace={output_trace_path}",
+                    "node_id": node_id,
+                    "output_trace_path": output_trace_path,
+                })
+            else:
+                error_trace_path = self.prompt_io_recorder.record(
+                    run_id=run_id,
+                    node_id=node_id,
+                    phase="llm_error",
+                    payload={
+                        "run_id": run_id,
+                        "node_id": node_id,
+                        "adapter_id": adapter.get("adapter_id"),
+                        "prompt_id": prompt.get("id"),
+                        "error": str(exc),
+                        "system_prompt": prompt.get("system"),
+                        "user_prompt": rendered,
+                        "schema": schema,
+                    },
+                )
+                await event_bus.emit(run_id, {
+                    "type": "LLM_ERROR_RECORDED",
+                    "title": "LLM error recorded",
+                    "message": f"LLM error trace={error_trace_path}",
+                    "node_id": node_id,
+                    "error_trace_path": error_trace_path,
+                })
+                raise
 
         await event_bus.emit(run_id, {
             "type": "LLM_JSON_VALIDATING",
@@ -480,6 +511,96 @@ class LLMJsonExecutor:
         result["_node_id"] = node_id
         result["_adapter_id"] = adapter.get("adapter_id")
         return result
+    def _recover_stage_result_after_provider_error(self, *, node_id: str | None, state: dict, slim_user_input: str, slim_previous_results: dict, error: str) -> dict | None:
+        """Generic last-resort recovery for local JSON stage failures.
+
+        This does not replace the LLM stage. It runs only after provider timeout
+        or malformed JSON. The recovered object is deliberately minimal and
+        schema-shaped so LangGraph can continue instead of looping on the same
+        heavy prompt. It contains no domain-specific keywords.
+        """
+        node = str(node_id or "")
+        if node == "input_parsing":
+            return self._recover_input_parsing(state=state, slim_user_input=slim_user_input, error=error)
+        if node == "workflow_planning":
+            return self._recover_workflow_planning(state=state, slim_user_input=slim_user_input, slim_previous_results=slim_previous_results, error=error)
+        return None
+
+    def _recover_input_parsing(self, *, state: dict, slim_user_input: str, error: str) -> dict:
+        payload = self._loads_json_obj(slim_user_input) or self._loads_json_obj(str(state.get("input") or "")) or {}
+        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        agent_parameters = context.get("agent_parameters") if isinstance(context.get("agent_parameters"), dict) else payload.get("agent_parameters")
+        values = agent_parameters.get("values") if isinstance(agent_parameters, dict) and isinstance(agent_parameters.get("values"), dict) else {}
+        missing = agent_parameters.get("missing") if isinstance(agent_parameters, dict) and isinstance(agent_parameters.get("missing"), list) else []
+        parsed_entities = {
+            k: v for k, v in {
+                "request_type": payload.get("request_type"),
+                "task_name": payload.get("task_name"),
+                "participant_name": payload.get("participant_name"),
+                "objective": payload.get("objective"),
+                "parameters": values,
+            }.items() if v not in (None, "", [], {})
+        }
+        return {
+            "language": "unknown",
+            "original_input": str(payload.get("objective") or payload.get("instruction") or slim_user_input)[:300],
+            "parsed_entities": parsed_entities,
+            "semantic_modifiers": [],
+            "constraints": {},
+            "temporal_expressions": [],
+            "missing_information": [str(x.get("name") or x) for x in missing if str(x.get("name") if isinstance(x, dict) else x).strip()],
+            "safety_notes": [],
+            "recovery": {"status": "provider_error_recovered", "reason": error[:500]},
+        }
+
+    def _recover_workflow_planning(self, *, state: dict, slim_user_input: str, slim_previous_results: dict, error: str) -> dict:
+        payload = self._loads_json_obj(slim_user_input) or {}
+        previous = slim_previous_results if isinstance(slim_previous_results, dict) else {}
+        intent = previous.get("intent_recognition") if isinstance(previous.get("intent_recognition"), dict) else {}
+        parsed = previous.get("input_parsing") if isinstance(previous.get("input_parsing"), dict) else {}
+        normalized = intent.get("normalized_intent") if isinstance(intent.get("normalized_intent"), dict) else {}
+        parsed_entities = parsed.get("parsed_entities") if isinstance(parsed.get("parsed_entities"), dict) else {}
+        known = {}
+        for source in (normalized, parsed_entities, payload.get("agent_parameters", {}).get("values") if isinstance(payload.get("agent_parameters"), dict) else {}):
+            if isinstance(source, dict):
+                for k, v in source.items():
+                    if v not in (None, "", [], {}):
+                        known[str(k)] = v
+        objective = str(payload.get("objective") or intent.get("intent_summary") or parsed.get("original_input") or "execute requested task")[:300]
+        capability = str(intent.get("intent_type") or "runtime_capability")[:120]
+        return {
+            "planned_steps": [
+                {
+                    "step_id": "step_1",
+                    "task_id": "step_1",
+                    "step_type": "runtime_execution",
+                    "objective": objective,
+                    "input_from": ["input_parsing", "intent_recognition"],
+                    "parameters": {"known": known, "missing_required": [], "optional": {}},
+                    "required_capability": capability,
+                    "execution_strategy": ["runtime_native", "structured_provider", "web_evidence", "tool_generation"],
+                    "execution_ready": True,
+                    "human_interaction": {},
+                    "next_action": "execute",
+                    "depends_on": [],
+                    "requires_human_confirmation": False,
+                    "missing_fields": [],
+                }
+            ],
+            "blocking_missing_information": [],
+            "required_capabilities": [capability],
+            "execution_strategy": ["runtime_native", "structured_provider", "web_evidence", "tool_generation"],
+            "human_interaction": {},
+            "recovery": {"status": "provider_error_recovered", "reason": error[:500]},
+        }
+
+    def _loads_json_obj(self, text: str) -> dict:
+        try:
+            value = json.loads(str(text or ""))
+            return value if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+
     def _build_runtime_context(self, state: dict) -> dict:
         """Build generic runtime context for prompts.
 

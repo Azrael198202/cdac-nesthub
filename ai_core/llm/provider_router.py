@@ -44,11 +44,11 @@ class ProviderRouter:
         updated = dict(adapter or {})
         node = str(node_id or "")
         if node in {"agent_parameter_contract", "input_parsing"}:
-            updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 650), 650)
-            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 120), 120.0)
-            updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1200), 1200)
+            updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 520), 520)
+            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 90), 90.0)
+            updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 900), 900)
             updated.setdefault("provider_options", {})
-            updated["provider_options"].update({"temperature": 0, "num_predict": 384, "num_ctx": 2048, "think": False})
+            updated["provider_options"].update({"temperature": 0, "num_predict": 256, "num_ctx": 1536, "think": False})
         elif node == "intent_recognition":
             updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 800), 800)
             updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 60), 60.0)
@@ -56,11 +56,11 @@ class ProviderRouter:
             updated.setdefault("provider_options", {})
             updated["provider_options"].update({"temperature": 0, "num_predict": 384, "num_ctx": 2048, "think": False})
         elif node == "workflow_planning":
-            updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 1000), 1000)
-            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 75), 75.0)
-            updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1800), 1800)
+            updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 700), 700)
+            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 120), 120.0)
+            updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1200), 1200)
             updated.setdefault("provider_options", {})
-            updated["provider_options"].update({"temperature": 0, "num_predict": 512, "num_ctx": 3072, "think": False})
+            updated["provider_options"].update({"temperature": 0, "num_predict": 384, "num_ctx": 2048, "think": False})
         elif node == "execution":
             updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 800), 800)
             updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 30), 30.0)
@@ -83,7 +83,7 @@ class ProviderRouter:
             "agent_parameter_contract": 1400,
             "input_parsing": 1400,
             "intent_recognition": 1800,
-            "workflow_planning": 2400,
+            "workflow_planning": 1600,
             "execution": 1600,
         }
         limit = int(adapter.get("max_prompt_chars") or hard_char_limits.get(node, 5000))

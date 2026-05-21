@@ -80,21 +80,25 @@ class AgentParameterContractService:
                     node_id="agent_parameter_contract",
                     adapter={
                         "adapter_id": "agent_parameter_contract_adapter",
-                        "provider_timeout_seconds": 8,
+                        "provider_route": ["ollama", "openai"],
+                        "route_name": "input_parsing",
+                        "provider_timeout_seconds": 45,
                         "max_provider_attempts": 1,
-                        "provider_options": {"temperature": 0, "num_predict": 384, "num_ctx": 2048, "think": False},
+                        "max_prompt_tokens": 520,
+                        "max_schema_chars": 900,
+                        "provider_options": {"temperature": 0, "num_predict": 256, "num_ctx": 1536, "think": False},
                     },
                     prompt={
                         "system": (
-                            "Return one JSON object only. Infer the required runtime parameters for this agent definition. "
-                            "Do not execute the agent. Do not create workflows. Parameter values must be arrays. "
-                            "If the definition already contains concrete values, put them in values; otherwise values is empty."
+                            "Return JSON only. Infer required runtime parameters for executing this agent later. "
+                            "Do not execute, plan, or name tools. Use generic snake_case names. "
+                            "Every parameter values field is an array. Fill explicit values only."
                         )
                     },
                     rendered_user_prompt=json.dumps(prompt_payload, ensure_ascii=False, separators=(",", ":")),
                     schema=schema,
                 ),
-                timeout=12,
+                timeout=55,
             )
             return self._normalize_contract_result(result, source="runtime_llm")
         except Exception as exc:

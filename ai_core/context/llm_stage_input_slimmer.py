@@ -13,11 +13,11 @@ class LLMStageInputSlimmer:
     """
 
     DEFAULT_TEXT_LIMITS = {
-        "agent_parameter_contract": 900,
-        "input_parsing": 700,
-        "intent_recognition": 900,
-        "workflow_planning": 1200,
-        "execution": 900,
+        "agent_parameter_contract": 700,
+        "input_parsing": 650,
+        "intent_recognition": 700,
+        "workflow_planning": 800,
+        "execution": 700,
     }
 
     DROP_KEYS = {
@@ -108,7 +108,7 @@ class LLMStageInputSlimmer:
         for key in allowed_nodes:
             value = results.get(key)
             if isinstance(value, dict):
-                compact[key] = self._keep_known_result_fields(value)
+                compact[key] = self._keep_known_result_fields(value, node_id=node)
         return self._trim_obj(compact, limit)
 
     def slim_runtime_context(self, *, node_id: str | None, runtime_context: dict[str, Any]) -> dict[str, Any]:
@@ -121,6 +121,8 @@ class LLMStageInputSlimmer:
         return {k: v for k, v in (runtime_context or {}).items() if k in keep}
 
     def _compact_input_payload(self, payload: dict[str, Any], *, node_id: str) -> dict[str, Any]:
+        if node_id in {"workflow_planning", "execution"}:
+            return self._compact_stage_goal_payload(payload, node_id=node_id)
         compact: dict[str, Any] = {}
         for key, value in payload.items():
             if key in self.DROP_KEYS:
@@ -150,6 +152,24 @@ class LLMStageInputSlimmer:
             # traces belong to graph scheduling / context-awareness / synthesis.
             # Including them here makes local JSON models emit malformed JSON.
             return compact
+        return compact
+
+    def _compact_stage_goal_payload(self, payload: dict[str, Any], *, node_id: str) -> dict[str, Any]:
+        # Later stages should not receive the full delegation envelope. Their
+        # decision should be based on the participant objective plus validated
+        # upstream state. This prevents local JSON models from copying huge
+        # strings into planned_steps or breaking JSON syntax.
+        compact: dict[str, Any] = {}
+        for key in ("request_type", "task_name", "participant_name", "objective"):
+            value = payload.get(key)
+            if isinstance(value, (str, int, float, bool)) and str(value).strip():
+                compact[key] = value
+        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        params = context.get("agent_parameters") if isinstance(context.get("agent_parameters"), dict) else payload.get("agent_parameters")
+        if isinstance(params, dict):
+            values = params.get("values") if isinstance(params.get("values"), dict) else {}
+            if values:
+                compact["agent_parameters"] = {"values": self._compact_value(values, max_depth=2)}
         return compact
 
     def _compact_input_context(self, value: dict[str, Any]) -> dict[str, Any]:
@@ -198,14 +218,35 @@ class LLMStageInputSlimmer:
         if node_id == "workflow_planning":
             return ["input_parsing", "intent_recognition"]
         if node_id == "execution":
-            return ["intent_recognition", "workflow_planning"]
+            return ["workflow_planning"]
         return ["input_parsing", "intent_recognition", "workflow_planning"]
 
-    def _keep_known_result_fields(self, value: dict[str, Any]) -> dict[str, Any]:
+    def _keep_known_result_fields(self, value: dict[str, Any], *, node_id: str | None = None) -> dict[str, Any]:
+        node = str(node_id or "")
+        if node == "workflow_planning":
+            allowed = {
+                "parsed_entities",
+                "temporal_expressions",
+                "constraints",
+                "missing_information",
+                "intent_type",
+                "intent_summary",
+                "normalized_intent",
+            }
+        elif node == "execution":
+            allowed = {
+                "planned_steps",
+                "blocking_missing_information",
+                "required_capabilities",
+                "execution_strategy",
+                "human_interaction",
+            }
+        else:
+            allowed = set(self.KEEP_RESULT_KEYS) - {"original_input", "reason"}
         return {
-            key: self._compact_value(item, max_depth=3)
+            key: self._compact_value(item, max_depth=2 if node in {"workflow_planning", "execution"} else 3)
             for key, item in value.items()
-            if key in self.KEEP_RESULT_KEYS
+            if key in allowed
         }
 
     def _compact_value(self, value: Any, *, max_depth: int) -> Any:

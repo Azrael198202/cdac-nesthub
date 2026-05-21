@@ -758,12 +758,10 @@ class RuntimeBootstrap:
                     "STATE={{ previous_results }}"
                 ),
                 "runtime_rules": [
-                    "Create the fewest planned_steps possible.",
-                    "Copy parameters from normalized_intent; do not copy full input.",
-                    "Use only generic execution_strategy values.",
-                    "Use existing parameter values; do not ask again when values exist.",
-                    "Use runtime_native only for values already in runtime context.",
-                    "Use structured_provider or web_evidence for outside evidence.",
+                    "Create exactly one step unless dependency is explicit.",
+                    "Copy only normalized_intent parameters and agent parameter values.",
+                    "Do not copy original_input or raw JSON envelopes.",
+                    "Use generic execution_strategy values only.",
                     "Do not add concrete provider/API/tool names.",
                 ],
                 "output_contract": {
@@ -906,9 +904,10 @@ class RuntimeBootstrap:
                 "prompt": "runtime/generated/prompts/input_parsing.yaml",
                 "output_schema": "runtime/generated/schemas/input_parsing.schema.json",
                 "json_mode": True,
-                "stage_prompt_char_limit": 1800,
-                "max_schema_chars": 5000,
-                "provider_options": {"temperature": 0, "num_predict": 512, "num_ctx": 4096, "think": False}
+                "stage_prompt_char_limit": 900,
+                "max_schema_chars": 900,
+                "provider_timeout_seconds": 90,
+                "provider_options": {"temperature": 0, "num_predict": 256, "num_ctx": 1536, "think": False}
             },
             "intent_recognition": {
                 "adapter_id": "intent_recognition_adapter",
@@ -920,9 +919,10 @@ class RuntimeBootstrap:
                 "prompt": "runtime/generated/prompts/intent_recognition.yaml",
                 "output_schema": "runtime/generated/schemas/intent_recognition.schema.json",
                 "json_mode": True,
-                "stage_prompt_char_limit": 2600,
-                "max_schema_chars": 5000,
-                "provider_options": {"temperature": 0, "num_predict": 768, "num_ctx": 4096, "think": False}
+                "stage_prompt_char_limit": 1000,
+                "max_schema_chars": 1000,
+                "provider_timeout_seconds": 75,
+                "provider_options": {"temperature": 0, "num_predict": 256, "num_ctx": 1536, "think": False}
             },
             "workflow_planning": {
                 "adapter_id": "workflow_planning_adapter",
@@ -934,9 +934,10 @@ class RuntimeBootstrap:
                 "prompt": "runtime/generated/prompts/workflow_planning.yaml",
                 "output_schema": "runtime/generated/schemas/workflow_planning.schema.json",
                 "json_mode": True,
-                "stage_prompt_char_limit": 4200,
-                "max_schema_chars": 7000,
-                "provider_options": {"temperature": 0, "num_predict": 1200, "num_ctx": 6144, "think": False}
+                "stage_prompt_char_limit": 1200,
+                "max_schema_chars": 1200,
+                "provider_timeout_seconds": 120,
+                "provider_options": {"temperature": 0, "num_predict": 384, "num_ctx": 2048, "think": False}
             }
         }
         for name, cfg in adapters.items():
