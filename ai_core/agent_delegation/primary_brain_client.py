@@ -414,24 +414,58 @@ class PrimaryBrainDelegationClient:
     def _build_agent_message(self, request: AgentExecutionRequest) -> str:
         import json
 
-        envelope = PrimaryRuntimeRequestEnvelope(
-            request_type="agent_execution",
-            task_name=request.task_name,
-            participant_name=request.participant_name,
-            participant_id=request.participant_id,
-            objective=(request.participant_instruction or "").strip(),
-            task_instruction=request.task_instruction,
-            community_id=request.community_id,
-            context=request.shared_context or {},
-            execution_policy=PrimaryRuntimeExecutionPolicy(),
-        )
-        return (
-            "Execute one participant request. Own objective is primary. "
-            "Peer results in context are supporting material only; use them only when they are relevant. "
-            "Do not redefine participants or tasks. Return only the participant final answer.\n"
-            "JSON_ENVELOPE:\n"
-            + json.dumps(envelope.to_prompt_payload(), ensure_ascii=False, separators=(",", ":"))
-        )
+        # Participant execution should not receive the whole top-level task
+        # envelope.  The task graph has already been analyzed by the auxiliary
+        # mind-graph coordinator.  Each agent receives only its own objective and
+        # the tiny context that can change execution: relationship metadata,
+        # declared upstream safe summaries, and collected agent parameters.
+        # This keeps input_parsing / intent / workflow prompts stable for local
+        # JSON models and prevents task-level text from being copied into plans.
+        context = self._compact_agent_context(request.shared_context or {})
+        payload = {
+            "participant_name": request.participant_name,
+            "objective": (request.participant_instruction or "").strip(),
+        }
+        if context:
+            payload["context"] = context
+        return "JSON=" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def _compact_agent_context(self, context: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(context, dict):
+            return {}
+        out: dict[str, Any] = {}
+        relation = context.get("relationship") or context.get("relation")
+        if isinstance(relation, (str, int, float, bool)) and str(relation).strip():
+            out["relationship"] = relation
+        params = context.get("agent_parameters")
+        if isinstance(params, dict):
+            values = params.get("values") if isinstance(params.get("values"), dict) else {}
+            missing = params.get("missing") if isinstance(params.get("missing"), list) else []
+            compact_params: dict[str, Any] = {}
+            if values:
+                compact_params["values"] = values
+            if missing:
+                compact_params["missing"] = [
+                    {"name": str(x.get("name") or ""), "required": bool(x.get("required", True))}
+                    for x in missing[:8] if isinstance(x, dict)
+                ]
+            if compact_params:
+                out["agent_parameters"] = compact_params
+        # Peer results are allowed only when the mind graph declared a real
+        # dependency. They must already be strict JSON summaries; never stringify
+        # Python dicts or raw final answers here.
+        peers = context.get("available_peer_results")
+        if isinstance(peers, list):
+            safe = []
+            for item in peers[:4]:
+                if isinstance(item, dict):
+                    safe.append({
+                        k: v for k, v in item.items()
+                        if k in {"participant_name", "status", "safe_summary", "data", "facts"}
+                    })
+            if safe:
+                out["available_peer_results"] = safe
+        return out
 
     def _usable_agent_results(self, agent_results: list[AgentExecutionResult]) -> list[AgentExecutionResult]:
         blocked_statuses = {"requires_key", "requires_input", "paused"}
@@ -593,7 +627,7 @@ class PrimaryBrainDelegationClient:
             label = result.participant_name or result.participant_id or "participant"
             status = str(result.status or "completed")
             answer = self._clean_participant_answer((result.final_answer or "").strip())
-            if status == "completed" and answer:
+            if status == "completed" and answer and self._answer_has_result_material(answer):
                 successful.append((label, answer))
             else:
                 failed.append(label)

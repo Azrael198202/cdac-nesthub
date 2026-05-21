@@ -13,11 +13,11 @@ class LLMStageInputSlimmer:
     """
 
     DEFAULT_TEXT_LIMITS = {
-        "agent_parameter_contract": 700,
-        "input_parsing": 650,
-        "intent_recognition": 700,
-        "workflow_planning": 800,
-        "execution": 700,
+        "agent_parameter_contract": 520,
+        "input_parsing": 420,
+        "intent_recognition": 520,
+        "workflow_planning": 520,
+        "execution": 520,
     }
 
     DROP_KEYS = {
@@ -42,13 +42,9 @@ class LLMStageInputSlimmer:
         "request",
         "message",
         "instruction",
-        "task_instruction",
         "objective",
-        "expected_output",
         "constraints",
         "context",
-        "task_name",
-        "request_type",
         "participant_name",
         "runtime_parameters",
         "agent_parameters",
@@ -155,21 +151,32 @@ class LLMStageInputSlimmer:
         return compact
 
     def _compact_stage_goal_payload(self, payload: dict[str, Any], *, node_id: str) -> dict[str, Any]:
-        # Later stages should not receive the full delegation envelope. Their
-        # decision should be based on the participant objective plus validated
-        # upstream state. This prevents local JSON models from copying huge
-        # strings into planned_steps or breaking JSON syntax.
+        # Later stages receive only the participant's own objective and already
+        # collected parameter values.  Top-level task names, task instructions,
+        # execution policies, expected-output flags, and mind-graph internals do
+        # not affect the agent's local planning and make local JSON output less
+        # stable.
         compact: dict[str, Any] = {}
-        for key in ("request_type", "task_name", "participant_name", "objective"):
-            value = payload.get(key)
-            if isinstance(value, (str, int, float, bool)) and str(value).strip():
-                compact[key] = value
+        value = payload.get("participant_name")
+        if isinstance(value, (str, int, float, bool)) and str(value).strip():
+            compact["participant_name"] = value
+        value = payload.get("objective")
+        if isinstance(value, (str, int, float, bool)) and str(value).strip():
+            compact["objective"] = self._trim(str(value), 180)
         context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
         params = context.get("agent_parameters") if isinstance(context.get("agent_parameters"), dict) else payload.get("agent_parameters")
         if isinstance(params, dict):
             values = params.get("values") if isinstance(params.get("values"), dict) else {}
             if values:
-                compact["agent_parameters"] = {"values": self._compact_value(values, max_depth=2)}
+                compact["parameters"] = self._compact_value(values, max_depth=2)
+        peers = context.get("available_peer_results") if isinstance(context, dict) else None
+        if isinstance(peers, list):
+            safe = []
+            for item in peers[:4]:
+                if isinstance(item, dict):
+                    safe.append(self._compact_value(item, max_depth=1))
+            if safe:
+                compact["upstream"] = safe
         return compact
 
     def _compact_input_context(self, value: dict[str, Any]) -> dict[str, Any]:
@@ -224,27 +231,35 @@ class LLMStageInputSlimmer:
     def _keep_known_result_fields(self, value: dict[str, Any], *, node_id: str | None = None) -> dict[str, Any]:
         node = str(node_id or "")
         if node == "workflow_planning":
-            allowed = {
-                "parsed_entities",
-                "temporal_expressions",
-                "constraints",
-                "missing_information",
-                "intent_type",
-                "intent_summary",
-                "normalized_intent",
-            }
-        elif node == "execution":
-            allowed = {
-                "planned_steps",
-                "blocking_missing_information",
-                "required_capabilities",
-                "execution_strategy",
-                "human_interaction",
-            }
-        else:
-            allowed = set(self.KEEP_RESULT_KEYS) - {"original_input", "reason"}
+            out: dict[str, Any] = {}
+            parsed = value.get("parsed_entities") if isinstance(value.get("parsed_entities"), dict) else None
+            if parsed:
+                out["entities"] = self._compact_value(parsed, max_depth=1)
+            normalized = value.get("normalized_intent") if isinstance(value.get("normalized_intent"), dict) else None
+            if normalized:
+                out["intent"] = self._compact_value(normalized, max_depth=1)
+            if isinstance(value.get("intent_type"), str):
+                out["intent_type"] = self._trim(value.get("intent_type"), 80)
+            missing = value.get("missing_information")
+            if isinstance(missing, list) and missing:
+                out["missing"] = [str(x)[:80] for x in missing[:6]]
+            return out
+        if node == "execution":
+            steps = value.get("planned_steps") if isinstance(value.get("planned_steps"), list) else []
+            if steps:
+                first = steps[0] if isinstance(steps[0], dict) else {}
+                return {
+                    "step": {
+                        "objective": self._trim(str(first.get("objective") or ""), 160),
+                        "parameters": self._compact_value(first.get("parameters") or {}, max_depth=1),
+                        "required_capability": self._trim(str(first.get("required_capability") or ""), 80),
+                        "execution_strategy": first.get("execution_strategy") if isinstance(first.get("execution_strategy"), list) else [],
+                    }
+                }
+            return {}
+        allowed = set(self.KEEP_RESULT_KEYS) - {"original_input", "reason"}
         return {
-            key: self._compact_value(item, max_depth=2 if node in {"workflow_planning", "execution"} else 3)
+            key: self._compact_value(item, max_depth=2)
             for key, item in value.items()
             if key in allowed
         }

@@ -549,16 +549,20 @@ class AgentDelegationRuntime:
         # in the delegation run and are used by final synthesis / dependent-agent
         # later stages only.
         if for_input_parsing:
-            return {
-                "task_graph_id": task_graph.get("graph_id"),
-                "participant_count": len(selected),
+            # Agent execution starts with the agent's own local input only.
+            # Task graph identity, participant counts, and top-level task text are
+            # coordination data and must not enter the agent's prompt.
+            ctx = {
                 "relationship": participant_plan.get("relationship") or own_node.get("relation") or "independent",
-                "depends_on": participant_plan.get("depends_on") or own_node.get("depends_on") or [],
                 "agent_parameters": {
                     "values": participant.get("runtime_parameters") or {},
                     "missing": self.parameter_contract_service.missing_parameters(participant),
                 },
             }
+            deps = participant_plan.get("depends_on") or own_node.get("depends_on") or []
+            if deps:
+                ctx["depends_on"] = deps
+            return ctx
 
         shared_context: dict[str, Any] = {
             "task_graph_id": task_graph.get("graph_id"),

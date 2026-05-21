@@ -730,12 +730,11 @@ class RuntimeBootstrap:
                 ),
                 "user_template": (
                     "INPUT={{ user_input }}\n"
-                    "PARSED={{ previous_results }}"
+                    "STATE={{ previous_results }}"
                 ),
                 "runtime_rules": [
-                    "Use parsed_entities first.",
-                    "normalized_intent should contain only required parameters.",
-                    "confidence must be compact.",
+                    "Use parsed entities and parameters only.",
+                    "Do not include task-level coordination text.",
                 ],
                 "output_contract": {
                     "intent_type": "string",
@@ -754,15 +753,13 @@ class RuntimeBootstrap:
                     "No concrete tools, APIs, providers, libraries, repositories, or files."
                 ),
                 "user_template": (
-                    "GOAL={{ user_input }}\n"
-                    "STATE={{ previous_results }}"
+                    "INPUT={{ user_input }}\n"
+                    "FACTS={{ previous_results }}"
                 ),
                 "runtime_rules": [
-                    "Create exactly one step unless dependency is explicit.",
-                    "Copy only normalized_intent parameters and agent parameter values.",
-                    "Do not copy original_input or raw JSON envelopes.",
-                    "Use generic execution_strategy values only.",
-                    "Do not add concrete provider/API/tool names.",
+                    "One minimal executable step.",
+                    "Use only objective and parameters.",
+                    "No task envelope or concrete provider names.",
                 ],
                 "output_contract": {
                     "planned_steps": "array",
@@ -934,10 +931,11 @@ class RuntimeBootstrap:
                 "prompt": "runtime/generated/prompts/workflow_planning.yaml",
                 "output_schema": "runtime/generated/schemas/workflow_planning.schema.json",
                 "json_mode": True,
-                "stage_prompt_char_limit": 1200,
-                "max_schema_chars": 1200,
-                "provider_timeout_seconds": 120,
-                "provider_options": {"temperature": 0, "num_predict": 384, "num_ctx": 2048, "think": False}
+                "stage_prompt_char_limit": 700,
+                "max_schema_chars": 900,
+                "provider_timeout_seconds": 35,
+                "max_provider_attempts": 1,
+                "provider_options": {"temperature": 0, "num_predict": 256, "num_ctx": 1536, "think": False}
             }
         }
         for name, cfg in adapters.items():
