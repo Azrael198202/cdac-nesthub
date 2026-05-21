@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import asyncio
 from collections.abc import Callable
 import uuid
