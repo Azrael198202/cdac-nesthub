@@ -377,6 +377,24 @@ class AgentDelegationRuntime:
         self.store.write_json(f"generated/results/{run_id}.json", run_payload)
         return run_payload
 
+
+    def _compact_text(self, value: Any, max_chars: int = 800) -> str:
+        """Return a short, JSON-safe text preview for peer-agent context.
+
+        This is coordination-only data. It must not change the participant's
+        own objective; it only gives later participants compact optional context
+        from already finished peers.
+        """
+        if value is None:
+            return ""
+        text = str(value)
+        text = " ".join(text.split())
+        if max_chars <= 0:
+            return text
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 3].rstrip() + "..."
+
     def _result_key(self, payload: dict[str, Any]) -> str:
         return str(payload.get("participant_id") or payload.get("participant_name") or "")
 

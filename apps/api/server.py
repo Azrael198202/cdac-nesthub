@@ -12,6 +12,7 @@ from auxiliary_brain.studio import AgentStudioService
 from ai_core.runtime.bootstrap import RuntimeBootstrapService
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 
+import traceback
 approval_learning = ApprovalLearningService()
 app = FastAPI()
 runtime = WorkflowRuntime()
@@ -127,7 +128,22 @@ async def agent_studio_state():
 
 @app.post("/api/agent-studio/message")
 async def agent_studio_message(req: AgentStudioRequest):
-    return JSONResponse(await studio_service.handle_message(req.message, provided_inputs=req.provided_inputs))
+    try:
+        payload = await studio_service.handle_message(req.message, provided_inputs=req.provided_inputs)
+        return JSONResponse(payload)
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "status": "failed",
+                "error": {
+                    "type": exc.__class__.__name__,
+                    "message": str(exc),
+                },
+                "traceback": traceback.format_exc(limit=8),
+            },
+            status_code=500,
+        )
 
 
 @app.post("/api/agent-studio/secret")
