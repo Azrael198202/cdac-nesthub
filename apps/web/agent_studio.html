@@ -39,9 +39,9 @@ const messages = document.getElementById('messages');
 function renderJson(obj){ return JSON.stringify(obj, null, 2); }
 function addMessage(text, cls='item') { const el=document.createElement('div'); el.className=cls; el.innerHTML=`<div class="message">${escapeHtml(text)}</div>`; messages.appendChild(el); messages.scrollTop=messages.scrollHeight; }
 function renderStudioResponse(data, originalText){
-  if(data && data.action==='conversation_message'){
+  if(data && (data.action==='conversation_message' || data.action==='model_preflight')){
     const answer = data.final_answer || data.message || '';
-    addMessage(answer || '(no answer)', 'item final');
+    addMessage(answer || '(no answer)', data.status==='blocked' ? 'item error' : 'item final');
     return;
   }
   addMessage(renderJson(data), data && data.status==='completed' ? 'item' : 'item error');

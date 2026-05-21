@@ -10,6 +10,7 @@ from auxiliary_brain.storage import JsonStore
 from auxiliary_brain.studio.command_router import StudioCommandRouter
 from ai_core.runtime.adaptation import FeedbackClassifier, ModelUpgradeController, RerunStrategy
 from ai_core.interaction.natural_conversation import NaturalConversationService
+from ai_core.runtime.modeling.model_runtime_preflight import ModelRuntimePreflight
 
 
 class AgentStudioService:
@@ -23,6 +24,7 @@ class AgentStudioService:
         self.model_upgrade_controller = ModelUpgradeController()
         self.rerun_strategy = RerunStrategy()
         self.natural_conversation = NaturalConversationService()
+        self.model_preflight = ModelRuntimePreflight()
         self.store.ensure_workspace()
         self.community_id = self._ensure_community()
 
@@ -32,6 +34,17 @@ class AgentStudioService:
             return self.create_participant(message, routed.name)
         if routed.action == "create_task":
             return self.create_task_graph(message, routed.name)
+
+        # Model-dependent paths must not enter the runtime if the selected
+        # provider mode is impossible to satisfy. This prevents confusing late
+        # failures such as input_parsing failing with "No real LLM provider is
+        # available" after the user selected Local only while no local service
+        # is running. The preflight is model-provider only and contains no
+        # business-domain logic.
+        preflight = await self.model_preflight.check_before_runtime()
+        if not preflight.get("ok"):
+            return preflight
+
         if routed.action == "execute_task":
             return await self.execute_task(routed.name)
         if routed.action == "feedback_adaptation":
