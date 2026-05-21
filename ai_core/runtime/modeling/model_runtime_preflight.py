@@ -9,6 +9,7 @@ from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import RUNTIME_CONFIGS
 from ai_core.secrets.secret_store import SecretStore
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
+from ai_core.runtime.modeling.model_provider_autoconfig import ModelProviderAutoConfigurator
 
 
 @dataclass
@@ -34,8 +35,10 @@ class ModelRuntimePreflight:
         self.selection_store = UserModelSelectionStore()
         self.loader = ConfigLoader()
         self.secret_store = SecretStore()
+        self.provider_autoconfig = ModelProviderAutoConfigurator()
 
     async def check_before_runtime(self) -> dict[str, Any]:
+        self.provider_autoconfig.ensure()
         state = self.selection_store.state()
         selection = state.get("selection") if isinstance(state.get("selection"), dict) else {}
         mode = str(selection.get("mode") or "api_only")
@@ -119,7 +122,10 @@ class ModelRuntimePreflight:
     async def _check_local_provider(self, provider_name: str, model_id: str, logical_model_id: str | None = None) -> ProviderHealth:
         provider = self._provider_config(provider_name)
         if not provider:
-            return ProviderHealth(provider_name or "local", model_id, "local", False, "Provider is not configured.")
+            self.provider_autoconfig.ensure()
+            provider = self._provider_config(provider_name)
+        if not provider:
+            return ProviderHealth(provider_name or "local", model_id, "local", False, "Provider is not configured after runtime auto-configuration.")
         if not provider.get("enabled", True):
             return ProviderHealth(provider_name, model_id, "local", False, "Provider is disabled in configuration.")
         protocol = str(provider.get("protocol") or provider.get("type") or "").lower()
@@ -160,12 +166,17 @@ class ModelRuntimePreflight:
                     pass
                 return ProviderHealth(provider_name, model_id, "local", True, "Provider is reachable.", checked_url=url)
         except Exception as exc:
+            if provider.get("auto_start") or provider.get("auto_install"):
+                return ProviderHealth(provider_name or "local", model_id, "local", True, f"Provider is configured for runtime auto-prepare; current health check was not reachable yet: {exc}", checked_url=base_url)
             return ProviderHealth(provider_name or "local", model_id, "local", False, f"Provider is not reachable: {exc}", checked_url=base_url)
 
     async def _check_api_provider(self, provider_name: str, model_id: str) -> ProviderHealth:
         provider = self._provider_config(provider_name)
         if not provider:
-            return ProviderHealth(provider_name or "api", model_id, "api", False, "Provider is not configured.")
+            self.provider_autoconfig.ensure()
+            provider = self._provider_config(provider_name)
+        if not provider:
+            return ProviderHealth(provider_name or "api", model_id, "api", False, "Provider is not configured after runtime auto-configuration.")
         if not provider.get("enabled", True):
             return ProviderHealth(provider_name, model_id, "api", False, "Provider is disabled in configuration.")
         secret = self.selection_store.required_secret_for_model(model_id) or provider.get("auth_env") or provider.get("required_secret")

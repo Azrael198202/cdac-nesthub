@@ -1,5 +1,6 @@
 import time
 from ai_core.config.loader import ConfigLoader
+from ai_core.runtime.modeling.model_provider_autoconfig import ModelProviderAutoConfigurator
 from ai_core.config.paths import RUNTIME_CONFIGS
 from ai_core.events.event_bus import event_bus
 from ai_core.llm.provider_handler_registry import ProviderHandlerRegistry
@@ -22,6 +23,7 @@ class ProviderRouter:
     def __init__(self) -> None:
         self.loader = ConfigLoader()
         self.registry = ProviderHandlerRegistry()
+        self.provider_autoconfig = ModelProviderAutoConfigurator()
         self.prompt_budget = PromptBudgetManager()
         self.model_matcher = ModelCapabilityMatcher()
         self.routing_planner = ModelRoutingPlanner()
@@ -30,6 +32,7 @@ class ProviderRouter:
         self.runtime_cost_policy = RuntimeCostPolicy()
 
     def _config(self) -> dict:
+        self.provider_autoconfig.ensure()
         return self.loader.load_yaml(RUNTIME_CONFIGS / "models" / "providers.yaml")
 
 

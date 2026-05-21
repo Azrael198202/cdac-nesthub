@@ -85,6 +85,44 @@ class UniversalModelProviderHandler:
         payload["messages"] = messages
         return payload, self.estimator.estimate_obj(payload), True
 
+
+    def _is_local_openai_compatible(self, provider: dict[str, Any]) -> bool:
+        base = str(provider.get("base_url") or "").lower()
+        return "127.0.0.1" in base or "localhost" in base or bool(provider.get("auto_start"))
+
+    async def _start_openai_compatible_service(self, run_id: str, node_id: str, provider_name: str, provider: dict[str, Any]) -> None:
+        command = str(provider.get("start_command") or "").strip()
+        if not command:
+            return
+        await event_bus.emit(run_id, {
+            "type": "LLM_PROVIDER_AUTOSTART",
+            "title": "Starting provider service",
+            "message": command,
+            "node_id": node_id,
+            "provider": provider_name,
+        })
+        await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+
+    async def _wait_openai_compatible_ready(self, base_url: str, provider: dict[str, Any]) -> bool:
+        timeout = int(provider.get("ready_timeout_seconds") or 60)
+        interval = float(provider.get("ready_poll_interval_seconds") or 2)
+        attempts = max(1, int(timeout / max(interval, 0.1)))
+        url = base_url.rstrip("/") + "/v1/models"
+        for _ in range(attempts):
+            try:
+                async with httpx.AsyncClient(timeout=3) as client:
+                    res = await client.get(url)
+                    if res.status_code < 500:
+                        return True
+            except Exception:
+                pass
+            await asyncio.sleep(interval)
+        return False
+
     async def _call_chat_completions(self, run_id, node_id, provider_name, provider, prompt, rendered_user_prompt, schema):
         base_url = (provider.get("base_url") or "").rstrip("/")
         endpoint = provider.get("endpoint", "/v1/chat/completions")
@@ -152,6 +190,19 @@ class UniversalModelProviderHandler:
                 response = await client.post(url, headers=headers, json=payload)
                 response.raise_for_status()
                 data = response.json()
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError) as exc:
+            if self._is_local_openai_compatible(provider) and provider.get("auto_start"):
+                await self._start_openai_compatible_service(run_id, node_id, provider_name, provider)
+                ready = await self._wait_openai_compatible_ready(base_url, provider)
+                if ready:
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+                        response = await client.post(url, headers=headers, json=payload)
+                        response.raise_for_status()
+                        data = response.json()
+                else:
+                    raise ProviderUnavailableError(f"Local provider did not become ready after auto-start. provider={provider_name}, base_url={base_url}") from exc
+            else:
+                raise ProviderUnavailableError(f"Model provider is not reachable. provider={provider_name}, base_url={base_url}, error={exc}") from exc
         except httpx.TimeoutException as exc:
             raise ProviderUnavailableError(
                 f"Model request timed out. provider={provider_name}, model={model}, timeout_seconds={timeout}"
