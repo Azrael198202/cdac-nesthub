@@ -1,1 +1,1 @@
-v3.1.2-model-provider-preflight
+v3.1.3-vllm-qwen3-local-fallback

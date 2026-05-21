@@ -52,21 +52,21 @@ class ModelRuntimePreflight:
             return self._ok(selection, [health])
 
         if mode == "local_only":
-            health = await self._check_local_provider(initial_provider, initial_model_id)
-            if not health.ok:
+            checks = await self._check_local_provider_chain(initial_model_id, preferred_provider=initial_provider)
+            if not any(item.ok for item in checks):
                 return self._blocked(
                     selection,
-                    [health],
-                    "Selected local model provider is not available. Start the local provider or switch to API/Hybrid mode.",
+                    checks,
+                    "No local model provider is available. Start vLLM/Ollama, install the selected model, or switch to API/Hybrid mode.",
                 )
-            return self._ok(selection, [health])
+            return self._ok(selection, checks)
 
         # Hybrid: at least one selected route must be usable. Prefer checking the
         # selected initial model first, then the companion provider family.
         checks: list[ProviderHealth] = []
         initial_family = self.selection_store.family_for_model(initial_model_id) if initial_model_id else "api"
         if initial_family == "local":
-            checks.append(await self._check_local_provider(initial_provider, initial_model_id))
+            checks.extend(await self._check_local_provider_chain(initial_model_id, preferred_provider=initial_provider))
             api_model = str(selection.get("selected_api_model_id") or "").strip()
             api_provider = self.selection_store.provider_for_model(api_model) if api_model else "openai"
             api_secret = self.selection_store.required_secret_for_model(api_model) if api_model else "OPENAI_API_KEY"
@@ -81,7 +81,7 @@ class ModelRuntimePreflight:
                 checks.append(await self._check_api_provider(initial_provider, initial_model_id))
             local_model = str(selection.get("selected_local_model_id") or "qwen3:8b").strip()
             local_provider = self.selection_store.provider_for_model(local_model)
-            checks.append(await self._check_local_provider(local_provider, local_model))
+            checks.extend(await self._check_local_provider_chain(local_model, preferred_provider=local_provider))
 
         if any(item.ok for item in checks):
             return self._ok(selection, checks)
@@ -92,7 +92,31 @@ class ModelRuntimePreflight:
             return self._requires_secret(selection, missing.requires_secret, checks)
         return self._blocked(selection, checks, "No selected model provider is available for the current mode.")
 
-    async def _check_local_provider(self, provider_name: str, model_id: str) -> ProviderHealth:
+    async def _check_local_provider_chain(self, model_id: str, *, preferred_provider: str | None = None) -> list[ProviderHealth]:
+        order = []
+        if preferred_provider:
+            order.append(str(preferred_provider))
+        try:
+            policy = self.selection_store._load_policy().get("global_policy", {}).get("runtime_execution_policy", {})
+            configured = policy.get("local_provider_order") if isinstance(policy, dict) else None
+            if isinstance(configured, list):
+                order.extend(str(x) for x in configured if str(x))
+        except Exception:
+            pass
+        order.extend(["vllm", "ollama"])
+        seen = set()
+        checks: list[ProviderHealth] = []
+        for provider_name in order:
+            if provider_name in seen:
+                continue
+            seen.add(provider_name)
+            provider_model = self.selection_store.provider_model_for(provider_name, model_id)
+            checks.append(await self._check_local_provider(provider_name, provider_model, logical_model_id=model_id))
+            if checks[-1].ok:
+                break
+        return checks
+
+    async def _check_local_provider(self, provider_name: str, model_id: str, logical_model_id: str | None = None) -> ProviderHealth:
         provider = self._provider_config(provider_name)
         if not provider:
             return ProviderHealth(provider_name or "local", model_id, "local", False, "Provider is not configured.")
@@ -125,6 +149,15 @@ class ModelRuntimePreflight:
                     root = await client.get(base_url)
                     if root.status_code >= 500:
                         return ProviderHealth(provider_name, model_id, "local", False, f"Health check failed: HTTP {res.status_code}", checked_url=url)
+                    return ProviderHealth(provider_name, model_id, "local", True, "Provider is reachable; served model list is not exposed.", checked_url=url)
+                try:
+                    payload = res.json()
+                    items = payload.get("data", []) if isinstance(payload, dict) else []
+                    served = [str(x.get("id") or "") for x in items if isinstance(x, dict)]
+                    if model_id and served and model_id not in served:
+                        return ProviderHealth(provider_name, model_id, "local", False, f"Provider is reachable, but selected provider model is not being served: {model_id}", checked_url=url)
+                except Exception:
+                    pass
                 return ProviderHealth(provider_name, model_id, "local", True, "Provider is reachable.", checked_url=url)
         except Exception as exc:
             return ProviderHealth(provider_name or "local", model_id, "local", False, f"Provider is not reachable: {exc}", checked_url=base_url)

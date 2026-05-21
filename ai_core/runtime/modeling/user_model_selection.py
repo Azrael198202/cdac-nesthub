@@ -195,11 +195,25 @@ class UserModelSelectionStore:
 
     def provider_for_model(self, model_id: str, meta: dict[str, Any] | None = None) -> str:
         meta = meta or self._model_meta(model_id) or {}
-        provider = str(meta.get("provider_template") or "").strip()
-        if provider:
-            return provider
         family = self.family_for_model_meta(meta) if meta else self.family_for_model(model_id)
-        return "ollama" if family == "local" else "openai"
+        if family == "local":
+            provider_models = meta.get("provider_models") if isinstance(meta.get("provider_models"), dict) else {}
+            for provider_id in self._local_provider_order():
+                if not provider_models or provider_id in provider_models:
+                    return provider_id
+            provider = str(meta.get("provider_template") or "").strip()
+            return provider or "vllm"
+        provider = str(meta.get("provider_template") or "").strip()
+        return provider or "openai"
+
+    def provider_model_for(self, provider_name: str, model_id: str, meta: dict[str, Any] | None = None) -> str:
+        meta = meta or self._model_meta(model_id) or {}
+        provider_models = meta.get("provider_models") if isinstance(meta.get("provider_models"), dict) else {}
+        mapped = str(provider_models.get(provider_name) or "").strip()
+        if mapped:
+            return mapped
+        provider_model = str(meta.get("provider_model") or "").strip()
+        return provider_model or model_id
 
     def required_secret_for_model(self, model_id: str, meta: dict[str, Any] | None = None) -> str | None:
         meta = meta or self._model_meta(model_id) or {}
@@ -257,6 +271,16 @@ class UserModelSelectionStore:
         if isinstance(catalog, dict) and isinstance(catalog.get(model_id), dict):
             return catalog[model_id]
         return None
+
+    def _local_provider_order(self) -> list[str]:
+        policy = self._load_policy()
+        try:
+            order = policy.get("global_policy", {}).get("runtime_execution_policy", {}).get("local_provider_order")
+            if isinstance(order, list) and order:
+                return [str(x) for x in order if str(x)]
+        except Exception:
+            pass
+        return ["vllm", "ollama"]
 
     def _default_local_model(self) -> str:
         ids = [m["model_id"] for m in self.available_models("local") if m.get("model_id")]

@@ -9,6 +9,7 @@ from ai_core.llm.model_capability_matcher import ModelCapabilityMatcher
 from ai_core.runtime.modeling import ModelRoutingPlanner, ModelStagePolicy, RuntimeExecutionPolicy
 from ai_core.runtime.governance import RuntimeCostPolicy
 from ai_core.secrets.secret_store import SecretStore
+from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 
 
 class ProviderRouter:
@@ -55,17 +56,26 @@ class ProviderRouter:
         selected = str(adapter.get("preferred_local_model") or "").strip()
         if not selected:
             return provider
-        if provider.get("protocol") != "ollama_chat":
+        protocol = str(provider.get("protocol") or "")
+        updated = dict(provider)
+        if protocol == "openai_compatible" and provider_name in {"vllm", "vllm_coder", "lmstudio", "lmstudio_coder"}:
+            provider_model = UserModelSelectionStore().provider_model_for(provider_name, selected)
+            if provider_model:
+                updated["model"] = provider_model
+                updated["logical_model_id"] = selected
+            return updated
+        if protocol != "ollama_chat":
             return provider
-        if provider_name != "ollama":
+        if not provider_name.startswith("ollama"):
             return provider
+        provider_model = UserModelSelectionStore().provider_model_for(provider_name, selected)
         allowed = provider.get("available_local_models") or provider.get("fallback_models") or []
         allowed = [str(x) for x in allowed]
-        if selected not in allowed:
+        if provider_model not in allowed and selected not in allowed:
             return provider
-        updated = dict(provider)
-        updated["model"] = selected
-        fallbacks = [selected] + [m for m in allowed if m != selected]
+        selected_runtime_model = provider_model if provider_model in allowed else selected
+        updated["model"] = selected_runtime_model
+        fallbacks = [selected_runtime_model] + [m for m in allowed if m != selected_runtime_model]
         updated["fallback_models"] = fallbacks
         if "vl" in selected or "vision" in selected:
             tags = set(updated.get("model_tags") or []) | {"vision", "screenshot_analysis", "ui_understanding"}
