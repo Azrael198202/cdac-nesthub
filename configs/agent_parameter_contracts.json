@@ -1,22 +1,4 @@
 {
-  "templates": [
-    {
-      "name": "weather_information_contract",
-      "keywords": ["weather"],
-      "parameters": [
-        {
-          "name": "location",
-          "label": "Location",
-          "description": "Please enter one or more locations. Enter one value, click Continue to add another, or click Done when finished.",
-          "required": true
-        },
-        {
-          "name": "date",
-          "label": "Date / time range",
-          "description": "Please enter one or more dates or time expressions, such as today or tomorrow. Enter one value, click Continue to add another, or click Done when finished.",
-          "required": true
-        }
-      ]
-    }
-  ]
+  "templates": [],
+  "note": "Parameter contracts are generated at runtime from agent definitions."
 }

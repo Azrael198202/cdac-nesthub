@@ -33,7 +33,7 @@ class AgentStudioService:
     async def handle_message(self, message: str, provided_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         routed = self.router.route(message)
         if routed.action == "create_participant":
-            return self.create_participant(message, routed.name)
+            return await self.create_participant(message, routed.name)
         if routed.action == "create_task":
             return self.create_task_graph(message, routed.name)
 
@@ -169,11 +169,11 @@ class AgentStudioService:
             "traces": self.store.list_json("traces/agent_delegation"),
         }
 
-    def create_participant(self, instruction: str, name: str | None = None) -> dict[str, Any]:
+    async def create_participant(self, instruction: str, name: str | None = None) -> dict[str, Any]:
         participant_id = new_id("participant")
         participant_name = name or participant_id
         execution_objective = self._derive_execution_objective(instruction, participant_name)
-        parameter_contract = self.parameter_contract_service.build_contract(
+        parameter_contract = await self.parameter_contract_service.build_contract_runtime(
             definition_instruction=instruction,
             execution_objective=execution_objective,
             participant_name=participant_name,

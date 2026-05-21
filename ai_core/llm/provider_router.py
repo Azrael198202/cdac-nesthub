@@ -43,26 +43,31 @@ class ProviderRouter:
         """
         updated = dict(adapter or {})
         node = str(node_id or "")
-        if node == "input_parsing":
-            updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 900), 900)
-            # Keep the prompt small, but do not make cold local model loading
-            # look like a logical failure. Execution-stage prompts are guarded
-            # separately and more aggressively.
+        if node in {"agent_parameter_contract", "input_parsing"}:
+            updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 650), 650)
             updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 120), 120.0)
-            updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1800), 1800)
+            updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1200), 1200)
+            updated.setdefault("provider_options", {})
+            updated["provider_options"].update({"temperature": 0, "num_predict": 384, "num_ctx": 2048, "think": False})
         elif node == "intent_recognition":
-            updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 1200), 1200)
+            updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 800), 800)
             updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 60), 60.0)
-            updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 2200), 2200)
+            updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1500), 1500)
+            updated.setdefault("provider_options", {})
+            updated["provider_options"].update({"temperature": 0, "num_predict": 384, "num_ctx": 2048, "think": False})
         elif node == "workflow_planning":
-            updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 1800), 1800)
-            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 90), 90.0)
-            updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 2800), 2800)
+            updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 1000), 1000)
+            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 75), 75.0)
+            updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1800), 1800)
+            updated.setdefault("provider_options", {})
+            updated["provider_options"].update({"temperature": 0, "num_predict": 512, "num_ctx": 3072, "think": False})
         elif node == "execution":
-            updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 1200), 1200)
-            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 45), 45.0)
-            updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1600), 1600)
+            updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 800), 800)
+            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 30), 30.0)
+            updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1000), 1000)
             updated["max_provider_attempts"] = 1
+            updated.setdefault("provider_options", {})
+            updated["provider_options"].update({"temperature": 0, "num_predict": 384, "num_ctx": 2048, "think": False})
         return updated
 
     def _compact_rendered_prompt(self, *, node_id: str, text: str, adapter: dict) -> str:
@@ -75,10 +80,11 @@ class ProviderRouter:
         text = str(text or "")
         node = str(node_id or "")
         hard_char_limits = {
-            "input_parsing": 1800,
-            "intent_recognition": 2600,
-            "workflow_planning": 4200,
-            "execution": 3200,
+            "agent_parameter_contract": 1400,
+            "input_parsing": 1400,
+            "intent_recognition": 1800,
+            "workflow_planning": 2400,
+            "execution": 1600,
         }
         limit = int(adapter.get("max_prompt_chars") or hard_char_limits.get(node, 5000))
         if len(text) <= limit:

@@ -13,9 +13,11 @@ class LLMStageInputSlimmer:
     """
 
     DEFAULT_TEXT_LIMITS = {
-        "input_parsing": 900,
-        "intent_recognition": 1400,
-        "workflow_planning": 2200,
+        "agent_parameter_contract": 900,
+        "input_parsing": 700,
+        "intent_recognition": 900,
+        "workflow_planning": 1200,
+        "execution": 900,
     }
 
     DROP_KEYS = {
@@ -48,6 +50,8 @@ class LLMStageInputSlimmer:
         "task_name",
         "request_type",
         "participant_name",
+        "runtime_parameters",
+        "agent_parameters",
     }
 
     KEEP_POLICY_KEYS = {
@@ -149,20 +153,29 @@ class LLMStageInputSlimmer:
         return compact
 
     def _compact_input_context(self, value: dict[str, Any]) -> dict[str, Any]:
-        # input_parsing should receive only tiny coordination hints. The
-        # participant objective/name are already top-level fields. Passing
-        # graph nodes or policy objects makes local JSON models copy complex
+        # input_parsing should receive only tiny coordination hints and the
+        # participant's already-collected parameter values. Passing graph nodes,
+        # policies, traces, or peer results makes local JSON models copy complex
         # structures and often emit malformed JSON.
         out: dict[str, Any] = {}
-        for key in ("task_graph_id", "relationship", "relation"):
+        for key in ("relationship", "relation"):
             item = value.get(key)
             if isinstance(item, (str, int, float, bool)) and item not in ("", None):
                 out[key] = item
-        # Never include task_mind_graph, participant_dependency_plan,
-        # own_mind_graph_node, participant_dependency_policy,
-        # available_peer_results, traces, or previous result payloads in
-        # input_parsing. Dependent agents receive peer summaries only in later
-        # context-aware stages.
+        params = value.get("agent_parameters")
+        if isinstance(params, dict):
+            values = params.get("values") if isinstance(params.get("values"), dict) else {}
+            missing = params.get("missing") if isinstance(params.get("missing"), list) else []
+            compact_params: dict[str, Any] = {}
+            if values:
+                compact_params["values"] = self._compact_value(values, max_depth=2)
+            if missing:
+                compact_params["missing"] = [
+                    {"name": str(x.get("name") or ""), "required": bool(x.get("required", True))}
+                    for x in missing[:8] if isinstance(x, dict)
+                ]
+            if compact_params:
+                out["agent_parameters"] = compact_params
         return out
 
     def _compact_runtime_context(self, value: dict[str, Any]) -> dict[str, Any]:
@@ -183,7 +196,9 @@ class LLMStageInputSlimmer:
         if node_id == "intent_recognition":
             return ["input_parsing"]
         if node_id == "workflow_planning":
-            return ["input_parsing", "intent_recognition", "context_awareness"]
+            return ["input_parsing", "intent_recognition"]
+        if node_id == "execution":
+            return ["intent_recognition", "workflow_planning"]
         return ["input_parsing", "intent_recognition", "workflow_planning"]
 
     def _keep_known_result_fields(self, value: dict[str, Any]) -> dict[str, Any]:

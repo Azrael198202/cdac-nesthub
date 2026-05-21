@@ -4,6 +4,7 @@ import ast
 import json
 import py_compile
 import tempfile
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -68,7 +69,7 @@ class SandboxVerifier:
         if syntax_ok["status"] != "passed":
             return SandboxVerificationResult("failed", checks, False, True, "Python syntax validation failed.")
 
-        static_check = self._check_static_policy(source)
+        static_check = self._check_static_policy(source, artifact=artifact)
         checks.append(static_check)
         if static_check["status"] != "passed":
             return SandboxVerificationResult("blocked", checks, False, True, "Static safety policy blocked the artifact.")
@@ -106,19 +107,26 @@ class SandboxVerifier:
         except SyntaxError as exc:
             return {"name": "python_syntax", "status": "failed", "message": str(exc)}
 
-    def _check_static_policy(self, source: str) -> dict[str, Any]:
+    def _check_static_policy(self, source: str, artifact: dict[str, Any] | None = None) -> dict[str, Any]:
         tree = ast.parse(source)
         findings: list[str] = []
+        declared = self._declared_python_packages(artifact or {})
+        stdlib = set(getattr(sys, "stdlib_module_names", set()))
+        allowed_third_party = declared | {"requests"}
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     root = str(alias.name).split(".")[0]
                     if root in self.BLOCKED_IMPORTS:
                         findings.append(f"blocked import: {root}")
+                    elif root not in stdlib and root not in allowed_third_party:
+                        findings.append(f"undeclared third-party import: {root}")
             if isinstance(node, ast.ImportFrom):
                 root = str(node.module or "").split(".")[0]
                 if root in self.BLOCKED_IMPORTS:
                     findings.append(f"blocked import: {root}")
+                elif root and root not in stdlib and root not in allowed_third_party:
+                    findings.append(f"undeclared third-party import: {root}")
             if isinstance(node, ast.Call):
                 name = ""
                 if isinstance(node.func, ast.Name):
@@ -130,6 +138,17 @@ class SandboxVerifier:
         if findings:
             return {"name": "static_policy", "status": "blocked", "findings": findings}
         return {"name": "static_policy", "status": "passed"}
+
+    def _declared_python_packages(self, artifact: dict[str, Any]) -> set[str]:
+        manifest = artifact.get("manifest") if isinstance(artifact.get("manifest"), dict) else {}
+        deps = manifest.get("dependencies") if isinstance(manifest.get("dependencies"), dict) else {}
+        packages = deps.get("python_packages") if isinstance(deps.get("python_packages"), list) else []
+        out = set()
+        for item in packages:
+            name = str(item).split("==")[0].split(">=")[0].split("[")[0].strip().replace("-", "_")
+            if name:
+                out.add(name)
+        return out
 
     def _expected_entrypoint(self, artifact: dict[str, Any] | None) -> str:
         manifest = (artifact or {}).get("manifest") if isinstance((artifact or {}).get("manifest"), dict) else {}

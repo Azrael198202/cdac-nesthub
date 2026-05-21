@@ -30,7 +30,88 @@ class AgentParameterContractService:
         self.config_path = Path(config_path)
         self.config = self._load_config()
 
+    async def build_contract_runtime(self, *, definition_instruction: str, execution_objective: str, participant_name: str) -> dict[str, Any]:
+        """Create a parameter contract at runtime from the agent definition.
+
+        The runtime LLM infers which values the agent must receive later. This
+        keeps business/domain requirements out of source/config files. Every
+        parameter uses list values so a UI can collect one or many values with
+        Continue / Done semantics.
+        """
+        prompt_payload = {
+            "participant_name": participant_name,
+            "definition_instruction": definition_instruction,
+            "execution_objective": execution_objective,
+            "requirements": {
+                "infer_required_parameters": True,
+                "all_values_must_be_lists": True,
+                "do_not_fill_missing_values": True,
+                "use_generic_lower_snake_case_names": True,
+            },
+        }
+        schema = {
+            "type": "object",
+            "required": ["parameters"],
+            "properties": {
+                "parameters": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["name", "label", "description", "required", "values"],
+                        "properties": {
+                            "name": {"type": "string"},
+                            "label": {"type": "string"},
+                            "description": {"type": "string"},
+                            "required": {"type": "boolean"},
+                            "values": {"type": "array"},
+                        },
+                        "additionalProperties": True,
+                    },
+                }
+            },
+            "additionalProperties": True,
+        }
+        try:
+            from ai_core.llm.provider_router import ProviderRouter
+            import asyncio
+            result = await asyncio.wait_for(
+                ProviderRouter().generate_json(
+                    run_id="agent_parameter_contract",
+                    node_id="agent_parameter_contract",
+                    adapter={
+                        "adapter_id": "agent_parameter_contract_adapter",
+                        "provider_timeout_seconds": 8,
+                        "max_provider_attempts": 1,
+                        "provider_options": {"temperature": 0, "num_predict": 384, "num_ctx": 2048, "think": False},
+                    },
+                    prompt={
+                        "system": (
+                            "Return one JSON object only. Infer the required runtime parameters for this agent definition. "
+                            "Do not execute the agent. Do not create workflows. Parameter values must be arrays. "
+                            "If the definition already contains concrete values, put them in values; otherwise values is empty."
+                        )
+                    },
+                    rendered_user_prompt=json.dumps(prompt_payload, ensure_ascii=False, separators=(",", ":")),
+                    schema=schema,
+                ),
+                timeout=12,
+            )
+            return self._normalize_contract_result(result, source="runtime_llm")
+        except Exception as exc:
+            # Safe fallback: do not invent business-specific parameters in code.
+            # The UI/runtime can retry contract generation when a provider is available.
+            return {
+                "contract_type": "agent_parameter_contract",
+                "source": "runtime_llm_unavailable",
+                "parameters": [],
+                "missing_information": [],
+                "contract_generation_error": str(exc),
+            }
+
     def build_contract(self, *, definition_instruction: str, execution_objective: str, participant_name: str) -> dict[str, Any]:
+        # Backward-compatible non-LLM path. It only uses explicit config when
+        # supplied by a deployment. Source packages should ship this config empty
+        # so business parameters are created at runtime.
         text = " ".join([definition_instruction or "", execution_objective or "", participant_name or ""]).strip()
         lowered = text.lower()
         matched_template = self._match_template(lowered)
@@ -44,22 +125,54 @@ class AgentParameterContractService:
             if not name:
                 continue
             values = self._normalize_list(extracted.get(name))
-            parameters.append({
-                "name": name,
-                "label": str(slot.get("label") or name),
-                "description": str(slot.get("description") or f"Provide {name}."),
-                "required": bool(slot.get("required", True)),
-                "type": "list",
-                "values": values,
-                "collection_mode": "repeat_until_done",
-            })
-        return {
+            parameters.append(self._parameter_record(
+                name=name,
+                label=str(slot.get("label") or name),
+                description=str(slot.get("description") or f"Provide {name}."),
+                required=bool(slot.get("required", True)),
+                values=values,
+            ))
+        return self._normalize_contract_result({"parameters": parameters}, source="configured_template" if parameters else "empty_runtime_contract")
+
+    def _normalize_contract_result(self, result: dict[str, Any], *, source: str) -> dict[str, Any]:
+        params = result.get("parameters") if isinstance(result, dict) else []
+        parameters: list[dict[str, Any]] = []
+        if isinstance(params, list):
+            for item in params:
+                if not isinstance(item, dict):
+                    continue
+                name = self._safe_name(item.get("name"))
+                if not name:
+                    continue
+                parameters.append(self._parameter_record(
+                    name=name,
+                    label=str(item.get("label") or name),
+                    description=str(item.get("description") or f"Please provide {name}."),
+                    required=bool(item.get("required", True)),
+                    values=self._normalize_list(item.get("values")),
+                ))
+        contract = {
             "contract_type": "agent_parameter_contract",
-            "source": "definition_instruction",
-            "matched_template": matched_template.get("name") if matched_template else None,
+            "source": source,
             "parameters": parameters,
-            "missing_information": self.missing_parameters({"parameter_contract": {"parameters": parameters}}),
         }
+        contract["missing_information"] = self.missing_parameters({"parameter_contract": contract})
+        return contract
+
+    def _parameter_record(self, *, name: str, label: str, description: str, required: bool, values: list[Any]) -> dict[str, Any]:
+        return {
+            "name": self._safe_name(name),
+            "label": label,
+            "description": description,
+            "required": required,
+            "type": "list",
+            "values": values,
+            "collection_mode": "repeat_until_done",
+        }
+
+    def _safe_name(self, value: Any) -> str:
+        name = re.sub(r"[^A-Za-z0-9_]+", "_", str(value or "").strip().lower()).strip("_")
+        return name[:64]
 
     def missing_parameters(self, participant: dict[str, Any]) -> list[dict[str, Any]]:
         contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}

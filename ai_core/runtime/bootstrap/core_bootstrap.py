@@ -693,15 +693,15 @@ class RuntimeBootstrap:
         prompts = {
             "input_parsing": {
                 "id": "input_parsing_prompt",
-                "version": "2.2-ultra-slim",
+                "version": "2.3-micro",
                 "executor_type": "llm_json",
                 "system": (
                     "Return one JSON object only. Extract request fields. "
                     "Do not plan, choose tools, name providers, or explain."
                 ),
                 "user_template": (
-                    "INPUT_JSON={{ user_input }}\n"
-                    "NOW={{ runtime_context }}"
+                    "INPUT={{ user_input }}\n"
+                    "TIME={{ runtime_context }}"
                 ),
                 "runtime_rules": [
                     "Output only schema fields.",
@@ -722,7 +722,7 @@ class RuntimeBootstrap:
             },
             "intent_recognition": {
                 "id": "intent_recognition_prompt",
-                "version": "2.2-ultra-slim",
+                "version": "2.3-micro",
                 "executor_type": "llm_json",
                 "system": (
                     "Return one JSON object only. Classify intent from parsed fields. "
@@ -730,8 +730,7 @@ class RuntimeBootstrap:
                 ),
                 "user_template": (
                     "INPUT={{ user_input }}\n"
-                    "PARSED={{ previous_results }}\n"
-                    "NOW={{ runtime_context }}"
+                    "PARSED={{ previous_results }}"
                 ),
                 "runtime_rules": [
                     "Use parsed_entities first.",
@@ -748,23 +747,23 @@ class RuntimeBootstrap:
             },
             "workflow_planning": {
                 "id": "workflow_planning_prompt",
-                "version": "2.2-ultra-slim",
+                "version": "2.3-micro",
                 "executor_type": "llm_json",
                 "system": (
                     "Return one JSON object only. Create minimal abstract execution steps. "
                     "No concrete tools, APIs, providers, libraries, repositories, or files."
                 ),
                 "user_template": (
-                    "INPUT={{ user_input }}\n"
-                    "STATE={{ previous_results }}\n"
-                    "NOW={{ runtime_context }}"
+                    "GOAL={{ user_input }}\n"
+                    "STATE={{ previous_results }}"
                 ),
                 "runtime_rules": [
                     "Create the fewest planned_steps possible.",
                     "Copy parameters from normalized_intent; do not copy full input.",
                     "Use only generic execution_strategy values.",
-                    "For values already observable from runtime_context, use required_source_level=runtime_native and execution_strategy=[runtime_native].",
-                    "For outside evidence, use execution_strategy=[structured_provider,web_evidence].",
+                    "Use existing parameter values; do not ask again when values exist.",
+                    "Use runtime_native only for values already in runtime context.",
+                    "Use structured_provider or web_evidence for outside evidence.",
                     "Do not add concrete provider/API/tool names.",
                 ],
                 "output_contract": {

@@ -115,10 +115,17 @@ class LLMJsonExecutor:
             limit=stage_prompt_limit or None,
         )
         runtime_context = self.input_slimmer.slim_runtime_context(node_id=node_id, runtime_context=runtime_context)
-        if node_id != "input_parsing":
-            runtime_context["role_profile"] = role_profile
-            runtime_context["prompt_policy"] = role_profile.get("prompt_policy", {})
-            runtime_context["evidence_summary"] = scoped_context.get("evidence_summary")
+        if node_id not in {"input_parsing", "intent_recognition", "workflow_planning"}:
+            runtime_context["role_profile"] = {
+                "role_id": role_profile.get("role_id"),
+                "role_type": role_profile.get("role_type"),
+            }
+            summary = scoped_context.get("evidence_summary")
+            if isinstance(summary, dict):
+                runtime_context["evidence_summary"] = {
+                    "known_parameters": summary.get("known_parameters", {}),
+                    "selected_evidence": (summary.get("selected_evidence") or [])[:2],
+                }
 
         await event_bus.emit(run_id, {
             "type": "ROLE_PROFILE_SELECTED",
