@@ -39,15 +39,14 @@ class AgentParameterContractService:
         Continue / Done semantics.
         """
         prompt_payload = {
-            "participant_name": participant_name,
-            "definition_instruction": definition_instruction,
-            "execution_objective": execution_objective,
-            "requirements": {
-                "infer_required_parameters": True,
-                "all_values_must_be_lists": True,
-                "do_not_fill_missing_values": True,
-                "use_generic_lower_snake_case_names": True,
-            },
+            "agent_name": participant_name,
+            "definition": definition_instruction,
+            "execution_goal": execution_objective,
+            "instruction": (
+                "Infer the minimum runtime parameters that must be collected before this agent can execute. "
+                "Only include parameters that affect the result. All values must be arrays. "
+                "Leave values empty unless explicitly present in the definition. Do not create tools or workflows."
+            ),
         }
         schema = {
             "type": "object",
@@ -84,15 +83,16 @@ class AgentParameterContractService:
                         "route_name": "input_parsing",
                         "provider_timeout_seconds": 45,
                         "max_provider_attempts": 1,
-                        "max_prompt_tokens": 520,
-                        "max_schema_chars": 900,
-                        "provider_options": {"temperature": 0, "num_predict": 256, "num_ctx": 1536, "think": False},
+                        "max_prompt_tokens": 460,
+                        "max_schema_chars": 820,
+                        "provider_options": {"temperature": 0, "num_predict": 320, "num_ctx": 1536, "think": False},
                     },
                     prompt={
                         "system": (
                             "Return JSON only. Infer required runtime parameters for executing this agent later. "
-                            "Do not execute, plan, or name tools. Use generic snake_case names. "
-                            "Every parameter values field is an array. Fill explicit values only."
+                            "Do not execute, plan, search, or name tools. Use lower snake_case parameter names. "
+                            "Return the smallest useful parameter set. Every values field is an array. "
+                            "Put only explicit values from the definition into values; otherwise leave []."
                         )
                     },
                     rendered_user_prompt=json.dumps(prompt_payload, ensure_ascii=False, separators=(",", ":")),

@@ -197,15 +197,24 @@ class AgentStudioService:
         }
         path = self.store.write_json(f"generated/agents/{participant_id}.json", payload)
         self._update_community()
-        return {
+        missing_inputs = self.parameter_contract_service.to_missing_input_fields(payload)
+        response = {
             "action": "create_participant",
             "origin": "auxiliary_brain",
             "status": "completed",
             "participant_id": participant_id,
             "agent_name": participant_name,
             "display_name": participant_name,
+            "name": participant_name,
             "path": str(path),
         }
+        # Surface the contract so the UI can show that the agent was created
+        # with runtime parameters. Actual parameter collection is still enforced
+        # when a task executes.
+        if missing_inputs:
+            response["parameter_contract"] = parameter_contract
+            response["missing_inputs_preview"] = missing_inputs
+        return response
 
     def create_task_graph(self, instruction: str, name: str | None = None) -> dict[str, Any]:
         graph_id = new_id("graph")
