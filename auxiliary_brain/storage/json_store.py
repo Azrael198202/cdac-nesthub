@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -41,13 +42,19 @@ class JsonStore:
         except Exception:
             return {}
 
-    def list_json(self, relative: str) -> list[dict[str, Any]]:
+    def list_json(self, relative: str, *, limit: int | None = None) -> list[dict[str, Any]]:
         self.ensure_workspace()
         path = self.root / relative
         out: list[dict[str, Any]] = []
         if not path.exists():
             return out
-        for item in sorted(path.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if limit is None:
+            try:
+                limit = int(os.environ.get("AI_CORE_JSON_STORE_LIST_LIMIT", "300"))
+            except Exception:
+                limit = 300
+        items = sorted(path.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for item in items[: max(1, int(limit))]:
             try:
                 loaded = json.loads(item.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict):

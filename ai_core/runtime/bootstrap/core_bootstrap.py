@@ -667,6 +667,13 @@ class RuntimeBootstrap:
             p = RUNTIME_GENERATED / "nodes" / f"{node_id}.yaml"
             if not p.exists():
                 self.loader.save_yaml(p, cfg)
+                continue
+            if node_id in {"input_parsing", "intent_recognition", "workflow_planning"}:
+                existing = self.loader.load_yaml(p)
+                changed = any(existing.get(k) != cfg.get(k) for k in ("executor_type", "prompt", "output_schema", "adapter"))
+                if changed:
+                    existing.update(cfg)
+                    self.loader.save_yaml(p, existing)
 
 
     def _ensure_runtime_templates(self) -> None:
@@ -686,23 +693,22 @@ class RuntimeBootstrap:
         prompts = {
             "input_parsing": {
                 "id": "input_parsing_prompt",
-                "version": "2.0",
+                "version": "2.1-slim",
                 "executor_type": "llm_json",
                 "system": (
                     "You are a generic input parsing engine. Return JSON only according to the output schema. "
-                    "Only parse the raw input. Do not generate tasks, workflow, tools, APIs, providers, or execution decisions."
+                    "Parse only the compact runtime request supplied by the user message. "
+                    "Do not generate workflow, tools, APIs, providers, or execution decisions."
                 ),
                 "user_template": (
-                    "User input: {{ user_input }}\n"
-                    "Runtime context: {{ runtime_context }}\n"
-                    "Previous results: {{ previous_results }}\n"
-                    "Correction memory: {{ correction_memory }}"
+                    "Compact input:\n{{ user_input }}\n\n"
+                    "Runtime date context:\n{{ runtime_context }}"
                 ),
                 "runtime_rules": [
                     "Only output fields needed for input parsing.",
                     "Do not output top-level tasks.",
                     "Do not output planned_steps, required_capabilities, tool names, API names, provider names, or execution decisions.",
-                    "Extract parsed_entities, semantic modifiers, constraints, and temporal expressions from the original input.",
+                    "Extract parsed_entities, semantic modifiers, constraints, and temporal expressions from the compact input.",
                     "If runtime_context can safely normalize a relative expression, include the normalized value as parsed data while preserving the original expression.",
                 ],
                 "output_contract": {
@@ -718,17 +724,17 @@ class RuntimeBootstrap:
             },
             "intent_recognition": {
                 "id": "intent_recognition_prompt",
-                "version": "2.0",
+                "version": "2.1-slim",
                 "executor_type": "llm_json",
                 "system": (
                     "You are a generic intent recognition engine. Return JSON only. "
-                    "Only classify and summarize intent. Do not generate tasks, workflow, tools, APIs, providers, or execution decisions."
+                    "Classify and summarize intent using compact input and previous parsed fields. "
+                    "Do not generate workflow, tools, APIs, providers, or execution decisions."
                 ),
                 "user_template": (
-                    "User input: {{ user_input }}\n"
-                    "Runtime context: {{ runtime_context }}\n"
-                    "Previous results: {{ previous_results }}\n"
-                    "Correction memory: {{ correction_memory }}"
+                    "Compact input:\n{{ user_input }}\n\n"
+                    "Previous structured results:\n{{ previous_results }}\n\n"
+                    "Runtime date context:\n{{ runtime_context }}"
                 ),
                 "runtime_rules": [
                     "Only output fields needed for intent recognition.",
@@ -747,17 +753,16 @@ class RuntimeBootstrap:
             },
             "workflow_planning": {
                 "id": "workflow_planning_prompt",
-                "version": "2.0",
+                "version": "2.1-slim",
                 "executor_type": "llm_json",
                 "system": (
-                    "You are a generic workflow planner. Produce executable planned_steps from previous structured results. "
+                    "You are a generic workflow planner. Build executable abstract steps from compact structured results. "
                     "Return JSON only. Use generic capabilities only; do not choose concrete tools, APIs, providers, libraries, repositories, or implementation files."
                 ),
                 "user_template": (
-                    "User input: {{ user_input }}\n"
-                    "Runtime context: {{ runtime_context }}\n"
-                    "Previous results: {{ previous_results }}\n"
-                    "Correction memory: {{ correction_memory }}"
+                    "Compact input:\n{{ user_input }}\n\n"
+                    "Previous structured results:\n{{ previous_results }}\n\n"
+                    "Runtime date context:\n{{ runtime_context }}"
                 ),
                 "runtime_rules": [
                     "Only workflow_planning may create planned_steps.",
@@ -781,10 +786,16 @@ class RuntimeBootstrap:
             "feedback_learning": {"id": "feedback_learning_prompt", "version": "1.0", "executor_type": "static_transform"},
             "output": {"id": "output_prompt", "version": "1.0", "executor_type": "output"}
         }
+        protected = {"input_parsing", "intent_recognition", "workflow_planning"}
         for name, cfg in prompts.items():
             p = RUNTIME_GENERATED / "prompts" / f"{name}.yaml"
             if not p.exists():
                 self.loader.save_yaml(p, cfg)
+                continue
+            if name in protected:
+                existing = self.loader.load_yaml(p)
+                if existing.get("version") != cfg.get("version"):
+                    self.loader.save_yaml(p, cfg)
 
     def _ensure_schemas(self) -> None:
         schemas = {
@@ -901,7 +912,10 @@ class RuntimeBootstrap:
                 "model_capabilities": ["json_generation", "structured_extraction"],
                 "prompt": "runtime/generated/prompts/input_parsing.yaml",
                 "output_schema": "runtime/generated/schemas/input_parsing.schema.json",
-                "json_mode": True
+                "json_mode": True,
+                "stage_prompt_char_limit": 1800,
+                "max_schema_chars": 5000,
+                "provider_options": {"temperature": 0, "num_predict": 512, "num_ctx": 4096, "think": False}
             },
             "intent_recognition": {
                 "adapter_id": "intent_recognition_adapter",
@@ -912,7 +926,10 @@ class RuntimeBootstrap:
                 "model_capabilities": ["json_generation", "structured_extraction"],
                 "prompt": "runtime/generated/prompts/intent_recognition.yaml",
                 "output_schema": "runtime/generated/schemas/intent_recognition.schema.json",
-                "json_mode": True
+                "json_mode": True,
+                "stage_prompt_char_limit": 2600,
+                "max_schema_chars": 5000,
+                "provider_options": {"temperature": 0, "num_predict": 768, "num_ctx": 4096, "think": False}
             },
             "workflow_planning": {
                 "adapter_id": "workflow_planning_adapter",
@@ -923,13 +940,21 @@ class RuntimeBootstrap:
                 "model_capabilities": ["workflow_planning", "json_generation"],
                 "prompt": "runtime/generated/prompts/workflow_planning.yaml",
                 "output_schema": "runtime/generated/schemas/workflow_planning.schema.json",
-                "json_mode": True
+                "json_mode": True,
+                "stage_prompt_char_limit": 4200,
+                "max_schema_chars": 7000,
+                "provider_options": {"temperature": 0, "num_predict": 1200, "num_ctx": 6144, "think": False}
             }
         }
         for name, cfg in adapters.items():
             p = RUNTIME_GENERATED / "adapters" / f"{name}.yaml"
             if not p.exists():
                 self.loader.save_yaml(p, cfg)
+                continue
+            if name in {"input_parsing", "intent_recognition", "workflow_planning"}:
+                existing = self.loader.load_yaml(p)
+                existing.update(cfg)
+                self.loader.save_yaml(p, existing)
 
     def _ensure_capability_routes(self) -> None:
         p = RUNTIME_CONFIGS / "capabilities" / "capability_routes.yaml"

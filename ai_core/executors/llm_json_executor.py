@@ -11,6 +11,7 @@ from ai_core.validation.result_auto_repair import ResultAutoRepair
 from ai_core.evolution.runtime_learning import RuntimeLearningService
 from ai_core.evolution.approval_learning import ApprovalLearningService
 from ai_core.context.runtime_context_reducer import RuntimeContextReducer
+from ai_core.context.llm_stage_input_slimmer import LLMStageInputSlimmer
 from ai_core.roles import RoleProfileSelector, PromptPackLoader, RoleScopedContextReducer
 from ai_core.runtime.modeling import ModelStagePolicy
 from ai_core.runtime.governance import RuntimeCostPolicy
@@ -33,6 +34,7 @@ class LLMJsonExecutor:
         self.runtime_learning = RuntimeLearningService()
         self.approval_learning = ApprovalLearningService()
         self.context_reducer = RuntimeContextReducer()
+        self.input_slimmer = LLMStageInputSlimmer()
         self.role_selector = RoleProfileSelector()
         self.prompt_pack_loader = PromptPackLoader()
         self.role_context_reducer = RoleScopedContextReducer()
@@ -79,6 +81,18 @@ class LLMJsonExecutor:
             role_profile=role_profile,
         )
         runtime_context = self._build_runtime_context(state)
+        stage_prompt_limit = int(adapter.get("stage_prompt_char_limit") or 0) if isinstance(adapter, dict) else 0
+        slim_user_input = self.input_slimmer.slim_user_input(
+            node_id=node_id,
+            raw_input=state.get("input", ""),
+            limit=stage_prompt_limit or None,
+        )
+        slim_previous_results = self.input_slimmer.slim_previous_results(
+            node_id=node_id,
+            results=state.get("results", {}),
+            limit=stage_prompt_limit or None,
+        )
+        runtime_context = self.input_slimmer.slim_runtime_context(node_id=node_id, runtime_context=runtime_context)
         runtime_context["role_profile"] = role_profile
         runtime_context["prompt_policy"] = role_profile.get("prompt_policy", {})
         runtime_context["evidence_summary"] = scoped_context.get("evidence_summary")
@@ -92,8 +106,8 @@ class LLMJsonExecutor:
         })
 
         rendered = self.template.render(prompt.get("user_template", ""), {
-            "user_input": state.get("input", ""),
-            "previous_results": scoped_context.get("previous_results", {}),
+            "user_input": slim_user_input,
+            "previous_results": slim_previous_results,
             "capability_result": scoped_context.get("capability_result", {}),
             "human_feedback": scoped_context.get("human_feedback", []),
             "correction_memory": correction_memory + ("\n\n" + approval_memory if approval_memory else ""),
@@ -133,7 +147,8 @@ class LLMJsonExecutor:
         await event_bus.emit(run_id, {
             "type": "LLM_PROMPT_RENDERED",
             "title": "Prompt rendered",
-            "message": f"Rendered prompt length: {len(rendered)} characters",
+            "message": f"Rendered prompt length: {len(rendered)} characters; slim_input_length={len(slim_user_input)}",
+            "slim_input_length": len(slim_user_input),
             "node_id": node_id,
         })
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib.util
+import os
+import platform
 import shlex
 from typing import Any
 
@@ -108,7 +110,10 @@ class ModelRuntimePreflight:
                 order.extend(str(x) for x in configured if str(x))
         except Exception:
             pass
-        order.extend(["vllm", "ollama"])
+        # vLLM is optional and is skipped by default on Windows and unless explicitly enabled.
+        if os.environ.get("AI_CORE_ENABLE_VLLM", "").strip().lower() in {"1", "true", "yes", "on"} and platform.system().lower() != "windows":
+            order.append("vllm")
+        order.append("ollama")
         seen = set()
         checks: list[ProviderHealth] = []
         for provider_name in order:

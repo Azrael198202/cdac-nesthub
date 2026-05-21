@@ -46,6 +46,34 @@ class ProviderRouter:
         snapshot = self.runtime_execution_policy.snapshot(provider_config=config)
         return snapshot.filter_route(route, providers)
 
+
+    def _apply_stage_provider_overrides(self, *, provider: dict, adapter: dict) -> dict:
+        """Apply generic stage-level request controls from runtime adapter.
+
+        This keeps provider lifecycle features intact while allowing JSON stages
+        to constrain output length, context, temperature, and thinking mode.
+        """
+        updated = dict(provider or {})
+        if isinstance(adapter.get("provider_options"), dict):
+            options = dict(updated.get("options") or {})
+            for key, value in adapter["provider_options"].items():
+                if key == "think":
+                    updated["think"] = bool(value)
+                else:
+                    options[key] = value
+            updated["options"] = options
+        if adapter.get("provider_timeout_seconds") is not None:
+            try:
+                updated["timeout_seconds"] = float(adapter.get("provider_timeout_seconds"))
+            except Exception:
+                pass
+        if adapter.get("max_schema_chars") is not None:
+            try:
+                updated["max_schema_chars"] = int(adapter.get("max_schema_chars"))
+            except Exception:
+                pass
+        return updated
+
     def _provider_is_local(self, *, provider_name: str, provider: dict) -> bool:
         return self.runtime_execution_policy.snapshot().provider_is_local(provider_name, provider)
 
@@ -138,6 +166,7 @@ class ProviderRouter:
 
         for provider_name in route:
             provider = dict(providers.get(provider_name, {}) or {})
+            provider = self._apply_stage_provider_overrides(provider=provider, adapter=adapter)
             provider = self._apply_runtime_model_override(provider_name=provider_name, provider=provider, adapter=adapter)
             if not provider.get("enabled", False):
                 await event_bus.emit(run_id, {

@@ -58,12 +58,16 @@ class ResumeRequest(BaseModel):
 
 @app.on_event("startup")
 async def runtime_bootstrap_on_startup():
-    try:
-        await bootstrap_service.bootstrap(force=False)
-    except Exception:
-        # Bootstrap must never prevent the API from starting. Runtime will fall
-        # back to static configs and can be re-bootstrapped via API.
-        pass
+    # Fast boot rule: API startup must not wait for model/provider preparation.
+    # Runtime topology bootstrap is seed/config based and is scheduled in the
+    # background. Any failure is handled by runtime fallback paths.
+    async def _background_bootstrap():
+        try:
+            await bootstrap_service.bootstrap(force=False)
+        except Exception:
+            pass
+
+    asyncio.create_task(_background_bootstrap())
 
 
 @app.post("/api/runtime/bootstrap")
