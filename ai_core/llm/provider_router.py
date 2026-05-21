@@ -45,7 +45,10 @@ class ProviderRouter:
         node = str(node_id or "")
         if node == "input_parsing":
             updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 900), 900)
-            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 60), 60.0)
+            # Keep the prompt small, but do not make cold local model loading
+            # look like a logical failure. Execution-stage prompts are guarded
+            # separately and more aggressively.
+            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 120), 120.0)
             updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1800), 1800)
         elif node == "intent_recognition":
             updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 1200), 1200)

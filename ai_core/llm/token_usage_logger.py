@@ -18,5 +18,9 @@ class TokenUsageLogger:
     def log(self, record: dict[str, Any]) -> None:
         safe = dict(record)
         safe.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
+        # Runtime directories may be cleaned between application boot and the
+        # first model call. Recreate the metrics directory at write time so
+        # token logging can never fail the LLM request itself.
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(safe, ensure_ascii=False, default=str) + "\n")

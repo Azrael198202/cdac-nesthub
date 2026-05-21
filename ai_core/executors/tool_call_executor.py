@@ -1769,24 +1769,11 @@ class ToolCallExecutor:
             # pages as evidence.
             api_discovery = {}
             direct_execution = None
-            try:
-                api_discovery = await asyncio.wait_for(self.api_discovery.discover(
-                    run_id=run_id,
-                    node_id=node_id,
-                    capability=capability,
-                    step=step,
-                    user_input=state.get("input", ""),
-                ), timeout=cost_snapshot.stage_timeout("api_discovery", 30))
-            except Exception as api_exc:
-                await event_bus.emit(run_id, {
-                    "type": "API_FIRST_DISCOVERY_FAILED",
-                    "title": "API-first discovery failed",
-                    "message": str(api_exc),
-                    "node_id": node_id,
-                    "step_id": step_id,
-                })
 
-            # Execute configured/free structured providers before any page evidence path.
+            # Execute configured/free structured providers before model-based API
+            # discovery. This avoids heavy tool-selection/fact-verification LLM
+            # loops when a trusted structured provider is already configured and
+            # the step contains enough normalized parameters.
             structured_execution = await asyncio.wait_for(self.structured_provider_executor.execute(
                 run_id=run_id,
                 node_id=node_id,
@@ -1794,19 +1781,38 @@ class ToolCallExecutor:
                 capability=capability,
                 step=step,
                 state=state,
-                advisory=api_discovery if isinstance(api_discovery, dict) else {},
+                advisory={},
             ), timeout=cost_snapshot.stage_timeout("api_call", 45))
             if structured_execution and structured_execution.get("status") == "success":
                 direct_execution = structured_execution
                 await event_bus.emit(run_id, {
-                    "type": "API_FIRST_STRUCTURED_PROVIDER_SUFFICIENT",
-                    "title": "API-first structured provider sufficient",
-                    "message": "A structured provider produced verified material; web-page fallback was skipped.",
+                    "type": "STRUCTURED_PROVIDER_SUFFICIENT_BEFORE_DISCOVERY",
+                    "title": "Structured provider sufficient before discovery",
+                    "message": "A configured structured provider produced verified material; model discovery and web fallback were skipped.",
                     "node_id": node_id,
                     "step_id": step_id,
                     "result": self._compact_direct_result_for_event(structured_execution.get("result") or {}),
                 })
-            elif api_discovery:
+
+            if not direct_execution:
+                try:
+                    api_discovery = await asyncio.wait_for(self.api_discovery.discover(
+                        run_id=run_id,
+                        node_id=node_id,
+                        capability=capability,
+                        step=step,
+                        user_input=state.get("input", ""),
+                    ), timeout=cost_snapshot.stage_timeout("api_discovery", 30))
+                except Exception as api_exc:
+                    await event_bus.emit(run_id, {
+                        "type": "API_FIRST_DISCOVERY_FAILED",
+                        "title": "API-first discovery failed",
+                        "message": str(api_exc),
+                        "node_id": node_id,
+                        "step_id": step_id,
+                    })
+
+            if not direct_execution and api_discovery:
                 await event_bus.emit(run_id, {
                     "type": "API_FIRST_DISCOVERY_DONE",
                     "title": "API-first discovery completed",

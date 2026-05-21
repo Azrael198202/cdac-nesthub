@@ -345,6 +345,7 @@ class AgentDelegationRuntime:
                     completed_results=agent_results,
                     dependency_plan=dependency_plan,
                     task_mind_graph=task_mind_graph,
+                    for_input_parsing=True,
                 ),
             )
             result = await self._execute_agent_request_with_progress(
@@ -542,6 +543,23 @@ class AgentDelegationRuntime:
         participant_id = self._participant_identity(participant)
         participant_plan = (dependency_plan.get("participants") or {}).get(participant_id) or {}
         own_node = self._mind_graph_node_for_participant(task_mind_graph, participant)
+        # For the participant's first input_parsing call, pass only its own
+        # minimal parameter state. Do not include the full mind graph, dependency
+        # plan, policy blocks, or peer results. Those coordination artifacts stay
+        # in the delegation run and are used by final synthesis / dependent-agent
+        # later stages only.
+        if for_input_parsing:
+            return {
+                "task_graph_id": task_graph.get("graph_id"),
+                "participant_count": len(selected),
+                "relationship": participant_plan.get("relationship") or own_node.get("relation") or "independent",
+                "depends_on": participant_plan.get("depends_on") or own_node.get("depends_on") or [],
+                "agent_parameters": {
+                    "values": participant.get("runtime_parameters") or {},
+                    "missing": self.parameter_contract_service.missing_parameters(participant),
+                },
+            }
+
         shared_context: dict[str, Any] = {
             "task_graph_id": task_graph.get("graph_id"),
             "participant_count": len(selected),
@@ -553,23 +571,14 @@ class AgentDelegationRuntime:
                 "independent_results_are_merged_only_at_final_synthesis": True,
                 "peer_result_format": "strict_json_safe_summary",
             },
-            "own_mind_graph_node": {
-                k: own_node.get(k)
-                for k in ("node_id", "node_type", "name", "objective", "relation", "depends_on")
-                if k in own_node
-            },
             "agent_parameters": {
                 "values": participant.get("runtime_parameters") or {},
                 "contract": self._compact_parameter_contract(participant.get("parameter_contract") or {}),
             },
         }
-        # Do not send full graph/plan to participant input parsing. The graph is
-        # retained in the delegation run and passed only to final synthesis. This
-        # keeps each agent's own prompt independent and valid JSON.
-        if not for_input_parsing:
-            peer_results = self._peer_results_for_participant(participant, completed_results, dependency_plan)
-            if peer_results:
-                shared_context["available_peer_results"] = peer_results
+        peer_results = self._peer_results_for_participant(participant, completed_results, dependency_plan)
+        if peer_results:
+            shared_context["available_peer_results"] = peer_results
         return shared_context
 
 
