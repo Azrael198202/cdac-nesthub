@@ -4,7 +4,7 @@ from ai_core.events.event_bus import event_bus
 from ai_core.llm.provider_command_runner import ProviderCommandRunner
 from ai_core.llm.provider_installer import ProviderInstaller
 from ai_core.llm.provider_handlers.base import ProviderUnavailableError
-from ai_core.llm.provider_handlers.utils import build_system_prompt, parse_json_content
+from ai_core.llm.provider_handlers.utils import build_system_prompt, parse_json_content, response_json_or_error
 
 
 class OllamaProviderHandler:
@@ -77,7 +77,7 @@ class OllamaProviderHandler:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(base + endpoint, json=payload)
                 response.raise_for_status()
-                content = response.json().get("message", {}).get("content", "")
+                content = response_json_or_error(response, provider_name=provider_name, endpoint=endpoint).get("message", {}).get("content", "")
         except httpx.TimeoutException as exc:
             raise ProviderUnavailableError(
                 f"Ollama request timed out. endpoint={endpoint}, model={model}, timeout_seconds={timeout}. "
@@ -105,7 +105,7 @@ class OllamaProviderHandler:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(base + endpoint, json=payload)
                 response.raise_for_status()
-                content = response.json().get("response", "")
+                content = response_json_or_error(response, provider_name=provider_name, endpoint=endpoint).get("response", "")
         except httpx.TimeoutException as exc:
             raise ProviderUnavailableError(
                 f"Ollama request timed out. endpoint={endpoint}, model={model}, timeout_seconds={timeout}. "

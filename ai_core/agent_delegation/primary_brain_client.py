@@ -211,7 +211,7 @@ class PrimaryBrainDelegationClient:
 
     async def _run_runtime_with_timeout(self, core_run_id: str, state: dict[str, Any], awaitable) -> None:
         snapshot = RuntimeCostPolicy().snapshot(state)
-        timeout_seconds = max(30, int(getattr(snapshot, "operation_timeout_seconds", 45)) + 30)
+        timeout_seconds = max(300, int(getattr(snapshot, "operation_timeout_seconds", 45)) + 120)
         try:
             await asyncio.wait_for(awaitable, timeout=timeout_seconds)
         except asyncio.TimeoutError:
@@ -626,6 +626,76 @@ class PrimaryBrainDelegationClient:
                 return report_answer
             return "The primary runtime completed without a user-facing final answer. Intermediate node data was intentionally not exposed."
         return "The primary runtime completed without a user-facing final answer."
+
+
+    def _extract_investigation_report_answer(self, results: dict[str, Any]) -> str:
+        """Derive a user-facing answer from completed intermediate results.
+
+        This is intentionally generic: it only looks for common result fields,
+        status fields, evidence-like lists, and error material. It does not
+        contain business/domain keywords. It prevents delegated execution from
+        crashing when the output node did not run but earlier nodes produced
+        usable material.
+        """
+        if not isinstance(results, dict) or not results:
+            return ""
+
+        preferred_keys = ["output", "final", "final_result", "synthesis", "execution", "answer"]
+        for key in preferred_keys:
+            value = results.get(key)
+            text = self._coerce_user_text(value)
+            if self._answer_has_result_material(text):
+                return text
+
+        collected: list[str] = []
+        failures: list[str] = []
+        for node_id, value in results.items():
+            if str(node_id).startswith("runtime_timeout"):
+                failures.append(str(value.get("reason") if isinstance(value, dict) else value))
+                continue
+            status = str(value.get("status") or value.get("execution_status") or "") if isinstance(value, dict) else ""
+            text = self._coerce_user_text(value)
+            if status.lower() in {"failed", "error", "timeout", "execution_timeout"}:
+                if text:
+                    failures.append(f"{node_id}: {text}")
+                else:
+                    failures.append(str(node_id))
+                continue
+            if self._answer_has_result_material(text):
+                collected.append(text)
+
+        if collected:
+            return "\n\n".join(collected[:3]).strip()
+        if failures:
+            return "The runtime could not produce a verified final answer. " + "; ".join(failures[:3])
+        return ""
+
+    def _coerce_user_text(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+        if isinstance(value, list):
+            parts = [self._coerce_user_text(item) for item in value]
+            return "\n".join(p for p in parts if p).strip()
+        if isinstance(value, dict):
+            for key in ["final_answer", "message", "answer", "result", "summary", "content", "text", "output"]:
+                text = self._coerce_user_text(value.get(key))
+                if self._answer_has_result_material(text):
+                    return text
+            pairs: list[str] = []
+            for key, child in value.items():
+                if str(key).startswith("_"):
+                    continue
+                if key in {"raw", "debug", "trace", "metadata", "schema", "input"}:
+                    continue
+                text = self._coerce_user_text(child)
+                if self._answer_has_result_material(text):
+                    pairs.append(f"{key}: {text}")
+            return "\n".join(pairs[:8]).strip()
+        return ""
 
     def _extract_status(self, state: dict[str, Any]) -> str:
         if isinstance(state, dict) and str(state.get("status") or "") in {"failed", "completed", "timeout"}:

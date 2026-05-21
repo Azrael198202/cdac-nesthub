@@ -10,7 +10,7 @@ from ai_core.context.token_estimator import TokenEstimator
 from ai_core.events.event_bus import event_bus
 from ai_core.llm.model_response_cache import ModelResponseCache
 from ai_core.llm.provider_handlers.base import ProviderUnavailableError
-from ai_core.llm.provider_handlers.utils import build_system_prompt, parse_json_content
+from ai_core.llm.provider_handlers.utils import build_system_prompt, parse_json_content, response_json_or_error
 from ai_core.llm.token_usage_logger import TokenUsageLogger
 from ai_core.secrets.secret_store import SecretStore
 
@@ -189,7 +189,7 @@ class UniversalModelProviderHandler:
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
                 response = await client.post(url, headers=headers, json=payload)
                 response.raise_for_status()
-                data = response.json()
+                data = response_json_or_error(response, provider_name=provider_name, endpoint=endpoint)
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError) as exc:
             if self._is_local_openai_compatible(provider) and provider.get("auto_start"):
                 await self._start_openai_compatible_service(run_id, node_id, provider_name, provider)
@@ -198,7 +198,7 @@ class UniversalModelProviderHandler:
                     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
                         response = await client.post(url, headers=headers, json=payload)
                         response.raise_for_status()
-                        data = response.json()
+                        data = response_json_or_error(response, provider_name=provider_name, endpoint=endpoint)
                 else:
                     raise ProviderUnavailableError(f"Local provider did not become ready after auto-start. provider={provider_name}, base_url={base_url}") from exc
             else:
@@ -431,7 +431,7 @@ class UniversalModelProviderHandler:
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
-                data = response.json()
+                data = response_json_or_error(response, provider_name=provider_name, endpoint=endpoint)
         except httpx.TimeoutException as exc:
             raise ProviderUnavailableError(
                 f"Model request timed out. provider={provider_name}, model={model}, timeout_seconds={timeout}"
