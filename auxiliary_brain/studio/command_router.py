@@ -66,9 +66,9 @@ class StudioCommandRouter:
         return False
 
     def _extract_named_value(self, text: str) -> str | None:
-        # Prefer explicitly quoted names, e.g. named "Writing Agent".
-        # The previous pattern did not accept quotes, so quoted agent names were
-        # lost and the participant id became the display name.
+        # Prefer quoted names so commands such as
+        # Create an agent named "Writing Agent" ...
+        # preserve the user-visible identity exactly.
         quoted_patterns = [
             r"\bnamed\s+[\"']([^\"']+)[\"']",
             r"\bname\s+[\"']([^\"']+)[\"']",
@@ -76,26 +76,19 @@ class StudioCommandRouter:
         for pattern in quoted_patterns:
             match = re.search(pattern, text, flags=re.IGNORECASE)
             if match:
-                name = self._clean_name(match.group(1))
-                if name:
-                    return name
+                name = match.group(1).strip()
+                return name or None
 
         patterns = [
-            r"\bnamed\s+([A-Za-z0-9_\- ]+?)(?:\s+to\s+|\s+that\s+|\s+which\s+|\s+who\s+|\s+with\s+|\s*,|\.|$)",
-            r"\bname\s+([A-Za-z0-9_\- ]+?)(?:\s+to\s+|\s+that\s+|\s+which\s+|\s+who\s+|\s+with\s+|\s*,|\.|$)",
+            r"\bnamed\s+([A-Za-z0-9_\- ]+?)(?:\s+to\s+|\s+that\s+|\s+which\s+|\s+who\s+|\s+can\s+|\s*,|\.|$)",
+            r"\bname\s+([A-Za-z0-9_\- ]+?)(?:\s+to\s+|\s+that\s+|\s+which\s+|\s+who\s+|\s+can\s+|\s*,|\.|$)",
         ]
         for pattern in patterns:
             match = re.search(pattern, text, flags=re.IGNORECASE)
             if match:
-                name = self._clean_name(match.group(1))
-                if name:
-                    return name
+                name = match.group(1).strip().strip("\"'")
+                return name or None
         return None
-
-    def _clean_name(self, value: str) -> str:
-        name = str(value or "").strip().strip("\"'`“”‘’ ")
-        name = re.sub(r"\s+", " ", name).strip()
-        return name[:120]
 
     def _extract_execute_name(self, text: str) -> str | None:
         parts = text.strip().split()

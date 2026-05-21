@@ -1,0 +1,17 @@
+workflow_id: base_orchestration
+name: Base Config Driven Orchestration
+nodes:
+- id: input_parsing
+  node_config: runtime/generated/nodes/input_parsing.yaml
+- id: intent_recognition
+  node_config: runtime/generated/nodes/intent_recognition.yaml
+- id: context_awareness
+  node_config: runtime/generated/nodes/context_awareness.yaml
+- id: workflow_planning
+  node_config: runtime/generated/nodes/workflow_planning.yaml
+- id: execution
+  node_config: runtime/generated/nodes/execution.yaml
+- id: feedback_learning
+  node_config: runtime/generated/nodes/feedback_learning.yaml
+- id: output
+  node_config: runtime/generated/nodes/output.yaml

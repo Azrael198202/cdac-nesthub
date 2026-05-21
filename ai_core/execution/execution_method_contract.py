@@ -47,8 +47,8 @@ class ExecutionMethodProposalEngine:
         "web_search",
         "knowledge_base",
         "model_knowledge",
+        "content_generation",
         "api_call",
-        "llm_generation",
     }
 
     STRATEGY_METHOD_MAP = {
@@ -63,10 +63,9 @@ class ExecutionMethodProposalEngine:
         "api_call": "api_call",
         "structured_provider": "api_call",
         "model_knowledge": "model_knowledge",
-        "generate": "llm_generation",
-        "content_generation": "llm_generation",
-        "content_creation": "llm_generation",
-        "llm_generation": "llm_generation",
+        "model_generation": "content_generation",
+        "content_generation": "content_generation",
+        "generate_content": "content_generation",
     }
 
     MODE_METHOD_MAP = {
@@ -168,8 +167,8 @@ class ExecutionMethodResolver:
         "api_call": ["web_search", "runtime_generated_tool"],
         "web_search": ["api_call", "knowledge_base"],
         "knowledge_base": ["web_search", "model_knowledge"],
-        "model_knowledge": ["knowledge_base", "web_search"],
-        "llm_generation": [],
+        "model_knowledge": ["knowledge_base"],
+        "content_generation": ["model_knowledge"],
     }
 
     def resolve(
@@ -248,14 +247,14 @@ class ExecutionMethodResolver:
         }
 
     def _cost(self, method: str) -> str:
-        if method in {"runtime_generated_tool", "existing_tool", "knowledge_base", "model_knowledge"}:
+        if method in {"runtime_generated_tool", "existing_tool", "knowledge_base", "model_knowledge", "content_generation"}:
             return "low"
         if method == "web_search":
             return "medium"
         return "variable"
 
     def _latency(self, method: str) -> str:
-        if method in {"runtime_generated_tool", "existing_tool", "model_knowledge"}:
+        if method in {"runtime_generated_tool", "existing_tool", "model_knowledge", "content_generation"}:
             return "low"
         if method == "knowledge_base":
             return "low_to_medium"

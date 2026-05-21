@@ -1,0 +1,14 @@
+default:
+  timeout_seconds: 1200
+  retries: 1
+  use_pty: false
+  auto_answer: true
+profiles:
+- name: winget
+  match_prefix: winget
+  append_args:
+  - --accept-source-agreements
+  - --accept-package-agreements
+  - --disable-interactivity
+  retries: 2
+  timeout_seconds: 3600

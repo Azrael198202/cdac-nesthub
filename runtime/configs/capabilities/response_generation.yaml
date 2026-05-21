@@ -1,0 +1,21 @@
+capability_id: response_generation
+type: generic_capability
+description: Generic response generation capability.
+detect:
+  binary: []
+  paths:
+    all: []
+  env_keys: []
+install:
+  all: []
+verify:
+  commands:
+    all: []
+  paths:
+    all: []
+  health_urls: []
+runtime_register:
+  tool_name: response_generation
+security:
+  approval_required: false
+  risk_level: low
