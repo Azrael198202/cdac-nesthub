@@ -76,7 +76,27 @@ class LLMJsonExecutor:
         )
 
         role_profile = self.role_selector.select(node_id=node_id, state=state, adapter=adapter).to_dict()
-        prompt_pack = self.prompt_pack_loader.load(role_profile.get("role_id", "general_runtime_agent"))
+        # input_parsing must remain a small, generic JSON extraction stage.
+        # Role-specific packs are useful later, but they can add irrelevant
+        # behavioral text (for example writer/retrieval rules) and destabilize
+        # local JSON output. Keep only date/time normalization context here.
+        if node_id == "input_parsing":
+            role_profile = {
+                "role_id": "generic_input_parser",
+                "role_type": "input_parsing",
+                "required_skills": ["extract_runtime_parameters"],
+                "prompt_policy": {
+                    "max_context_tokens": 1200,
+                    "include_full_trace": False,
+                    "include_only_evidence_summary": False,
+                    "max_previous_result_items": 0,
+                    "max_evidence_items": 0,
+                    "max_chars_per_evidence": 0,
+                },
+            }
+            prompt_pack = {}
+        else:
+            prompt_pack = self.prompt_pack_loader.load(role_profile.get("role_id", "general_runtime_agent"))
         scoped_context = self.role_context_reducer.reduce_state(
             state=state,
             capability_result=capability_result,
@@ -95,9 +115,10 @@ class LLMJsonExecutor:
             limit=stage_prompt_limit or None,
         )
         runtime_context = self.input_slimmer.slim_runtime_context(node_id=node_id, runtime_context=runtime_context)
-        runtime_context["role_profile"] = role_profile
-        runtime_context["prompt_policy"] = role_profile.get("prompt_policy", {})
-        runtime_context["evidence_summary"] = scoped_context.get("evidence_summary")
+        if node_id != "input_parsing":
+            runtime_context["role_profile"] = role_profile
+            runtime_context["prompt_policy"] = role_profile.get("prompt_policy", {})
+            runtime_context["evidence_summary"] = scoped_context.get("evidence_summary")
 
         await event_bus.emit(run_id, {
             "type": "ROLE_PROFILE_SELECTED",

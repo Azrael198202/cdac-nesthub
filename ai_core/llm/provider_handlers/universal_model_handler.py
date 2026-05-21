@@ -5,6 +5,7 @@ import importlib.util
 import shlex
 import time
 import shutil
+import json
 from typing import Any
 
 import httpx
@@ -13,8 +14,9 @@ from ai_core.context.token_estimator import TokenEstimator
 from ai_core.events.event_bus import event_bus
 from ai_core.llm.model_response_cache import ModelResponseCache
 from ai_core.llm.provider_handlers.base import ProviderUnavailableError
-from ai_core.llm.provider_handlers.utils import build_system_prompt, parse_json_content
+from ai_core.llm.provider_handlers.utils import build_system_prompt, parse_json_content, LLMJSONParseError
 from ai_core.llm.token_usage_logger import TokenUsageLogger
+from ai_core.llm.prompt_io_recorder import PromptIORecorder
 from ai_core.secrets.secret_store import SecretStore
 
 
@@ -39,6 +41,7 @@ class UniversalModelProviderHandler:
         self.cache = ModelResponseCache()
         self.token_logger = TokenUsageLogger()
         self.estimator = TokenEstimator()
+        self.prompt_io_recorder = PromptIORecorder()
 
     async def generate_json(
         self,
@@ -253,7 +256,7 @@ class UniversalModelProviderHandler:
         self._log_usage(provider_name, provider, node_id, prompt_tokens, completion_tokens, total_tokens, elapsed, cache_hit=False)
         if provider.get("cache_enabled", True):
             self.cache.set(cache_key, {"content": content, "usage": usage, "latency_seconds": elapsed})
-        return parse_json_content(content)
+        return await self._parse_or_retry_json(run_id, node_id, provider_name, provider, prompt, rendered_user_prompt, schema, content, protocol="openai_compatible", base_url=base_url, endpoint=endpoint, model=model, timeout=timeout)
 
     async def _ensure_ollama_model_ready(self, run_id, node_id, provider_name, provider, base_url: str, primary_model: str) -> str:
         """Ensure an Ollama model is available using runtime config.
@@ -498,7 +501,165 @@ class UniversalModelProviderHandler:
         self._log_usage(provider_name, provider, node_id, prompt_tokens, completion_tokens, total_tokens, elapsed, cache_hit=False)
         if provider.get("cache_enabled", True):
             self.cache.set(cache_key, {"content": content, "latency_seconds": elapsed})
-        return parse_json_content(content)
+        return await self._parse_or_retry_json(run_id, node_id, provider_name, provider, prompt, rendered_user_prompt, schema, content, protocol=protocol, base_url=base_url, endpoint=endpoint, model=model, timeout=timeout)
+
+
+    async def _parse_or_retry_json(
+        self,
+        run_id: str,
+        node_id: str,
+        provider_name: str,
+        provider: dict[str, Any],
+        prompt: dict[str, Any],
+        rendered_user_prompt: str,
+        schema: dict[str, Any],
+        content: str,
+        *,
+        protocol: str,
+        base_url: str,
+        endpoint: str,
+        model: str,
+        timeout: float,
+    ) -> dict[str, Any]:
+        try:
+            return parse_json_content(content)
+        except LLMJSONParseError as exc:
+            self.prompt_io_recorder.record(
+                run_id=run_id,
+                node_id=node_id,
+                phase=f"provider_raw_invalid_json_{provider_name}",
+                payload={
+                    "run_id": run_id,
+                    "node_id": node_id,
+                    "provider": provider_name,
+                    "model": model,
+                    "error": str(exc),
+                    "raw_content": exc.raw_content,
+                    "candidate": exc.candidate,
+                },
+            )
+            # Local JSON models occasionally return a syntactically broken JSON
+            # object even with format=json. Retry once with an ultra-minimal,
+            # schema-bound correction prompt. This preserves the LLM stage while
+            # avoiding deterministic bypass of input_parsing/intent/planning.
+            if provider.get("json_repair_retry", True):
+                repaired = await self._retry_json_repair(
+                    run_id=run_id,
+                    node_id=node_id,
+                    provider_name=provider_name,
+                    provider=provider,
+                    schema=schema,
+                    invalid_content=exc.raw_content,
+                    original_user_prompt=rendered_user_prompt,
+                    protocol=protocol,
+                    base_url=base_url,
+                    endpoint=endpoint,
+                    model=model,
+                    timeout=min(float(provider.get("repair_timeout_seconds") or timeout), timeout),
+                )
+                return parse_json_content(repaired)
+            raise
+
+    async def _retry_json_repair(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        provider_name: str,
+        provider: dict[str, Any],
+        schema: dict[str, Any],
+        invalid_content: str,
+        original_user_prompt: str,
+        protocol: str,
+        base_url: str,
+        endpoint: str,
+        model: str,
+        timeout: float,
+    ) -> str:
+        repair_system = (
+            "You repair malformed JSON for a schema-bound runtime. "
+            "Return exactly one valid JSON object. No markdown. No explanation."
+        )
+        # Keep the repair input short. The original prompt is only useful as
+        # context when the model output is too damaged to repair directly.
+        repair_user = (
+            "JSON schema:\n" + json_dumps_compact(schema, 6000) +
+            "\n\nMalformed model output to repair:\n" + str(invalid_content or "")[:4000] +
+            "\n\nOriginal compact prompt, for missing required fields only:\n" + str(original_user_prompt or "")[:1600]
+        )
+        if protocol == "ollama_generate":
+            payload: dict[str, Any] = {
+                "model": model,
+                "stream": False,
+                "format": "json",
+                "prompt": repair_system + "\n\n" + repair_user,
+            }
+            options = provider.get("options") if isinstance(provider.get("options"), dict) else {}
+            if options:
+                payload["options"] = options
+            url = base_url.rstrip("/") + (provider.get("generate_endpoint") or "/api/generate")
+        elif protocol == "ollama_chat":
+            payload = {
+                "model": model,
+                "stream": False,
+                "format": "json",
+                "messages": [
+                    {"role": "system", "content": repair_system},
+                    {"role": "user", "content": repair_user},
+                ],
+            }
+            options = provider.get("options") if isinstance(provider.get("options"), dict) else {}
+            if options:
+                payload["options"] = options
+            if provider.get("think") is not None:
+                payload["think"] = bool(provider.get("think"))
+            url = base_url.rstrip("/") + (provider.get("chat_endpoint") or "/api/chat")
+        else:
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": repair_system},
+                    {"role": "user", "content": repair_user},
+                ],
+                "response_format": {"type": "json_object"},
+            }
+            url = base_url.rstrip("/") + endpoint
+        await event_bus.emit(run_id, {
+            "type": "LLM_JSON_REPAIR_RETRY",
+            "title": "Retrying malformed JSON output repair",
+            "message": f"provider={provider_name}, model={model}, node={node_id}",
+            "node_id": node_id,
+            "provider": provider_name,
+            "model": model,
+        })
+        started = time.monotonic()
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+            if protocol == "openai_compatible":
+                headers = {"Content-Type": "application/json"}
+                self._apply_auth(headers, provider)
+                response = await client.post(url, headers=headers, json=payload)
+            else:
+                response = await client.post(url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+        elapsed = round(time.monotonic() - started, 3)
+        content = data.get("message", {}).get("content", "") if protocol == "ollama_chat" else data.get("response", "")
+        if protocol == "openai_compatible":
+            content = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+        self.prompt_io_recorder.record(
+            run_id=run_id,
+            node_id=node_id,
+            phase=f"provider_json_repair_response_{provider_name}",
+            payload={
+                "run_id": run_id,
+                "node_id": node_id,
+                "provider": provider_name,
+                "model": model,
+                "elapsed_seconds": elapsed,
+                "raw_content": content,
+            },
+        )
+        return content
 
     def _apply_auth(self, headers: dict[str, str], provider: dict[str, Any]) -> None:
         auth_type = provider.get("auth_type") or ("bearer_env" if provider.get("api_key_env") else "none")
@@ -529,3 +690,10 @@ class UniversalModelProviderHandler:
             "latency_seconds": elapsed,
             "cache_hit": cache_hit,
         })
+
+
+def json_dumps_compact(value: Any, max_chars: int) -> str:
+    text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if len(text) > max_chars:
+        return text[:max_chars] + "...[truncated]"
+    return text

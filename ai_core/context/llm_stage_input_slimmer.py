@@ -149,32 +149,17 @@ class LLMStageInputSlimmer:
         return compact
 
     def _compact_input_context(self, value: dict[str, Any]) -> dict[str, Any]:
-        keep_scalars = {
-            "task_graph_id",
-            "participant_count",
-            "relationship",
-            "relation",
-            "execution_group",
-        }
+        # input_parsing should receive only tiny coordination hints. The
+        # participant objective/name are already top-level fields. Passing
+        # graph nodes or policy objects makes local JSON models copy complex
+        # structures and often emit malformed JSON.
         out: dict[str, Any] = {}
-        for key in keep_scalars:
+        for key in ("task_graph_id", "relationship", "relation"):
             item = value.get(key)
-            if isinstance(item, (str, int, float, bool)) or item is None:
+            if isinstance(item, (str, int, float, bool)) and item not in ("", None):
                 out[key] = item
-        policy = value.get("participant_dependency_policy")
-        if isinstance(policy, dict):
-            out["participant_dependency_policy"] = {
-                str(k): v for k, v in policy.items()
-                if isinstance(v, (str, int, float, bool)) or v is None
-            }
-        node = value.get("own_mind_graph_node")
-        if isinstance(node, dict):
-            out["own_mind_graph_node"] = {
-                k: node.get(k)
-                for k in ("node_id", "node_type", "name", "objective", "relation", "depends_on")
-                if k in node
-            }
-        # Never include full task_mind_graph, participant_dependency_plan,
+        # Never include task_mind_graph, participant_dependency_plan,
+        # own_mind_graph_node, participant_dependency_policy,
         # available_peer_results, traces, or previous result payloads in
         # input_parsing. Dependent agents receive peer summaries only in later
         # context-aware stages.
