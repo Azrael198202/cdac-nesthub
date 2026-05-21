@@ -190,8 +190,7 @@ class RuntimeTemplateGenerator:
                 "Stage responsibility: convert parsed input and recognized intent into executable planned_steps.",
                 "planned_steps must be executable step objects, not strings.",
                 "Workflow planning may choose generic required capabilities, but must not choose concrete tools, APIs, providers, libraries, repositories, or implementation files.",
-                "Each planned step should include step_id, step_type, objective, input_from, parameters.known, parameters.optional, parameters.missing_required, execution_strategy, execution_ready, human_interaction, next_action, depends_on, and requires_human_confirmation when allowed by the schema. Use execution_strategy such as [model_generation], [local_knowledge], [web_evidence], or [tool_generation] instead of choosing concrete tools or providers.",
-                "When the desired result is original/generated content rather than verified external facts, set execution_strategy to [model_generation] and do not add web_evidence unless the user explicitly requires sources or current facts.",
+                "Each planned step should include step_id, step_type, objective, input_from, parameters.known, parameters.optional, parameters.missing_required, execution_strategy, execution_ready, human_interaction, next_action, depends_on, and requires_human_confirmation when allowed by the schema. Use execution_strategy such as [local_knowledge, web_evidence, tool_generation] instead of choosing concrete tools or providers.",
                 "Copy normalized entities from upstream nodes; do not invent stale dates or re-normalize already resolved values.",
                 "Only request human_interaction when required fields are actually missing.",
             ]

@@ -66,27 +66,14 @@ class StudioCommandRouter:
         return False
 
     def _extract_named_value(self, text: str) -> str | None:
-        # Prefer quoted names so commands such as
-        # Create an agent named "Writing Agent" ...
-        # preserve the user-visible identity exactly.
-        quoted_patterns = [
-            r"\bnamed\s+[\"']([^\"']+)[\"']",
-            r"\bname\s+[\"']([^\"']+)[\"']",
-        ]
-        for pattern in quoted_patterns:
-            match = re.search(pattern, text, flags=re.IGNORECASE)
-            if match:
-                name = match.group(1).strip()
-                return name or None
-
         patterns = [
-            r"\bnamed\s+([A-Za-z0-9_\- ]+?)(?:\s+to\s+|\s+that\s+|\s+which\s+|\s+who\s+|\s+can\s+|\s*,|\.|$)",
-            r"\bname\s+([A-Za-z0-9_\- ]+?)(?:\s+to\s+|\s+that\s+|\s+which\s+|\s+who\s+|\s+can\s+|\s*,|\.|$)",
+            r"\bnamed\s+([A-Za-z0-9_\- ]+?)(?:\s+to\s+|\s+which\s+|\s*,|\.|$)",
+            r"\bname\s+([A-Za-z0-9_\- ]+?)(?:\s+to\s+|\s+which\s+|\s*,|\.|$)",
         ]
         for pattern in patterns:
             match = re.search(pattern, text, flags=re.IGNORECASE)
             if match:
-                name = match.group(1).strip().strip("\"'")
+                name = match.group(1).strip()
                 return name or None
         return None
 

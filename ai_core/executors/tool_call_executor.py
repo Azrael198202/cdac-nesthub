@@ -41,6 +41,7 @@ from ai_core.execution.execution_continuation_coordinator import ExecutionContin
 from ai_core.execution.answer_sufficiency_evaluator import AnswerSufficiencyEvaluator
 from ai_core.execution.evidence_satisfied_short_circuit import EvidenceSatisfiedShortCircuit
 from ai_core.runtime.capability.capability_router import CapabilityRouter
+from ai_core.llm.provider_router import ProviderRouter
 from ai_core.research.web_research_tool import GenericWebResearchTool
 from ai_core.context.evidence_noise_reducer import EvidenceNoiseReducer
 from ai_core.knowledge.knowledge_service import KnowledgeService
@@ -50,7 +51,6 @@ from ai_core.runtime.evidence import EvidenceBudgetAllocator, CandidateEvidenceR
 from ai_core.execution.execution_method_contract import ExecutionMethodContract, ExecutionMethodProposalEngine, ExecutionMethodResolver
 from ai_core.research.deep_web_research import DeepWebResearchPipeline
 from ai_core.research.structured_provider_executor import StructuredProviderExecutor
-from ai_core.llm.provider_router import ProviderRouter
 
 
 class ToolCallExecutor:
@@ -303,6 +303,35 @@ class ToolCallExecutor:
                 "result": {"contract": method_contract.to_dict(), "proposals": method_proposals, "selected_mode": selected_execution_mode},
             })
 
+            # Generic LLM generation path.  This is used when the workflow
+            # explicitly declares that the result should be generated from the
+            # model itself rather than retrieved from external evidence.  It is
+            # intentionally capability/schema based and does not rely on domain
+            # or business keywords.
+            if method_contract.method == "llm_generation":
+                generation_result = await self._try_llm_generation_execution(
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    capability=required_capability or "generic_generation",
+                    step=step,
+                    state=state,
+                    method_contract=method_contract,
+                )
+                if generation_result:
+                    result_obj = generation_result.get("result") if isinstance(generation_result.get("result"), dict) else {}
+                    execution_steps.append({
+                        "step_id": step_id,
+                        "status": "executed" if self._is_success_result(result_obj) else "tool_execution_failed",
+                        "tool": {"id": "llm_generation", "source": "primary_runtime_model"},
+                        "input": generation_result.get("input"),
+                        "result": result_obj,
+                        "provenance": result_obj.get("provenance") if isinstance(result_obj, dict) else None,
+                        "source_step": step,
+                        "priority_path": "execution_method_llm_generation",
+                    })
+                    continue
+
             # If the plan explicitly asks for runtime-native observation, honor it
             # before any generic web/API/model fallback. This is a generic source
             # contract, not a domain-specific shortcut.
@@ -408,7 +437,7 @@ class ToolCallExecutor:
                     })
                     continue
 
-            if method_contract.method not in {"web_search", "api_call", "knowledge_base", "model_knowledge", "content_generation", "existing_tool", "runtime_generated_tool"}:
+            if method_contract.method not in {"web_search", "api_call", "knowledge_base", "model_knowledge", "existing_tool", "runtime_generated_tool", "llm_generation"}:
                 blocked_steps.append({
                     "step_id": step_id,
                     "status": "unsupported_execution_method",
@@ -436,28 +465,6 @@ class ToolCallExecutor:
                     "source_step": step,
                 })
                 continue
-
-            if method_contract.method == "content_generation":
-                generated_content_result = await self._try_model_generation_execution(
-                    run_id=run_id,
-                    node_id=node_id,
-                    step_id=step_id,
-                    capability=required_capability or "content_generation",
-                    step=step,
-                    state=state,
-                )
-                if generated_content_result:
-                    execution_steps.append({
-                        "step_id": step_id,
-                        "status": "executed",
-                        "tool": {"id": "llm_content_generation", "source": "model_runtime"},
-                        "input": generated_content_result.get("input"),
-                        "result": generated_content_result.get("result"),
-                        "provenance": (generated_content_result.get("result") or {}).get("provenance") if isinstance(generated_content_result.get("result"), dict) else None,
-                        "source_step": step,
-                        "priority_path": "content_generation_contract",
-                    })
-                    continue
 
             # v70.9 priority layer: local/model knowledge first.
             # If previous successful runtime knowledge already covers the current
@@ -1364,7 +1371,7 @@ class ToolCallExecutor:
         return None
 
 
-    async def _try_model_generation_execution(
+    async def _try_llm_generation_execution(
         self,
         *,
         run_id: str,
@@ -1373,13 +1380,13 @@ class ToolCallExecutor:
         capability: str,
         step: dict[str, Any],
         state: dict[str, Any],
+        method_contract: ExecutionMethodContract,
     ) -> dict[str, Any] | None:
-        """Generate original output with the configured model.
+        """Generate final answer material directly with the configured model.
 
-        This is a generic execution path for tasks whose workflow contract asks
-        for model-generated content rather than external evidence. It is not tied
-        to any domain; the workflow/model chooses this method through
-        execution_strategy or execution_method_policy.
+        This path is generic: it is selected by the runtime method contract
+        (llm_generation), not by business keywords. It prevents generative tasks
+        from being sent to API discovery/web search/tool-code generation.
         """
         tool_input = self._build_tool_input(
             step=step,
@@ -1388,98 +1395,86 @@ class ToolCallExecutor:
             step_id=step_id,
             user_input=state.get("input", ""),
         )
-        known = {}
-        if isinstance(tool_input.get("known"), dict):
-            known.update(tool_input.get("known") or {})
         params = tool_input.get("parameters") if isinstance(tool_input.get("parameters"), dict) else {}
+        known = tool_input.get("known") if isinstance(tool_input.get("known"), dict) else {}
         if isinstance(params.get("known"), dict):
-            known.update(params.get("known") or {})
-        for key, value in tool_input.items():
-            if key in {"known", "parameters", "optional", "context", "source_step"}:
-                continue
-            if isinstance(value, (str, int, float, bool, list, dict)):
-                known.setdefault(str(key), value)
-
+            known = {**known, **params.get("known", {})}
+        flat_params = {k: v for k, v in params.items() if k not in {"known", "optional", "missing_required"}}
+        generation_input = {
+            "objective": step.get("objective") or state.get("input") or "",
+            "parameters": {**known, **flat_params},
+            "constraints": step.get("constraints") if isinstance(step.get("constraints"), dict) else {},
+        }
         schema = {
             "type": "object",
-            "required": ["status", "answer_material"],
+            "required": ["answer_material"],
             "properties": {
-                "status": {"type": "string"},
                 "answer_material": {"type": "string"},
-                "normalized_facts": {"type": "array"},
+                "normalized_facts": {"type": "array", "items": {"type": "object"}},
+                "notes": {"type": "array", "items": {"type": "string"}},
             },
             "additionalProperties": True,
         }
+        adapter = {
+            "adapter_id": "llm_generation_adapter",
+            "provider_route": ["stage_execution_ollama_qwen3_8b", "ollama"],
+            "timeout_seconds": 90,
+            "options": {"temperature": 0.4, "num_predict": 1024, "num_ctx": 4096},
+        }
         prompt = {
             "system": (
-                "Return JSON only. Generate the requested final content from the "
-                "provided objective and parameters. Do not browse the web, cite "
-                "external sources, invent provenance, or return code unless code "
-                "itself is explicitly the requested final content."
-            )
+                "Return exactly one JSON object. Generate the requested output directly from the provided objective and parameters. "
+                "Do not search the web. Do not propose tools, APIs, providers, repositories, files, or code unless the objective explicitly asks for code."
+            ),
+            "user": "GENERATION_REQUEST=" + json.dumps(make_json_safe(generation_input), ensure_ascii=False),
         }
-        rendered = (
-            "OBJECTIVE=" + str(step.get("objective") or state.get("input") or "")[:600] +
-            "\nPARAMETERS=" + json.dumps(make_json_safe(known), ensure_ascii=False, separators=(",", ":"))[:1200] +
-            "\nReturn a concise completed result in answer_material."
-        )
         try:
             generated = await self.provider_router.generate_json(
                 run_id=run_id,
-                node_id="execution",
-                adapter={
-                    "adapter_id": "content_generation_execution_adapter",
-                    "provider_route": ["ollama", "openai"],
-                    "provider_timeout_seconds": 90,
-                    "max_provider_attempts": 1,
-                    "max_prompt_tokens": 900,
-                    "max_schema_chars": 600,
-                    "provider_options": {"temperature": 0.4, "num_predict": 900, "num_ctx": 2048, "think": False},
-                },
+                node_id=node_id,
+                adapter=adapter,
                 prompt=prompt,
-                rendered_user_prompt=rendered,
+                rendered_user_prompt=prompt["user"],
                 schema=schema,
             )
         except Exception as exc:
             return {
-                "input": tool_input,
+                "input": generation_input,
                 "result": {
                     "status": "error",
-                    "error": {"code": "content_generation_failed", "message": str(exc)},
+                    "error": {"message": str(exc)},
                     "data": {},
-                    "source": "model_runtime",
+                    "source": "llm_generation",
                     "requires_human_confirmation": False,
                 },
             }
-
-        answer = str(generated.get("answer_material") or generated.get("final_answer") or generated.get("content") or "").strip()
+        answer = str(generated.get("answer_material") or "").strip()
         if not answer:
-            return None
+            answer = str(generated.get("content") or generated.get("text") or "").strip()
         result = {
-            "status": "success",
+            "status": "success" if answer else "error",
+            "source": "llm_generation",
             "data": {
                 "answer_material": answer,
                 "normalized_facts": generated.get("normalized_facts") if isinstance(generated.get("normalized_facts"), list) else [],
-                "answer_material_quality": {
-                    "passed": True,
-                    "reason": "model_generated_content_contract",
-                    "source_type": "model_generated",
-                },
+                "generation_parameters": generation_input.get("parameters", {}),
+                "execution_method_contract": method_contract.to_dict(),
             },
-            "source": "model_generated_content",
             "requires_human_confirmation": False,
             "provenance": {
-                "source": "model_runtime",
+                "source": "primary_runtime_model",
                 "execution_claims": {
                     "real_execution_declared": True,
                     "no_mock_data_declared": True,
                     "network_declared": False,
                     "live_verification_passed": False,
-                    "evidence_quality_passed": True,
+                    "model_generation_declared": True,
                 },
             },
         }
-        return {"input": tool_input, "result": result}
+        if not answer:
+            result["error"] = {"message": "LLM generation returned no answer_material."}
+        return {"input": generation_input, "result": result}
 
     async def _try_local_knowledge_execution(
         self,
