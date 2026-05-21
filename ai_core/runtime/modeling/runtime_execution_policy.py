@@ -34,8 +34,8 @@ class RuntimeExecutionPolicySnapshot:
     default_mode: str = "api_only"
     api_enabled: bool = True
     api_provider_order: list[str] = field(default_factory=lambda: ["openai", "claude"])
-    local_provider_order: list[str] = field(default_factory=lambda: ["vllm", "ollama"])
-    local_code_provider_order: list[str] = field(default_factory=lambda: ["vllm_coder", "ollama_coder_qwen25", "ollama_coder_deepseek"])
+    local_provider_order: list[str] = field(default_factory=lambda: ["ollama"])
+    local_code_provider_order: list[str] = field(default_factory=lambda: ["ollama_coder_qwen25", "ollama_coder_deepseek"])
     api_only_when_local_disabled: bool = True
     credential_recovery_enabled: bool = True
 
@@ -150,13 +150,13 @@ class RuntimeExecutionPolicy:
             or provider_canonical.get("local_provider_order")
             or legacy_local.get("default_provider_order")
             or provider_policy.get("local_provider_order")
-            or ["vllm", "ollama"]
+            or ["ollama"]
         )
         local_code_order = self._string_list(
             canonical.get("local_code_provider_order")
             or provider_canonical.get("local_code_provider_order")
             or legacy_local.get("code_provider_order")
-            or ["vllm_coder", "ollama_coder_qwen25", "ollama_coder_deepseek"]
+            or ["ollama_coder_qwen25", "ollama_coder_deepseek"]
         )
         api_only = self._coalesce_bool(
             canonical.get("api_only_when_local_disabled"),

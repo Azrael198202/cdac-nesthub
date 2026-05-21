@@ -18,9 +18,9 @@ _API_PROVIDER_IDS = {"openai", "claude"}
 
 @dataclass(frozen=True)
 class UserModelSelectionSnapshot:
-    mode: str = "api_only"  # local_only | api_only | hybrid
-    initial_model_id: str = "gpt-4o-mini"
-    initial_provider: str = "openai"
+    mode: str = "local_only"  # local_only | api_only | hybrid
+    initial_model_id: str = "qwen3:8b"
+    initial_provider: str = "ollama"
     selected_local_model_id: str = "qwen3:8b"
     selected_api_model_id: str = "gpt-4o-mini"
     allow_escalation: bool = True
@@ -64,7 +64,7 @@ class UserModelSelectionStore:
 
     def snapshot(self) -> UserModelSelectionSnapshot:
         data = self._read()
-        mode = self._normalize_mode(data.get("mode") or os.getenv("AI_CORE_MODEL_MODE") or "api_only")
+        mode = self._normalize_mode(data.get("mode") or os.getenv("AI_CORE_MODEL_MODE") or "local_only")
         local_default = self._default_local_model()
         api_default = self._default_api_model()
         local_model = str(data.get("selected_local_model_id") or local_default).strip() or local_default

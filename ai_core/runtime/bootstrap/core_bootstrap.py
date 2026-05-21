@@ -131,48 +131,45 @@ class RuntimeBootstrap:
 
     def _default_model_providers_config(self) -> dict:
         return {
-            "default_route": ["openai", "claude", "vllm", "ollama"],
+            "default_route": ["ollama", "openai", "claude"],
             "routes": {
-                "local_light": ["vllm", "ollama", "openai"],
-                "local_capable": ["vllm", "ollama", "lmstudio", "openai"],
-                "strong_reasoning": ["openai", "claude", "vllm", "ollama", "lmstudio"],
-                "input_parsing": ["openai", "claude", "vllm", "ollama"],
-                "intent_simple": ["openai", "claude", "vllm", "ollama"],
-                "intent_complex": ["openai", "claude", "vllm", "ollama", "lmstudio"],
-                "intent_recognition": ["openai", "claude", "vllm", "ollama"],
-                "workflow_basic": ["openai", "claude", "vllm", "ollama"],
-                "workflow_complex": ["openai", "claude", "vllm", "ollama", "lmstudio"],
-                "workflow_planning": ["openai", "claude", "vllm", "ollama"],
-                "semantic_grounding": ["openai", "claude", "vllm", "ollama", "lmstudio"],
-                "tool_selection": ["openai", "claude", "vllm", "ollama"],
-                "stable_synthesis": ["openai", "claude", "vllm", "ollama"],
-                "stable_synthesis_strong": ["openai", "claude", "vllm", "ollama", "lmstudio"],
-                "reasoning": ["openai", "claude", "vllm", "ollama"],
+                "local_light": ["ollama", "openai"],
+                "local_capable": ["ollama", "lmstudio", "openai"],
+                "strong_reasoning": ["ollama", "openai", "claude", "lmstudio"],
+                "input_parsing": ["ollama", "openai", "claude"],
+                "intent_simple": ["ollama", "openai", "claude"],
+                "intent_complex": ["ollama", "openai", "claude", "lmstudio"],
+                "intent_recognition": ["ollama", "openai", "claude"],
+                "workflow_basic": ["ollama", "openai", "claude"],
+                "workflow_complex": ["ollama", "openai", "claude", "lmstudio"],
+                "workflow_planning": ["ollama", "openai", "claude"],
+                "semantic_grounding": ["ollama", "openai", "claude", "lmstudio"],
+                "tool_selection": ["ollama", "openai", "claude"],
+                "stable_synthesis": ["ollama", "openai", "claude"],
+                "stable_synthesis_strong": ["ollama", "openai", "claude", "lmstudio"],
+                "reasoning": ["ollama", "openai", "claude"],
                 # Code artifact generation uses code-specialized local models first.
                 # The generic vision/reasoning model is kept later as fallback only.
                 "code_generation": [
-                    "vllm_coder",
                     "ollama_coder_qwen25",
                     "ollama_coder_deepseek",
                     "lmstudio_coder",
                     "openai"
                 ],
                 "adapter_generation": [
-                    "vllm_coder",
                     "ollama_coder_qwen25",
                     "ollama_coder_deepseek",
                     "lmstudio_coder",
                     "openai"
                 ],
                 "schema_repair": [
-                    "vllm_coder",
                     "ollama_coder_qwen25",
                     "ollama_coder_deepseek",
                     "openai"
                 ],
-                "api_discovery_local": ["vllm", "ollama"],
-                "api_discovery_external": ["openai", "claude", "vllm", "ollama"],
-                "fallback": ["openai", "claude", "vllm", "ollama"]
+                "api_discovery_local": ["ollama"],
+                "api_discovery_external": ["ollama", "openai", "claude"],
+                "fallback": ["ollama", "openai", "claude"]
             },
             "role_model_preferences": {
                 "information_retrieval_agent": ["structured_extraction", "reasoning"],
@@ -440,7 +437,7 @@ class RuntimeBootstrap:
                 },
 
                 "vllm_coder": {
-                    "enabled": True,
+                    "enabled": False,
                     "type": "universal_model",
                     "protocol": "openai_compatible",
                     "base_url": "http://127.0.0.1:8002",
@@ -472,7 +469,7 @@ class RuntimeBootstrap:
                     "priority": 5
                 },
                 "vllm": {
-                    "enabled": True,
+                    "enabled": False,
                     "type": "universal_model",
                     "protocol": "openai_compatible",
                     "base_url": "http://127.0.0.1:8001",
@@ -506,27 +503,27 @@ class RuntimeBootstrap:
                 "prefer_local_base_model": False,
                 "runtime_execution_policy": {
                     "source_of_truth": "runtime_execution_policy",
-                    "default_mode": "api_only",
-                    "local_enabled": False,
-                    "api_only_when_local_disabled": True,
+                    "default_mode": "local_only",
+                    "local_enabled": True,
+                    "api_only_when_local_disabled": False,
                     "api_provider_order": ["openai", "claude"],
-                    "local_provider_order": ["vllm", "ollama"],
-                    "local_code_provider_order": ["vllm_coder", "ollama_coder_qwen25", "ollama_coder_deepseek"],
+                    "local_provider_order": ["ollama"],
+                    "local_code_provider_order": ["ollama_coder_qwen25", "ollama_coder_deepseek"],
                     "credential_recovery_enabled": True
                 },
-                "local_models_enabled": False,
-                "local_provider_order": ["vllm", "ollama"],
+                "local_models_enabled": True,
+                "local_provider_order": ["ollama"],
                 "api_only_when_local_disabled": True,
                 "api_provider_order": ["openai", "claude"],
-                "base_model_provider": "openai",
-                "base_model": "Qwen/Qwen3-8B",
+                "base_model_provider": "ollama",
+                "base_model": "qwen3:8b",
                 "local_fallback_provider": "ollama",
-                "local_fallback_model": "qwen3:8b",
-                "code_generation_provider": "vllm_coder",
-                "code_generation_model": "Qwen/Qwen2.5-Coder-7B-Instruct",
-                "code_generation_fallback_provider": "ollama_coder_qwen25",
-                "code_generation_fallback_model": "qwen2.5-coder:7b",
-                "external_provider_is_fallback": False
+                "local_fallback_model": "qwen3:4b",
+                "code_generation_provider": "ollama_coder_qwen25",
+                "code_generation_model": "qwen2.5-coder:7b",
+                "code_generation_fallback_provider": "ollama",
+                "code_generation_fallback_model": "qwen3:8b",
+                "external_provider_is_fallback": True
             }
         }
 
@@ -898,7 +895,7 @@ class RuntimeBootstrap:
             "input_parsing": {
                 "adapter_id": "input_parsing_adapter",
                 "type": "llm_json",
-                "provider_route": ["vllm", "ollama", "openai"],
+                "provider_route": ["ollama", "openai"],
                 "route_name": "input_parsing",
                 "model_complexity": "low",
                 "model_capabilities": ["json_generation", "structured_extraction"],
@@ -909,7 +906,7 @@ class RuntimeBootstrap:
             "intent_recognition": {
                 "adapter_id": "intent_recognition_adapter",
                 "type": "llm_json",
-                "provider_route": ["vllm", "ollama", "openai"],
+                "provider_route": ["ollama", "openai"],
                 "route_name": "intent_simple",
                 "model_complexity": "low",
                 "model_capabilities": ["json_generation", "structured_extraction"],
@@ -920,7 +917,7 @@ class RuntimeBootstrap:
             "workflow_planning": {
                 "adapter_id": "workflow_planning_adapter",
                 "type": "llm_json",
-                "provider_route": ["vllm", "ollama", "openai"],
+                "provider_route": ["ollama", "openai"],
                 "route_name": "workflow_basic",
                 "model_complexity": "medium",
                 "model_capabilities": ["workflow_planning", "json_generation"],

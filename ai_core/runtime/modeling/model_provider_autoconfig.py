@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import os
 from typing import Any
 
 from ai_core.config.loader import ConfigLoader
@@ -31,15 +32,15 @@ class ModelProviderAutoConfigurator:
 
     def default_config(self) -> dict[str, Any]:
         return {
-            "default_route": ["openai", "claude", "vllm", "ollama"],
+            "default_route": ["ollama", "openai", "claude"],
             "routes": {
-                "input_parsing": ["openai", "claude", "vllm", "ollama"],
-                "intent_recognition": ["openai", "claude", "vllm", "ollama"],
-                "workflow_planning": ["openai", "claude", "vllm", "ollama"],
-                "reasoning": ["openai", "claude", "vllm", "ollama"],
-                "stable_synthesis": ["openai", "claude", "vllm", "ollama"],
-                "code_generation": ["vllm_coder", "ollama_coder_qwen25", "openai"],
-                "fallback": ["openai", "claude", "vllm", "ollama"],
+                "input_parsing": ["ollama", "openai", "claude"],
+                "intent_recognition": ["ollama", "openai", "claude"],
+                "workflow_planning": ["ollama", "openai", "claude"],
+                "reasoning": ["ollama", "openai", "claude"],
+                "stable_synthesis": ["ollama", "openai", "claude"],
+                "code_generation": ["ollama_coder_qwen25", "openai"],
+                "fallback": ["ollama", "openai", "claude"],
             },
             "providers": {
                 "openai": {
@@ -71,7 +72,7 @@ class ModelProviderAutoConfigurator:
                     "capabilities": ["reasoning", "json_generation"],
                 },
                 "vllm": {
-                    "enabled": True,
+                    "enabled": False,
                     "type": "universal_model",
                     "protocol": "openai_compatible",
                     "base_url": "http://127.0.0.1:8001",
@@ -134,7 +135,7 @@ class ModelProviderAutoConfigurator:
                     "capabilities": ["reasoning", "json_generation"],
                 },
                 "vllm_coder": {
-                    "enabled": True,
+                    "enabled": False,
                     "type": "universal_model",
                     "protocol": "openai_compatible",
                     "base_url": "http://127.0.0.1:8002",
@@ -165,10 +166,51 @@ class ModelProviderAutoConfigurator:
             "policy": {
                 "require_real_provider": True,
                 "allow_placeholder_result": False,
-                "local_provider_order": ["vllm", "ollama"],
+                "local_provider_order": ["ollama", "vllm"],
                 "api_provider_order": ["openai", "claude"],
             },
         }
+
+    def _vllm_enabled_by_environment(self) -> bool:
+        return str(os.getenv("AI_CORE_ENABLE_VLLM", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _prefer_supported_local_runtime(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Keep Windows/default local execution on Ollama.
+
+        vLLM is useful on Linux GPU environments, but it is not a safe default
+        for Windows development.  It is only enabled when AI_CORE_ENABLE_VLLM=1.
+        """
+        enable_vllm = self._vllm_enabled_by_environment()
+        providers = config.get("providers") if isinstance(config.get("providers"), dict) else {}
+        for name in ("vllm", "vllm_coder"):
+            if name in providers and not enable_vllm:
+                providers[name]["enabled"] = False
+                providers[name]["auto_start"] = False
+                providers[name]["auto_install"] = False
+                providers[name]["disabled_reason"] = "vllm_is_optional_enable_with_AI_CORE_ENABLE_VLLM"
+        def normalize_route(route: Any) -> list[str]:
+            if not isinstance(route, list):
+                return []
+            names = [str(x) for x in route if str(x)]
+            if not enable_vllm:
+                names = [x for x in names if not x.startswith("vllm")]
+            order = ["ollama", "ollama_coder_qwen25", "ollama_coder_deepseek", "openai", "claude", "lmstudio", "lmstudio_coder"]
+            ordered = [x for x in order if x in names]
+            ordered.extend([x for x in names if x not in ordered])
+            return ordered
+        config["default_route"] = normalize_route(config.get("default_route")) or ["ollama", "openai"]
+        routes = config.get("routes") if isinstance(config.get("routes"), dict) else {}
+        for key, route in list(routes.items()):
+            routes[key] = normalize_route(route) or ["ollama", "openai"]
+        policy = config.get("policy") if isinstance(config.get("policy"), dict) else {}
+        policy["local_provider_order"] = normalize_route(policy.get("local_provider_order")) or ["ollama"]
+        rte = policy.get("runtime_execution_policy") if isinstance(policy.get("runtime_execution_policy"), dict) else {}
+        if rte:
+            rte["local_provider_order"] = normalize_route(rte.get("local_provider_order")) or ["ollama"]
+            rte["local_code_provider_order"] = normalize_route(rte.get("local_code_provider_order")) or ["ollama_coder_qwen25"]
+            policy["runtime_execution_policy"] = rte
+        config["policy"] = policy
+        return config
 
     def merge(self, current: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any]:
         merged = deepcopy(current)
@@ -196,4 +238,4 @@ class ModelProviderAutoConfigurator:
         for key, value in (desired.get("policy") or {}).items():
             policy.setdefault(key, deepcopy(value))
         merged["policy"] = policy
-        return merged
+        return self._prefer_supported_local_runtime(merged)

@@ -4,6 +4,7 @@ import asyncio
 import importlib.util
 import shlex
 import time
+import shutil
 from typing import Any
 
 import httpx
@@ -259,6 +260,13 @@ class UniversalModelProviderHandler:
         It respects auto_start, auto_pull_missing_model, fallback_models, binary,
         start_command, pull_command, and timeout settings from providers.yaml.
         """
+        binary = str(provider.get("binary") or "ollama").strip() or "ollama"
+        if not shutil.which(binary):
+            raise ProviderUnavailableError(
+                f"{provider_name}: Ollama executable is not available. "
+                f"Install Ollama, then run `ollama pull {primary_model}`. binary={binary}"
+            )
+
         tags = await self._ollama_tags(base_url)
         if tags is None and provider.get("auto_start", True):
             await self._start_ollama_service(run_id, node_id, provider_name, provider)
