@@ -90,11 +90,9 @@ class AgentParameterContractService:
                     },
                     prompt={
                         "system": (
-                            "Return JSON only. Infer all runtime parameters that are required to execute this agent later. "
-                            "Do not execute or plan. Do not name tools. Use generic snake_case names. "
-                            "Use required=true only for values without which execution cannot produce a verified answer. "
-                            "Do not add optional preferences as required parameters. Every values field is an array. "
-                            "Fill values only when they are explicit in the definition."
+                            "Return JSON only. Infer required runtime parameters for executing this agent later. "
+                            "Do not execute, plan, or name tools. Use generic snake_case names. "
+                            "Every parameter values field is an array. Fill explicit values only."
                         )
                     },
                     rendered_user_prompt=json.dumps(prompt_payload, ensure_ascii=False, separators=(",", ":")),

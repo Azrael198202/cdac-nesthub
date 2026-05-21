@@ -1,1 +1,1 @@
-20260521-stage-prompt-runtime-contract-sandbox-fix
+20260521-clean-agent-local-execution
