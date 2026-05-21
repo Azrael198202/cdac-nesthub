@@ -219,7 +219,7 @@ class PrimaryBrainDelegationClient:
 
     async def _run_runtime_with_timeout(self, core_run_id: str, state: dict[str, Any], awaitable) -> None:
         snapshot = RuntimeCostPolicy().snapshot(state)
-        timeout_seconds = max(30, int(getattr(snapshot, "operation_timeout_seconds", 45)) + 30)
+        timeout_seconds = self._compute_primary_runtime_timeout_seconds(state, snapshot)
         try:
             await asyncio.wait_for(awaitable, timeout=timeout_seconds)
         except asyncio.TimeoutError:
@@ -242,6 +242,36 @@ class PrimaryBrainDelegationClient:
                 "message": "Execution exceeded the configured timeout and was finalized as failed.",
                 "origin": "ai_core",
             })
+
+
+
+    def _compute_primary_runtime_timeout_seconds(self, state: dict[str, Any], snapshot: Any) -> int:
+        """Compute a whole-run timeout from generic runtime structure.
+
+        The previous fixed 210s budget was smaller than a normal local-model run
+        on Windows/Ollama, where several JSON nodes may each need tens of seconds.
+        This budget is domain-neutral: it only looks at remaining workflow nodes,
+        stage/provider timeout hints, and environment-configured operation budget.
+        """
+        base_timeout = max(60, int(getattr(snapshot, "operation_timeout_seconds", 180) or 180))
+        workflow = state.get("workflow") if isinstance(state, dict) else {}
+        nodes = workflow.get("nodes") if isinstance(workflow, dict) else []
+        node_index = int(state.get("node_index") or 0) if isinstance(state, dict) else 0
+        remaining_nodes = max(1, len(nodes) - node_index) if isinstance(nodes, list) else 1
+
+        stage_timeouts = getattr(snapshot, "stage_timeouts", {}) or {}
+        stage_budget = 0
+        if isinstance(stage_timeouts, dict):
+            for node in (nodes[node_index:] if isinstance(nodes, list) else []):
+                node_id = str((node or {}).get("id") or "")
+                stage_budget += int(stage_timeouts.get(node_id) or 0)
+
+        # Local LLM JSON nodes can be slow on Windows/CPU. Give each remaining
+        # node a generic minimum budget, without knowing or hardcoding the task domain.
+        per_node_floor = int(state.get("runtime_node_timeout_floor_seconds") or 180)
+        structural_budget = remaining_nodes * per_node_floor
+
+        return max(base_timeout + 60, stage_budget + 60, structural_budget + 60)
 
     def _clear_waiting_state(self, state: dict[str, Any]) -> None:
         state.pop("pending_action", None)

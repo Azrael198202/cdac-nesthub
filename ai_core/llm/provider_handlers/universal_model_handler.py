@@ -234,7 +234,9 @@ class UniversalModelProviderHandler:
                 raise ProviderUnavailableError(f"Model provider is not reachable. provider={provider_name}, base_url={base_url}, error={exc}") from exc
         except httpx.TimeoutException as exc:
             raise ProviderUnavailableError(
-                f"Model request timed out. provider={provider_name}, model={model}, timeout_seconds={timeout}"
+                f"Model request timed out. provider={provider_name}, model={model}, timeout_seconds={timeout}. "
+                "Use a smaller/faster local model for early JSON stages, increase the whole-run budget, "
+                "or enable an external fallback provider."
             ) from exc
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text[:1000] if exc.response is not None else ""
@@ -403,6 +405,8 @@ class UniversalModelProviderHandler:
         timeout = float(provider.get("timeout_seconds", 90))
         model = await self._ensure_ollama_model_ready(run_id, node_id, provider_name, provider, base_url, model)
         system_prompt = build_system_prompt(prompt, schema, max_schema_chars=int(provider.get("max_schema_chars", 10000)))
+        options = provider.get("options") if isinstance(provider.get("options"), dict) else {}
+        think = provider.get("think")
         if protocol == "ollama_generate":
             endpoint = provider.get("generate_endpoint", "/api/generate")
             payload = {
@@ -411,6 +415,8 @@ class UniversalModelProviderHandler:
                 "format": "json",
                 "prompt": system_prompt + "\n\nUser prompt:\n" + rendered_user_prompt,
             }
+            if options:
+                payload["options"] = options
         else:
             endpoint = provider.get("chat_endpoint", "/api/chat")
             payload = {
@@ -422,6 +428,10 @@ class UniversalModelProviderHandler:
                     {"role": "user", "content": rendered_user_prompt},
                 ],
             }
+            if options:
+                payload["options"] = options
+            if think is not None:
+                payload["think"] = bool(think)
         url = base_url + endpoint
         if isinstance(payload.get("messages"), list):
             payload, prompt_tokens_est, total_budget_truncated = self._fit_payload_to_budget(provider, payload, user_message_index=1)
@@ -470,7 +480,9 @@ class UniversalModelProviderHandler:
                 data = response.json()
         except httpx.TimeoutException as exc:
             raise ProviderUnavailableError(
-                f"Model request timed out. provider={provider_name}, model={model}, timeout_seconds={timeout}"
+                f"Model request timed out. provider={provider_name}, model={model}, timeout_seconds={timeout}. "
+                "Use a smaller/faster local model for early JSON stages, increase the whole-run budget, "
+                "or enable an external fallback provider."
             ) from exc
         except httpx.HTTPStatusError as exc:
             if protocol == "ollama_chat" and exc.response.status_code == 404 and provider.get("endpoint_strategy", "auto") == "auto":
