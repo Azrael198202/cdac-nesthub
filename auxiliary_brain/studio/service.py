@@ -12,6 +12,7 @@ from ai_core.runtime.adaptation import FeedbackClassifier, ModelUpgradeControlle
 from ai_core.interaction.natural_conversation import NaturalConversationService
 from ai_core.runtime.modeling.model_runtime_preflight import ModelRuntimePreflight
 from auxiliary_brain.parameters.agent_parameter_contract import AgentParameterContractService
+from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
 
 
 class AgentStudioService:
@@ -27,6 +28,7 @@ class AgentStudioService:
         self.natural_conversation = NaturalConversationService()
         self.model_preflight = ModelRuntimePreflight()
         self.parameter_contract_service = AgentParameterContractService()
+        self.artifact_registry = UploadedArtifactRegistry()
         self.store.ensure_workspace()
         self.community_id = self._ensure_community()
 
@@ -178,7 +180,7 @@ class AgentStudioService:
             execution_objective=execution_objective,
             participant_name=participant_name,
         )
-        artifact_refs = self._normalize_uploaded_artifacts(uploaded_artifacts)
+        artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
         payload = {
             "participant_id": participant_id,
             "name": participant_name,
@@ -220,7 +222,7 @@ class AgentStudioService:
         task_name = name or graph_id
         participants = self.store.list_json("generated/agents")
         selected_ids = [p.get("participant_id") for p in self._select_participants_for_instruction(instruction, participants)]
-        artifact_refs = self._normalize_uploaded_artifacts(uploaded_artifacts)
+        artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
         payload = {
             "graph_id": graph_id,
             "task_name": task_name,
@@ -474,31 +476,18 @@ class AgentStudioService:
 
 
 
+    def _resolve_uploaded_artifacts_for_instruction(self, instruction: str, uploaded_artifacts: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        """Bind explicit UI artifacts and filename references in the instruction.
+
+        This is a generic artifact-reference resolver. It does not decide the
+        domain or action result. It only converts user-visible filenames or
+        artifact ids into registered artifact records so ai_core can plan the
+        fixed use_uploaded_file action.
+        """
+        return self.artifact_registry.bind_for_instruction(instruction, uploaded_artifacts or [])
+
     def _normalize_uploaded_artifacts(self, uploaded_artifacts: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
-        normalized: list[dict[str, Any]] = []
-        if not isinstance(uploaded_artifacts, list):
-            return normalized
-        seen: set[str] = set()
-        for item in uploaded_artifacts:
-            if not isinstance(item, dict):
-                continue
-            path = str(item.get("path") or item.get("filepath") or item.get("file_path") or "").strip()
-            if not path:
-                continue
-            artifact_id = str(item.get("artifact_id") or item.get("id") or path).strip()
-            if artifact_id in seen:
-                continue
-            seen.add(artifact_id)
-            normalized.append({
-                "artifact_id": artifact_id,
-                "name": str(item.get("name") or item.get("filename") or path).strip(),
-                "filename": str(item.get("filename") or item.get("name") or "").strip(),
-                "path": path,
-                "mime_type": str(item.get("mime_type") or item.get("content_type") or "").strip(),
-                "role": str(item.get("role") or "method_candidate"),
-                "source": str(item.get("source") or "agent_studio_upload"),
-            })
-        return normalized
+        return self.artifact_registry.normalize_records(uploaded_artifacts or [])
 
     def _runtime_parameters_from_contract(self, parameter_contract: dict[str, Any]) -> dict[str, list[Any]]:
         params = parameter_contract.get("parameters") if isinstance(parameter_contract, dict) else []

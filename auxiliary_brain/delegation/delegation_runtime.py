@@ -559,7 +559,13 @@ class AgentDelegationRuntime:
                     "missing": self.parameter_contract_service.missing_parameters(participant),
                 },
                 "uploaded_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
+                "available_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
                 "artifact_policy": participant.get("artifact_policy") or {},
+                "artifact_binding": {
+                    "available": bool(participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts")),
+                    "resolution_key": "artifact_id_or_filename",
+                    "preferred_action_type": "use_uploaded_file",
+                },
             }
 
         shared_context: dict[str, Any] = {
@@ -578,7 +584,13 @@ class AgentDelegationRuntime:
                 "contract": self._compact_parameter_contract(participant.get("parameter_contract") or {}),
             },
             "uploaded_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
+            "available_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
             "artifact_policy": participant.get("artifact_policy") or {},
+            "artifact_binding": {
+                "available": bool(participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts")),
+                "resolution_key": "artifact_id_or_filename",
+                "preferred_action_type": "use_uploaded_file",
+            },
         }
         peer_results = self._peer_results_for_participant(participant, completed_results, dependency_plan)
         if peer_results:

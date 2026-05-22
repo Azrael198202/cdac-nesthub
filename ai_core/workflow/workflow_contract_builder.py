@@ -33,6 +33,9 @@ class WorkflowContractBuilder:
         # search the whole generic record for the first valid execution
         # decision and the deepest valid planned_steps before falling back.
         decision = self.extract_execution_decision(result)
+        artifact_decision = self.artifact_forced_decision(state, slim_user_input)
+        if artifact_decision.get("selected_action_type"):
+            decision = artifact_decision
         if not decision.get("selected_action_type"):
             decision = self.default_execution_decision(state=state, result=result)
         steps = self.extract_planned_steps(result)
@@ -283,6 +286,70 @@ class WorkflowContractBuilder:
             "missing_fields": [],
         }
 
+    def collect_available_artifacts(self, state: dict[str, Any]) -> list[dict[str, Any]]:
+        artifacts: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        def visit(value: Any, depth: int = 0) -> None:
+            if depth > 6:
+                return
+            if isinstance(value, dict):
+                for key in ("uploaded_artifacts", "available_artifacts", "artifact_refs", "source_files", "method_files"):
+                    raw = value.get(key)
+                    if isinstance(raw, list):
+                        for item in raw:
+                            if isinstance(item, dict):
+                                artifact_id = str(item.get("artifact_id") or item.get("id") or item.get("path") or item.get("filename") or "").strip()
+                                path = str(item.get("path") or item.get("filepath") or item.get("file_path") or "").strip()
+                                filename = str(item.get("filename") or item.get("name") or "").strip()
+                                key_id = artifact_id or path or filename
+                                if key_id and key_id not in seen:
+                                    seen.add(key_id)
+                                    artifacts.append(dict(item))
+                for nested in value.values():
+                    visit(nested, depth + 1)
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item, depth + 1)
+        visit(state)
+        return artifacts
+
+    def referenced_artifacts_for_state(self, state: dict[str, Any], text: str = "") -> list[dict[str, Any]]:
+        artifacts = self.collect_available_artifacts(state)
+        request_text = (str(text or "") + " " + self._joined_request_text(state=state, result={}, container={})).strip()
+        if not request_text:
+            return []
+        matched: list[dict[str, Any]] = []
+        for item in artifacts:
+            names = [
+                str(item.get("artifact_id") or item.get("id") or ""),
+                str(item.get("filename") or ""),
+                str(item.get("name") or ""),
+            ]
+            path = str(item.get("path") or "")
+            if path:
+                names.append(path.split("/")[-1].split("\\")[-1])
+            if any(name and name.lower() in request_text.lower() for name in names):
+                matched.append(dict(item))
+        return matched
+
+    def artifact_forced_decision(self, state: dict[str, Any], slim_user_input: str = "") -> dict[str, Any]:
+        refs = self.referenced_artifacts_for_state(state, slim_user_input)
+        if not refs:
+            return {}
+        selected = "use_uploaded_file"
+        ranked = [{**ACTION_CONTRACTS[selected], "action_type": selected, "priority": 1, "reason": "request references an available uploaded artifact as execution method"}]
+        for action, contract in ACTION_CONTRACTS.items():
+            if action != selected:
+                ranked.append({**contract, "action_type": action, "priority": len(ranked) + 1, "reason": "available fixed execution option"})
+        return {
+            "selected_action_type": selected,
+            "selected_execution_method": method_for_action(selected),
+            "ranked_options": ranked,
+            "selection_rules": list(SELECTION_RULES),
+            "artifact_refs": refs,
+            "decision_guard": "available_uploaded_artifact_reference",
+        }
+
     def normalize_step(self, *, step: dict[str, Any], index: int, state: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
         out = dict(step)
         step_id = str(out.get("step_id") or out.get("task_id") or f"step_{index + 1}")
@@ -303,10 +370,18 @@ class WorkflowContractBuilder:
         if not params["known"]:
             params["known"] = self.collect_known_parameters(state)
         out["parameters"] = params
+        artifact_refs = decision.get("artifact_refs") if isinstance(decision.get("artifact_refs"), list) else self.referenced_artifacts_for_state(state, str(out.get("objective") or ""))
+        if artifact_refs:
+            existing_refs = out.get("uploaded_artifacts") if isinstance(out.get("uploaded_artifacts"), list) else []
+            out["uploaded_artifacts"] = existing_refs or artifact_refs
+            out["artifact_refs"] = artifact_refs
+            out.setdefault("external_artifact", {"artifact_refs": artifact_refs})
         step_decision = self.extract_execution_decision(out) or decision
         action_type = normalize_action_type(out.get("action_type") or out.get("execution_action") or step_decision.get("selected_action_type"))
         if not is_fixed_action(action_type):
             action_type = normalize_action_type(decision.get("selected_action_type"), "ask_user")
+        if artifact_refs:
+            action_type = "use_uploaded_file"
         corrected_action_type = self._correct_action_for_output_contract(action_type=action_type, state=state, result={}, container=out)
         if corrected_action_type != action_type:
             action_type = corrected_action_type

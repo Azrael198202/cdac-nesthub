@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_core.config.paths import PROJECT_ROOT, RUNTIME_DIR
+from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
 
 
 @dataclass
@@ -27,8 +28,11 @@ class UploadedArtifactContractBuilder:
     and creates UI parameter requests when a file requires missing inputs.
     """
 
+    def __init__(self) -> None:
+        self.registry = UploadedArtifactRegistry()
+
     FILE_REF_KEYS = (
-        "uploaded_files", "uploaded_artifacts", "attachments", "files", "file_refs",
+        "uploaded_files", "uploaded_artifacts", "available_artifacts", "attachments", "files", "file_refs",
         "artifact_refs", "source_files", "method_files", "external_files",
     )
 
@@ -138,9 +142,17 @@ class UploadedArtifactContractBuilder:
                 refs.extend(self._coerce_refs(item))
             return refs
         if isinstance(value, str):
+            resolved = self.registry.resolve_reference(value)
+            if resolved:
+                return self._coerce_refs(resolved)
             name = Path(value).name
             return [UploadedArtifactRef(artifact_id=self._safe_name(value), path=value, name=name)]
         if isinstance(value, dict):
+            if not (value.get("path") or value.get("filepath") or value.get("file_path") or value.get("local_path")):
+                ref = value.get("artifact_id") or value.get("id") or value.get("filename") or value.get("name")
+                resolved = self.registry.resolve_reference(str(ref or ""))
+                if resolved:
+                    value = resolved
             path = value.get("path") or value.get("filepath") or value.get("file_path") or value.get("local_path") or value.get("uri") or value.get("url")
             if not path:
                 return []

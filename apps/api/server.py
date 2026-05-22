@@ -8,6 +8,8 @@ from pathlib import Path
 from uuid import uuid4
 import json
 
+from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
+
 from ai_core.evolution.approval_learning import ApprovalLearningService
 from ai_core.orchestration.workflow_runtime import WorkflowRuntime
 from ai_core.events.event_bus import event_bus
@@ -118,24 +120,13 @@ async def agent_studio_home():
 
 
 
-def _artifact_registry_path() -> Path:
-    path = Path("runtime") / "uploads" / "artifact_registry.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        path.write_text("[]", encoding="utf-8")
-    return path
+artifact_registry = UploadedArtifactRegistry()
 
 def _read_artifact_registry() -> list[dict[str, Any]]:
-    path = _artifact_registry_path()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
+    return artifact_registry.list()
 
 def _write_artifact_registry(items: list[dict[str, Any]]) -> None:
-    path = _artifact_registry_path()
-    path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    artifact_registry.write(items)
 
 @app.get("/api/agent-studio/artifacts")
 async def agent_studio_artifacts():
