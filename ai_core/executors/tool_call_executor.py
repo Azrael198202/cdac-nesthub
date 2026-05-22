@@ -160,7 +160,9 @@ class ToolCallExecutor:
                     "required_result": "pre_execution_validation.status == passed",
                 },
             }
-        workflow_plan = previous_results.get("workflow_planning", {})
+        workflow_plan = previous_results.get("agent_action_planning", {}) or previous_results.get("workflow_planning", {})
+        if isinstance(workflow_plan, dict) and isinstance(workflow_plan.get("action_planning_record"), dict):
+            workflow_plan = workflow_plan.get("action_planning_record")
         normalized_plan = self.normalizer.normalize(workflow_plan)
         normalized_plan = self.planning_recovery.recover_if_empty(
             workflow_plan=normalized_plan,
@@ -305,18 +307,31 @@ class ToolCallExecutor:
                 has_existing_tool=bool(early_tool and self._has_executable_implementation(early_tool)),
                 classifier_category=str(classifier_result.get("category") or ""),
             )
-            method_contract = self.execution_method_resolver.resolve(
+            # v5.1: execution does not decide the method. The planner LLM in
+            # agent_action_planning already selected the fixed action and locked
+            # execution_method. The generic resolver may still produce diagnostics,
+            # but the effective contract is rebuilt from the locked step.
+            resolved_diagnostic = self.execution_method_resolver.resolve(
                 proposals=method_proposals,
                 step=step,
                 policy=self.capability_router.selector.policy_for(
                     step=step, plan=normalized_plan, state=state, capability=required_capability or "unknown_capability"
                 ),
             )
-            method_contract = self._enforce_intent_execution_contract(
-                method_contract=method_contract,
-                step=step,
-                plan=normalized_plan,
-                state=state,
+            locked_method = str(step.get("execution_method") or "").strip()
+            if not locked_method:
+                locked_method = resolved_diagnostic.method
+            method_contract = ExecutionMethodContract(
+                method=locked_method,
+                confidence=1.0,
+                cost_level=self.execution_method_resolver._cost(locked_method),
+                latency_level=self.execution_method_resolver._latency(locked_method),
+                input_schema={},
+                output_schema={},
+                fallback=[],
+                reason="locked by agent_action_planning; execution cannot reselect method",
+                proposal_source="agent_action_planning",
+                decision_source="locked_workflow_contract",
             )
             step["execution_method_decision"] = method_contract.to_dict()
             await event_bus.emit(run_id, {
@@ -325,7 +340,7 @@ class ToolCallExecutor:
                 "message": method_contract.method,
                 "node_id": node_id,
                 "step_id": step_id,
-                "result": {"contract": method_contract.to_dict(), "proposals": method_proposals, "selected_mode": selected_execution_mode},
+                "result": {"contract": method_contract.to_dict(), "diagnostic_proposals": method_proposals, "selected_mode": selected_execution_mode, "method_reselection_disabled": True},
             })
 
             # If the plan explicitly asks for runtime-native observation, honor it
@@ -443,7 +458,7 @@ class ToolCallExecutor:
                     })
                     continue
 
-            if method_contract.method not in {"web_search", "api_call", "knowledge_base", "model_knowledge", "content_generation", "existing_tool", "runtime_generated_tool", "shell", "human_interaction", "no_op"}:
+            if method_contract.method not in {"web_search", "api_call", "knowledge_base", "model_knowledge", "content_generation", "existing_tool", "runtime_generated_tool", "shell", "human_interaction", "no_op", "external_skill", "static_response"}:
                 blocked_steps.append({
                     "step_id": step_id,
                     "status": "unsupported_execution_method",
@@ -1217,13 +1232,17 @@ class ToolCallExecutor:
             return value.strip()
         action_type = str(step.get("action_type") or step.get("execution_action") or "").strip()
         return {
-            "call_llm": "content_generation",
+            "llm_generate": "content_generation",
             "generate_code": "runtime_generated_tool",
             "generate_shell": "shell",
-            "call_api": "api_call",
+            "call_api_no_key": "api_call",
+            "call_api_with_key": "api_call",
             "web_query": "web_search",
             "use_existing_tool": "existing_tool",
-            "read_knowledge": "knowledge_base",
+            "use_external_skill": "external_skill",
+            "use_local_knowledge": "knowledge_base",
+            "generate_complex_tool": "runtime_generated_tool",
+            "compose_static_response": "static_response",
             "ask_user": "human_interaction",
             "no_op": "no_op",
         }.get(action_type, "")

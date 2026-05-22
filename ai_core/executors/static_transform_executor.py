@@ -95,10 +95,20 @@ class StaticTransformExecutor:
             "message": "Clean context prepared." if not clean_context["missing_information"] else "Clean context prepared with missing information hold.",
         }
 
+    def _locked_action_plan(self, state: dict[str, Any]) -> dict[str, Any]:
+        results = self._results(state)
+        action_raw = results.get("agent_action_planning") if isinstance(results.get("agent_action_planning"), dict) else {}
+        action_payload = self._stage_payload(action_raw, "action_planning_record")
+        if isinstance(action_payload.get("planned_steps"), list):
+            return action_payload
+        if isinstance(action_raw.get("planned_steps"), list):
+            return action_raw
+        plan_raw = results.get("workflow_planning") if isinstance(results.get("workflow_planning"), dict) else {}
+        return plan_raw if isinstance(plan_raw.get("planned_steps"), list) else self._stage_payload(plan_raw)
+
     def _execution_preparation(self, *, node_id: str, state: dict[str, Any], node_config: dict[str, Any]) -> dict[str, Any]:
         results = self._results(state)
-        plan_raw = results.get("workflow_planning") if isinstance(results.get("workflow_planning"), dict) else {}
-        plan = plan_raw if isinstance(plan_raw.get("planned_steps"), list) else self._stage_payload(plan_raw)
+        plan = self._locked_action_plan(state)
         steps = plan.get("planned_steps") if isinstance(plan.get("planned_steps"), list) else []
         bundle = {
             "kind": "execution_preparation_bundle",
@@ -113,7 +123,7 @@ class StaticTransformExecutor:
                 "artifact_path": artifact_path,
                 "resource_bundle": bundle,
                 "prepared_step_count": len(steps),
-                "upstream_refs": ["workflow_planning"],
+                "upstream_refs": ["agent_action_planning", "workflow_planning"],
             },
             "status": "completed" if steps else "blocked",
             "message": "Execution resources prepared." if steps else "No planned steps were available for preparation.",
@@ -121,8 +131,7 @@ class StaticTransformExecutor:
 
     def _pre_execution_validation(self, *, node_id: str, state: dict[str, Any], node_config: dict[str, Any]) -> dict[str, Any]:
         results = self._results(state)
-        plan_raw = results.get("workflow_planning") if isinstance(results.get("workflow_planning"), dict) else {}
-        plan = plan_raw if isinstance(plan_raw.get("planned_steps"), list) else self._stage_payload(plan_raw)
+        plan = self._locked_action_plan(state)
         prep = self._stage_payload(results.get("execution_preparation"), "execution_preparation_record")
         steps = plan.get("planned_steps") if isinstance(plan.get("planned_steps"), list) else []
         checks = []
@@ -155,7 +164,7 @@ class StaticTransformExecutor:
                 "status": "passed" if passed_all else "failed",
                 "checks": checks,
                 "prepared_artifact_path": prep.get("artifact_path"),
-                "upstream_refs": ["workflow_planning", "execution_preparation"],
+                "upstream_refs": ["agent_action_planning", "execution_preparation"],
             },
             "status": "completed" if passed_all else "blocked",
             "message": "Pre-execution validation passed." if passed_all else "Pre-execution validation failed or no executable steps exist.",
@@ -309,7 +318,7 @@ class StaticTransformExecutor:
             return value[preferred_key]
         for key in (
             "input_record", "intent_record", "requirement_record", "context_record",
-            "execution_plan", "execution_preparation_record",
+            "workflow_record", "action_planning_record", "execution_plan", "execution_preparation_record",
             "validation_record", "verification_record", "repair_record",
         ):
             if isinstance(value.get(key), dict):

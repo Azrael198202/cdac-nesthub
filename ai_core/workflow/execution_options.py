@@ -16,7 +16,7 @@ class ExecutionOption:
 
 
 FIXED_EXECUTION_OPTIONS: tuple[ExecutionOption, ...] = (
-    ExecutionOption("call_llm", "content_generation", "prompt_contract", False, False, "runtime", "Generate a prompt contract and expected output contract."),
+    ExecutionOption("llm_generate", "content_generation", "prompt_contract", False, False, "runtime", "Executor LLM generates final content only when this action is explicitly selected. Planner LLM calls are stage operations, not final actions."),
     ExecutionOption("generate_code", "runtime_generated_tool", "code_design", False, False, "runtime", "Generate design, code, tests, and sandbox contract before execution."),
     ExecutionOption("generate_shell", "shell", "shell_design", False, False, "runtime", "Generate shell design, command contract, and sandbox contract before execution."),
     ExecutionOption("call_api_no_key", "api_call", "api_contract", True, False, "free_or_unknown", "Collect endpoint candidates, request schema, response schema, and no-key policy."),
@@ -41,7 +41,7 @@ SELECTION_RULES: tuple[str, ...] = (
     "Prefer free/runtime options before paid options when both can satisfy the request.",
     "Prefer already-prepared local or registered resources before generating new code or using external access.",
     "Do not use web/API/external access unless the intent requires current, external, or evidence-backed information.",
-    "Do not choose execution methods inside execution; workflow_planning is the only owner of action selection.",
+    "Do not choose execution methods inside execution; agent_action_planning is the only owner of final action selection. Workflow planning may call planner LLM, but that is not final task execution.",
 )
 
 

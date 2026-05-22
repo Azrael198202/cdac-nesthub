@@ -110,7 +110,7 @@ class WorkflowContractBuilder:
                 extracted = self.extract_execution_decision(value)
                 if extracted.get("selected_action_type"):
                     return extracted
-        selected = "call_llm"
+        selected = "llm_generate"
         ranked = []
         for i, item in enumerate(fixed_options_for_prompt()):
             priority = 1 if item["action_type"] == selected else i + 2
@@ -121,7 +121,7 @@ class WorkflowContractBuilder:
     def default_step(self, *, state: dict[str, Any], result: dict[str, Any], decision: dict[str, Any], slim_user_input: str) -> dict[str, Any]:
         known = self.collect_known_parameters(state)
         objective = self.objective_from_state(state=state, result=result, slim_user_input=slim_user_input)
-        action_type = str(decision.get("selected_action_type") or "call_llm")
+        action_type = str(decision.get("selected_action_type") or "llm_generate")
         return {
             "step_id": "step_1",
             "task_id": "step_1",
@@ -164,7 +164,7 @@ class WorkflowContractBuilder:
         step_decision = self.extract_execution_decision(out) or decision
         action_type = str(out.get("action_type") or out.get("execution_action") or step_decision.get("selected_action_type") or "").strip()
         if not is_fixed_action(action_type):
-            action_type = str(decision.get("selected_action_type") or "call_llm")
+            action_type = str(decision.get("selected_action_type") or "llm_generate")
         method = method_for_action(action_type)
         out["action_type"] = action_type
         out["execution_action"] = action_type

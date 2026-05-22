@@ -49,10 +49,18 @@ PIPELINE_STAGES: tuple[StageContract, ...] = (
     ),
     StageContract(
         stage_id="workflow_planning",
-        owner="create executable workflow, graph, agent/substep relations, ranked fixed execution action decision, source policy, and locked execution plan",
-        allowed_decisions=("workflow_generation", "agent_graph_generation", "dependency_mapping", "fixed_action_ranking", "execution_method_locking", "source_policy_locking"),
-        forbidden_decisions=("runtime_execution", "result_synthesis", "unplanned_fallback"),
-        output_key="execution_plan",
+        owner="create the main workflow, agent graph, agent relations, and agent-level objectives only",
+        allowed_decisions=("workflow_generation", "agent_graph_generation", "dependency_mapping", "agent_objective_definition", "substep_outline"),
+        forbidden_decisions=("runtime_execution", "result_synthesis", "final_action_execution", "provider_selection"),
+        output_key="workflow_record",
+        executor_type="llm_json",
+    ),
+    StageContract(
+        stage_id="agent_action_planning",
+        owner="use planner LLM only to rank fixed action options and produce executable substeps for each agent",
+        allowed_decisions=("planner_llm_action_ranking", "fixed_action_selection", "substep_generation", "execution_method_locking", "source_policy_locking"),
+        forbidden_decisions=("runtime_execution", "final_answer_creation", "planner_output_as_answer", "unplanned_fallback"),
+        output_key="action_planning_record",
         executor_type="llm_json",
     ),
     StageContract(
@@ -161,7 +169,7 @@ class PipelineStageContract:
         stage = self.by_id[stage_id]
         return {
             "id": f"{stage.stage_id}_prompt",
-            "version": "4.4-ranked-execution-decision",
+            "version": "5.1-agent-action-planning",
             "executor_type": stage.executor_type,
             "system": (
                 "Return one JSON object only. Follow the stage boundary exactly. "
@@ -174,12 +182,13 @@ class PipelineStageContract:
                 "Allowed decisions: " + ", ".join(stage.allowed_decisions),
                 "Forbidden decisions: " + ", ".join(stage.forbidden_decisions),
                 f"Write primary result under {stage.output_key} when applicable.",
-                "For workflow planning, first read the upstream intent/objective and known parameters, then rank the fixed execution options: call_llm, generate_code, generate_shell, call_api, web_query, use_existing_tool, read_knowledge, ask_user, no_op.",
-                "Workflow planning MUST output execution_decision with ranked_options and selected_action_type. Do not hide the decision inside a free-text action name.",
-                "Each executable step must copy the selected action_type from execution_decision unless it has a separately ranked execution_decision.",
-                "Map action_type to execution_method deterministically: call_llm=content_generation, generate_code=runtime_generated_tool, generate_shell=shell, call_api=api_call, web_query=web_search, use_existing_tool=existing_tool, read_knowledge=knowledge_base, ask_user=human_interaction, no_op=no_op.",
-                "For web_query or call_api, workflow_planning must state whether external resources are required; execution_preparation must prepare concrete targets/endpoints before execution.",
-                "Execution may only run actions/resources approved by execution_preparation.",
+                "workflow_planning only builds main workflow, agent graph, agent relations, and agent objectives; it must not execute or produce final task content.",
+                "agent_action_planning is a planner-LLM stage: it uses LLM only to choose the next action, never to complete the user's task unless selected_action_type is llm_generate.",
+                "agent_action_planning MUST rank the fixed execution options: llm_generate, generate_code, generate_shell, call_api_no_key, call_api_with_key, web_query, use_existing_tool, use_external_skill, use_local_knowledge, generate_complex_tool, compose_static_response, ask_user, no_op.",
+                "agent_action_planning MUST output action_planning_record.planned_steps with execution_decision.ranked_options and selected_action_type for every executable agent/substep.",
+                "Map action_type to execution_method deterministically from the fixed options. Planner LLM output is planning material only and cannot enter final_synthesis.",
+                "For web_query or API actions, execution_preparation must prepare concrete targets/endpoints before execution.",
+                "Execution may only run locked actions/resources approved by agent_action_planning and execution_preparation.",
                 "Do not output placeholder key lists as the stage result.",
             ],
             "output_contract": {stage.output_key: "object"},

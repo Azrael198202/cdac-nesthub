@@ -519,12 +519,81 @@ class LLMJsonExecutor:
     def _postprocess_stage_result(self, *, node_id: str | None, result: dict, state: dict, slim_user_input: str) -> dict:
         node = str(node_id or "")
         if node == "workflow_planning":
-            return self._ensure_executable_workflow(result=result, state=state, slim_user_input=slim_user_input)
+            return self._ensure_main_workflow_only(result=result, state=state, slim_user_input=slim_user_input)
+        if node == "agent_action_planning":
+            return self._ensure_agent_action_plan(result=result, state=state, slim_user_input=slim_user_input)
         if node == "intent_recognition":
             return self._ensure_intent_carry_forward(result=result, state=state)
         if node == "input_parsing":
             return self._ensure_input_carry_forward(result=result, state=state, slim_user_input=slim_user_input)
         return result
+
+    def _ensure_main_workflow_only(self, *, result: dict, state: dict, slim_user_input: str) -> dict:
+        """Normalize main workflow without final execution action selection.
+
+        This stage may use an LLM as planner, but its output is only topology:
+        main workflow, agent graph, dependency relations, and agent objectives.
+        It must not be interpreted as the final business execution result.
+        """
+        if not isinstance(result, dict):
+            result = {}
+        results = state.get("results") if isinstance(state.get("results"), dict) else {}
+        intent = results.get("intent_recognition") if isinstance(results.get("intent_recognition"), dict) else {}
+        context = results.get("context_awareness") if isinstance(results.get("context_awareness"), dict) else {}
+        ctx_payload = context.get("context_record") if isinstance(context.get("context_record"), dict) else context
+        clean = ctx_payload.get("clean_context") if isinstance(ctx_payload.get("clean_context"), dict) else {}
+        objective = str(result.get("objective") or intent.get("intent_summary") or clean.get("intent_summary") or state.get("input") or slim_user_input or "execute requested task")[:1000]
+        agents = result.get("agents") if isinstance(result.get("agents"), list) else []
+        if not agents:
+            agents = [{
+                "agent_id": "agent_1",
+                "objective": objective,
+                "relation": "independent",
+                "depends_on": [],
+                "context_policy": "clean_context_only",
+            }]
+        graph_nodes=[]; graph_edges=[]
+        for i,a in enumerate(agents):
+            if not isinstance(a, dict):
+                continue
+            aid=str(a.get("agent_id") or a.get("id") or f"agent_{i+1}")
+            deps=a.get("depends_on") if isinstance(a.get("depends_on"), list) else []
+            graph_nodes.append({"id": aid, "relation": "dependent" if deps else "independent", "objective": str(a.get("objective") or objective)[:800]})
+            for d in deps:
+                graph_edges.append({"from": str(d), "to": aid, "context_policy": "strict_json_safe_summary"})
+        record={
+            "status": "ready_for_agent_action_planning",
+            "workflow": result.get("workflow") if isinstance(result.get("workflow"), dict) else {"workflow_id": "runtime_main_workflow", "status": "planned"},
+            "agents": agents,
+            "agent_graph": result.get("agent_graph") if isinstance(result.get("agent_graph"), dict) else {"main_graph": {"nodes": graph_nodes, "edges": graph_edges}, "subgraphs": []},
+            "objective": objective,
+            "planner_llm_role": "topology_planning_only",
+            "next_stage": "agent_action_planning",
+            "upstream_refs": ["input_parsing", "intent_recognition", "requirement_completion", "context_awareness"],
+        }
+        return {"workflow_record": record, "status": "planned", "message": "Main workflow and agent graph planned; final actions are not selected in this stage."}
+
+    def _ensure_agent_action_plan(self, *, result: dict, state: dict, slim_user_input: str) -> dict:
+        """Normalize planner-LLM action decisions into locked executable steps.
+
+        The LLM in this stage decides HOW each agent should execute by ranking
+        fixed action options. It is not allowed to produce the final user answer.
+        """
+        normalized = self.workflow_contract_builder.normalize_workflow_result(
+            result=result if isinstance(result, dict) else {},
+            state=state,
+            slim_user_input=slim_user_input,
+        )
+        normalized["planner_llm_role"] = "action_selection_only"
+        normalized["planner_output_can_enter_final_synthesis"] = False
+        normalized["status"] = normalized.get("status") or "action_planned"
+        return {
+            "action_planning_record": normalized,
+            "planned_steps": normalized.get("planned_steps", []),
+            "execution_plan": normalized.get("execution_plan", {}),
+            "status": "planned",
+            "message": "Agent actions and substeps planned with locked fixed execution options.",
+        }
 
     def _ensure_input_carry_forward(self, *, result: dict, state: dict, slim_user_input: str) -> dict:
         if not isinstance(result, dict):
@@ -691,7 +760,7 @@ class LLMJsonExecutor:
         # create missing planned_steps, but it must not change the selected
         # execution action. This keeps workflow_planning as the single place
         # where the fixed action options are ranked and selected.
-        selected_action = self._selected_action_type(intent, clean_context, requirement_payload, parsed) or "call_llm"
+        selected_action = self._selected_action_type(intent, clean_context, requirement_payload, parsed) or "llm_generate"
         decision_source = self._execution_decision_from_plan(intent) or self._execution_decision_from_plan(clean_context) or {}
         raw_ranked = decision_source.get("ranked_options") if isinstance(decision_source.get("ranked_options"), list) else []
         ranked_options = []
@@ -804,7 +873,7 @@ class LLMJsonExecutor:
         if node == "input_parsing":
             return self._recover_input_parsing(state=state, slim_user_input=slim_user_input, error=error)
         if node == "workflow_planning":
-            return self._recover_workflow_planning(state=state, slim_user_input=slim_user_input, slim_previous_results=slim_previous_results, error=error)
+            return self._recover_main_workflow_planning(state=state, slim_user_input=slim_user_input, slim_previous_results=slim_previous_results, error=error)
         return None
 
     def _recover_input_parsing(self, *, state: dict, slim_user_input: str, error: str) -> dict:
@@ -834,6 +903,23 @@ class LLMJsonExecutor:
             "recovery": {"status": "provider_error_recovered", "reason": error[:500]},
         }
 
+    def _recover_main_workflow_planning(self, *, state: dict, slim_user_input: str, slim_previous_results: dict, error: str) -> dict:
+        objective = str((self._loads_json_obj(slim_user_input) or {}).get("objective") or state.get("input") or "execute requested task")[:500]
+        return {
+            "workflow_record": {
+                "status": "ready_for_agent_action_planning",
+                "workflow": {"workflow_id": "runtime_main_workflow", "status": "planned"},
+                "agents": [{"agent_id": "agent_1", "objective": objective, "relation": "independent", "depends_on": []}],
+                "agent_graph": {"main_graph": {"nodes": [{"id": "agent_1", "relation": "independent", "objective": objective}], "edges": []}, "subgraphs": []},
+                "objective": objective,
+                "planner_llm_role": "topology_planning_only",
+                "next_stage": "agent_action_planning",
+                "recovery": {"status": "provider_error_recovered", "reason": error[:500]},
+            },
+            "status": "planned",
+            "message": "Main workflow recovered; final action selection is delegated to agent_action_planning.",
+        }
+
     def _recover_workflow_planning(self, *, state: dict, slim_user_input: str, slim_previous_results: dict, error: str) -> dict:
         payload = self._loads_json_obj(slim_user_input) or {}
         previous = slim_previous_results if isinstance(slim_previous_results, dict) else {}
@@ -849,7 +935,7 @@ class LLMJsonExecutor:
                         known[str(k)] = v
         objective = str(payload.get("objective") or intent.get("intent_summary") or parsed.get("original_input") or state.get("input") or "execute requested task")[:500]
         capability = str(intent.get("intent_type") or intent.get("classified_intent") or "generic_content_generation")[:120]
-        selected_action = self._selected_action_type(intent) or "call_llm"
+        selected_action = self._selected_action_type(intent) or "llm_generate"
         selected_method = self._method_from_action_type(selected_action)
         step = {
             "step_id": "step_1",
