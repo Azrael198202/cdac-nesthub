@@ -29,10 +29,13 @@ class WorkflowContractBuilder:
     def normalize_workflow_result(self, *, result: dict[str, Any], state: dict[str, Any], slim_user_input: str = "") -> dict[str, Any]:
         if not isinstance(result, dict):
             result = {}
+        # v5.4: planner output can be nested by adapters/wrappers. Always
+        # search the whole generic record for the first valid execution
+        # decision and the deepest valid planned_steps before falling back.
         decision = self.extract_execution_decision(result)
         if not decision.get("selected_action_type"):
             decision = self.default_execution_decision(state=state, result=result)
-        steps = result.get("planned_steps") if isinstance(result.get("planned_steps"), list) else []
+        steps = self.extract_planned_steps(result)
         if not steps:
             steps = [self.default_step(state=state, result=result, decision=decision, slim_user_input=slim_user_input)]
         normalized_steps = [self.normalize_step(step=step, index=index, state=state, decision=decision) for index, step in enumerate(steps) if isinstance(step, dict)]
@@ -70,18 +73,73 @@ class WorkflowContractBuilder:
         return result
 
     def extract_execution_decision(self, container: dict[str, Any]) -> dict[str, Any]:
-        if not isinstance(container, dict):
-            return {}
-        for key in ("execution_decision", "execution_method_decision", "method_decision"):
-            value = container.get(key)
-            if isinstance(value, dict):
-                return self.normalize_decision(value)
-        plan = container.get("execution_plan") if isinstance(container.get("execution_plan"), dict) else {}
-        for key in ("execution_decision", "execution_method_decision", "method_decision"):
-            value = plan.get(key)
-            if isinstance(value, dict):
-                return self.normalize_decision(value)
+        """Find the first valid fixed-action decision in a generic nested record.
+
+        LLM adapters often wrap their real output like:
+        action_planning_record.action_planning_record.planned_steps[].
+        This method is intentionally structural and domain-neutral: it only
+        accepts values that map to the fixed action list. It never guesses from
+        business words or intent labels.
+        """
+        for candidate in self.iter_nested_dicts(container, max_depth=8):
+            for key in ("execution_decision", "execution_method_decision", "method_decision"):
+                value = candidate.get(key)
+                if isinstance(value, dict):
+                    normalized = self.normalize_decision(value)
+                    if normalized.get("selected_action_type"):
+                        return normalized
+            selected = normalize_action_type(
+                candidate.get("selected_action_type")
+                or candidate.get("action_type")
+                or candidate.get("execution_action")
+                or candidate.get("selected_option")
+            )
+            if is_fixed_action(selected):
+                return self.normalize_decision({
+                    "selected_action_type": selected,
+                    "ranked_options": candidate.get("ranked_options") if isinstance(candidate.get("ranked_options"), list) else [{"action_type": selected, "priority": 1}],
+                })
         return {}
+
+    def extract_planned_steps(self, container: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return the deepest valid planned_steps array from nested output.
+
+        A valid step is a dict containing either a fixed action field or an
+        embedded execution_decision. This prevents wrapper-level empty or
+        fallback steps from overriding the actual planner decision.
+        """
+        best: list[dict[str, Any]] = []
+        best_score = -1
+        for candidate in self.iter_nested_dicts(container, max_depth=8):
+            steps = candidate.get("planned_steps")
+            if not isinstance(steps, list) or not steps:
+                continue
+            dict_steps = [step for step in steps if isinstance(step, dict)]
+            if not dict_steps:
+                continue
+            score = 0
+            for step in dict_steps:
+                if self.extract_execution_decision(step).get("selected_action_type"):
+                    score += 3
+                elif is_fixed_action(normalize_action_type(step.get("action_type") or step.get("execution_action") or step.get("selected_action_type"))):
+                    score += 2
+                if step.get("parameters") or step.get("target") or step.get("objective"):
+                    score += 1
+            if score > best_score:
+                best = dict_steps
+                best_score = score
+        return best
+
+    def iter_nested_dicts(self, value: Any, *, max_depth: int = 8):
+        if max_depth < 0:
+            return
+        if isinstance(value, dict):
+            yield value
+            for nested in value.values():
+                yield from self.iter_nested_dicts(nested, max_depth=max_depth - 1)
+        elif isinstance(value, list):
+            for item in value:
+                yield from self.iter_nested_dicts(item, max_depth=max_depth - 1)
 
     def normalize_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
         ranked_raw = decision.get("ranked_options") if isinstance(decision.get("ranked_options"), list) else []

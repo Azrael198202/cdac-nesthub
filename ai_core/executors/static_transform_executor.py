@@ -98,13 +98,65 @@ class StaticTransformExecutor:
     def _locked_action_plan(self, state: dict[str, Any]) -> dict[str, Any]:
         results = self._results(state)
         action_raw = results.get("agent_action_planning") if isinstance(results.get("agent_action_planning"), dict) else {}
+        # v5.4: agent_action_planning can be double-wrapped by LLM/adapters.
+        # Promote the deepest valid planned_steps instead of using a shallow
+        # wrapper that may contain fallback ask_user/no-op data.
+        promoted = self._promote_deep_action_plan(action_raw)
+        if isinstance(promoted.get("planned_steps"), list) and promoted.get("planned_steps"):
+            return promoted
         action_payload = self._stage_payload(action_raw, "action_planning_record")
-        if isinstance(action_payload.get("planned_steps"), list):
+        if isinstance(action_payload.get("planned_steps"), list) and action_payload.get("planned_steps"):
             return action_payload
-        if isinstance(action_raw.get("planned_steps"), list):
+        if isinstance(action_raw.get("planned_steps"), list) and action_raw.get("planned_steps"):
             return action_raw
         plan_raw = results.get("workflow_planning") if isinstance(results.get("workflow_planning"), dict) else {}
         return plan_raw if isinstance(plan_raw.get("planned_steps"), list) else self._stage_payload(plan_raw)
+
+    def _promote_deep_action_plan(self, record: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(record, dict):
+            return {}
+        best_steps: list[dict[str, Any]] = []
+        best_score = -1
+        best_container: dict[str, Any] = {}
+        for candidate in self._iter_nested_dicts(record, max_depth=8):
+            steps = candidate.get("planned_steps")
+            if not isinstance(steps, list) or not steps:
+                continue
+            dict_steps = [s for s in steps if isinstance(s, dict)]
+            if not dict_steps:
+                continue
+            score = 0
+            for step in dict_steps:
+                action_type = normalize_action_type(step.get("action_type") or step.get("execution_action") or step.get("selected_action_type"))
+                decision = step.get("execution_decision") if isinstance(step.get("execution_decision"), dict) else {}
+                decision_action = normalize_action_type(decision.get("selected_action_type") or decision.get("action_type"))
+                if action_type in self.FIXED_ACTION_METHODS or decision_action in self.FIXED_ACTION_METHODS:
+                    score += 3
+                if step.get("parameters") or step.get("target") or step.get("objective"):
+                    score += 1
+                if action_type == "ask_user" or decision_action == "ask_user":
+                    score -= 1
+            if score > best_score:
+                best_score = score
+                best_steps = dict_steps
+                best_container = candidate
+        if not best_steps:
+            return {}
+        out = dict(best_container)
+        out["planned_steps"] = best_steps
+        out.setdefault("promoted_from_nested_action_plan", True)
+        return out
+
+    def _iter_nested_dicts(self, value: Any, *, max_depth: int = 8):
+        if max_depth < 0:
+            return
+        if isinstance(value, dict):
+            yield value
+            for nested in value.values():
+                yield from self._iter_nested_dicts(nested, max_depth=max_depth - 1)
+        elif isinstance(value, list):
+            for item in value:
+                yield from self._iter_nested_dicts(item, max_depth=max_depth - 1)
 
     def _execution_preparation(self, *, node_id: str, state: dict[str, Any], node_config: dict[str, Any]) -> dict[str, Any]:
         results = self._results(state)
