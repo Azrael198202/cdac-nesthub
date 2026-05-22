@@ -160,7 +160,7 @@ This version adds a dedicated `provider_resolution` stage between `workflow_plan
 
 ## v4.4 ranked execution decision
 
-Workflow planning now asks the model to rank fixed execution options before producing executable steps. The fixed options are `call_llm`, `generate_code`, `generate_shell`, `call_api`, `web_query`, `use_existing_tool`, `read_knowledge`, `ask_user`, and `no_op`. The selected option is stored in `execution_decision.selected_action_type`, then deterministically mapped to `execution_method`. Later stages are not allowed to infer or change the method from free-text action names.
+Workflow planning now asks the model to rank fixed execution options before producing executable steps. The fixed options are `llm_generate`, `generate_code`, `generate_shell`, `call_api_no_key`, `call_api_with_key`, `web_query`, `use_existing_tool`, `use_external_skill`, `use_uploaded_file`, `use_local_knowledge`, `generate_complex_tool`, `compose_static_response`, `ask_user`, and `no_op`. The selected option is stored in `execution_decision.selected_action_type`, then deterministically mapped to `execution_method`. Later stages are not allowed to infer or change the method from free-text action names.
 
 For external access, `execution_preparation` must prepare concrete web targets or API endpoint candidates. `pre_execution_validation` and `execution` block web/API execution when these resources were not prepared.
 

@@ -6,6 +6,9 @@ import subprocess
 import sys
 import urllib.request
 import urllib.error
+import importlib.util
+import inspect
+from pathlib import Path
 from typing import Any
 from datetime import datetime, timezone
 
@@ -53,6 +56,7 @@ from ai_core.execution.execution_method_contract import ExecutionMethodContract,
 from ai_core.research.deep_web_research import DeepWebResearchPipeline
 from ai_core.research.structured_provider_executor import StructuredProviderExecutor
 from ai_core.llm.provider_router import ProviderRouter
+from ai_core.config.paths import PROJECT_ROOT
 
 
 class ToolCallExecutor:
@@ -360,7 +364,7 @@ class ToolCallExecutor:
             # If the plan explicitly asks for runtime-native observation, honor it
             # before any generic web/API/model fallback. This is a generic source
             # contract, not a domain-specific shortcut.
-            if method_contract.method not in {"web_search", "api_call"} and self._step_requests_runtime_native(step, normalized_plan, required_capability or "runtime_current_observation"):
+            if method_contract.method not in {"web_search", "api_call", "uploaded_artifact"} and self._step_requests_runtime_native(step, normalized_plan, required_capability or "runtime_current_observation"):
                 runtime_native_result = self.capability_router.try_runtime_native(
                     run_id=run_id,
                     node_id=node_id,
@@ -506,7 +510,7 @@ class ToolCallExecutor:
                 })
                 continue
 
-            if method_contract.method not in {"web_search", "api_call", "knowledge_base", "model_knowledge", "content_generation", "existing_tool", "runtime_generated_tool", "shell", "human_interaction", "no_op", "external_skill", "static_response"}:
+            if method_contract.method not in {"web_search", "api_call", "knowledge_base", "model_knowledge", "content_generation", "existing_tool", "runtime_generated_tool", "shell", "human_interaction", "no_op", "external_skill", "static_response", "uploaded_artifact"}:
                 blocked_steps.append({
                     "step_id": step_id,
                     "status": "unsupported_execution_method",
@@ -530,6 +534,37 @@ class ToolCallExecutor:
                     "step_id": step_id,
                     "status": "execution_method_unavailable",
                     "reason": "Strict runtime-native execution did not return a result and fallback is disabled.",
+                    "execution_method_contract": method_contract.to_dict(),
+                    "source_step": step,
+                })
+                continue
+
+            if method_contract.method == "uploaded_artifact":
+                uploaded_result = await self._execute_uploaded_artifact(
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    step=step,
+                    state=state,
+                )
+                if uploaded_result:
+                    result_obj = uploaded_result.get("result") if isinstance(uploaded_result.get("result"), dict) else {}
+                    result_obj.setdefault("data", {})["execution_method_contract"] = method_contract.to_dict()
+                    execution_steps.append({
+                        "step_id": step_id,
+                        "status": "executed",
+                        "tool": uploaded_result.get("tool"),
+                        "input": uploaded_result.get("input"),
+                        "result": result_obj,
+                        "provenance": (result_obj or {}).get("provenance") if isinstance(result_obj, dict) else None,
+                        "source_step": step,
+                        "priority_path": "uploaded_artifact_contract",
+                    })
+                    continue
+                blocked_steps.append({
+                    "step_id": step_id,
+                    "status": "uploaded_artifact_execution_failed",
+                    "reason": "The locked uploaded artifact action did not return a result. Check artifact contract, required UI parameters, and sandbox compatibility.",
                     "execution_method_contract": method_contract.to_dict(),
                     "source_step": step,
                 })
@@ -1288,6 +1323,7 @@ class ToolCallExecutor:
             "web_query": "web_search",
             "use_existing_tool": "existing_tool",
             "use_external_skill": "external_skill",
+            "use_uploaded_file": "uploaded_artifact",
             "use_local_knowledge": "knowledge_base",
             "generate_complex_tool": "runtime_generated_tool",
             "compose_static_response": "static_response",
@@ -1417,6 +1453,97 @@ class ToolCallExecutor:
         }
         return {"tool": {"id": "prepared_external_resource_executor", "source": "execution_preparation"}, "input": {"url": url, "method": method}, "result": result}
 
+    async def _execute_uploaded_artifact(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        step_id: str,
+        step: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        resource = self._prepared_resource_for_step(state=state, step_id=step_id)
+        contract = resource.get("uploaded_artifact_execution") if isinstance(resource.get("uploaded_artifact_execution"), dict) else {}
+        if not contract or not contract.get("approved_in_preparation"):
+            return None
+        artifact = contract.get("selected_artifact") if isinstance(contract.get("selected_artifact"), dict) else {}
+        resolved_path = str(artifact.get("resolved_path") or "").strip()
+        if not resolved_path:
+            return None
+        path = Path(resolved_path)
+        try:
+            project = PROJECT_ROOT.resolve()
+            resolved = path.resolve()
+            allowed_roots = (project, Path("/mnt/data").resolve())
+            if not any(str(resolved).startswith(str(root)) for root in allowed_roots):
+                return None
+        except Exception:
+            return None
+        known = contract.get("known_parameter_values") if isinstance(contract.get("known_parameter_values"), dict) else {}
+        entry = artifact.get("execution_entrypoint") if isinstance(artifact.get("execution_entrypoint"), dict) else {}
+        suffix = path.suffix.lower()
+        await event_bus.emit(run_id, {
+            "type": "UPLOADED_ARTIFACT_EXECUTION_STARTED",
+            "title": "Uploaded artifact execution started",
+            "message": "Executing the locked uploaded artifact in sandbox-compatible mode.",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": {"path": str(path), "entrypoint": entry},
+        })
+        try:
+            if suffix == ".py":
+                payload = await asyncio.to_thread(self._run_uploaded_python_artifact, path, entry, known)
+            else:
+                payload = {"status": "success", "output": path.read_text(encoding="utf-8", errors="replace")[:12000]}
+        except Exception as exc:
+            await event_bus.emit(run_id, {
+                "type": "UPLOADED_ARTIFACT_EXECUTION_FAILED",
+                "title": "Uploaded artifact execution failed",
+                "message": str(exc),
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": {"path": str(path)},
+            })
+            return None
+        result = {
+            "status": "success" if payload.get("status") == "success" else "failed",
+            "data": {
+                "answer_material": payload.get("output"),
+                "normalized_facts": payload.get("normalized_facts") if isinstance(payload.get("normalized_facts"), dict) else {},
+                "content": payload.get("output"),
+                "artifact_path": str(path),
+                "artifact_contract": contract,
+            },
+            "provenance": {
+                "source": "uploaded_artifact",
+                "artifact_path": str(path),
+                "executed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        }
+        return {"tool": {"id": "uploaded_artifact_executor", "source": "execution_preparation"}, "input": {"artifact_path": str(path), "parameters": known}, "result": result}
+
+    def _run_uploaded_python_artifact(self, path: Path, entry: dict[str, Any], known: dict[str, Any]) -> dict[str, Any]:
+        module_name = f"uploaded_artifact_{abs(hash(str(path)))}"
+        spec = importlib.util.spec_from_file_location(module_name, str(path))
+        if spec is None or spec.loader is None:
+            raise RuntimeError("unable_to_load_uploaded_python_artifact")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        function_name = str(entry.get("function") or "run")
+        func = getattr(module, function_name, None)
+        if not callable(func):
+            raise RuntimeError("uploaded_python_artifact_has_no_callable_entrypoint")
+        sig = inspect.signature(func)
+        if len(sig.parameters) == 1 and next(iter(sig.parameters.keys())) in {"payload", "input", "data", "params"}:
+            value = func(dict(known))
+        else:
+            kwargs = {name: known.get(name) for name in sig.parameters.keys() if name in known}
+            value = func(**kwargs)
+        if isinstance(value, dict):
+            output = value.get("answer_material") or value.get("output") or value.get("result") or value
+            return {"status": "success", "output": output, "normalized_facts": value if isinstance(value, dict) else {}}
+        return {"status": "success", "output": value}
+
     def _prepared_resource_allows_method(self, *, state: dict[str, Any], step_id: str, method: str) -> bool:
         results = state.get("results") if isinstance(state, dict) and isinstance(state.get("results"), dict) else {}
         prep = results.get("execution_preparation") if isinstance(results.get("execution_preparation"), dict) else {}
@@ -1424,7 +1551,7 @@ class ToolCallExecutor:
         bundle = record.get("resource_bundle") if isinstance(record.get("resource_bundle"), dict) else {}
         steps = bundle.get("steps") if isinstance(bundle.get("steps"), list) else []
         if not steps:
-            return method not in {"web_search", "api_call"}
+            return method not in {"web_search", "api_call", "uploaded_artifact"}
         for item in steps:
             if not isinstance(item, dict):
                 continue
@@ -1432,6 +1559,9 @@ class ToolCallExecutor:
                 continue
             if str(item.get("execution_method") or "") != method:
                 return False
+            if method == "uploaded_artifact":
+                contract = item.get("uploaded_artifact_execution") if isinstance(item.get("uploaded_artifact_execution"), dict) else {}
+                return bool(contract.get("approved_in_preparation"))
             if method == "web_search":
                 web = item.get("web_collection") if isinstance(item.get("web_collection"), dict) else {}
                 if web.get("credential_interaction_required"):

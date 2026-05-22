@@ -10,6 +10,7 @@ from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import PROJECT_ROOT, RUNTIME_DIR
 from ai_core.validation.schema_validator import SchemaValidator
 from ai_core.workflow.execution_options import ACTION_TO_METHOD, ACTION_CONTRACTS, AGENT_ACTION_PROMPT_CONTRACT, normalize_action_type
+from ai_core.artifacts.uploaded_artifact_contract import UploadedArtifactContractBuilder
 
 
 class StaticTransformExecutor:
@@ -26,6 +27,7 @@ class StaticTransformExecutor:
     def __init__(self) -> None:
         self.loader = ConfigLoader()
         self.validator = SchemaValidator()
+        self.uploaded_artifacts = UploadedArtifactContractBuilder()
 
     async def execute(self, workflow_node, node_config, state, capability_result):
         node_id = str(node_config.get("node_id") or workflow_node.get("id") or "")
@@ -167,7 +169,7 @@ class StaticTransformExecutor:
             "kind": "execution_preparation_bundle",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "run_id": state.get("run_id"),
-            "steps": [self._prepared_step(step, index) for index, step in enumerate(steps)],
+            "steps": [self._prepared_step(step, index, state) for index, step in enumerate(steps)],
         }
         artifact_path = self._write_runtime_artifact(state, "execution_preparation", "resource_bundle.json", bundle)
         return {
@@ -206,10 +208,10 @@ class StaticTransformExecutor:
                 "parameter_check": "passed" if not missing_fields and not missing_required else "failed",
                 "action_type_check": "passed" if action_ok else "failed",
                 "execution_method_check": "passed" if method_ok else "failed",
-                "resource_preparation_check": "credential_required" if credential_required else ("passed" if resource_ok else "failed"),
-                "tool_presence_check": "not_required" if method in {"content_generation", "model_knowledge", "knowledge_base", "web_search", "api_call"} else "deferred_to_runtime_registry",
-                "confirmation_check": "requires_credential_input" if credential_required else ("requires_human_confirmation" if bool(step.get("requires_human_confirmation")) else "not_required"),
-                "sandbox_check": "passed" if method in {"content_generation", "model_knowledge", "knowledge_base", "web_search", "api_call"} else "deferred_until_generated_resource_exists",
+                "resource_preparation_check": ("runtime_parameter_required" if method == "uploaded_artifact" and credential_required else ("credential_required" if credential_required else ("passed" if resource_ok else "failed"))),
+                "tool_presence_check": "not_required" if method in {"content_generation", "model_knowledge", "knowledge_base", "web_search", "api_call", "uploaded_artifact"} else "deferred_to_runtime_registry",
+                "confirmation_check": ("requires_runtime_parameter_input" if method == "uploaded_artifact" and credential_required else ("requires_credential_input" if credential_required else ("requires_human_confirmation" if bool(step.get("requires_human_confirmation")) else "not_required"))),
+                "sandbox_check": "passed" if method in {"content_generation", "model_knowledge", "knowledge_base", "web_search", "api_call", "uploaded_artifact"} else "deferred_until_generated_resource_exists",
                 "ui_request": self._prepared_credential_request(prep, str(step.get("step_id") or step.get("task_id") or f"step_{index + 1}"), method) if credential_required else None,
                 "passed": passed,
             })
@@ -356,7 +358,7 @@ class StaticTransformExecutor:
                 filtered.append(text)
         return filtered
 
-    def _prepared_step(self, step: dict[str, Any], index: int) -> dict[str, Any]:
+    def _prepared_step(self, step: dict[str, Any], index: int, state: dict[str, Any] | None = None) -> dict[str, Any]:
         method = self._execution_method(step)
         action_type = normalize_action_type(step.get("action_type") or step.get("execution_action"))
         if not action_type:
@@ -380,6 +382,8 @@ class StaticTransformExecutor:
         query_contract["credential_required_targets"] = self._filter_credential_required_references(query_contract_targets)
         query_contract["rejected_targets"] = [item for item in raw_web_targets if item not in web_targets and item not in credential_web_targets]
         evidence_requirements = references["evidence_requirements"]
+        upload_contract = self.uploaded_artifacts.build_contract(state=state or {}, step=step, step_id=step_id) if method == "uploaded_artifact" else {"required": False}
+        upload_manifest_path = self.uploaded_artifacts.write_manifest(state=state or {}, step_id=step_id, contract=upload_contract) if method == "uploaded_artifact" else ""
         action_contract = ACTION_CONTRACTS.get(action_type, {})
         selected_api_endpoint = endpoint_candidates[0] if endpoint_candidates else ""
         credential_only = bool(credential_endpoint_candidates) and not bool(endpoint_candidates)
@@ -442,6 +446,10 @@ class StaticTransformExecutor:
                     "output_schema": {"type": "object", "additionalProperties": True},
                 },
             },
+            "uploaded_artifact_execution": {
+                **upload_contract,
+                "manifest_path": upload_manifest_path,
+            },
             "tool_generation": {
                 "required": method in {"runtime_generated_tool", "existing_tool", "external_skill"},
                 "design_contract": {
@@ -466,7 +474,7 @@ class StaticTransformExecutor:
             },
             "sandbox_precheck": {
                 "required": method not in {"content_generation", "model_knowledge", "knowledge_base"},
-                "status": "passed" if method in {"content_generation", "model_knowledge", "knowledge_base"} else "deferred_until_artifact_exists",
+                "status": "passed" if method in {"content_generation", "model_knowledge", "knowledge_base"} else ("passed" if method == "uploaded_artifact" and upload_contract.get("approved_in_preparation") else "deferred_until_artifact_exists"),
             },
         }
 
@@ -554,6 +562,8 @@ class StaticTransformExecutor:
         }
 
     def _prepared_resource_ok(self, prep: dict[str, Any], step_id: str, method: str) -> bool:
+        if method == "uploaded_artifact":
+            return self._prepared_uploaded_artifact_ok(prep, step_id)
         if method not in {"web_search", "api_call"}:
             return True
         bundle = prep.get("resource_bundle") if isinstance(prep.get("resource_bundle"), dict) else {}
@@ -576,6 +586,16 @@ class StaticTransformExecutor:
                 return bool(api.get("approved_in_preparation") and api.get("endpoint_candidates"))
         return False
 
+    def _prepared_uploaded_artifact_ok(self, prep: dict[str, Any], step_id: str) -> bool:
+        bundle = prep.get("resource_bundle") if isinstance(prep.get("resource_bundle"), dict) else {}
+        steps = bundle.get("steps") if isinstance(bundle.get("steps"), list) else []
+        for item in steps:
+            if not isinstance(item, dict) or str(item.get("step_id")) != str(step_id):
+                continue
+            contract = item.get("uploaded_artifact_execution") if isinstance(item.get("uploaded_artifact_execution"), dict) else {}
+            return bool(contract.get("approved_in_preparation"))
+        return False
+
 
     def _prepared_credential_required(self, prep: dict[str, Any], step_id: str, method: str) -> bool:
         bundle = prep.get("resource_bundle") if isinstance(prep.get("resource_bundle"), dict) else {}
@@ -583,6 +603,9 @@ class StaticTransformExecutor:
         for item in steps:
             if not isinstance(item, dict) or str(item.get("step_id")) != str(step_id):
                 continue
+            if method == "uploaded_artifact":
+                contract = item.get("uploaded_artifact_execution") if isinstance(item.get("uploaded_artifact_execution"), dict) else {}
+                return bool(contract.get("ui_parameter_request"))
             if method == "web_search":
                 web = item.get("web_collection") if isinstance(item.get("web_collection"), dict) else {}
                 return bool(web.get("credential_interaction_required"))
@@ -597,6 +620,10 @@ class StaticTransformExecutor:
         for item in steps:
             if not isinstance(item, dict) or str(item.get("step_id")) != str(step_id):
                 continue
+            if method == "uploaded_artifact":
+                contract = item.get("uploaded_artifact_execution") if isinstance(item.get("uploaded_artifact_execution"), dict) else {}
+                req = contract.get("ui_parameter_request") if isinstance(contract.get("ui_parameter_request"), dict) else None
+                return req
             if method == "web_search":
                 web = item.get("web_collection") if isinstance(item.get("web_collection"), dict) else {}
                 contract = web.get("api_contract_from_discovery") if isinstance(web.get("api_contract_from_discovery"), dict) else {}
