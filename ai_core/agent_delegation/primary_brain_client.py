@@ -44,6 +44,16 @@ class PrimaryBrainDelegationClient:
     planning, tool selection, execution, verification, and synthesis.
     """
 
+    INTERNAL_OUTPUT_KEYS = {
+        "agent_action_prompt_contract", "prompt_contract", "output_contract",
+        "resource_bundle", "contract", "contracts", "instructions",
+        "rules", "prompt", "system", "schema", "agent_execution_flow",
+    }
+    INTERNAL_OUTPUT_MARKERS = (
+        "Use upstream input", "Return JSON", "Return valid JSON",
+        "prompt_contract", "agent_action_prompt_contract", "planner_llm",
+    )
+
     def __init__(self, runtime: WorkflowRuntime | None = None) -> None:
         self.runtime = runtime or WorkflowRuntime()
         self.router = ProviderRouter()
@@ -628,6 +638,8 @@ class PrimaryBrainDelegationClient:
         marker = "\n\nTrust: unverified generated result."
         if marker in text:
             text = text.split(marker, 1)[0].strip()
+        if any(m in text for m in self.INTERNAL_OUTPUT_MARKERS):
+            return ""
         return text
 
     def _build_synthesis_message(
@@ -679,6 +691,8 @@ class PrimaryBrainDelegationClient:
             if "completed without a user-facing final answer" in lowered:
                 return ""
             if "intermediate node data was intentionally not exposed" in lowered:
+                return ""
+            if any(marker in text for marker in self.INTERNAL_OUTPUT_MARKERS):
                 return ""
             return text
 
@@ -752,18 +766,33 @@ class PrimaryBrainDelegationClient:
         return "The primary runtime completed without a user-facing final answer."
 
     def _extract_public_answer_material(self, value: Any) -> str:
-        public_keys = ("answer_material", "final_answer", "answer", "generated_content", "content", "text")
+        # Only explicit public answer fields are eligible. Generic content/text
+        # fields are often prompt-contract bodies and must not leak to delivery.
+        public_keys = ("answer_material", "final_answer", "answer", "generated_content")
+
+        def safe_text(text: str) -> str:
+            clean = str(text or "").strip()
+            if not clean or not self._answer_has_result_material(clean):
+                return ""
+            if any(marker in clean for marker in self.INTERNAL_OUTPUT_MARKERS):
+                return ""
+            return clean
+
         def scan(item: Any) -> str:
             if isinstance(item, dict):
                 for key in public_keys:
                     val = item.get(key)
-                    if isinstance(val, str) and val.strip() and self._answer_has_result_material(val):
-                        return val.strip()
+                    if isinstance(val, str):
+                        text = safe_text(val)
+                        if text:
+                            return text
                     if isinstance(val, (dict, list)):
                         nested = scan(val)
                         if nested:
                             return nested
-                for child in item.values():
+                for key, child in item.items():
+                    if str(key) in self.INTERNAL_OUTPUT_KEYS:
+                        continue
                     if isinstance(child, (dict, list)):
                         nested = scan(child)
                         if nested:

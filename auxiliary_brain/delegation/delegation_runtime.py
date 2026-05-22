@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+import copy
 
 from ai_core.agent_delegation import AgentExecutionRequest, PrimaryBrainDelegationClient
 from auxiliary_brain.storage import JsonStore
@@ -25,11 +26,14 @@ class AgentDelegationRuntime:
         self.parameter_contract_service = AgentParameterContractService()
 
     async def execute_task(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
+        selected = self._fresh_task_participants(self._select_participants(task_graph, participants))
+        return await self._execute_task_with_selected(task_graph, selected)
+
+    async def _execute_task_with_selected(self, task_graph: dict[str, Any], selected: list[dict[str, Any]]) -> dict[str, Any]:
         run_id = new_id("delegation_run")
         task_name = str(task_graph.get("task_name") or task_graph.get("graph_id") or "task")
         task_instruction = str(task_graph.get("instruction") or task_graph.get("objective") or "")
         community_id = str(task_graph.get("community_id") or "default")
-        selected = self._select_participants(task_graph, participants)
         task_mind_graph = self._build_task_mind_graph(task_graph, selected)
         dependency_plan = task_mind_graph.get("agent_relation_analysis") or self._build_participant_dependency_plan(task_graph, selected)
 
@@ -255,8 +259,9 @@ class AgentDelegationRuntime:
         selected = self._select_participants(task_graph, participants)
         pending = run_payload.get("pending_action") if isinstance(run_payload.get("pending_action"), dict) else {}
         if str(pending.get("kind") or "") == "agent_parameter_collection":
+            selected = self._fresh_task_participants(selected)
             self._apply_agent_parameter_values(selected, provided_inputs or {})
-            return await self.execute_task(task_graph, participants)
+            return await self._execute_task_with_selected(task_graph, selected)
         task_mind_graph = self._build_task_mind_graph(task_graph, selected)
         dependency_plan = task_mind_graph.get("agent_relation_analysis") or self._build_participant_dependency_plan(task_graph, selected)
         run_payload["participant_dependency_plan"] = dependency_plan
@@ -874,6 +879,29 @@ class AgentDelegationRuntime:
             "at": self._now(),
         })
         self.store.write_json(f"generated/results/{run_payload['run_id']}.json", run_payload)
+
+    def _fresh_task_participants(self, participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return task-run copies with no persisted runtime values.
+
+        Agent definitions are durable capability/schema records. Parameter values
+        belong to one task run only. This prevents a later task execution from
+        silently reusing values collected during an earlier run.
+        """
+        fresh: list[dict[str, Any]] = []
+        for participant in participants:
+            item = copy.deepcopy(participant)
+            item["runtime_parameters"] = {}
+            contract = item.get("parameter_contract") if isinstance(item.get("parameter_contract"), dict) else {}
+            params = contract.get("parameters") if isinstance(contract.get("parameters"), list) else []
+            for param in params:
+                if isinstance(param, dict):
+                    param["values"] = []
+            if isinstance(contract, dict):
+                contract["missing_information"] = self.parameter_contract_service.missing_parameters({"parameter_contract": contract, "runtime_parameters": {}})
+                item["parameter_contract"] = contract
+            item["missing_information"] = item.get("parameter_contract", {}).get("missing_information", []) if isinstance(item.get("parameter_contract"), dict) else []
+            fresh.append(item)
+        return fresh
 
     def _select_participants(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not participants:

@@ -15,6 +15,7 @@ EXPECTED_STAGES = [
     "requirement_completion",
     "context_awareness",
     "workflow_planning",
+    "agent_action_planning",
     "execution_preparation",
     "pre_execution_validation",
     "execution",

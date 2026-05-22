@@ -190,9 +190,9 @@ class AgentStudioService:
             "instruction": execution_objective,
             "execution_objective": execution_objective,
             "definition_instruction": instruction,
-            "parameter_contract": parameter_contract,
-            "runtime_parameters": self._runtime_parameters_from_contract(parameter_contract),
-            "missing_information": parameter_contract.get("missing_information", []),
+            "parameter_contract": self._parameter_contract_schema_only(parameter_contract),
+            "runtime_parameters": {},
+            "missing_information": self._parameter_contract_schema_only(parameter_contract).get("missing_information", []),
             "origin": "auxiliary_brain",
             "status": "created",
             "created_at": self._now(),
@@ -488,6 +488,20 @@ class AgentStudioService:
 
     def _normalize_uploaded_artifacts(self, uploaded_artifacts: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
         return self.artifact_registry.normalize_records(uploaded_artifacts or [])
+
+    def _parameter_contract_schema_only(self, parameter_contract: dict[str, Any]) -> dict[str, Any]:
+        """Store only parameter schema on the agent profile.
+
+        Values are task-run state and must be collected again on every execution.
+        """
+        import copy
+        contract = copy.deepcopy(parameter_contract) if isinstance(parameter_contract, dict) else {}
+        params = contract.get("parameters") if isinstance(contract.get("parameters"), list) else []
+        for param in params:
+            if isinstance(param, dict):
+                param["values"] = []
+        contract["missing_information"] = [p for p in params if isinstance(p, dict) and p.get("required", True)]
+        return contract
 
     def _runtime_parameters_from_contract(self, parameter_contract: dict[str, Any]) -> dict[str, list[Any]]:
         params = parameter_contract.get("parameters") if isinstance(parameter_contract, dict) else []
