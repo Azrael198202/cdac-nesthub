@@ -181,6 +181,14 @@ class AgentStudioService:
             participant_name=participant_name,
         )
         artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
+        schema_contract = self._parameter_contract_schema_only(parameter_contract)
+        if artifact_refs:
+            # Uploaded-artifact agents get their executable parameter schema from
+            # file introspection during execution_preparation.  Do not keep
+            # inferred durable agent parameters here, because they can ask for
+            # stale fields before the selected file has been inspected.
+            schema_contract["missing_information"] = []
+            schema_contract["parameters"] = []
         payload = {
             "participant_id": participant_id,
             "name": participant_name,
@@ -190,9 +198,9 @@ class AgentStudioService:
             "instruction": execution_objective,
             "execution_objective": execution_objective,
             "definition_instruction": instruction,
-            "parameter_contract": self._parameter_contract_schema_only(parameter_contract),
+            "parameter_contract": schema_contract,
             "runtime_parameters": {},
-            "missing_information": self._parameter_contract_schema_only(parameter_contract).get("missing_information", []),
+            "missing_information": schema_contract.get("missing_information", []),
             "origin": "auxiliary_brain",
             "status": "created",
             "created_at": self._now(),
@@ -223,6 +231,14 @@ class AgentStudioService:
         participants = self.store.list_json("generated/agents")
         selected_ids = [p.get("participant_id") for p in self._select_participants_for_instruction(instruction, participants)]
         artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
+        schema_contract = self._parameter_contract_schema_only(parameter_contract)
+        if artifact_refs:
+            # Uploaded-artifact agents get their executable parameter schema from
+            # file introspection during execution_preparation.  Do not keep
+            # inferred durable agent parameters here, because they can ask for
+            # stale fields before the selected file has been inspected.
+            schema_contract["missing_information"] = []
+            schema_contract["parameters"] = []
         payload = {
             "graph_id": graph_id,
             "task_name": task_name,
@@ -384,10 +400,15 @@ class AgentStudioService:
                 if isinstance(field, dict):
                     normalized.append({
                         "kind": kind,
-                        "field": str(field.get("name") or field.get("field") or f"field_{index}"),
-                        "message": str(field.get("message") or field.get("label") or request.get("message") or "Please provide this runtime value."),
+                        "field": str(field.get("field") or field.get("name") or field.get("source_field") or f"field_{index}"),
+                        "label": str(field.get("label") or field.get("name") or field.get("field") or f"Input {index + 1}"),
+                        "message": str(field.get("question") or field.get("prompt") or field.get("message") or field.get("description") or field.get("label") or request.get("message") or "Please provide this runtime value."),
                         "input_type": str(field.get("input_type") or field.get("type") or "text"),
+                        "placeholder": str(field.get("placeholder") or ""),
+                        "description": str(field.get("description") or ""),
                         "required": bool(field.get("required", True)),
+                        "aliases": field.get("aliases") if isinstance(field.get("aliases"), list) else [],
+                        "merge_targets": field.get("merge_targets") if isinstance(field.get("merge_targets"), list) else [],
                     })
             if normalized:
                 return normalized

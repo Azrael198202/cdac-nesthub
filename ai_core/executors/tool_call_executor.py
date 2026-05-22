@@ -1550,6 +1550,7 @@ class ToolCallExecutor:
         except Exception:
             return None
         known = contract.get("known_parameter_values") if isinstance(contract.get("known_parameter_values"), dict) else {}
+        known = self._normalize_uploaded_artifact_call_values(known)
         entry = artifact.get("execution_entrypoint") if isinstance(artifact.get("execution_entrypoint"), dict) else {}
         suffix = path.suffix.lower()
         await event_bus.emit(run_id, {
@@ -1591,6 +1592,17 @@ class ToolCallExecutor:
             },
         }
         return {"tool": {"id": "uploaded_artifact_executor", "source": "execution_preparation"}, "input": {"artifact_path": str(path), "parameters": known}, "result": result}
+
+    def _normalize_uploaded_artifact_call_values(self, values: dict[str, Any]) -> dict[str, Any]:
+        normalized: dict[str, Any] = {}
+        if not isinstance(values, dict):
+            return normalized
+        for key, value in values.items():
+            if isinstance(value, list) and len(value) == 1:
+                normalized[str(key)] = value[0]
+            else:
+                normalized[str(key)] = value
+        return normalized
 
     def _run_uploaded_python_artifact(self, path: Path, entry: dict[str, Any], known: dict[str, Any]) -> dict[str, Any]:
         module_name = f"uploaded_artifact_{abs(hash(str(path)))}"

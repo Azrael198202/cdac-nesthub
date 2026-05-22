@@ -48,17 +48,6 @@ class UploadedArtifactContractBuilder:
         for item in self.registry.resolve_from_text(text_blob):
             raw.append(item)
 
-        # Deterministic uploaded-artifact binding guard.  When the locked action
-        # is an uploaded-file execution, a user-visible filename may be present
-        # only in upstream stage text, or the UI may have uploaded exactly one
-        # candidate file for the current session.  Resolve that before asking an
-        # LLM or falling back to ask_user.  This is generic resource binding, not
-        # domain/business logic.
-        if not raw and self._step_requests_uploaded_artifact(step):
-            registry_items = self.registry.list()
-            if len(registry_items) == 1 and isinstance(registry_items[0], dict):
-                raw.append(registry_items[0])
-
         refs: list[UploadedArtifactRef] = []
         seen: set[str] = set()
         for item in raw:
@@ -310,7 +299,7 @@ class UploadedArtifactContractBuilder:
         for container in self._containers(state=state, step=step):
             if not isinstance(container, dict):
                 continue
-            for key in ("known_parameters", "parameter_values", "parameters", "values", "runtime_inputs"):
+            for key in ("known_parameters", "parameter_values", "parameters", "values", "runtime_inputs", "runtime_parameters", "provided_inputs"):
                 value = container.get(key)
                 if isinstance(value, dict):
                     src = value.get("known") if isinstance(value.get("known"), dict) else value
@@ -362,6 +351,11 @@ class UploadedArtifactContractBuilder:
                     "name": text,
                     "label": self._human_label(text),
                     "required": True,
+                    "field": text,
+                    "type": "text",
+                    "input_type": "text",
+                    "placeholder": "Enter " + self._human_label(text),
+                    "description": "This value is required by the selected uploaded artifact.",
                     "source": "uploaded_artifact_contract",
                     "aliases": self._aliases_for_required_field(text),
                     "merge_targets": [{"source_field": text}],

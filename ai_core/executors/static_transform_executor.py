@@ -215,16 +215,31 @@ class StaticTransformExecutor:
                 "ui_request": self._prepared_credential_request(prep, str(step.get("step_id") or step.get("task_id") or f"step_{index + 1}"), method) if credential_required else None,
                 "passed": passed,
             })
+        runtime_input_requests = []
+        for item in checks:
+            req = item.get("ui_request") if isinstance(item.get("ui_request"), dict) else None
+            if req:
+                runtime_input_requests.append({
+                    "type": req.get("type") or "collect_runtime_parameters",
+                    "kind": req.get("kind") or req.get("type") or "collect_runtime_parameters",
+                    "step_id": item.get("step_id"),
+                    "title": req.get("title") or "Required runtime input",
+                    "message": req.get("message") or req.get("reason") or "Please provide the required runtime input values and resume the workflow.",
+                    "fields": req.get("fields") if isinstance(req.get("fields"), list) else [],
+                    "reason": req.get("reason") or "runtime_input_required",
+                })
         passed_all = bool(steps) and all(item.get("passed") for item in checks)
         return {
             "validation_record": {
                 "status": "passed" if passed_all else "failed",
                 "checks": checks,
                 "prepared_artifact_path": prep.get("artifact_path"),
+                "human_interactions": runtime_input_requests,
                 "upstream_refs": ["agent_action_planning", "execution_preparation"],
             },
+            "human_interactions": runtime_input_requests,
             "status": "completed" if passed_all else "blocked",
-            "message": "Pre-execution validation passed." if passed_all else "Pre-execution validation failed or no executable steps exist.",
+            "message": "Pre-execution validation passed." if passed_all else ("Runtime input is required before execution can continue." if runtime_input_requests else "Pre-execution validation failed or no executable steps exist."),
         }
 
     def _result_verification(self, *, node_id: str, state: dict[str, Any], node_config: dict[str, Any]) -> dict[str, Any]:

@@ -650,7 +650,8 @@ class WorkflowRuntime:
             # from exposing earlier stage messages as final answers.
             if node_id == "pre_execution_validation" and isinstance(result, dict):
                 record = result.get("validation_record") if isinstance(result.get("validation_record"), dict) else result
-                if record.get("status") != "passed":
+                validation_needs_runtime_input = bool(result.get("human_interactions") or record.get("human_interactions"))
+                if record.get("status") != "passed" and not validation_needs_runtime_input:
                     repair_count = int(state.setdefault("repair_attempts", {}).get("pre_execution_validation", 0) or 0)
                     if repair_count < 3:
                         state["repair_attempts"]["pre_execution_validation"] = repair_count + 1
@@ -740,7 +741,34 @@ class WorkflowRuntime:
                     continue
 
                 state["pending_action"] = continuation_action
+                request_fields = []
+                request_payload = continuation_action.get("request") if isinstance(continuation_action.get("request"), dict) else {}
+                if isinstance(request_payload.get("fields"), list):
+                    request_fields = request_payload.get("fields") or []
+                state["missing_inputs"] = request_fields
                 self.checkpoints.save(run_id, state)
+
+                if action_kind in {"collect_runtime_parameters", "runtime_parameter_input", "uploaded_artifact_parameters"}:
+                    await self._emit(run_id, {
+                        "type": "HUMAN_INPUT_REQUIRED",
+                        "title": "Runtime input required",
+                        "node_id": node_id,
+                        "attempt_number": attempt_number,
+                        "message": continuation_action.get("request", {}).get("message") or continuation_action.get("message"),
+                        "request": continuation_action.get("request"),
+                        "run_id": run_id,
+                        "progress": done,
+                    })
+                    await self._emit(run_id, {
+                        "type": "RUN_PAUSED",
+                        "workflow_state": "waiting_runtime_parameters",
+                        "title": "Workflow paused for runtime input",
+                        "node_id": node_id,
+                        "message": continuation_action.get("message") or "Runtime input is required before execution can continue.",
+                        "run_id": run_id,
+                        "progress": done,
+                    })
+                    return
 
                 if action_kind == "human_information_required":
                     await self._emit(run_id, {

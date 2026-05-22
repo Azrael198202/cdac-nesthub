@@ -856,7 +856,7 @@ class PrimaryBrainDelegationClient:
             kind = str(pending.get("kind") or "pending")
             if kind in {"secret_input", "optional_credential_choice"}:
                 return "requires_key"
-            if kind == "human_information_required":
+            if kind in {"human_information_required", "collect_runtime_parameters", "runtime_parameter_input", "uploaded_artifact_parameters"}:
                 return "requires_input"
             return "paused"
         results = state.get("results", {}) if isinstance(state, dict) else {}
