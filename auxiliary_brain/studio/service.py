@@ -30,12 +30,12 @@ class AgentStudioService:
         self.store.ensure_workspace()
         self.community_id = self._ensure_community()
 
-    async def handle_message(self, message: str, provided_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def handle_message(self, message: str, provided_inputs: dict[str, Any] | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         routed = self.router.route(message)
         if routed.action == "create_participant":
-            return await self.create_participant(message, routed.name)
+            return await self.create_participant(message, routed.name, uploaded_artifacts=uploaded_artifacts)
         if routed.action == "create_task":
-            return self.create_task_graph(message, routed.name)
+            return self.create_task_graph(message, routed.name, uploaded_artifacts=uploaded_artifacts)
 
         # Model-dependent paths must not enter the runtime if the selected
         # provider mode is impossible to satisfy. This prevents confusing late
@@ -169,7 +169,7 @@ class AgentStudioService:
             "traces": self.store.list_json("traces/agent_delegation"),
         }
 
-    async def create_participant(self, instruction: str, name: str | None = None) -> dict[str, Any]:
+    async def create_participant(self, instruction: str, name: str | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         participant_id = new_id("participant")
         participant_name = name or participant_id
         execution_objective = self._derive_execution_objective(instruction, participant_name)
@@ -178,6 +178,7 @@ class AgentStudioService:
             execution_objective=execution_objective,
             participant_name=participant_name,
         )
+        artifact_refs = self._normalize_uploaded_artifacts(uploaded_artifacts)
         payload = {
             "participant_id": participant_id,
             "name": participant_name,
@@ -194,6 +195,12 @@ class AgentStudioService:
             "status": "created",
             "created_at": self._now(),
             "execution_policy": "delegate_to_ai_core",
+            "uploaded_artifacts": artifact_refs,
+            "artifact_policy": {
+                "bind_uploaded_artifacts_to_agent": bool(artifact_refs),
+                "allowed_action": "use_uploaded_file",
+                "parameter_collection_owner": "ui",
+            },
         }
         path = self.store.write_json(f"generated/agents/{participant_id}.json", payload)
         self._update_community()
@@ -205,13 +212,15 @@ class AgentStudioService:
             "agent_name": participant_name,
             "display_name": participant_name,
             "path": str(path),
+            "uploaded_artifacts": artifact_refs,
         }
 
-    def create_task_graph(self, instruction: str, name: str | None = None) -> dict[str, Any]:
+    def create_task_graph(self, instruction: str, name: str | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         graph_id = new_id("graph")
         task_name = name or graph_id
         participants = self.store.list_json("generated/agents")
         selected_ids = [p.get("participant_id") for p in self._select_participants_for_instruction(instruction, participants)]
+        artifact_refs = self._normalize_uploaded_artifacts(uploaded_artifacts)
         payload = {
             "graph_id": graph_id,
             "task_name": task_name,
@@ -222,6 +231,7 @@ class AgentStudioService:
             "created_at": self._now(),
             "execution_policy": "delegated_participant_execution_via_ai_core",
             "selected_participant_ids": selected_ids,
+            "uploaded_artifacts": artifact_refs,
             "tasks": [
                 {
                     "task_id": f"{graph_id}_delegate_{index + 1}",
@@ -242,6 +252,7 @@ class AgentStudioService:
             "graph_id": graph_id,
             "task_name": task_name,
             "path": str(path),
+            "uploaded_artifacts": artifact_refs,
         }
 
     async def execute_task(self, task_name: str | None) -> dict[str, Any]:
@@ -363,6 +374,23 @@ class AgentStudioService:
                 "api_source": api_source,
                 "api_sources": api_sources,
             }]
+        if kind in {"collect_runtime_parameters", "runtime_parameter_input", "uploaded_artifact_parameters"}:
+            request = pending.get("request") if isinstance(pending.get("request"), dict) else {}
+            fields = request.get("fields") if isinstance(request.get("fields"), list) else []
+            normalized = []
+            for index, field in enumerate(fields):
+                if isinstance(field, dict):
+                    normalized.append({
+                        "kind": kind,
+                        "field": str(field.get("name") or field.get("field") or f"field_{index}"),
+                        "message": str(field.get("message") or field.get("label") or request.get("message") or "Please provide this runtime value."),
+                        "input_type": str(field.get("input_type") or field.get("type") or "text"),
+                        "required": bool(field.get("required", True)),
+                    })
+            if normalized:
+                return normalized
+            return [{"kind": kind, "field": "input", "message": str(request.get("message") or pending.get("message") or "Please provide runtime values required by the uploaded artifact."), "required": True}]
+
         if kind == "human_information_required":
             request = pending.get("request") if isinstance(pending.get("request"), dict) else {}
             fields = request.get("fields") if isinstance(request.get("fields"), list) else []
@@ -444,6 +472,33 @@ class AgentStudioService:
 
         return text
 
+
+
+    def _normalize_uploaded_artifacts(self, uploaded_artifacts: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        if not isinstance(uploaded_artifacts, list):
+            return normalized
+        seen: set[str] = set()
+        for item in uploaded_artifacts:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or item.get("filepath") or item.get("file_path") or "").strip()
+            if not path:
+                continue
+            artifact_id = str(item.get("artifact_id") or item.get("id") or path).strip()
+            if artifact_id in seen:
+                continue
+            seen.add(artifact_id)
+            normalized.append({
+                "artifact_id": artifact_id,
+                "name": str(item.get("name") or item.get("filename") or path).strip(),
+                "filename": str(item.get("filename") or item.get("name") or "").strip(),
+                "path": path,
+                "mime_type": str(item.get("mime_type") or item.get("content_type") or "").strip(),
+                "role": str(item.get("role") or "method_candidate"),
+                "source": str(item.get("source") or "agent_studio_upload"),
+            })
+        return normalized
 
     def _runtime_parameters_from_contract(self, parameter_contract: dict[str, Any]) -> dict[str, list[Any]]:
         params = parameter_contract.get("parameters") if isinstance(parameter_contract, dict) else []

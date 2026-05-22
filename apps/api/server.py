@@ -1,9 +1,12 @@
 import asyncio
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel
+from pathlib import Path
+from uuid import uuid4
+import json
 
 from ai_core.evolution.approval_learning import ApprovalLearningService
 from ai_core.orchestration.workflow_runtime import WorkflowRuntime
@@ -29,6 +32,7 @@ class ChatRequest(BaseModel):
 class AgentStudioRequest(BaseModel):
     message: str
     provided_inputs: dict[str, Any] | None = None
+    uploaded_artifacts: list[dict[str, Any]] | None = None
 
 
 class AgentStudioSecretRequest(BaseModel):
@@ -112,6 +116,64 @@ async def agent_studio_home():
 
 
 
+
+
+def _artifact_registry_path() -> Path:
+    path = Path("runtime") / "uploads" / "artifact_registry.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text("[]", encoding="utf-8")
+    return path
+
+def _read_artifact_registry() -> list[dict[str, Any]]:
+    path = _artifact_registry_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def _write_artifact_registry(items: list[dict[str, Any]]) -> None:
+    path = _artifact_registry_path()
+    path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+
+@app.get("/api/agent-studio/artifacts")
+async def agent_studio_artifacts():
+    return JSONResponse({"ok": True, "artifacts": _read_artifact_registry()})
+
+@app.post("/api/agent-studio/artifacts")
+async def agent_studio_upload_artifacts(files: list[UploadFile] = File(...)):
+    upload_dir = Path("runtime") / "uploads" / "files"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    registry = _read_artifact_registry()
+    existing_ids = {str(item.get("artifact_id")) for item in registry if isinstance(item, dict)}
+    created: list[dict[str, Any]] = []
+    for file in files:
+        original_name = Path(file.filename or "uploaded_file").name
+        suffix = Path(original_name).suffix
+        artifact_id = f"artifact_{uuid4().hex[:12]}"
+        while artifact_id in existing_ids:
+            artifact_id = f"artifact_{uuid4().hex[:12]}"
+        existing_ids.add(artifact_id)
+        stored_name = f"{artifact_id}{suffix}"
+        target = upload_dir / stored_name
+        content = await file.read()
+        target.write_bytes(content)
+        item = {
+            "artifact_id": artifact_id,
+            "name": original_name,
+            "filename": original_name,
+            "path": str(target),
+            "mime_type": file.content_type or "application/octet-stream",
+            "size_bytes": len(content),
+            "role": "method_candidate",
+            "source": "agent_studio_upload",
+        }
+        registry.append(item)
+        created.append(item)
+    _write_artifact_registry(registry)
+    return JSONResponse({"ok": True, "artifacts": created, "registry": registry})
+
 @app.get("/api/agent-studio/model-selection")
 async def agent_studio_model_selection_state():
     return JSONResponse(model_selection_store.state())
@@ -129,7 +191,7 @@ async def agent_studio_state():
 @app.post("/api/agent-studio/message")
 async def agent_studio_message(req: AgentStudioRequest):
     try:
-        payload = await studio_service.handle_message(req.message, provided_inputs=req.provided_inputs)
+        payload = await studio_service.handle_message(req.message, provided_inputs=req.provided_inputs, uploaded_artifacts=req.uploaded_artifacts)
         return JSONResponse(payload)
     except Exception as exc:
         return JSONResponse(

@@ -10,7 +10,7 @@
     header{height:82px;display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--line);gap:12px;overflow:hidden}
     h1{font-size:18px;margin:0 0 4px}.sub{color:#a5b4fc;font-size:12px}.status{color:#bae6fd;display:flex;align-items:center;gap:8px}.status.running::before{content:'';width:10px;height:10px;border:2px solid #38bdf8;border-top-color:transparent;border-radius:50%;display:inline-block;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.btn{border:0;border-radius:10px;background:#334155;color:white;padding:10px 14px;font-weight:700;cursor:pointer}.btn.primary{background:#0369a1}.btn.danger{background:var(--danger)}.btn:disabled{opacity:.6;cursor:not-allowed}
     main{display:grid;grid-template-columns:minmax(0,26fr) minmax(0,44fr) minmax(0,30fr);gap:10px;height:calc(100vh - 82px);padding:10px;overflow:hidden;min-width:0}.panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);min-height:0;min-width:0;display:flex;flex-direction:column;overflow:hidden}.panel h2{font-size:14px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}.scroll{padding:12px;overflow:auto;min-height:0;flex:1}.item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}.pill{display:inline-block;margin:3px 4px 0 0;padding:3px 7px;border-radius:999px;background:#0f766e;color:#ccfbf1;font-size:12px}.path{color:#93c5fd;font-size:12px;word-break:break-all}.console{border-top:1px solid var(--line);padding:12px;background:#0b1220}.input{width:100%;height:72px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px;resize:none}.row{display:flex;gap:8px;margin-top:10px}.message{white-space:pre-wrap}.user{border-color:#0ea5e9}.error{border-color:#f59e0b}.final{border-color:#22c55e}.pre{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;background:#020617;border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;max-height:220px;max-width:100%}.small{font-size:12px;color:#bfdbfe}.sectionTitle{color:#bfdbfe;font-weight:700;margin:12px 0 8px}.empty{color:#94a3b8;font-size:13px}.cardHeader{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.copyBtn{border:1px solid var(--line);border-radius:8px;background:#0b1220;color:#bfdbfe;padding:4px 8px;cursor:pointer;font-size:12px}.copyBtn:hover{border-color:#38bdf8;color:#e0f2fe}.toast{position:fixed;right:20px;bottom:20px;background:#064e3b;border:1px solid #22c55e;color:#dcfce7;padding:10px 14px;border-radius:10px;z-index:50}.progressLine{display:flex;align-items:center;gap:8px;margin:6px 0;color:#bfdbfe}.progressDot{width:8px;height:8px;border-radius:999px;background:#38bdf8;animation:pulse 1.2s ease-in-out infinite}.progressDot.done{background:#22c55e;animation:none}.progressDot.wait{background:#f59e0b;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.15)}}
-    .modalBackdrop{position:fixed;inset:0;background:rgba(2,6,23,.72);display:none;align-items:center;justify-content:center;z-index:80}.modalBackdrop.show{display:flex}.modal{width:min(720px,92vw);max-height:86vh;overflow:auto;background:#111827;border:1px solid var(--line);border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.45);padding:18px}.modal h3{margin:0 0 6px;font-size:18px}.fieldLabel{display:block;margin:14px 0 6px;font-weight:700;color:#bfdbfe}.fieldHint{font-size:12px;color:#cbd5e1;white-space:pre-wrap}.fieldInput{width:100%;min-height:40px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px}.fieldInput.area{min-height:110px;font-family:ui-monospace,Consolas,monospace}.modalActions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}.badge{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 8px;color:#bae6fd;font-size:12px}.modelBar{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px;max-width:720px;min-width:0}.modelGroup{display:flex;align-items:center;gap:5px;background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:6px 8px;white-space:nowrap}.modelGroup label{font-size:12px;color:#bfdbfe}.modelSelect{background:#020617;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px;max-width:280px;min-width:220px}.radioGroup{display:flex;gap:8px;align-items:center}.radioGroup label{font-size:12px;color:#e0f2fe;white-space:nowrap}.modelHint{width:100%;text-align:right;font-size:11px;color:#93c5fd;line-height:1.1}
+    .modalBackdrop{position:fixed;inset:0;background:rgba(2,6,23,.72);display:none;align-items:center;justify-content:center;z-index:80}.modalBackdrop.show{display:flex}.modal{width:min(720px,92vw);max-height:86vh;overflow:auto;background:#111827;border:1px solid var(--line);border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.45);padding:18px}.modal h3{margin:0 0 6px;font-size:18px}.fieldLabel{display:block;margin:14px 0 6px;font-weight:700;color:#bfdbfe}.fieldHint{font-size:12px;color:#cbd5e1;white-space:pre-wrap}.fieldInput{width:100%;min-height:40px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px}.fieldInput.area{min-height:110px;font-family:ui-monospace,Consolas,monospace}.modalActions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}.badge{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 8px;color:#bae6fd;font-size:12px}.modelBar{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px;max-width:720px;min-width:0}.modelGroup{display:flex;align-items:center;gap:5px;background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:6px 8px;white-space:nowrap}.modelGroup label{font-size:12px;color:#bfdbfe}.modelSelect{background:#020617;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px;max-width:280px;min-width:220px}.radioGroup{display:flex;gap:8px;align-items:center}.radioGroup label{font-size:12px;color:#e0f2fe;white-space:nowrap}.modelHint{width:100%;text-align:right;font-size:11px;color:#93c5fd;line-height:1.1}.uploadBox{border:1px dashed #38bdf8;border-radius:12px;padding:10px;margin-bottom:10px;background:#0b1220}.artifactList{margin-top:8px}.artifactItem{display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--line);border-radius:10px;padding:7px 8px;margin-top:6px;background:#111827}.artifactMeta{min-width:0}.artifactName{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.artifactPath{font-size:11px;color:#93c5fd;word-break:break-all}.checkLabel{display:flex;align-items:center;gap:6px;font-size:12px;color:#e0f2fe}.fileInput{width:100%;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:8px}
   </style>
 </head>
 <body>
@@ -29,7 +29,7 @@
   </div>
 </header>
 <main>
-  <section class="panel"><h2>Interactive Console <span id="profileCount" class="small"></span></h2><div class="scroll" id="messages"></div><div class="console"><textarea id="input" class="input" placeholder="Enter a message, request, or runtime instruction."></textarea><div class="row"><button id="sendBtn" class="btn primary" onclick="sendMessage()">Send</button><button class="btn" onclick="quickExecute()">Execute Named Task</button></div></div></section>
+  <section class="panel"><h2>Interactive Console <span id="profileCount" class="small"></span></h2><div class="scroll" id="messages"></div><div class="console"><div class="uploadBox"><div class="cardHeader"><b>Uploaded artifacts</b><button class="copyBtn" onclick="refreshArtifacts()">Refresh</button></div><input id="artifactUploadInput" class="fileInput" type="file" multiple onchange="uploadArtifacts()" /><div class="small">Files selected here can be bound to create-agent messages and used as external methods during execution.</div><div id="artifactList" class="artifactList"><div class="empty">No uploaded artifact.</div></div></div><textarea id="input" class="input" placeholder="Enter a message, request, or runtime instruction."></textarea><div class="row"><button id="sendBtn" class="btn primary" onclick="sendMessage()">Send</button><button class="btn" onclick="quickExecute()">Execute Named Task</button></div></div></section>
   <section class="panel"><h2>Generated Participants <span id="participantCount" class="small"></span></h2><div class="scroll" id="participants"></div></section>
   <section class="panel"><h2>Workflow / Results / Traces <span id="graphCount" class="small"></span></h2><div class="scroll" id="rightPane"></div></section>
 </main>
@@ -55,6 +55,57 @@ let lastPendingRunId = '';
 let lastPendingInstruction = '';
 let modelSelectionState = null;
 let suppressModelSave = false;
+let uploadedArtifacts = [];
+let selectedArtifactIds = new Set();
+
+
+function selectedArtifactsForRequest(){
+  return uploadedArtifacts.filter(item=>selectedArtifactIds.has(String(item.artifact_id||item.id||'')));
+}
+function renderArtifacts(){
+  const box=document.getElementById('artifactList');
+  if(!box)return;
+  box.innerHTML='';
+  if(!uploadedArtifacts.length){ box.innerHTML='<div class="empty">No uploaded artifact.</div>'; return; }
+  uploadedArtifacts.forEach(item=>{
+    const id=String(item.artifact_id||item.id||'');
+    const el=document.createElement('div');
+    el.className='artifactItem';
+    const checked=selectedArtifactIds.has(id) ? 'checked' : '';
+    el.innerHTML=`<div class="artifactMeta"><div class="artifactName">${escapeHtml(item.name||item.filename||id)}</div><div class="artifactPath">${escapeHtml(item.path||'')}</div><div class="small">${escapeHtml(item.mime_type||'')} ${item.size_bytes?(' / '+item.size_bytes+' bytes'):''}</div></div><label class="checkLabel"><input type="checkbox" ${checked} onchange="toggleArtifactSelection('${escapeHtml(id)}', this.checked)"> bind</label>`;
+    box.appendChild(el);
+  });
+}
+function toggleArtifactSelection(id, checked){
+  if(checked) selectedArtifactIds.add(id); else selectedArtifactIds.delete(id);
+}
+async function refreshArtifacts(){
+  try{
+    const res=await fetch('/api/agent-studio/artifacts');
+    const data=await res.json();
+    uploadedArtifacts=Array.isArray(data.artifacts)?data.artifacts:[];
+    renderArtifacts();
+  }catch(e){ addMessage('Artifact refresh failed: '+e,'item error'); }
+}
+async function uploadArtifacts(){
+  const input=document.getElementById('artifactUploadInput');
+  const files=input&&input.files?Array.from(input.files):[];
+  if(!files.length)return;
+  const form=new FormData();
+  files.forEach(file=>form.append('files', file));
+  setStudioStatus('uploading', true);
+  try{
+    const res=await fetch('/api/agent-studio/artifacts',{method:'POST',body:form});
+    const data=await res.json();
+    if(!res.ok || data.ok===false){ throw new Error(data.message||'upload failed'); }
+    const created=Array.isArray(data.artifacts)?data.artifacts:[];
+    created.forEach(item=>selectedArtifactIds.add(String(item.artifact_id||item.id||'')));
+    uploadedArtifacts=Array.isArray(data.registry)?data.registry:created;
+    renderArtifacts();
+    addProgressMessage('uploaded artifact count: '+created.length);
+  }catch(e){ addMessage('Artifact upload failed: '+e,'item error'); }
+  finally{ if(input) input.value=''; setStudioStatus('ready', false); }
+}
 
 async function sendMessage(){
   const input=document.getElementById('input');
@@ -87,7 +138,7 @@ async function sendMessage(){
     hintTimer=setInterval(()=>{
       if(hintIndex<hints.length){ addProgressMessage(hints[hintIndex++]); }
     }, 2500);
-    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});
+    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, uploaded_artifacts:selectedArtifactsForRequest()})});
     const data=await res.json();
     renderStudioResponse(data, text);
     const pendingItems = collectMissingInputs(data);
@@ -204,7 +255,7 @@ async function skipCredentialAndContinue(){
   }
   const text=lastPendingInstruction || lastSubmittedInstruction;
   if(text){
-    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, provided_inputs:provided})});
+    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, provided_inputs:provided, uploaded_artifacts:selectedArtifactsForRequest()})});
     const data=await res.json();
     renderStudioResponse(data, text);
     await refreshState();
@@ -241,7 +292,7 @@ async function submitMissingInputs(){
   if(lastPendingRunId){ await resumePendingRun(lastPendingRunId, provided); return; }
   const text=lastPendingInstruction || lastSubmittedInstruction;
   if(text){
-    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, provided_inputs:provided})});
+    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, provided_inputs:provided, uploaded_artifacts:selectedArtifactsForRequest()})});
     const data=await res.json();
     addMessage(renderJson(data), data.status==='completed'?'item':'item error');
     await refreshState();
@@ -459,6 +510,14 @@ function deriveMissingInputs(run){
     const fieldName = firstSecret.name || apiSource.secret_key || pending.secret_key || 'runtime_access_key';
     return [{kind:kind, field:String(fieldName), message:String(pending.message||request.message||'A credential-protected method is available. Enter a key to use it, or continue without this key to try another allowed method.'), input_type:'password', provider:String(provider), source_url:String(sourceUrl), api_source:apiSource, api_sources:apiSources}];
   }
+  if(kind==='collect_runtime_parameters' || kind==='runtime_parameter_input' || kind==='uploaded_artifact_parameters'){
+    const request = pending.request || {};
+    const fields = Array.isArray(request.fields) ? request.fields : [];
+    if(fields.length){
+      return fields.map((f,idx)=>({kind:kind, field:String(f.name||f.field||('field_'+idx)), message:String(f.message||f.label||request.message||'Please provide this runtime value.'), input_type:String(f.input_type||f.type||'text'), required:f.required!==false}));
+    }
+    return [{kind:kind, field:'input', message:String(request.message||pending.message||'Please provide the runtime values required by the uploaded artifact.'), required:true}];
+  }
   if(kind==='human_information_required' || kind==='agent_parameter_collection'){
     const request = pending.request || {};
     const fields = Array.isArray(request.fields) ? request.fields : [];
@@ -543,6 +602,7 @@ function card(title, body){
   return el;
 }
 loadModelSelection();
+refreshArtifacts();
 refreshState();
 </script>
 </body>

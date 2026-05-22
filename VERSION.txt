@@ -1,1 +1,1 @@
-5.8-discovery-to-api-contract
+v6.0-agent-studio-upload-ui

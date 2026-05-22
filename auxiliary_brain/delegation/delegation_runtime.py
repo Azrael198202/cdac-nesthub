@@ -558,6 +558,8 @@ class AgentDelegationRuntime:
                     "values": participant.get("runtime_parameters") or {},
                     "missing": self.parameter_contract_service.missing_parameters(participant),
                 },
+                "uploaded_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
+                "artifact_policy": participant.get("artifact_policy") or {},
             }
 
         shared_context: dict[str, Any] = {
@@ -575,6 +577,8 @@ class AgentDelegationRuntime:
                 "values": participant.get("runtime_parameters") or {},
                 "contract": self._compact_parameter_contract(participant.get("parameter_contract") or {}),
             },
+            "uploaded_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
+            "artifact_policy": participant.get("artifact_policy") or {},
         }
         peer_results = self._peer_results_for_participant(participant, completed_results, dependency_plan)
         if peer_results:

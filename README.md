@@ -171,3 +171,10 @@ For external access, `execution_preparation` must prepare concrete web targets o
 - pre_execution_validation failure blocks execution and routes to repair.
 - execution no longer runs after failed validation.
 - final answer delivery prefers `final_synthesis.final_answer`; generated answer material can be returned for locked content-generation workflows.
+
+
+## v6.0 Agent Studio uploaded artifact UI
+
+Agent Studio now supports uploading external artifacts from `agent_studio.html`. Uploaded files are registered under runtime upload storage, can be selected/bound to create-agent or create-task messages, and are passed into the runtime as generic artifact references. Execution preparation can inspect those artifacts, infer runtime parameters, pause for UI input when required, and resume execution after values are provided.
+
+This is implemented as a generic action path (`use_uploaded_file`) and does not encode domain-specific behavior in `ai_core`.
