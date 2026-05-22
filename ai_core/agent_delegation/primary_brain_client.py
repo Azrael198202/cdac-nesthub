@@ -195,6 +195,28 @@ class PrimaryBrainDelegationClient:
             if retry_index is not None:
                 state["node_index"] = int(retry_index) + 1
 
+        elif kind in {"collect_runtime_parameters", "runtime_parameter_input", "uploaded_artifact_parameters"}:
+            clean_inputs = self._clean_runtime_inputs(provided_inputs)
+            state.setdefault("human_information_history", []).append({
+                "node_id": node_id,
+                "provided": clean_inputs,
+                "recovery_kind": kind,
+            })
+            state.setdefault("runtime_parameters", {}).update(clean_inputs)
+            state.setdefault("runtime_inputs", {}).update(clean_inputs)
+            state.setdefault("provided_inputs", {}).update(clean_inputs)
+            # Runtime parameters change execution_preparation and validation.
+            # Remove downstream cached results and resume from preparation so
+            # uploaded-artifact contracts are rebuilt with the submitted values.
+            results = state.setdefault("results", {})
+            for key in ("execution_preparation", "pre_execution_validation", "execution", "result_verification", "feedback_repair", "final_synthesis", "output"):
+                results.pop(key, None)
+            prep_index = self._find_workflow_node_index(state, "execution_preparation")
+            if prep_index is not None:
+                state["node_index"] = prep_index
+            elif retry_index is not None:
+                state["node_index"] = max(0, int(retry_index) - 2)
+
         elif kind == "human_information_required":
             state.setdefault("human_information_history", []).append({
                 "node_id": node_id,
@@ -282,6 +304,27 @@ class PrimaryBrainDelegationClient:
         structural_budget = remaining_nodes * per_node_floor
 
         return max(base_timeout + 60, stage_budget + 60, structural_budget + 60)
+
+    def _clean_runtime_inputs(self, provided_inputs: dict[str, Any]) -> dict[str, Any]:
+        clean: dict[str, Any] = {}
+        if not isinstance(provided_inputs, dict):
+            return clean
+        for raw_key, value in provided_inputs.items():
+            key = str(raw_key or "").strip()
+            if not key or key in {"action", "choice", "secret_key", "value", "credential", "api_key"}:
+                continue
+            if isinstance(value, str) and value == "":
+                continue
+            clean[key] = value
+        return clean
+
+    def _find_workflow_node_index(self, state: dict[str, Any], node_id: str) -> int | None:
+        workflow = state.get("workflow") if isinstance(state, dict) else None
+        nodes = workflow.get("nodes") if isinstance(workflow, dict) and isinstance(workflow.get("nodes"), list) else []
+        for idx, node in enumerate(nodes):
+            if isinstance(node, dict) and str(node.get("id") or node.get("node_id") or "") == str(node_id):
+                return idx
+        return None
 
     def _clear_waiting_state(self, state: dict[str, Any]) -> None:
         state.pop("pending_action", None)
@@ -869,11 +912,49 @@ class PrimaryBrainDelegationClient:
                 "api_source": api_source,
                 "api_sources": api_sources,
             }]
+        if kind in {"collect_runtime_parameters", "runtime_parameter_input", "uploaded_artifact_parameters"}:
+            request = pending.get("request") if isinstance(pending.get("request"), dict) else {}
+            fields = request.get("fields") if isinstance(request.get("fields"), list) else []
+            out = []
+            for idx, f in enumerate(fields):
+                if isinstance(f, dict):
+                    field = str(f.get("field") or f.get("name") or f.get("source_field") or f"field_{idx}")
+                    out.append({
+                        "kind": kind,
+                        "field": field,
+                        "label": str(f.get("label") or field),
+                        "message": str(f.get("question") or f.get("prompt") or f.get("message") or f.get("description") or request.get("message") or "Please provide this runtime value."),
+                        "input_type": str(f.get("input_type") or f.get("type") or "text"),
+                        "required": f.get("required", True) is not False,
+                        "placeholder": str(f.get("placeholder") or f"Enter {field}"),
+                        "description": str(f.get("description") or ""),
+                        "aliases": f.get("aliases") if isinstance(f.get("aliases"), list) else [],
+                        "merge_targets": f.get("merge_targets") if isinstance(f.get("merge_targets"), list) else [],
+                    })
+                elif isinstance(f, str) and f.strip():
+                    out.append({"kind": kind, "field": f.strip(), "label": f.strip(), "message": str(request.get("message") or "Please provide this runtime value."), "input_type": "text", "required": True})
+            return out
         if kind == "human_information_required":
             request = pending.get("request") if isinstance(pending.get("request"), dict) else {}
             fields = request.get("fields") or request.get("missing_fields") or []
             if isinstance(fields, list):
-                return [{"kind": "human_information_required", "field": str(f), "message": str(request.get("message") or "Additional information is required.")} for f in fields]
+                out = []
+                for idx, f in enumerate(fields):
+                    if isinstance(f, dict):
+                        field = str(f.get("field") or f.get("name") or f.get("source_field") or f"field_{idx}")
+                        out.append({
+                            "kind": "human_information_required",
+                            "field": field,
+                            "label": str(f.get("label") or field),
+                            "message": str(f.get("question") or f.get("prompt") or f.get("message") or f.get("description") or request.get("message") or "Additional information is required."),
+                            "input_type": str(f.get("input_type") or f.get("type") or "text"),
+                            "placeholder": str(f.get("placeholder") or f"Enter {field}"),
+                            "aliases": f.get("aliases") if isinstance(f.get("aliases"), list) else [],
+                            "merge_targets": f.get("merge_targets") if isinstance(f.get("merge_targets"), list) else [],
+                        })
+                    elif isinstance(f, str):
+                        out.append({"kind": "human_information_required", "field": str(f), "message": str(request.get("message") or "Additional information is required.")})
+                return out
         if kind == "validation_recovery":
             node_id = str(pending.get("node_id") or "")
             result = state.get("results", {}).get(node_id, {}) if isinstance(state.get("results"), dict) else {}

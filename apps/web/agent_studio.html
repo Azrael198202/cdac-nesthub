@@ -161,12 +161,46 @@ function addMissingInputs(items, pendingInstruction, runId){
   if(runId){ lastPendingRunId = runId; }
   openMissingInputModal(lastMissingInputs, lastPendingRunId);
 }
+
+function normalizeInteractionItem(raw, idx){
+  let it = raw;
+  if(typeof it === 'string'){
+    const trimmed = it.trim();
+    try { it = JSON.parse(trimmed); } catch(e) { it = {field: 'field_'+idx, label: trimmed.slice(0,80), question: trimmed}; }
+  }
+  if(!it || typeof it !== 'object'){
+    it = {field:'field_'+idx, label:'Input '+(idx+1), question:'Please provide this value.'};
+  }
+  const field = String(it.field || it.name || it.source_field || it.parameter || it.parameter_name || ('field_'+idx)).trim();
+  const label = String(it.label || it.title || it.display_name || field).trim();
+  const message = String(it.question || it.prompt || it.message || it.description || ('Please provide this information: '+label+'.')).trim();
+  const inputType = String(it.input_type || it.type || it.ui_type || 'text').trim();
+  return {
+    ...it,
+    kind: String(it.kind || it.type_kind || 'human_information_required'),
+    field: field || ('field_'+idx),
+    label: label || field || ('Input '+(idx+1)),
+    message,
+    input_type: inputType,
+    placeholder: String(it.placeholder || ('Enter '+(label || field || 'value'))),
+    description: String(it.description || it.help_text || ''),
+    required: it.required !== false,
+    aliases: Array.isArray(it.aliases) ? it.aliases : [],
+    merge_targets: Array.isArray(it.merge_targets) ? it.merge_targets : []
+  };
+}
+
+function normalizeInteractionItems(items){
+  const raw = Array.isArray(items) ? items : [];
+  return raw.map((it, idx)=>normalizeInteractionItem(it, idx));
+}
+
 function openMissingInputModal(items, runId){
   const modal=document.getElementById('missingInputModal');
   const fields=document.getElementById('missingInputFields');
   const summary=document.getElementById('missingInputSummary');
   fields.innerHTML='';
-  const safeItems=Array.isArray(items)?items:[];
+  const safeItems=normalizeInteractionItems(items);
   const hasCredentialChoice = safeItems.some(it => ['secret_input','optional_credential_choice'].includes(String(it.kind||'')));
   const skipBtn=document.getElementById('skipCredentialBtn');
   if(skipBtn){ skipBtn.style.display = hasCredentialChoice ? 'inline-block' : 'none'; }
@@ -174,7 +208,7 @@ function openMissingInputModal(items, runId){
   safeItems.forEach((it,idx)=>{
     const kind=String(it.kind||'human_information_required');
     const field=String(it.field||it.name||('field_'+idx));
-    const message=String(it.message||'Please provide this value.');
+    const message=String(it.message||it.question||'Please provide this value.');
     const validation=String(it.validation_error||'');
     const provider=String(it.provider || (it.api_source&&it.api_source.provider) || '');
     const sourceUrl=String(it.source_url || (it.api_source&&it.api_source.url) || '');
@@ -182,7 +216,7 @@ function openMissingInputModal(items, runId){
     const wrap=document.createElement('div');
     const label=document.createElement('label');
     label.className='fieldLabel';
-    label.textContent=field;
+    label.textContent=String(it.label||field);
     const hint=document.createElement('div');
     hint.className='fieldHint';
     let sourceText='';
@@ -192,7 +226,7 @@ function openMissingInputModal(items, runId){
       const names=sourceList.slice(0,3).map(x=>String((x&&x.provider)|| (x&&x.name) || (x&&x.url) || '')).filter(Boolean);
       if(names.length){ sourceText += '\nCandidate sources: ' + names.join(' | '); }
     }
-    hint.textContent=message + sourceText + (validation ? '\n\nValidation error:\n' + validation : '');
+    hint.textContent=message + (it.description ? '\n' + String(it.description) : '') + sourceText + (validation ? '\n\nValidation error:\n' + validation : '');
     const inputType=String(it.input_type||'');
     const area = inputType==='textarea' || (kind==='validation_recovery' && field==='corrected_json');
     const input=document.createElement(area?'textarea':'input');
@@ -203,7 +237,9 @@ function openMissingInputModal(items, runId){
     input.dataset.kind=kind;
     input.dataset.inputType=inputType;
     input.dataset.values='[]';
-    input.placeholder=inputType==='list' ? 'Enter one value, then click Continue or Done' : field;
+    input.dataset.aliases=JSON.stringify(it.aliases||[]);
+    input.dataset.mergeTargets=JSON.stringify(it.merge_targets||[]);
+    input.placeholder=inputType==='list' ? 'Enter one value, then click Continue or Done' : String(it.placeholder||field);
     wrap.appendChild(label);
     wrap.appendChild(hint);
     wrap.appendChild(input);
@@ -281,6 +317,14 @@ async function submitMissingInputs(){
       provided.value=Array.isArray(value) ? value.join(',') : value;
     } else {
       provided[field]=value;
+      try{
+        const aliases=JSON.parse(input.dataset.aliases||'[]');
+        aliases.forEach(alias=>{ const k=String(alias||'').trim(); if(k && provided[k]===undefined){ provided[k]=value; } });
+      }catch(e){}
+      try{
+        const targets=JSON.parse(input.dataset.mergeTargets||'[]');
+        targets.forEach(t=>{ const k=String((t&&t.source_field)||'').trim(); if(k && provided[k]===undefined){ provided[k]=value; } });
+      }catch(e){}
     }
   });
   const hasValue=Object.values(provided).some(v=>Array.isArray(v) ? v.length>0 : String(v||'').trim()!=='');
@@ -482,9 +526,18 @@ function renderState(data){
 
 function collectMissingInputs(payload){
   if(!payload || typeof payload !== 'object'){ return []; }
-  if(Array.isArray(payload.missing_inputs) && payload.missing_inputs.length){ return payload.missing_inputs; }
+  if(Array.isArray(payload.missing_inputs) && payload.missing_inputs.length){ return normalizeInteractionItems(payload.missing_inputs); }
+  if(payload.interaction_request && typeof payload.interaction_request === 'object'){
+    const req = payload.interaction_request;
+    if(Array.isArray(req.fields) && req.fields.length){ return normalizeInteractionItems(req.fields.map(f=>({...f, kind:req.kind||req.type||'human_information_required'}))); }
+  }
+  if(Array.isArray(payload.human_interactions) && payload.human_interactions.length){
+    const fields=[];
+    payload.human_interactions.forEach(h=>{ if(h && Array.isArray(h.fields)){ h.fields.forEach(f=>fields.push({...f, kind:h.type||h.kind||'human_information_required'})); } });
+    if(fields.length){ return normalizeInteractionItems(fields); }
+  }
   const derived = deriveMissingInputs(payload);
-  return Array.isArray(derived) ? derived : [];
+  return Array.isArray(derived) ? normalizeInteractionItems(derived) : [];
 }
 
 function deriveMissingInputs(run){
@@ -524,9 +577,14 @@ function deriveMissingInputs(run){
     if(fields.length){
       return fields.map((f,idx)=>({
         kind:String(f.kind||kind),
-        field:String(f.name||f.field||('field_'+idx)),
-        message:String(f.message||f.label||request.message||'Please provide this value.'),
-        input_type:String(f.input_type||'text'),
+        field:String(f.field||f.name||f.source_field||('field_'+idx)),
+        label:String(f.label||f.title||f.name||f.field||('Input '+(idx+1))),
+        message:String(f.question||f.prompt||f.message||f.description||f.label||request.message||'Please provide this value.'),
+        input_type:String(f.input_type||f.type||f.ui_type||'text'),
+        placeholder:String(f.placeholder||''),
+        description:String(f.description||f.help_text||''),
+        aliases:Array.isArray(f.aliases)?f.aliases:[],
+        merge_targets:Array.isArray(f.merge_targets)?f.merge_targets:[],
         participant_name:String(f.participant_name||''),
         parameter_name:String(f.parameter_name||'')
       }));
