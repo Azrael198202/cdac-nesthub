@@ -181,14 +181,18 @@ class AgentStudioService:
             participant_name=participant_name,
         )
         artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
-        schema_contract = self._parameter_contract_schema_only(parameter_contract)
-        if artifact_refs:
-            # Uploaded-artifact agents get their executable parameter schema from
-            # file introspection during execution_preparation.  Do not keep
-            # inferred durable agent parameters here, because they can ask for
-            # stale fields before the selected file has been inspected.
-            schema_contract["missing_information"] = []
-            schema_contract["parameters"] = []
+        # Task graphs do not own durable parameter values.  Parameter schemas live
+        # on participants, while uploaded artifact parameters are discovered from
+        # the selected artifact during execution_preparation.  Keeping a blank
+        # task-level contract here prevents stale values such as location/api_key
+        # from leaking into unrelated future runs and avoids referencing an
+        # undefined participant-only parameter_contract.
+        schema_contract = {
+            "contract_type": "task_runtime_parameter_contract",
+            "parameters": [],
+            "missing_information": [],
+            "runtime_scope": "task_run",
+        }
         payload = {
             "participant_id": participant_id,
             "name": participant_name,
@@ -231,14 +235,18 @@ class AgentStudioService:
         participants = self.store.list_json("generated/agents")
         selected_ids = [p.get("participant_id") for p in self._select_participants_for_instruction(instruction, participants)]
         artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
-        schema_contract = self._parameter_contract_schema_only(parameter_contract)
-        if artifact_refs:
-            # Uploaded-artifact agents get their executable parameter schema from
-            # file introspection during execution_preparation.  Do not keep
-            # inferred durable agent parameters here, because they can ask for
-            # stale fields before the selected file has been inspected.
-            schema_contract["missing_information"] = []
-            schema_contract["parameters"] = []
+        # Task graphs do not own durable parameter values.  Parameter schemas live
+        # on participants, while uploaded artifact parameters are discovered from
+        # the selected artifact during execution_preparation.  Keeping a blank
+        # task-level contract here prevents stale values such as location/api_key
+        # from leaking into unrelated future runs and avoids referencing an
+        # undefined participant-only parameter_contract.
+        schema_contract = {
+            "contract_type": "task_runtime_parameter_contract",
+            "parameters": [],
+            "missing_information": [],
+            "runtime_scope": "task_run",
+        }
         payload = {
             "graph_id": graph_id,
             "task_name": task_name,
@@ -250,6 +258,8 @@ class AgentStudioService:
             "execution_policy": "delegated_participant_execution_via_ai_core",
             "selected_participant_ids": selected_ids,
             "uploaded_artifacts": artifact_refs,
+            "parameter_contract": schema_contract,
+            "runtime_parameters": {},
             "tasks": [
                 {
                     "task_id": f"{graph_id}_delegate_{index + 1}",
