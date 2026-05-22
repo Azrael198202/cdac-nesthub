@@ -12,7 +12,7 @@ class ResultMaterialBuilder:
     later presentation/synthesis stage.
     """
 
-    TEXT_KEYS = ("final_answer", "answer", "summary", "message", "text")
+    TEXT_KEYS = ("answer_material", "generated_content", "final_answer", "answer", "summary", "message", "text")
     INTERNAL_KEYS = {
         "status",
         "source",
@@ -22,6 +22,21 @@ class ResultMaterialBuilder:
         "raw",
         "debug",
         "trace",
+        # Execution contracts/prompts are internal instructions, not user-facing material.
+        "agent_action_prompt_contract",
+        "prompt_contract",
+        "output_contract",
+        "action_contract",
+        "agent_execution_flow",
+        "web_collection",
+        "api_call_preparation",
+        "tool_generation",
+        "uploaded_artifact_execution",
+        "resource_bundle",
+        "contract",
+        "contracts",
+        "instructions",
+        "rules",
     }
 
     def from_execution_step(self, step: dict[str, Any]) -> ResultMaterial:

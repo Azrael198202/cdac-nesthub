@@ -159,19 +159,31 @@ class OutputExecutor:
         generic by reading only public answer fields and never node messages from
         input/intermediate stages.
         """
-        public_keys = ("answer_material", "final_answer", "answer", "generated_content", "content", "text")
+        public_keys = ("answer_material", "generated_content", "final_answer", "answer")
 
         def scan(value: Any) -> str:
             if isinstance(value, dict):
                 for key in public_keys:
                     item = value.get(key)
                     if isinstance(item, str) and item.strip():
-                        return item.strip()
+                        text = item.strip()
+                        blocked_markers = ("Use upstream input", "Return JSON", "prompt_contract", "output_contract", "agent_action_prompt_contract")
+                        if not any(marker in text for marker in blocked_markers):
+                            return text
                     if isinstance(item, (dict, list)):
                         nested = scan(item)
                         if nested:
                             return nested
-                for child in value.values():
+                internal_keys = {
+                    "agent_action_prompt_contract", "prompt_contract", "output_contract",
+                    "action_contract", "agent_execution_flow", "web_collection",
+                    "api_call_preparation", "tool_generation", "uploaded_artifact_execution",
+                    "resource_bundle", "contract", "contracts", "instructions", "rules",
+                    "prompt", "system", "schema",
+                }
+                for key, child in value.items():
+                    if str(key) in internal_keys:
+                        continue
                     if isinstance(child, (dict, list)):
                         nested = scan(child)
                         if nested:

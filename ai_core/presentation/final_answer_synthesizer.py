@@ -12,7 +12,40 @@ from ai_core.runtime.semantic import SynthesisGuard
 class FinalAnswerSynthesizer:
     """Creates final user-facing answers from normalized facts only."""
 
-    DEBUG_MARKERS = ("Matched Parameter:", "Descriptors:", "Values:")
+    DEBUG_MARKERS = (
+        "Matched Parameter:",
+        "Descriptors:",
+        "Values:",
+        "Use upstream input",
+        "Return valid JSON",
+        "Return JSON",
+        "If the selected action",
+        "prompt_contract",
+        "output_contract",
+        "executor_llm_generation",
+        "verification phase",
+        "planner_llm",
+        "agent_action_prompt_contract",
+    )
+    INTERNAL_CONTRACT_KEYS = {
+        "agent_action_prompt_contract",
+        "prompt_contract",
+        "output_contract",
+        "action_contract",
+        "agent_execution_flow",
+        "web_collection",
+        "api_call_preparation",
+        "tool_generation",
+        "uploaded_artifact_execution",
+        "resource_bundle",
+        "contract",
+        "contracts",
+        "instructions",
+        "rules",
+        "prompt",
+        "system",
+        "schema",
+    }
 
     def __init__(self) -> None:
         self.sanitizer = ResultSanitizer()
@@ -74,24 +107,36 @@ class FinalAnswerSynthesizer:
     def _direct_generated_answer_material(self, sanitized: list[dict[str, Any]]) -> str:
         """Return user-facing generated content when it is the planned deliverable.
 
-        Evidence/fact synthesis is correct for retrieval tasks, but model/content
-        generation tasks produce answer material directly. This method is generic:
-        it only reads public answer/text fields from execution materials and
-        avoids internal debug labels.
+        Planner prompts, contracts, schemas, and internal instructions must never
+        become the final answer. This method therefore only accepts explicit
+        public answer fields and skips known internal contract containers.
         """
+        public_keys = ("answer_material", "generated_content", "final_answer", "answer")
+
+        def is_public_text(text: str) -> bool:
+            clean = self.sanitizer.sanitize_value(text).strip()
+            if not clean:
+                return False
+            if any(marker in clean for marker in self.DEBUG_MARKERS):
+                return False
+            return True
+
         def scan(value: Any) -> str:
             if isinstance(value, dict):
-                for key in ("answer_material", "final_answer", "answer", "generated_content", "content", "text"):
+                # Prefer explicit public answer material only. Do not read generic
+                # "content" from contract/prompt envelopes because those often
+                # contain planner instructions.
+                for key in public_keys:
                     item = value.get(key)
-                    if isinstance(item, str) and item.strip():
-                        text = self.sanitizer.sanitize_value(item).strip()
-                        if text and not any(marker in text for marker in self.DEBUG_MARKERS):
-                            return text
-                    if isinstance(item, dict):
+                    if isinstance(item, str) and is_public_text(item):
+                        return self.sanitizer.sanitize_value(item).strip()
+                    if isinstance(item, (dict, list)):
                         nested = scan(item)
                         if nested:
                             return nested
-                for child in value.values():
+                for key, child in value.items():
+                    if str(key) in self.INTERNAL_CONTRACT_KEYS:
+                        continue
                     if isinstance(child, (dict, list)):
                         nested = scan(child)
                         if nested:
