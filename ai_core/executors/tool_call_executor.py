@@ -592,17 +592,35 @@ class ToolCallExecutor:
                     state=state,
                 )
                 if generated_content_result:
-                    execution_steps.append({
-                        "step_id": step_id,
-                        "status": "executed",
-                        "tool": {"id": "llm_content_generation", "source": "model_runtime"},
-                        "input": generated_content_result.get("input"),
-                        "result": generated_content_result.get("result"),
-                        "provenance": (generated_content_result.get("result") or {}).get("provenance") if isinstance(generated_content_result.get("result"), dict) else None,
-                        "source_step": step,
-                        "priority_path": "content_generation_contract",
-                    })
-                    continue
+                    result_obj = generated_content_result.get("result") if isinstance(generated_content_result.get("result"), dict) else {}
+                    data_obj = result_obj.get("data") if isinstance(result_obj.get("data"), dict) else {}
+                    answer_material = str(data_obj.get("answer_material") or result_obj.get("answer_material") or "").strip()
+                    if answer_material:
+                        result_obj.setdefault("answer_material", answer_material)
+                        result_obj.setdefault("data", data_obj)["answer_material"] = answer_material
+                        execution_steps.append({
+                            "step_id": step_id,
+                            "status": "executed",
+                            "tool": {"id": "llm_content_generation", "source": "model_runtime"},
+                            "input": generated_content_result.get("input"),
+                            "result": result_obj,
+                            "provenance": result_obj.get("provenance") if isinstance(result_obj, dict) else None,
+                            "source_step": step,
+                            "priority_path": "content_generation_contract",
+                        })
+                        continue
+                blocked_steps.append({
+                    "step_id": step_id,
+                    "status": "content_generation_failed",
+                    "reason": "The locked content generation action did not produce answer_material. Execution must not fall through to runtime observation, prompt contracts, web/API, or unrelated tools.",
+                    "execution_method_contract": method_contract.to_dict(),
+                    "source_step": step,
+                    "repair_instruction": {
+                        "retry_from": "execution_preparation",
+                        "required_result": "prepare a valid prompt/output contract and execute executor_llm_generation until answer_material exists",
+                    },
+                })
+                continue
 
             # v70.9 priority layer: local/model knowledge first.
             # If previous successful runtime knowledge already covers the current

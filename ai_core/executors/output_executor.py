@@ -57,7 +57,7 @@ class OutputExecutor:
         verification_record = verification.get("verification_record") if isinstance(verification.get("verification_record"), dict) else verification
         verification_failed = verification_record.get("status") == "failed"
         explicit_final = final_synthesis_result.get("final_answer") or final_synthesis_result.get("answer")
-        if isinstance(explicit_final, str) and explicit_final.strip() and not verification_failed:
+        if isinstance(explicit_final, str) and explicit_final.strip() and not verification_failed and self._is_public_answer_text(explicit_final):
             return {
                 "_executor_type": "output",
                 "_node_id": node_config.get("node_id", "output"),
@@ -129,6 +129,9 @@ class OutputExecutor:
             trust_summary=trust_summary,
         )
         final_answer = synthesized.get("answer") or self._answer_material_from_execution_steps(execution_steps) or "Workflow finished, but no user-facing answer was produced."
+        if not self._is_public_answer_text(final_answer):
+            fallback_answer = self._answer_material_from_execution_steps(execution_steps)
+            final_answer = fallback_answer if fallback_answer else "Workflow finished, but no verified user-facing answer was produced."
 
         if trust_summary.get("trust_level") == "unverified_generated_result" and final_answer.startswith("I could not"):
             final_answer = final_answer + "\n\nTrust: unverified generated result. The runtime did not confirm live network verification, no-mock execution, or evidence-supported material quality."
@@ -150,6 +153,17 @@ class OutputExecutor:
             "executed_steps": len(execution_steps),
             "blocked_steps": blocked_steps,
         }
+
+
+    def _is_public_answer_text(self, text: str) -> bool:
+        if not isinstance(text, str) or not text.strip():
+            return False
+        blocked_markers = (
+            "Use upstream input", "Return JSON", "Return valid JSON",
+            "prompt_contract", "output_contract", "agent_action_prompt_contract",
+            "planner_llm", "executor_llm_generation", "verification phase",
+        )
+        return not any(marker in text for marker in blocked_markers)
 
 
     def _answer_material_from_execution_steps(self, execution_steps: list[dict[str, Any]]) -> str:
