@@ -199,16 +199,18 @@ class StaticTransformExecutor:
             method_ok = bool(method) and method == expected_method
             resource_ok = self._prepared_resource_ok(prep, str(step.get("step_id") or step.get("task_id") or f"step_{index + 1}"), method)
             passed = not missing_fields and not missing_required and method_ok and action_ok and resource_ok
+            credential_required = self._prepared_credential_required(prep, str(step.get("step_id") or step.get("task_id") or f"step_{index + 1}"), method)
             checks.append({
                 "step_id": str(step.get("step_id") or step.get("task_id") or f"step_{index + 1}"),
                 "schema_check": "passed",
                 "parameter_check": "passed" if not missing_fields and not missing_required else "failed",
                 "action_type_check": "passed" if action_ok else "failed",
                 "execution_method_check": "passed" if method_ok else "failed",
-                "resource_preparation_check": "passed" if resource_ok else "failed",
+                "resource_preparation_check": "credential_required" if credential_required else ("passed" if resource_ok else "failed"),
                 "tool_presence_check": "not_required" if method in {"content_generation", "model_knowledge", "knowledge_base", "web_search", "api_call"} else "deferred_to_runtime_registry",
-                "confirmation_check": "requires_human_confirmation" if bool(step.get("requires_human_confirmation")) else "not_required",
+                "confirmation_check": "requires_credential_input" if credential_required else ("requires_human_confirmation" if bool(step.get("requires_human_confirmation")) else "not_required"),
                 "sandbox_check": "passed" if method in {"content_generation", "model_knowledge", "knowledge_base", "web_search", "api_call"} else "deferred_until_generated_resource_exists",
+                "ui_request": self._prepared_credential_request(prep, str(step.get("step_id") or step.get("task_id") or f"step_{index + 1}"), method) if credential_required else None,
                 "passed": passed,
             })
         passed_all = bool(steps) and all(item.get("passed") for item in checks)
@@ -306,6 +308,42 @@ class StaticTransformExecutor:
         )
         return any(token in lowered for token in placeholder_tokens)
 
+    def _reference_requires_credential(self, value: str) -> bool:
+        """Detect credential placeholders without hard-coding any provider or domain.
+
+        Credential-required candidates are not invalid. They are preserved as
+        candidates and converted into a UI credential request before execution.
+        """
+        text = str(value or "").strip().lower()
+        if not text:
+            return False
+        credential_markers = (
+            "your_api_key",
+            "api_key=",
+            "apikey=",
+            "key=",
+            "token=",
+            "access_token=",
+            "bearer ",
+            "insert_key",
+            "replace_me",
+            "<api",
+            "{api",
+        )
+        return any(marker in text for marker in credential_markers)
+
+    def _filter_credential_required_references(self, values: list[str]) -> list[str]:
+        filtered: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value or "").strip()
+            if not text or not self._reference_requires_credential(text):
+                continue
+            if text not in seen:
+                seen.add(text)
+                filtered.append(text)
+        return filtered
+
     def _filter_preparable_references(self, values: list[str]) -> list[str]:
         filtered: list[str] = []
         seen: set[str] = set()
@@ -334,11 +372,33 @@ class StaticTransformExecutor:
         raw_endpoint_candidates = references["endpoint_candidates"]
         web_targets = self._filter_preparable_references(raw_web_targets)
         endpoint_candidates = self._filter_preparable_references(raw_endpoint_candidates)
+        credential_web_targets = self._filter_credential_required_references(raw_web_targets)
+        credential_endpoint_candidates = self._filter_credential_required_references(raw_endpoint_candidates)
         query_contract = references["query_contract"]
-        query_contract["targets"] = self._filter_preparable_references(query_contract.get("targets") if isinstance(query_contract.get("targets"), list) else [])
-        query_contract["rejected_targets"] = [item for item in raw_web_targets if item not in web_targets]
+        query_contract_targets = query_contract.get("targets") if isinstance(query_contract.get("targets"), list) else []
+        query_contract["targets"] = self._filter_preparable_references(query_contract_targets)
+        query_contract["credential_required_targets"] = self._filter_credential_required_references(query_contract_targets)
+        query_contract["rejected_targets"] = [item for item in raw_web_targets if item not in web_targets and item not in credential_web_targets]
         evidence_requirements = references["evidence_requirements"]
         action_contract = ACTION_CONTRACTS.get(action_type, {})
+        selected_api_endpoint = endpoint_candidates[0] if endpoint_candidates else ""
+        credential_only = bool(credential_endpoint_candidates) and not bool(endpoint_candidates)
+        discovered_api_contract = {
+            "required": method in {"web_search", "api_call"} and bool(endpoint_candidates or credential_endpoint_candidates),
+            "source_phase": "resource_discovery",
+            "selected_endpoint": selected_api_endpoint,
+            "endpoint_candidates": endpoint_candidates,
+            "credential_required_candidates": credential_endpoint_candidates,
+            "credential_interaction_required": credential_only,
+            "credential_request": {
+                "type": "collect_credential",
+                "fields": ["credential_value"],
+                "target_refs": credential_endpoint_candidates,
+                "reason": "A selected external candidate requires a credential before execution.",
+            } if credential_only else None,
+            "selection_policy": "prefer no-credential candidates before credential-required candidates; preserve all candidate URLs for verification",
+            "evidence_url_policy": {"preserve_selected_endpoint": True, "preserve_actual_request_url": True},
+        }
         return {
             "step_id": step_id,
             "action_type": action_type,
@@ -354,22 +414,28 @@ class StaticTransformExecutor:
                 "query_contract": query_contract,
                 "evidence_requirements": evidence_requirements,
                 "evidence_url_policy": {"preserve_planned_targets": True, "preserve_actual_result_urls": True, "compare_planned_and_actual": True},
-                "next_resource_stage": "api_contract_preparation" if endpoint_candidates else "web_evidence_collection",
-                "approved_in_preparation": method == "web_search" and bool(web_targets),
-                "discovery_required": method == "web_search" and not bool(web_targets),
-                "discovery_contract": {"allowed": True, "selection_policy": "collect explicit query/target references before execution; preserve collected source URLs as evidence"} if method == "web_search" and not bool(web_targets) else None,
-                "status": "prepared" if method != "web_search" or web_targets else "discovery_required",
+                "next_resource_stage": "api_contract_preparation" if (endpoint_candidates or credential_endpoint_candidates) else "web_evidence_collection",
+                "api_contract_from_discovery": discovered_api_contract if method == "web_search" else None,
+                "approved_in_preparation": method == "web_search" and bool(web_targets or selected_api_endpoint),
+                "credential_interaction_required": method == "web_search" and credential_only,
+                "discovery_required": method == "web_search" and not bool(web_targets or endpoint_candidates or credential_endpoint_candidates),
+                "discovery_contract": {"allowed": True, "selection_policy": "collect explicit query/target references before execution; preserve collected source URLs as evidence; structured candidates must be converted into API contracts before execution when possible"} if method == "web_search" and not bool(web_targets or endpoint_candidates or credential_endpoint_candidates) else None,
+                "status": "credential_required" if method == "web_search" and credential_only else ("prepared" if method != "web_search" or web_targets or selected_api_endpoint else "discovery_required"),
             },
             "api_call_preparation": {
                 "required": method == "api_call",
                 "parameters": known,
                 "endpoint_candidates": endpoint_candidates,
+                "credential_required_candidates": credential_endpoint_candidates,
                 "query_contract": query_contract,
+                "api_contract": discovered_api_contract if method == "api_call" else None,
                 "evidence_requirements": evidence_requirements,
                 "evidence_url_policy": {"preserve_endpoint_candidates": True, "preserve_actual_request_url": True, "compare_planned_and_actual": True},
                 "approved_in_preparation": method == "api_call" and bool(endpoint_candidates),
-                "discovery_required": method == "api_call" and not endpoint_candidates,
-                "discovery_contract": {"allowed": action_type == "call_api_no_key", "credential_required": action_type == "call_api_with_key", "selection_policy": "no-key before key-required; free before paid"} if method == "api_call" else None,
+                "credential_interaction_required": method == "api_call" and credential_only,
+                "credential_request": discovered_api_contract.get("credential_request") if method == "api_call" else None,
+                "discovery_required": method == "api_call" and not bool(endpoint_candidates or credential_endpoint_candidates),
+                "discovery_contract": {"allowed": action_type == "call_api_no_key", "credential_required": action_type == "call_api_with_key", "selection_policy": "no-key before key-required; free before paid; key-required candidates are preserved and routed to UI credential collection"} if method == "api_call" else None,
                 "design_contract": {
                     "capability": step.get("required_capability"),
                     "input_schema": {"type": "object", "additionalProperties": True},
@@ -499,11 +565,48 @@ class StaticTransformExecutor:
                 return False
             if method == "web_search":
                 web = item.get("web_collection") if isinstance(item.get("web_collection"), dict) else {}
-                return bool(web.get("approved_in_preparation") and web.get("targets"))
+                api_contract = web.get("api_contract_from_discovery") if isinstance(web.get("api_contract_from_discovery"), dict) else {}
+                if web.get("credential_interaction_required"):
+                    return False
+                return bool(web.get("approved_in_preparation") and (web.get("targets") or api_contract.get("selected_endpoint")))
             if method == "api_call":
                 api = item.get("api_call_preparation") if isinstance(item.get("api_call_preparation"), dict) else {}
+                if api.get("credential_interaction_required"):
+                    return False
                 return bool(api.get("approved_in_preparation") and api.get("endpoint_candidates"))
         return False
+
+
+    def _prepared_credential_required(self, prep: dict[str, Any], step_id: str, method: str) -> bool:
+        bundle = prep.get("resource_bundle") if isinstance(prep.get("resource_bundle"), dict) else {}
+        steps = bundle.get("steps") if isinstance(bundle.get("steps"), list) else []
+        for item in steps:
+            if not isinstance(item, dict) or str(item.get("step_id")) != str(step_id):
+                continue
+            if method == "web_search":
+                web = item.get("web_collection") if isinstance(item.get("web_collection"), dict) else {}
+                return bool(web.get("credential_interaction_required"))
+            if method == "api_call":
+                api = item.get("api_call_preparation") if isinstance(item.get("api_call_preparation"), dict) else {}
+                return bool(api.get("credential_interaction_required"))
+        return False
+
+    def _prepared_credential_request(self, prep: dict[str, Any], step_id: str, method: str) -> dict[str, Any] | None:
+        bundle = prep.get("resource_bundle") if isinstance(prep.get("resource_bundle"), dict) else {}
+        steps = bundle.get("steps") if isinstance(bundle.get("steps"), list) else []
+        for item in steps:
+            if not isinstance(item, dict) or str(item.get("step_id")) != str(step_id):
+                continue
+            if method == "web_search":
+                web = item.get("web_collection") if isinstance(item.get("web_collection"), dict) else {}
+                contract = web.get("api_contract_from_discovery") if isinstance(web.get("api_contract_from_discovery"), dict) else {}
+                req = contract.get("credential_request") if isinstance(contract.get("credential_request"), dict) else None
+                return req
+            if method == "api_call":
+                api = item.get("api_call_preparation") if isinstance(item.get("api_call_preparation"), dict) else {}
+                req = api.get("credential_request") if isinstance(api.get("credential_request"), dict) else None
+                return req
+        return None
 
     def _stage_payload(self, value: Any, preferred_key: str | None = None) -> dict[str, Any]:
         if not isinstance(value, dict):

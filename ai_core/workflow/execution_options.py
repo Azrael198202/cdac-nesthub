@@ -98,7 +98,8 @@ AGENT_ACTION_PROMPT_CONTRACT: dict[str, Any] = {
         "The flow must show discovery/planning phases separately from real execution phases.",
         "A planner LLM call may be used only to choose actions, discover candidate sources, or design a resource contract; it must not produce the final task result unless selected_action_type is llm_generate.",
         "If a web/API candidate is selected, preserve query/target/endpoint values for execution_preparation and later verification.",
-        "If web discovery finds a structured endpoint candidate, the next flow phase should prepare an API contract before execution when that is more stable than page reading.",
+        "If web discovery finds a structured endpoint candidate, the next flow phase MUST prepare an API contract before execution when that is more stable than page reading.",
+        "If the selected candidate requires credentials, do not discard it; output credential_fields and a user_interaction phase before API execution.",
         "Use only fixed action_type values; never invent method names."
     ],
     "required_output": {

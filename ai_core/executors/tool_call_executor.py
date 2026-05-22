@@ -4,6 +4,8 @@ import asyncio
 import json
 import subprocess
 import sys
+import urllib.request
+import urllib.error
 from typing import Any
 from datetime import datetime, timezone
 
@@ -446,6 +448,28 @@ class ToolCallExecutor:
                 continue
 
             if method_contract.method in {"web_search", "api_call"}:
+                prepared_external_result = await self._execute_prepared_external_resource(
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    method=method_contract.method,
+                    step=step,
+                    state=state,
+                )
+                if prepared_external_result:
+                    result_obj = prepared_external_result.get("result") if isinstance(prepared_external_result.get("result"), dict) else {}
+                    result_obj.setdefault("data", {})["execution_method_contract"] = method_contract.to_dict()
+                    execution_steps.append({
+                        "step_id": step_id,
+                        "status": "executed",
+                        "tool": prepared_external_result.get("tool"),
+                        "input": prepared_external_result.get("input"),
+                        "result": result_obj,
+                        "provenance": (result_obj or {}).get("provenance") if isinstance(result_obj, dict) else None,
+                        "source_step": step,
+                        "priority_path": "prepared_external_resource_contract",
+                    })
+                    continue
                 routed_web_result = await self._try_strategy_web_evidence_execution(
                     run_id=run_id,
                     node_id=node_id,
@@ -1287,6 +1311,112 @@ class ToolCallExecutor:
             decision_source="locked_workflow_action_enforcer",
         )
 
+    def _prepared_resource_for_step(self, *, state: dict[str, Any], step_id: str) -> dict[str, Any]:
+        results = state.get("results") if isinstance(state, dict) and isinstance(state.get("results"), dict) else {}
+        prep = results.get("execution_preparation") if isinstance(results.get("execution_preparation"), dict) else {}
+        record = prep.get("execution_preparation_record") if isinstance(prep.get("execution_preparation_record"), dict) else prep
+        bundle = record.get("resource_bundle") if isinstance(record.get("resource_bundle"), dict) else {}
+        steps = bundle.get("steps") if isinstance(bundle.get("steps"), list) else []
+        for item in steps:
+            if isinstance(item, dict) and str(item.get("step_id")) == str(step_id):
+                return item
+        return {}
+
+    def _selected_prepared_external_url(self, *, resource: dict[str, Any], method: str) -> str:
+        if method == "api_call":
+            api = resource.get("api_call_preparation") if isinstance(resource.get("api_call_preparation"), dict) else {}
+            if api.get("credential_interaction_required"):
+                return ""
+            endpoints = api.get("endpoint_candidates") if isinstance(api.get("endpoint_candidates"), list) else []
+            return str(endpoints[0]).strip() if endpoints else ""
+        if method == "web_search":
+            web = resource.get("web_collection") if isinstance(resource.get("web_collection"), dict) else {}
+            if web.get("credential_interaction_required"):
+                return ""
+            api_contract = web.get("api_contract_from_discovery") if isinstance(web.get("api_contract_from_discovery"), dict) else {}
+            selected = str(api_contract.get("selected_endpoint") or "").strip()
+            if selected:
+                return selected
+            targets = web.get("targets") if isinstance(web.get("targets"), list) else []
+            return str(targets[0]).strip() if targets else ""
+        return ""
+
+    async def _execute_prepared_external_resource(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        step_id: str,
+        method: str,
+        step: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Execute the exact external URL approved by execution_preparation.
+
+        This is generic and provider-neutral. It does not discover a domain or
+        provider. It only executes the locked prepared URL and preserves it as
+        evidence/provenance. Credential-required candidates are intentionally
+        not executed here; validation should route them to user interaction.
+        """
+        resource = self._prepared_resource_for_step(state=state, step_id=step_id)
+        url = self._selected_prepared_external_url(resource=resource, method=method)
+        if not url or not str(url).lower().startswith(("http://", "https://")):
+            return None
+        await event_bus.emit(run_id, {
+            "type": "PREPARED_EXTERNAL_RESOURCE_EXECUTION_STARTED",
+            "title": "Prepared external resource execution started",
+            "message": "Executing the locked URL prepared by execution_preparation.",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": {"url": url, "method": method},
+        })
+        def fetch() -> dict[str, Any]:
+            req = urllib.request.Request(url, headers={"User-Agent": "cdac-nesthub-runtime/1.0", "Accept": "application/json,text/plain,*/*"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                status = getattr(resp, "status", 200)
+                content_type = resp.headers.get("content-type", "") if hasattr(resp, "headers") else ""
+                raw = resp.read(512000)
+            text = raw.decode("utf-8", errors="replace")
+            parsed: Any = None
+            if "json" in content_type.lower() or text.lstrip().startswith(("{", "[")):
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    parsed = None
+            return {"status_code": status, "content_type": content_type, "text": text[:12000], "json": parsed}
+        try:
+            payload = await asyncio.to_thread(fetch)
+        except Exception as exc:
+            await event_bus.emit(run_id, {
+                "type": "PREPARED_EXTERNAL_RESOURCE_EXECUTION_FAILED",
+                "title": "Prepared external resource execution failed",
+                "message": str(exc),
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": {"url": url, "method": method},
+            })
+            return None
+        data = {
+            "answer_material": payload.get("json") if payload.get("json") is not None else payload.get("text"),
+            "normalized_facts": payload.get("json") if isinstance(payload.get("json"), dict) else {},
+            "content": payload.get("text"),
+            "source_urls": [url],
+            "evidence_urls": [url],
+            "http_status": payload.get("status_code"),
+            "content_type": payload.get("content_type"),
+        }
+        result = {
+            "status": "success" if int(payload.get("status_code") or 0) < 400 else "failed",
+            "data": data,
+            "provenance": {
+                "source": "prepared_external_resource",
+                "method": method,
+                "source_urls": [url],
+                "executed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        }
+        return {"tool": {"id": "prepared_external_resource_executor", "source": "execution_preparation"}, "input": {"url": url, "method": method}, "result": result}
+
     def _prepared_resource_allows_method(self, *, state: dict[str, Any], step_id: str, method: str) -> bool:
         results = state.get("results") if isinstance(state, dict) and isinstance(state.get("results"), dict) else {}
         prep = results.get("execution_preparation") if isinstance(results.get("execution_preparation"), dict) else {}
@@ -1304,9 +1434,14 @@ class ToolCallExecutor:
                 return False
             if method == "web_search":
                 web = item.get("web_collection") if isinstance(item.get("web_collection"), dict) else {}
-                return bool(web.get("required") and web.get("approved_in_preparation") and web.get("targets"))
+                if web.get("credential_interaction_required"):
+                    return False
+                api_contract = web.get("api_contract_from_discovery") if isinstance(web.get("api_contract_from_discovery"), dict) else {}
+                return bool(web.get("required") and web.get("approved_in_preparation") and (web.get("targets") or api_contract.get("selected_endpoint")))
             if method == "api_call":
                 api = item.get("api_call_preparation") if isinstance(item.get("api_call_preparation"), dict) else {}
+                if api.get("credential_interaction_required"):
+                    return False
                 return bool(api.get("required") and api.get("approved_in_preparation") and api.get("endpoint_candidates"))
             return True
         return False

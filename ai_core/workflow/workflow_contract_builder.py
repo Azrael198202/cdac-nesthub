@@ -286,17 +286,28 @@ class WorkflowContractBuilder:
         if method in {"web_search", "api_call"}:
             flow.append({
                 "phase_id": "phase_2",
-                "phase_role": "resource_discovery_or_contract_preparation",
-                "action_type": action_type,
-                "purpose": "collect stable query targets, candidate endpoints, request contract, and evidence URL policy before real execution",
+                "phase_role": "resource_discovery",
+                "action_type": "web_query" if method == "web_search" else action_type,
+                "purpose": "collect available pages, API candidates, credential requirements, query targets, and evidence URL policy before real execution",
                 "inputs": ["selected_action_type", "known_parameters", "candidate_targets"],
-                "outputs": ["query_contract", "targets_or_endpoints", "evidence_requirements"],
-                "success_criteria": ["targets or endpoints are preserved", "source URLs can be verified after execution"],
+                "outputs": ["query_contract", "candidate_sources", "candidate_endpoints", "credential_requirements", "evidence_requirements"],
+                "success_criteria": ["candidate URLs are preserved", "credential requirements are explicit", "source URLs can be verified after execution"],
                 "next_on_success": "phase_3",
                 "next_on_failure": "resource_discovery_repair",
             })
             flow.append({
                 "phase_id": "phase_3",
+                "phase_role": "api_or_web_contract_preparation",
+                "action_type": action_type,
+                "purpose": "convert discovered candidates into an executable API contract when possible; otherwise prepare a web extraction contract; if credentials are required, prepare a UI credential request",
+                "inputs": ["candidate_sources", "candidate_endpoints", "credential_requirements", "known_parameters"],
+                "outputs": ["api_contract", "web_extract_contract", "credential_request", "resource_bundle"],
+                "success_criteria": ["no-key candidates are preferred", "key-required candidates trigger user interaction before execution", "prepared contract matches selected action"],
+                "next_on_success": "phase_4",
+                "next_on_failure": "credential_or_contract_repair",
+            })
+            flow.append({
+                "phase_id": "phase_4",
                 "phase_role": "real_execution",
                 "action_type": action_type,
                 "execution_method": method,
