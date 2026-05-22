@@ -992,7 +992,7 @@ class RuntimeBootstrap:
             })
 
     def _ensure_registry(self) -> None:
-        for name in ["installed_capabilities.json", "tool_registry.json", "provider_registry.json"]:
+        for name in ["installed_capabilities.json", "tool_registry.json", "provider_registry.json", "module_registry.json"]:
             p = RUNTIME_REGISTRY / name
             if not p.exists():
                 self.loader.save_json(p, {})

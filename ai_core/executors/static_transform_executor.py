@@ -206,9 +206,9 @@ class StaticTransformExecutor:
                 "action_type_check": "passed" if action_ok else "failed",
                 "execution_method_check": "passed" if method_ok else "failed",
                 "resource_preparation_check": "passed" if resource_ok else "failed",
-                "tool_presence_check": "not_required" if method in {"content_generation", "model_knowledge", "knowledge_base"} else "deferred_to_runtime_registry",
+                "tool_presence_check": "not_required" if method in {"content_generation", "model_knowledge", "knowledge_base", "web_search", "api_call"} else "deferred_to_runtime_registry",
                 "confirmation_check": "requires_human_confirmation" if bool(step.get("requires_human_confirmation")) else "not_required",
-                "sandbox_check": "passed" if method in {"content_generation", "model_knowledge", "knowledge_base"} else "deferred_until_generated_resource_exists",
+                "sandbox_check": "passed" if method in {"content_generation", "model_knowledge", "knowledge_base", "web_search", "api_call"} else "deferred_until_generated_resource_exists",
                 "passed": passed,
             })
         passed_all = bool(steps) and all(item.get("passed") for item in checks)
@@ -284,6 +284,40 @@ class StaticTransformExecutor:
         key = ((node_config.get("stage_contract") or {}).get("output_key") or "stage_record")
         return {key: {"status": "executed", "node_id": node_id}, "status": "completed", "message": "Stage executed."}
 
+
+    def _reference_has_placeholder(self, value: str) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return True
+        lowered = text.lower()
+        placeholder_tokens = (
+            "your_api_key",
+            "api_key",
+            "apikey",
+            "insert_key",
+            "change_me",
+            "replace_me",
+            "todo",
+            "xxxxx",
+            "<",
+            ">",
+            "{",
+            "}",
+        )
+        return any(token in lowered for token in placeholder_tokens)
+
+    def _filter_preparable_references(self, values: list[str]) -> list[str]:
+        filtered: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value or "").strip()
+            if not text or self._reference_has_placeholder(text):
+                continue
+            if text not in seen:
+                seen.add(text)
+                filtered.append(text)
+        return filtered
+
     def _prepared_step(self, step: dict[str, Any], index: int) -> dict[str, Any]:
         method = self._execution_method(step)
         action_type = normalize_action_type(step.get("action_type") or step.get("execution_action"))
@@ -296,9 +330,13 @@ class StaticTransformExecutor:
             known.update(params.get("known") or {})
         source_policy = step.get("source_policy") if isinstance(step.get("source_policy"), dict) else {}
         references = self._extract_execution_references(step)
-        web_targets = references["web_targets"]
-        endpoint_candidates = references["endpoint_candidates"]
+        raw_web_targets = references["web_targets"]
+        raw_endpoint_candidates = references["endpoint_candidates"]
+        web_targets = self._filter_preparable_references(raw_web_targets)
+        endpoint_candidates = self._filter_preparable_references(raw_endpoint_candidates)
         query_contract = references["query_contract"]
+        query_contract["targets"] = self._filter_preparable_references(query_contract.get("targets") if isinstance(query_contract.get("targets"), list) else [])
+        query_contract["rejected_targets"] = [item for item in raw_web_targets if item not in web_targets]
         evidence_requirements = references["evidence_requirements"]
         action_contract = ACTION_CONTRACTS.get(action_type, {})
         return {

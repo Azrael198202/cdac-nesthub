@@ -469,6 +469,18 @@ class ToolCallExecutor:
                         "priority_path": "execution_method_" + method_contract.method,
                     })
                     continue
+                blocked_steps.append({
+                    "step_id": step_id,
+                    "status": "locked_external_execution_failed",
+                    "reason": "The locked external execution method did not return verified material; execution must not fall through to registry modules or unrelated runtime tools.",
+                    "execution_method_contract": method_contract.to_dict(),
+                    "source_step": step,
+                    "repair_instruction": {
+                        "retry_from": "agent_action_planning",
+                        "required_result": "prepare a valid target/endpoint or choose another fixed action explicitly",
+                    },
+                })
+                continue
 
             if method_contract.method not in {"web_search", "api_call", "knowledge_base", "model_knowledge", "content_generation", "existing_tool", "runtime_generated_tool", "shell", "human_interaction", "no_op", "external_skill", "static_response"}:
                 blocked_steps.append({
