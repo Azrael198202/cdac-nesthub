@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from ai_core.workflow.execution_options import ACTION_CONTRACTS, ACTION_TO_METHOD, SELECTION_RULES, fixed_options_for_prompt, is_fixed_action, method_for_action
+from ai_core.workflow.execution_options import (
+    ACTION_CONTRACTS,
+    ACTION_TO_METHOD,
+    AGENT_ACTION_PROMPT_CONTRACT,
+    SELECTION_RULES,
+    fixed_options_for_prompt,
+    is_fixed_action,
+    method_for_action,
+    normalize_action_type,
+)
 
 
 class WorkflowContractBuilder:
@@ -81,13 +90,13 @@ class WorkflowContractBuilder:
         for i, item in enumerate(ranked_raw):
             if not isinstance(item, dict):
                 continue
-            action = str(item.get("action_type") or item.get("selected_action_type") or item.get("id") or item.get("name") or "").strip()
+            action = normalize_action_type(item.get("action_type") or item.get("selected_action_type") or item.get("id") or item.get("name"))
             if not is_fixed_action(action) or action in seen:
                 continue
             contract = ACTION_CONTRACTS.get(action, {})
             ranked.append({**contract, **item, "action_type": action, "priority": int(item.get("priority") or item.get("rank") or i + 1)})
             seen.add(action)
-        selected = str(decision.get("selected_action_type") or decision.get("action_type") or decision.get("selected_option") or "").strip()
+        selected = normalize_action_type(decision.get("selected_action_type") or decision.get("action_type") or decision.get("selected_option"))
         if not is_fixed_action(selected) and ranked:
             selected = str(ranked[0].get("action_type"))
         if not is_fixed_action(selected):
@@ -110,11 +119,11 @@ class WorkflowContractBuilder:
                 extracted = self.extract_execution_decision(value)
                 if extracted.get("selected_action_type"):
                     return extracted
-        selected = "llm_generate"
+        selected = "ask_user"
         ranked = []
         for i, item in enumerate(fixed_options_for_prompt()):
             priority = 1 if item["action_type"] == selected else i + 2
-            ranked.append({**item, "priority": priority, "reason": "default generic option when model did not provide a valid fixed action"})
+            ranked.append({**item, "priority": priority, "reason": "planner did not provide a valid fixed action; request action clarification instead of guessing execution"})
         ranked.sort(key=lambda x: int(x["priority"]))
         return {"selected_action_type": selected, "selected_execution_method": method_for_action(selected), "ranked_options": ranked, "selection_rules": list(SELECTION_RULES)}
 
@@ -133,6 +142,7 @@ class WorkflowContractBuilder:
             "parameters": {"known": known, "missing_required": {}, "optional": {}},
             "required_capability": self.capability_from_state(state),
             "execution_decision": decision,
+            "agent_action_prompt_contract": AGENT_ACTION_PROMPT_CONTRACT,
             "execution_ready": True,
             "human_interaction": {},
             "next_action": "execution_preparation",
@@ -162,13 +172,14 @@ class WorkflowContractBuilder:
             params["known"] = self.collect_known_parameters(state)
         out["parameters"] = params
         step_decision = self.extract_execution_decision(out) or decision
-        action_type = str(out.get("action_type") or out.get("execution_action") or step_decision.get("selected_action_type") or "").strip()
+        action_type = normalize_action_type(out.get("action_type") or out.get("execution_action") or step_decision.get("selected_action_type"))
         if not is_fixed_action(action_type):
-            action_type = str(decision.get("selected_action_type") or "llm_generate")
+            action_type = normalize_action_type(decision.get("selected_action_type"), "ask_user")
         method = method_for_action(action_type)
         out["action_type"] = action_type
         out["execution_action"] = action_type
         out["execution_decision"] = step_decision or decision
+        out["agent_action_prompt_contract"] = AGENT_ACTION_PROMPT_CONTRACT
         out["execution_method"] = method
         out["execution_method_policy"] = {"preferred_methods": [method], "disabled_methods": [m for m in set(ACTION_TO_METHOD.values()) if m != method], "fallback_allowed": False}
         out["execution_strategy"] = [method]
