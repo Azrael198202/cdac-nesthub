@@ -144,26 +144,29 @@ class ToolCallExecutor:
         validation_result = previous_results.get("pre_execution_validation") if isinstance(previous_results.get("pre_execution_validation"), dict) else {}
         validation_payload = validation_result.get("validation_record") if isinstance(validation_result.get("validation_record"), dict) else validation_result
         if validation_payload and validation_payload.get("status") != "passed":
+            interaction_requests = self._interaction_requests_from_validation(validation_payload)
+            waiting_for_input = bool(interaction_requests)
             return {
                 "_executor_type": "tool_call",
                 "_node_id": node_id,
-                "status": "blocked",
-                "message": "Execution stopped because pre_execution_validation did not pass. Repair loop must regenerate planning/preparation/validation before execution.",
+                "status": "waiting_for_human_information" if waiting_for_input else "blocked",
+                "message": "Execution is waiting for runtime input before the locked action can run." if waiting_for_input else "Execution stopped because pre_execution_validation did not pass. Repair loop must regenerate planning/preparation/validation before execution.",
                 "execution_steps": [],
                 "blocked_steps": [{
                     "step_id": "pre_execution_validation",
-                    "status": "validation_failed",
-                    "reason": "pre_execution_validation.status must be passed before execution.",
+                    "status": "waiting_for_runtime_input" if waiting_for_input else "validation_failed",
+                    "reason": "Runtime parameter input is required before execution." if waiting_for_input else "pre_execution_validation.status must be passed before execution.",
                     "validation_record": validation_payload,
+                    "ui_requests": interaction_requests,
                 }],
-                "human_interactions": [],
+                "human_interactions": interaction_requests,
                 "missing_tools": [],
                 "safety_holds": [],
                 "repair_instruction": {
-                    "target_stage": "feedback_repair",
-                    "retry_from": "workflow_planning",
+                    "target_stage": "requirement_completion" if waiting_for_input else "feedback_repair",
+                    "retry_from": "pre_execution_validation" if waiting_for_input else "workflow_planning",
                     "max_repair_attempts": 3,
-                    "required_result": "pre_execution_validation.status == passed",
+                    "required_result": "user supplies runtime parameters and pre_execution_validation.status == passed" if waiting_for_input else "pre_execution_validation.status == passed",
                 },
             }
         workflow_plan = previous_results.get("agent_action_planning", {}) or previous_results.get("workflow_planning", {})

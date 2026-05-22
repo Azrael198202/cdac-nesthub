@@ -72,6 +72,8 @@ class OutputExecutor:
         blocked_steps = execution.get("blocked_steps") if isinstance(execution.get("blocked_steps"), list) else []
         safety_holds = execution.get("safety_holds") if isinstance(execution.get("safety_holds"), list) else []
         human_interactions = execution.get("human_interactions") if isinstance(execution.get("human_interactions"), list) else []
+        if not human_interactions:
+            human_interactions = self._ui_requests_from_blocked_steps(blocked_steps)
         optional_human_interactions = execution.get("optional_human_interactions") if isinstance(execution.get("optional_human_interactions"), list) else []
         missing_tools = execution.get("missing_tools") if isinstance(execution.get("missing_tools"), list) else []
 
@@ -103,6 +105,7 @@ class OutputExecutor:
                 "blocked_steps": blocked_steps,
                 "safety_holds": safety_holds,
                 "human_interactions": human_interactions,
+                "interaction_request": human_interactions[0] if human_interactions else None,
                 "missing_tools": missing_tools,
                 "final_answer": message,
             }
@@ -232,6 +235,25 @@ class OutputExecutor:
         except Exception:
             return
 
+    def _ui_requests_from_blocked_steps(self, blocked_steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        requests: list[dict[str, Any]] = []
+        for step in blocked_steps:
+            if not isinstance(step, dict):
+                continue
+            direct = step.get("ui_requests") if isinstance(step.get("ui_requests"), list) else []
+            for item in direct:
+                if isinstance(item, dict):
+                    requests.append(item)
+            validation = step.get("validation_record") if isinstance(step.get("validation_record"), dict) else {}
+            checks = validation.get("checks") if isinstance(validation.get("checks"), list) else []
+            for check in checks:
+                if not isinstance(check, dict):
+                    continue
+                req = check.get("ui_request") if isinstance(check.get("ui_request"), dict) else None
+                if req:
+                    requests.append(req)
+        return requests
+
     def _optional_upgrade_request(self, interactions: list[dict[str, Any]]) -> dict[str, Any]:
         first = interactions[0] if interactions and isinstance(interactions[0], dict) else {}
         return {
@@ -302,6 +324,12 @@ class OutputExecutor:
 
     def _waiting_message(self, status: str, human_interactions, safety_holds, missing_tools, blocked_steps) -> str:
         if human_interactions:
+            first = human_interactions[0] if isinstance(human_interactions, list) and human_interactions and isinstance(human_interactions[0], dict) else {}
+            fields = first.get("fields") if isinstance(first.get("fields"), list) else []
+            names = [str(field.get("name") or field.get("label") or "").strip() for field in fields if isinstance(field, dict)]
+            names = [name for name in names if name]
+            if names:
+                return "The workflow is waiting for runtime input before it can continue. Required fields: " + ", ".join(names)
             return "The workflow is waiting for additional information before it can continue."
         if safety_holds:
             return "The workflow is waiting for your confirmation before executing a sensitive or irreversible step."

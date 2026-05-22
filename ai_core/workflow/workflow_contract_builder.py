@@ -12,6 +12,7 @@ from ai_core.workflow.execution_options import (
     method_for_action,
     normalize_action_type,
 )
+from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
 
 
 class WorkflowContractBuilder:
@@ -22,6 +23,9 @@ class WorkflowContractBuilder:
     It never decides business semantics; it only uses upstream structured
     intent/context and fixed runtime action options.
     """
+
+    def __init__(self) -> None:
+        self.artifact_registry = UploadedArtifactRegistry()
 
     def fixed_action_types(self) -> list[str]:
         return list(ACTION_TO_METHOD.keys())
@@ -289,6 +293,23 @@ class WorkflowContractBuilder:
     def collect_available_artifacts(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         artifacts: list[dict[str, Any]] = []
         seen: set[str] = set()
+
+        def add_item(item: dict[str, Any]) -> None:
+            artifact_id = str(item.get("artifact_id") or item.get("id") or item.get("path") or item.get("filename") or "").strip()
+            path = str(item.get("path") or item.get("filepath") or item.get("file_path") or "").strip()
+            filename = str(item.get("filename") or item.get("name") or "").strip()
+            key_id = artifact_id or path or filename
+            if key_id and key_id not in seen:
+                seen.add(key_id)
+                artifacts.append(dict(item))
+
+        # Registry items are runtime resources, not business logic. Include them
+        # so a user-visible filename mentioned in the request can be resolved even
+        # when the UI did not explicitly attach the artifact to the message body.
+        for item in self.artifact_registry.list():
+            if isinstance(item, dict):
+                add_item(item)
+
         def visit(value: Any, depth: int = 0) -> None:
             if depth > 6:
                 return
@@ -298,13 +319,7 @@ class WorkflowContractBuilder:
                     if isinstance(raw, list):
                         for item in raw:
                             if isinstance(item, dict):
-                                artifact_id = str(item.get("artifact_id") or item.get("id") or item.get("path") or item.get("filename") or "").strip()
-                                path = str(item.get("path") or item.get("filepath") or item.get("file_path") or "").strip()
-                                filename = str(item.get("filename") or item.get("name") or "").strip()
-                                key_id = artifact_id or path or filename
-                                if key_id and key_id not in seen:
-                                    seen.add(key_id)
-                                    artifacts.append(dict(item))
+                                add_item(item)
                 for nested in value.values():
                     visit(nested, depth + 1)
             elif isinstance(value, list):
@@ -319,6 +334,10 @@ class WorkflowContractBuilder:
         if not request_text:
             return []
         matched: list[dict[str, Any]] = []
+        registry_matches = self.artifact_registry.resolve_from_text(request_text)
+        for item in registry_matches:
+            if isinstance(item, dict):
+                matched.append(dict(item))
         for item in artifacts:
             names = [
                 str(item.get("artifact_id") or item.get("id") or ""),

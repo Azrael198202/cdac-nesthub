@@ -44,6 +44,10 @@ class UploadedArtifactContractBuilder:
             for key in self.FILE_REF_KEYS:
                 if key in container:
                     raw.append(container.get(key))
+        text_blob = self._joined_text(state=state, step=step)
+        for item in self.registry.resolve_from_text(text_blob):
+            raw.append(item)
+
         refs: list[UploadedArtifactRef] = []
         seen: set[str] = set()
         for item in raw:
@@ -121,6 +125,27 @@ class UploadedArtifactContractBuilder:
         runtime_context = state.get("runtime_context") if isinstance(state.get("runtime_context"), dict) else {}
         yield runtime_context
         yield state
+
+    def _joined_text(self, *, state: dict[str, Any], step: dict[str, Any]) -> str:
+        parts: list[str] = []
+        def visit(value: Any, depth: int = 0) -> None:
+            if depth > 5:
+                return
+            if isinstance(value, str):
+                parts.append(value)
+            elif isinstance(value, dict):
+                for key in ("original_input", "user_input", "instruction", "objective", "content", "target", "query", "filename", "name", "artifact_id"):
+                    raw = value.get(key)
+                    if isinstance(raw, str):
+                        parts.append(raw)
+                for nested in value.values():
+                    visit(nested, depth + 1)
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item, depth + 1)
+        visit(step)
+        visit(state)
+        return "\n".join(part for part in parts if part)
 
     def _iter_nested(self, value: Any, *, max_depth: int):
         if max_depth < 0:
