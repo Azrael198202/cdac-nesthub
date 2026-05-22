@@ -642,7 +642,43 @@ class WorkflowRuntime:
                 return
 
             state["results"][node_id] = result
-            state["node_index"] += 1
+
+            # v5.0: validation failure is not allowed to flow into execution.
+            # The runtime loops back to workflow_planning/execution_preparation
+            # with generic repair hints until validation passes or retry budget is
+            # exhausted. This keeps execution deterministic and prevents delivery
+            # from exposing earlier stage messages as final answers.
+            if node_id == "pre_execution_validation" and isinstance(result, dict):
+                record = result.get("validation_record") if isinstance(result.get("validation_record"), dict) else result
+                if record.get("status") != "passed":
+                    repair_count = int(state.setdefault("repair_attempts", {}).get("pre_execution_validation", 0) or 0)
+                    if repair_count < 3:
+                        state["repair_attempts"]["pre_execution_validation"] = repair_count + 1
+                        state.setdefault("repair_hints", []).append({
+                            "from_stage": "pre_execution_validation",
+                            "retry_from": "workflow_planning",
+                            "reason": "validation_failed",
+                            "validation_record": record,
+                        })
+                        for stale in ("execution_preparation", "pre_execution_validation", "execution", "result_verification", "feedback_repair", "final_synthesis", "output"):
+                            state.get("results", {}).pop(stale, None)
+                        state["node_index"] = self._node_index_by_id(workflow, "workflow_planning")
+                        await self._emit(run_id, {
+                            "type": "VALIDATION_REPAIR_LOOP",
+                            "title": "Validation repair loop",
+                            "node_id": node_id,
+                            "attempt_number": repair_count + 1,
+                            "message": "Pre-execution validation failed. Re-running workflow planning and preparation with repair hints.",
+                            "validation_record": record,
+                            "progress": progress,
+                        })
+                        continue
+                    state["status"] = "blocked"
+                    state["node_index"] += 1
+                else:
+                    state["node_index"] += 1
+            else:
+                state["node_index"] += 1
             done = self._progress(workflow, state["node_index"])
             state["progress"] = done
 

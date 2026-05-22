@@ -4,6 +4,8 @@ import json
 from datetime import datetime
 from typing import Any
 
+from ai_core.workflow.execution_options import fixed_options_for_prompt, SELECTION_RULES
+
 from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_KNOWLEDGE
 from ai_core.utils.safe_json import safe_json_dumps
@@ -186,14 +188,21 @@ class RuntimeTemplateGenerator:
                 "confidence must be structured when the schema allows it; include overall, intent, and parameter_understanding scores.",
             ]
         if node_id == "workflow_planning":
+            options = fixed_options_for_prompt()
+            rules = list(SELECTION_RULES)
             return [
-                "Stage responsibility: convert parsed input and recognized intent into executable planned_steps.",
-                "planned_steps must be executable step objects, not strings.",
-                "Workflow planning may choose generic required capabilities, but must not choose concrete tools, APIs, providers, libraries, repositories, or implementation files.",
-                "Each planned step should include step_id, step_type, objective, input_from, parameters.known, parameters.optional, parameters.missing_required, execution_strategy, execution_ready, human_interaction, next_action, depends_on, and requires_human_confirmation when allowed by the schema. Use execution_strategy such as [model_generation], [local_knowledge], [web_evidence], or [tool_generation] instead of choosing concrete tools or providers.",
-                "When the desired result is original/generated content rather than verified external facts, set execution_strategy to [model_generation] and do not add web_evidence unless the user explicitly requires sources or current facts.",
-                "Copy normalized entities from upstream nodes; do not invent stale dates or re-normalize already resolved values.",
-                "Only request human_interaction when required fields are actually missing.",
+                "Stage responsibility: convert parsed input, recognized intent, completed requirements, and clean_context into a locked executable workflow.",
+                "First create execution_decision. You MUST rank the fixed execution options and choose exactly one selected_action_type for each executable step.",
+                "Fixed execution options JSON: " + json.dumps(options, ensure_ascii=False),
+                "Selection rules JSON: " + json.dumps(rules, ensure_ascii=False),
+                "planned_steps must be executable step objects, not strings, and must never be empty when requirements are complete.",
+                "Each planned step MUST include: step_id, step_type, objective, input_from, parameters.known, parameters.optional, parameters.missing_required, execution_decision, action_type, execution_method, execution_strategy, execution_ready, human_interaction, next_action, depends_on, source_policy, and requires_human_confirmation.",
+                "Generate workflow.main graph, agent_graph.main_graph nodes/edges, and subgraphs if the task needs multiple agents or substeps.",
+                "For each agent/substep, decide relation as independent or dependent. Dependent steps may only receive strict_json_safe_summary from dependencies.",
+                "Do not choose concrete provider names, API URLs, websites, SDK packages, repositories, or implementation files here. Those are prepared later by execution_preparation.",
+                "Do not leave action as a free verb. action_type must be one of the fixed options, and execution_method must match the selected option.",
+                "If information is missing, put it in blocking_missing_information and human_interaction, but still describe the blocked planned_steps when possible.",
+                "Copy normalized entities from upstream nodes into parameters.known; do not drop known_parameters.",
             ]
         return []
 
@@ -219,7 +228,11 @@ class RuntimeTemplateGenerator:
             }
         if node_id == "workflow_planning":
             return {
-                "planned_steps": "array",
+                "workflow": "object with workflow_id/status/main_graph/subgraphs",
+                "agent_graph": "object with main_graph nodes/edges and optional subgraphs",
+                "execution_decision": "object with selected_action_type and ranked_options from fixed options",
+                "planned_steps": "non-empty array when requirements are complete",
+                "execution_plan": "object with locked=true, steps, selected_action_type, ranked_options, allowed_action_types",
                 "blocking_missing_information": "array",
                 "required_capabilities": "array",
                 "human_interaction": "object optional; generate user-friendly fields only when required information is missing",
@@ -291,13 +304,25 @@ class RuntimeTemplateGenerator:
                 "type": "object",
                 "required": ["planned_steps"],
                 "properties": {
+                    "workflow": {"type": "object", "additionalProperties": True},
+                    "agent_graph": {"type": "object", "additionalProperties": True},
+                    "execution_decision": {
+                        "type": "object",
+                        "properties": {
+                            "selected_action_type": {"type": "string"},
+                            "ranked_options": {"type": "array"},
+                            "selection_rules": {"type": "array"}
+                        },
+                        "additionalProperties": True
+                    },
+                    "execution_plan": {"type": "object", "additionalProperties": True},
                     "planned_steps": {
                         "type": "array",
                         "items": {
                             "type": "object",
                             "required": [
                                 "step_id", "step_type", "objective", "input_from",
-                                "parameters", "execution_ready",
+                                "parameters", "execution_decision", "action_type", "execution_method", "execution_ready",
                                 "human_interaction", "next_action"
                             ],
                             "properties": {
@@ -306,6 +331,10 @@ class RuntimeTemplateGenerator:
                                 "task_id": {"type": "string"},
                                 "task_type": {"type": "string"},
                                 "action": {"type": "string"},
+                                "action_type": {"type": "string"},
+                                "execution_method": {"type": "string"},
+                                "execution_decision": {"type": "object", "additionalProperties": True},
+                                "source_policy": {"type": "object", "additionalProperties": True},
                                 "objective": {"type": "string"},
                                 "input_from": {"type": "array", "items": {"type": "string"}},
                                 "parameters": {

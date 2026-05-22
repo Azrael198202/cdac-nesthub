@@ -125,7 +125,7 @@ class OutputExecutor:
             materials=result_materials,
             trust_summary=trust_summary,
         )
-        final_answer = synthesized.get("answer") or "Workflow finished, but no user-facing answer was produced."
+        final_answer = synthesized.get("answer") or self._answer_material_from_execution_steps(execution_steps) or "Workflow finished, but no user-facing answer was produced."
 
         if trust_summary.get("trust_level") == "unverified_generated_result" and final_answer.startswith("I could not"):
             final_answer = final_answer + "\n\nTrust: unverified generated result. The runtime did not confirm live network verification, no-mock execution, or evidence-supported material quality."
@@ -148,6 +148,46 @@ class OutputExecutor:
             "blocked_steps": blocked_steps,
         }
 
+
+    def _answer_material_from_execution_steps(self, execution_steps: list[dict[str, Any]]) -> str:
+        """Extract public generated answer material from execution results.
+
+        This is a delivery fallback for locked generation workflows. It remains
+        generic by reading only public answer fields and never node messages from
+        input/intermediate stages.
+        """
+        public_keys = ("answer_material", "final_answer", "answer", "generated_content", "content", "text")
+
+        def scan(value: Any) -> str:
+            if isinstance(value, dict):
+                for key in public_keys:
+                    item = value.get(key)
+                    if isinstance(item, str) and item.strip():
+                        return item.strip()
+                    if isinstance(item, (dict, list)):
+                        nested = scan(item)
+                        if nested:
+                            return nested
+                for child in value.values():
+                    if isinstance(child, (dict, list)):
+                        nested = scan(child)
+                        if nested:
+                            return nested
+            elif isinstance(value, list):
+                for item in value[:20]:
+                    nested = scan(item)
+                    if nested:
+                        return nested
+            return ""
+
+        for step in execution_steps:
+            if not isinstance(step, dict):
+                continue
+            result = step.get("result") if isinstance(step.get("result"), dict) else {}
+            text = scan(result)
+            if text:
+                return text
+        return ""
 
     def _save_verified_answer_to_knowledge(self, *, state: dict[str, Any], final_answer: str, synthesized: dict[str, Any], trust_summary: dict[str, Any]) -> None:
         try:

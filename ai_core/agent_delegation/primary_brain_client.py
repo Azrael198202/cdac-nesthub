@@ -546,6 +546,8 @@ class PrimaryBrainDelegationClient:
             "could not be completed with verified result material",
             "no completed participant result",
             "no verified result material",
+            "could not produce a verified answer",
+            "could not produce a verified final answer",
             "source only",
         ]
         if any(fragment in lower for fragment in placeholder_fragments):
@@ -692,7 +694,9 @@ class PrimaryBrainDelegationClient:
                 if text:
                     return text
 
-        for node in results.values():
+        for node_id, node in results.items():
+            if str(node_id) in {"input_parsing", "intent_recognition", "requirement_completion", "context_awareness", "workflow_planning", "execution_preparation", "pre_execution_validation", "result_verification", "feedback_repair"}:
+                continue
             if isinstance(node, dict):
                 status = str(node.get("status") or node.get("execution_status") or "").lower()
                 if status in {"failed", "error", "timeout"}:
@@ -712,16 +716,29 @@ class PrimaryBrainDelegationClient:
 
     def _extract_final_answer(self, state: dict[str, Any]) -> str:
         results = state.get("results", {}) if isinstance(state, dict) else {}
-        output = results.get("output") if isinstance(results, dict) else None
-        if isinstance(output, dict):
-            for key in ["final_answer", "message", "answer", "result"]:
-                value = output.get(key)
-                if value:
-                    return str(value)
-        for key in ["final_answer", "message", "answer", "result"]:
+
+        # Delivery must use terminal synthesis/output nodes only. Never fall back
+        # to input parsing or early-stage node messages such as "payload
+        # normalized" because those are internal progress messages, not answers.
+        for node_id in ("output", "final_synthesis", "final", "synthesis"):
+            node = results.get(node_id) if isinstance(results, dict) else None
+            if isinstance(node, dict):
+                for key in ("final_answer", "answer", "result", "content", "text"):
+                    value = node.get(key)
+                    if isinstance(value, str) and value.strip() and self._answer_has_result_material(value):
+                        return value.strip()
+
+        # If the terminal synthesis failed to expose answer_material, extract it
+        # from the execution node's public tool result contract.
+        execution = results.get("execution") if isinstance(results, dict) else None
+        answer_from_execution = self._extract_public_answer_material(execution)
+        if answer_from_execution:
+            return answer_from_execution
+
+        for key in ["final_answer", "answer", "result"]:
             value = state.get(key) if isinstance(state, dict) else None
-            if value:
-                return str(value)
+            if isinstance(value, str) and value.strip() and self._answer_has_result_material(value):
+                return str(value).strip()
         if isinstance(state, dict) and state.get("error"):
             return str(state.get("error"))
         pending = state.get("pending_action") if isinstance(state, dict) else None
@@ -733,6 +750,31 @@ class PrimaryBrainDelegationClient:
                 return report_answer
             return "The primary runtime completed without a user-facing final answer. Intermediate node data was intentionally not exposed."
         return "The primary runtime completed without a user-facing final answer."
+
+    def _extract_public_answer_material(self, value: Any) -> str:
+        public_keys = ("answer_material", "final_answer", "answer", "generated_content", "content", "text")
+        def scan(item: Any) -> str:
+            if isinstance(item, dict):
+                for key in public_keys:
+                    val = item.get(key)
+                    if isinstance(val, str) and val.strip() and self._answer_has_result_material(val):
+                        return val.strip()
+                    if isinstance(val, (dict, list)):
+                        nested = scan(val)
+                        if nested:
+                            return nested
+                for child in item.values():
+                    if isinstance(child, (dict, list)):
+                        nested = scan(child)
+                        if nested:
+                            return nested
+            elif isinstance(item, list):
+                for child in item[:20]:
+                    nested = scan(child)
+                    if nested:
+                        return nested
+            return ""
+        return scan(value)
 
     def _extract_status(self, state: dict[str, Any]) -> str:
         if isinstance(state, dict) and str(state.get("status") or "") in {"failed", "completed", "timeout"}:

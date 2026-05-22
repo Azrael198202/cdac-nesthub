@@ -49,8 +49,8 @@ PIPELINE_STAGES: tuple[StageContract, ...] = (
     ),
     StageContract(
         stage_id="workflow_planning",
-        owner="create executable workflow, graphs, dependencies, execution methods, source policy, and execution plan",
-        allowed_decisions=("workflow_generation", "agent_graph_generation", "dependency_mapping", "execution_method_locking", "source_policy_locking"),
+        owner="create executable workflow, graph, agent/substep relations, ranked fixed execution action decision, source policy, and locked execution plan",
+        allowed_decisions=("workflow_generation", "agent_graph_generation", "dependency_mapping", "fixed_action_ranking", "execution_method_locking", "source_policy_locking"),
         forbidden_decisions=("runtime_execution", "result_synthesis", "unplanned_fallback"),
         output_key="execution_plan",
         executor_type="llm_json",
@@ -58,7 +58,7 @@ PIPELINE_STAGES: tuple[StageContract, ...] = (
     StageContract(
         stage_id="execution_preparation",
         owner="prepare executable resources required by the locked workflow without executing the workflow",
-        allowed_decisions=("resource_bundle_generation", "prompt_contract_generation", "tool_design_generation", "sandbox_precheck", "source_collection"),
+        allowed_decisions=("resource_bundle_generation", "prompt_contract_generation", "tool_design_generation", "api_contract_generation", "web_target_collection", "shell_design_generation", "sandbox_precheck", "source_collection"),
         forbidden_decisions=("business_intent_reclassification", "runtime_execution", "unplanned_provider_selection", "final_answer_creation"),
         output_key="execution_preparation_record",
         executor_type="static_transform",

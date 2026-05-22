@@ -7,6 +7,8 @@ from ai_core.validation.schema_validator import SchemaValidator
 from ai_core.llm.provider_router import ProviderRouter
 from ai_core.events.event_bus import event_bus
 from ai_core.validation.recoverable_validation_error import RecoverableValidationError
+from ai_core.workflow.workflow_contract_builder import WorkflowContractBuilder
+from ai_core.workflow.execution_options import ACTION_TO_METHOD, fixed_options_for_prompt
 from ai_core.validation.schema_auto_repair import SchemaAutoRepair
 from ai_core.validation.result_auto_repair import ResultAutoRepair
 from ai_core.evolution.runtime_learning import RuntimeLearningService
@@ -30,6 +32,7 @@ class LLMJsonExecutor:
         self.loader = ConfigLoader()
         self.template = TemplateEngine()
         self.validator = SchemaValidator()
+        self.workflow_contract_builder = WorkflowContractBuilder()
         self.schema_auto_repair = SchemaAutoRepair()
         self.result_auto_repair = ResultAutoRepair()
         self.router = ProviderRouter()
@@ -555,17 +558,7 @@ class LLMJsonExecutor:
         result.setdefault("missing_information", [])
         return result
 
-    FIXED_EXECUTION_ACTIONS = {
-        "call_llm": "content_generation",
-        "generate_code": "runtime_generated_tool",
-        "generate_shell": "shell",
-        "call_api": "api_call",
-        "web_query": "web_search",
-        "use_existing_tool": "existing_tool",
-        "read_knowledge": "knowledge_base",
-        "ask_user": "human_interaction",
-        "no_op": "no_op",
-    }
+    FIXED_EXECUTION_ACTIONS = dict(ACTION_TO_METHOD)
 
     def _action_type_from_text(self, value: object, default: str = "") -> str:
         """Return only an explicit fixed action type.
@@ -653,53 +646,16 @@ class LLMJsonExecutor:
         return [step]
 
     def _ensure_executable_workflow(self, *, result: dict, state: dict, slim_user_input: str) -> dict:
-        if not isinstance(result, dict):
-            result = {}
-        existing = result.get("planned_steps")
-        if not isinstance(existing, list) or not existing:
-            existing = self._steps_from_execution_plan_action(result=result, state=state)
-        if isinstance(existing, list) and existing:
-            steps = [self._normalize_generated_step(step, index, state) for index, step in enumerate(existing) if isinstance(step, dict)]
-            result["planned_steps"] = steps
-            result.setdefault("workflow", {"workflow_id": "runtime_workflow", "status": "ready"})
-            result.setdefault("required_capabilities", [s.get("required_capability") for s in steps if s.get("required_capability")])
-            result.setdefault("execution_plan", {"steps": steps, "locked": True})
-            if isinstance(result.get("execution_plan"), dict):
-                result["execution_plan"]["steps"] = steps
-                result["execution_plan"]["locked"] = True
-                result["execution_plan"]["allowed_action_types"] = list(self.FIXED_EXECUTION_ACTIONS.keys())
-            result.setdefault("agent_graph", self._build_agent_graph(steps))
-            result.setdefault("blocking_missing_information", [])
-            result["planning_contract"] = {
-                "status": "locked",
-                "allowed_action_types": list(self.FIXED_EXECUTION_ACTIONS.keys()),
-                "execution_must_follow_locked_action": True,
-            }
-            return result
-        # v4.5: workflow_planning must never pass an empty executable plan to
-        # later stages when requirements are complete. If the model failed to
-        # produce planned_steps, create a domain-neutral LLM generation step from
-        # the locked intent/context material. This is a structural repair, not a
-        # business fallback: the allowed action remains one of the fixed runtime
-        # execution options and execution is still locked by validation.
-        fallback_step = self._generic_locked_step_from_state(state=state, slim_user_input=slim_user_input)
-        steps = [self._normalize_generated_step(fallback_step, 0, state)]
-        return {
-            "workflow": {"workflow_id": "runtime_workflow", "status": "ready", "repair": "planned_steps_generated_from_locked_context"},
-            "planned_steps": steps,
-            "execution_plan": {"steps": steps, "locked": True, "allowed_action_types": list(self.FIXED_EXECUTION_ACTIONS.keys())},
-            "agent_graph": self._build_agent_graph(steps),
-            "blocking_missing_information": [],
-            "required_capabilities": [steps[0].get("required_capability")],
-            "planning_contract": {
-                "status": "locked",
-                "reason": "planner_empty_repaired_with_fixed_action_option",
-                "allowed_action_types": list(self.FIXED_EXECUTION_ACTIONS.keys()),
-                "execution_must_follow_locked_action": True,
-            },
-            "status": "planned",
-            "message": "Workflow planning produced locked planned_steps after structural repair.",
-        }
+        # v5.0: workflow_planning is the single owner of execution-method
+        # decision. The model is prompted to rank fixed execution options, and
+        # this structural normalizer guarantees a locked workflow contract even
+        # when the raw model output is incomplete. It does not run tools or
+        # choose business-specific providers.
+        return self.workflow_contract_builder.normalize_workflow_result(
+            result=result if isinstance(result, dict) else {},
+            state=state,
+            slim_user_input=slim_user_input,
+        )
 
     def _generic_locked_step_from_state(self, *, state: dict, slim_user_input: str) -> dict:
         results = state.get("results") if isinstance(state.get("results"), dict) else {}
@@ -731,32 +687,45 @@ class LLMJsonExecutor:
             or "execute requested task"
         )[:800]
         capability = str(clean_context.get("recognized_intent") or intent.get("intent_type") or intent.get("classified_intent") or "generic_content_generation")[:120]
-        ranked_options = [
-            {"action_type": "call_llm", "priority": 1, "reason": "Use model generation when the task can be completed from locked input and context."},
-            {"action_type": "read_knowledge", "priority": 2, "reason": "Use local knowledge only when the workflow explicitly requires stored internal material."},
-            {"action_type": "web_query", "priority": 3, "reason": "Use external web only when the workflow explicitly requires live public evidence."},
-            {"action_type": "call_api", "priority": 4, "reason": "Use API only when prepared endpoint and parameters are available."},
-            {"action_type": "generate_code", "priority": 5, "reason": "Generate code only when the requested output requires an executable artifact."},
-            {"action_type": "generate_shell", "priority": 6, "reason": "Generate shell only for operating-system/runtime commands."},
-            {"action_type": "use_existing_tool", "priority": 7, "reason": "Use an existing tool only when registry matching has been prepared."},
-            {"action_type": "ask_user", "priority": 8, "reason": "Ask the user only when required information is missing."},
-        ]
+        # Preserve the upstream LLM execution decision. Structural repair may
+        # create missing planned_steps, but it must not change the selected
+        # execution action. This keeps workflow_planning as the single place
+        # where the fixed action options are ranked and selected.
+        selected_action = self._selected_action_type(intent, clean_context, requirement_payload, parsed) or "call_llm"
+        decision_source = self._execution_decision_from_plan(intent) or self._execution_decision_from_plan(clean_context) or {}
+        raw_ranked = decision_source.get("ranked_options") if isinstance(decision_source.get("ranked_options"), list) else []
+        ranked_options = []
+        seen_actions = set()
+        for index, item in enumerate(raw_ranked):
+            if not isinstance(item, dict):
+                continue
+            action = self._action_type_from_text(item.get("action_type") or item.get("selected_action_type") or item.get("id") or item.get("name"))
+            if not action or action in seen_actions:
+                continue
+            seen_actions.add(action)
+            ranked_options.append({**item, "action_type": action, "priority": int(item.get("priority") or item.get("rank") or index + 1)})
+        for action in self.FIXED_EXECUTION_ACTIONS:
+            if action not in seen_actions:
+                ranked_options.append({"action_type": action, "priority": len(ranked_options) + 1, "reason": "available fixed execution option"})
+                seen_actions.add(action)
+        ranked_options.sort(key=lambda x: int(x.get("priority") or 999))
+        selected_method = self._method_from_action_type(selected_action)
         return {
             "step_id": "step_1",
             "task_id": "step_1",
             "step_type": "runtime_execution",
             "action": "execute_with_selected_fixed_action",
-            "action_type": "call_llm",
-            "execution_action": "call_llm",
+            "action_type": selected_action,
+            "execution_action": selected_action,
             "objective": objective,
             "input_from": ["input_parsing", "intent_recognition", "requirement_completion", "context_awareness"],
             "parameters": {"known": known, "missing_required": {}, "optional": {"original_input": str(state.get("input") or slim_user_input)}},
             "required_capability": capability,
-            "execution_decision": {"selected_action_type": "call_llm", "ranked_options": ranked_options, "selection_rules": ["free/no-key options before paid/key-required options", "prepared resources before unprepared resources", "locked workflow before executor fallback"]},
-            "execution_method": "content_generation",
-            "execution_method_policy": {"preferred_methods": ["content_generation"], "disabled_methods": ["web_search", "api_call", "runtime_generated_tool", "shell", "existing_tool"], "fallback_allowed": False},
-            "execution_strategy": ["content_generation"],
-            "source_policy": {"allow_external": False, "allow_internal": True, "requires_live_evidence": False},
+            "execution_decision": {"selected_action_type": selected_action, "ranked_options": ranked_options, "selection_rules": ["no-key options before key-required options", "free options before paid options", "prepared resources before unprepared resources", "locked workflow before executor fallback"]},
+            "execution_method": selected_method,
+            "execution_method_policy": {"preferred_methods": [selected_method], "disabled_methods": [m for m in ["web_search", "api_call", "content_generation", "runtime_generated_tool", "shell", "existing_tool", "knowledge_base"] if m != selected_method], "fallback_allowed": False},
+            "execution_strategy": [selected_method],
+            "source_policy": {"allow_external": selected_method in {"api_call", "web_search"}, "allow_internal": True, "requires_live_evidence": selected_method in {"api_call", "web_search"}},
             "execution_ready": True,
             "depends_on": [],
             "requires_human_confirmation": False,
@@ -880,6 +849,8 @@ class LLMJsonExecutor:
                         known[str(k)] = v
         objective = str(payload.get("objective") or intent.get("intent_summary") or parsed.get("original_input") or state.get("input") or "execute requested task")[:500]
         capability = str(intent.get("intent_type") or intent.get("classified_intent") or "generic_content_generation")[:120]
+        selected_action = self._selected_action_type(intent) or "call_llm"
+        selected_method = self._method_from_action_type(selected_action)
         step = {
             "step_id": "step_1",
             "task_id": "step_1",
@@ -888,12 +859,12 @@ class LLMJsonExecutor:
             "input_from": ["input_parsing", "intent_recognition", "requirement_completion", "context_awareness"],
             "parameters": {"known": known, "missing_required": {}, "optional": {}},
             "required_capability": capability,
-            "action_type": "call_llm",
-            "execution_decision": {"selected_action_type": "call_llm", "ranked_options": [{"action_type": "call_llm", "priority": 1, "reason": "recovery default for generic content generation"}]},
-            "execution_method": "content_generation",
-            "execution_method_policy": {"preferred_methods": ["content_generation"], "fallback_allowed": False},
-            "execution_strategy": ["content_generation"],
-            "source_policy": {"allow_external": False, "allow_internal": True, "requires_live_evidence": False},
+            "action_type": selected_action,
+            "execution_decision": {"selected_action_type": selected_action, "ranked_options": [{"action_type": selected_action, "priority": 1, "reason": "recovery uses upstream selected fixed action when available"}]},
+            "execution_method": selected_method,
+            "execution_method_policy": {"preferred_methods": [selected_method], "fallback_allowed": False},
+            "execution_strategy": [selected_method],
+            "source_policy": {"allow_external": selected_method in {"api_call", "web_search"}, "allow_internal": True, "requires_live_evidence": selected_method in {"api_call", "web_search"}},
             "execution_ready": True,
             "human_interaction": {},
             "next_action": "execute",
@@ -903,12 +874,12 @@ class LLMJsonExecutor:
         }
         return {
             "workflow": {"workflow_id": "runtime_generated_workflow", "status": "ready"},
-            "agent_graph": {"main_graph": {"nodes": [{"id": "step_1", "relation": "independent", "execution_method": "content_generation"}], "edges": []}, "subgraphs": []},
+            "agent_graph": {"main_graph": {"nodes": [{"id": "step_1", "relation": "independent", "execution_method": selected_method}], "edges": []}, "subgraphs": []},
             "planned_steps": [step],
             "execution_plan": {"steps": [step], "locked": True},
             "blocking_missing_information": [],
             "required_capabilities": [capability],
-            "execution_strategy": ["content_generation"],
+            "execution_strategy": [selected_method],
             "human_interaction": {},
             "recovery": {"status": "provider_error_recovered", "reason": error[:500]},
         }

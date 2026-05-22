@@ -8,6 +8,7 @@ from typing import Any
 from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import PROJECT_ROOT, RUNTIME_DIR
 from ai_core.validation.schema_validator import SchemaValidator
+from ai_core.workflow.execution_options import ACTION_TO_METHOD, ACTION_CONTRACTS
 
 
 class StaticTransformExecutor:
@@ -19,17 +20,7 @@ class StaticTransformExecutor:
     records verification/repair state.
     """
 
-    FIXED_ACTION_METHODS = {
-        "call_llm": "content_generation",
-        "generate_code": "runtime_generated_tool",
-        "generate_shell": "shell",
-        "call_api": "api_call",
-        "web_query": "web_search",
-        "use_existing_tool": "existing_tool",
-        "read_knowledge": "knowledge_base",
-        "ask_user": "human_interaction",
-        "no_op": "no_op",
-    }
+    FIXED_ACTION_METHODS = dict(ACTION_TO_METHOD)
 
     def __init__(self) -> None:
         self.loader = ConfigLoader()
@@ -238,11 +229,13 @@ class StaticTransformExecutor:
         source_policy = step.get("source_policy") if isinstance(step.get("source_policy"), dict) else {}
         web_targets = step.get("source_targets") if isinstance(step.get("source_targets"), list) else []
         endpoint_candidates = step.get("endpoint_candidates") if isinstance(step.get("endpoint_candidates"), list) else []
+        action_contract = ACTION_CONTRACTS.get(action_type, {})
         return {
             "step_id": step_id,
             "action_type": action_type,
             "execution_method": method,
             "locked": True,
+            "action_contract": action_contract,
             "source_policy": source_policy,
             "web_collection": {
                 "required": method == "web_search",
@@ -254,8 +247,9 @@ class StaticTransformExecutor:
                 "required": method == "api_call",
                 "parameters": known,
                 "endpoint_candidates": endpoint_candidates,
-                "approved_in_preparation": method == "api_call" and bool(endpoint_candidates),
+                "approved_in_preparation": method == "api_call" and (bool(endpoint_candidates) or action_type == "call_api_no_key"),
                 "discovery_required": method == "api_call" and not endpoint_candidates,
+                "discovery_contract": {"allowed": action_type == "call_api_no_key", "credential_required": action_type == "call_api_with_key", "selection_policy": "no-key before key-required; free before paid"} if method == "api_call" else None,
                 "design_contract": {
                     "capability": step.get("required_capability"),
                     "input_schema": {"type": "object", "additionalProperties": True},
@@ -263,7 +257,7 @@ class StaticTransformExecutor:
                 },
             },
             "tool_generation": {
-                "required": method in {"runtime_generated_tool", "existing_tool"},
+                "required": method in {"runtime_generated_tool", "existing_tool", "external_skill"},
                 "design_contract": {
                     "capability": step.get("required_capability"),
                     "input_schema": {"type": "object", "additionalProperties": True},
@@ -271,7 +265,7 @@ class StaticTransformExecutor:
                 },
             },
             "prompt_contract": {
-                "required": method in {"content_generation", "model_knowledge"},
+                "required": method in {"content_generation", "model_knowledge", "static_response"},
                 "objective": step.get("objective"),
                 "known_parameters": known,
                 "output_format": "json_object_with_answer_material",
@@ -305,7 +299,7 @@ class StaticTransformExecutor:
                 return bool(web.get("approved_in_preparation") and web.get("targets"))
             if method == "api_call":
                 api = item.get("api_call_preparation") if isinstance(item.get("api_call_preparation"), dict) else {}
-                return bool(api.get("approved_in_preparation") and api.get("endpoint_candidates"))
+                return bool(api.get("approved_in_preparation") or api.get("discovery_contract"))
         return False
 
     def _stage_payload(self, value: Any, preferred_key: str | None = None) -> dict[str, Any]:
