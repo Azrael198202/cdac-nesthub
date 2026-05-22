@@ -1002,3 +1002,90 @@ class RuntimeBootstrap:
             p = RUNTIME_DATASETS / name
             if not p.exists():
                 p.write_text("", encoding="utf-8")
+
+# ---- v4.0 provider-resolution stage bootstrap overrides ----
+# Kept at the end intentionally so the original bootstrap remains readable while
+# source packages can enforce the latest stage contract without carrying
+# runtime-generated files.
+from ai_core.pipeline.stage_contract import PipelineStageContract as _PipelineStageContract
+
+
+def _v40_stage_contract(self):
+    contract = getattr(self, "_v40_pipeline_contract", None)
+    if contract is None:
+        contract = _PipelineStageContract()
+        setattr(self, "_v40_pipeline_contract", contract)
+    return contract
+
+
+def _v40_ensure_workflow(self) -> None:
+    p = RUNTIME_CONFIGS / "workflows" / "base_orchestration.yaml"
+    self.loader.save_yaml(p, {
+        "workflow_id": "base_orchestration",
+        "name": "Domain Neutral Provider-Resolved Orchestration",
+        "version": "4.0",
+        "stage_boundary_policy": "locked_stage_contract",
+        "nodes": _v40_stage_contract(self).default_workflow_nodes(),
+    })
+
+
+def _v40_ensure_node_configs(self) -> None:
+    contract = _v40_stage_contract(self)
+    for stage_id in contract.ordered_stage_ids():
+        p = RUNTIME_GENERATED / "nodes" / f"{stage_id}.yaml"
+        self.loader.save_yaml(p, contract.node_config(stage_id))
+
+
+def _v40_ensure_runtime_templates(self) -> None:
+    contract = _v40_stage_contract(self)
+    for stage in contract.stages:
+        self.template_generator.ensure_node_template(stage.stage_id, stage.executor_type)
+
+
+def _v40_ensure_prompts(self) -> None:
+    contract = _v40_stage_contract(self)
+    for stage_id in contract.ordered_stage_ids():
+        p = RUNTIME_GENERATED / "prompts" / f"{stage_id}.yaml"
+        self.loader.save_yaml(p, contract.prompt_template(stage_id))
+
+
+def _v40_ensure_schemas(self) -> None:
+    contract = _v40_stage_contract(self)
+    for stage_id in contract.ordered_stage_ids():
+        p = RUNTIME_GENERATED / "schemas" / f"{stage_id}.schema.json"
+        self.loader.save_json(p, contract.generic_schema(stage_id))
+
+
+def _v40_ensure_adapters(self) -> None:
+    contract = _v40_stage_contract(self)
+    for stage in contract.stages:
+        if stage.executor_type != "llm_json":
+            continue
+        p = RUNTIME_GENERATED / "adapters" / f"{stage.stage_id}.yaml"
+        self.loader.save_yaml(p, {
+            "adapter_id": f"{stage.stage_id}_adapter",
+            "type": "llm_json",
+            "provider_route": ["local", "external"],
+            "route_name": stage.stage_id,
+            "model_complexity": "low" if stage.stage_id not in {"workflow_planning"} else "medium",
+            "model_capabilities": ["json_generation", "structured_reasoning"],
+            "prompt": f"runtime/generated/prompts/{stage.stage_id}.yaml",
+            "output_schema": f"runtime/generated/schemas/{stage.stage_id}.schema.json",
+            "json_mode": True,
+            "stage_prompt_char_limit": 1400,
+            "max_schema_chars": 1400,
+            "provider_timeout_seconds": 120,
+            "provider_options": {"temperature": 0, "num_predict": 512, "num_ctx": 2048, "think": False},
+            "stage_boundary": {
+                "allowed_decisions": list(stage.allowed_decisions),
+                "forbidden_decisions": list(stage.forbidden_decisions),
+            },
+        })
+
+
+RuntimeBootstrap._ensure_workflow = _v40_ensure_workflow
+RuntimeBootstrap._ensure_node_configs = _v40_ensure_node_configs
+RuntimeBootstrap._ensure_runtime_templates = _v40_ensure_runtime_templates
+RuntimeBootstrap._ensure_prompts = _v40_ensure_prompts
+RuntimeBootstrap._ensure_schemas = _v40_ensure_schemas
+RuntimeBootstrap._ensure_adapters = _v40_ensure_adapters

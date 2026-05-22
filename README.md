@@ -130,3 +130,21 @@ The trace records candidate counts, selected URLs, fact counts, material preview
 - Final LLM material is generated only from compact consensus material, not raw pages or single-source fallback text.
 - Added white-box trace stages for consensus after browser materialization, fallback extraction, and final fusion.
 - No business/domain keyword rules were added.
+
+## v4.0 Domain-neutral ten-stage runtime
+
+This source package defines the runtime pipeline through `ai_core/pipeline/stage_contract.py`. The bootstrap layer generates runtime node, prompt, schema, and adapter files from that contract during startup; those generated files are intentionally excluded from the source ZIP.
+
+Pipeline order: input_parsing → intent_recognition → requirement_completion → context_awareness → workflow_planning → pre_execution_validation → execution → result_verification → feedback_repair → final_synthesis.
+
+Validation command:
+
+```bash
+python tools/validate_source_package.py
+```
+
+
+
+## v4.0 Provider Resolution
+
+This version adds a dedicated `provider_resolution` stage between `workflow_planning` and `pre_execution_validation`. Runtime provider binding artifacts such as `structured_api_providers.json` are generated under `runtime/sessions/{run_id}/provider_resolution/` and are not included in the source package. Core code remains domain-neutral and does not carry concrete business provider definitions.

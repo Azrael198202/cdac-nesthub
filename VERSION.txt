@@ -1,1 +1,1 @@
-20260521-clean-agent-local-execution
+4.0-provider-resolution

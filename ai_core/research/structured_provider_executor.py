@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ai_core.config.paths import CONFIGS_DIR, RUNTIME_GENERATED, RUNTIME_TRACES
+from ai_core.config.paths import RUNTIME_SESSIONS, RUNTIME_TRACES
 from ai_core.events.event_bus import event_bus
 from ai_core.secrets.secret_store import SecretStore
 
@@ -30,8 +30,7 @@ class StructuredProviderExecutor:
         self.secret_store = SecretStore()
         self.trace_dir = RUNTIME_TRACES / "structured_provider_execution"
         self.trace_dir.mkdir(parents=True, exist_ok=True)
-        self.generated_policy_dir = RUNTIME_GENERATED / "system_topology"
-        self.generated_policy_dir.mkdir(parents=True, exist_ok=True)
+        self.session_root = RUNTIME_SESSIONS
 
     async def execute(
         self,
@@ -54,7 +53,7 @@ class StructuredProviderExecutor:
             "providers": [],
         }
         known = self._known_parameters(step)
-        policies = self._load_policies()
+        policies = self._load_policies(run_id=run_id)
         candidates = self._rank_candidates(policies, capability=capability, step=step, known=known, advisory=advisory)
         trace["candidate_count"] = len(candidates)
         await self._emit(run_id, node_id, step_id, "STRUCTURED_PROVIDER_CANDIDATES", "Structured provider candidates resolved", {"count": len(candidates), "providers": [self._safe_provider_summary(p) for p in candidates]})
@@ -151,21 +150,34 @@ class StructuredProviderExecutor:
         await self._emit(run_id, node_id, step_id, "STRUCTURED_PROVIDER_EXECUTION_PARTIAL", "Structured provider execution did not produce verified material", self._compact_result(partial))
         return {"status": "partial", "result": partial, "tool": {"id": "structured_provider_executor", "source": "api_or_sdk"}}
 
-    def _load_policies(self) -> list[dict[str, Any]]:
-        paths = [
-            self.generated_policy_dir / "structured_api_providers.json",
-            CONFIGS_DIR / "structured_api_providers.json",
-        ]
-        for path in paths:
-            if path.exists():
-                try:
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                    providers = data.get("providers") if isinstance(data, dict) else data
-                    if isinstance(providers, list):
-                        return [p for p in providers if isinstance(p, dict)]
-                except Exception:
-                    continue
-        return []
+    def _load_policies(self, *, run_id: str) -> list[dict[str, Any]]:
+        path = self.session_root / run_id / "provider_resolution" / "structured_api_providers.json"
+        if not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        providers = data.get("providers") if isinstance(data, dict) else data
+        if not isinstance(providers, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for binding in providers:
+            if not isinstance(binding, dict):
+                continue
+            primary = binding.get("selected_provider")
+            if isinstance(primary, dict):
+                item = dict(primary)
+                item.setdefault("capability", binding.get("capability"))
+                item.setdefault("execution_method", binding.get("execution_method"))
+                normalized.append(item)
+            for fallback in binding.get("fallbacks") or []:
+                if isinstance(fallback, dict):
+                    item = dict(fallback)
+                    item.setdefault("capability", binding.get("capability"))
+                    item.setdefault("execution_method", binding.get("execution_method"))
+                    normalized.append(item)
+        return normalized
 
     def _rank_candidates(self, policies: list[dict[str, Any]], *, capability: str, step: dict[str, Any], known: dict[str, Any], advisory: dict[str, Any] | None) -> list[dict[str, Any]]:
         text = " ".join([capability, str(step.get("objective") or ""), str(step.get("action") or ""), json.dumps(known, ensure_ascii=False)]).casefold()

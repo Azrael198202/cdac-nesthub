@@ -188,7 +188,7 @@ class IntentContractGuard:
         temporal_request_terms = {"current", "now", "runtime", "local", "system"}
         temporal_object_terms = {"time", "datetime", "timestamp"}
         asks_runtime_temporal_value = bool(temporal_request_terms.intersection(set(text.split()))) and any(term in text for term in temporal_object_terms)
-        external_action_terms = {"information", "retrieval", "lookup", "search", "forecast", "external"}
+        external_action_terms = {"information", "retrieval", "lookup", "search", "external"}
         asks_external = any(term in text for term in external_action_terms) and has_external_targets
         if (has_runtime_temporal_marker and not has_parameter_entity) or (asks_runtime_temporal_value and not asks_external):
             return "runtime_observation"
