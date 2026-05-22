@@ -555,26 +555,141 @@ class LLMJsonExecutor:
         result.setdefault("missing_information", [])
         return result
 
+    FIXED_EXECUTION_ACTIONS = {
+        "call_llm": "content_generation",
+        "generate_code": "runtime_generated_tool",
+        "generate_shell": "shell",
+        "call_api": "api_call",
+        "web_query": "web_search",
+        "use_existing_tool": "existing_tool",
+        "read_knowledge": "knowledge_base",
+        "ask_user": "human_interaction",
+        "no_op": "no_op",
+    }
+
+    def _action_type_from_text(self, value: object, default: str = "") -> str:
+        """Return only an explicit fixed action type.
+
+        Workflow planning must ask the LLM to rank the fixed execution options
+        and choose one. Runtime normalization must not guess from verbs such as
+        fetch/search/generate, because that lets later stages silently change
+        the workflow intent.
+        """
+        text = str(value or "").strip().lower()
+        return text if text in self.FIXED_EXECUTION_ACTIONS else default
+
+    def _execution_decision_from_plan(self, container: dict) -> dict:
+        if not isinstance(container, dict):
+            return {}
+        for key in ("execution_decision", "execution_method_decision", "method_decision"):
+            value = container.get(key)
+            if isinstance(value, dict):
+                return value
+        options = container.get("execution_options") or container.get("method_options") or container.get("candidate_actions")
+        if isinstance(options, list) and options:
+            normalized = []
+            for item in options:
+                if not isinstance(item, dict):
+                    continue
+                at = self._action_type_from_text(item.get("action_type") or item.get("execution_action") or item.get("id") or item.get("name"))
+                if at:
+                    normalized.append({**item, "action_type": at})
+            if normalized:
+                normalized.sort(key=lambda x: int(x.get("priority") or x.get("rank") or 999))
+                top = normalized[0]
+                return {"selected_action_type": top.get("action_type"), "ranked_options": normalized}
+        return {}
+
+    def _selected_action_type(self, *containers: dict) -> str:
+        for container in containers:
+            decision = self._execution_decision_from_plan(container)
+            action_type = self._action_type_from_text(
+                decision.get("selected_action_type") or decision.get("action_type") or decision.get("selected_option")
+            )
+            if action_type:
+                return action_type
+            action_type = self._action_type_from_text(container.get("action_type") or container.get("execution_action")) if isinstance(container, dict) else ""
+            if action_type:
+                return action_type
+        return ""
+
+    def _method_from_action_type(self, action_type: str) -> str:
+        return self.FIXED_EXECUTION_ACTIONS.get(str(action_type or ""), "content_generation")
+
+    def _steps_from_execution_plan_action(self, *, result: dict, state: dict) -> list[dict]:
+        execution_plan = result.get("execution_plan") if isinstance(result.get("execution_plan"), dict) else {}
+        action = execution_plan.get("action") or result.get("action")
+        if not action:
+            return []
+        action_type = self._selected_action_type(execution_plan, result)
+        if not action_type:
+            return []
+        params = execution_plan.get("parameters") if isinstance(execution_plan.get("parameters"), dict) else {}
+        next_steps = execution_plan.get("next_steps") if isinstance(execution_plan.get("next_steps"), list) else []
+        intent = (state.get("results") or {}).get("intent_recognition") if isinstance(state.get("results"), dict) else {}
+        objective = str(result.get("objective") or execution_plan.get("objective") or result.get("message") or intent.get("intent_summary") or state.get("input") or "")[:800]
+        method = self._method_from_action_type(action_type)
+        step = {
+            "step_id": str(execution_plan.get("step_id") or "step_1"),
+            "task_id": str(execution_plan.get("task_id") or "step_1"),
+            "step_type": "runtime_execution",
+            "action": str(action),
+            "action_type": action_type,
+            "execution_action": action_type,
+            "objective": objective,
+            "parameters": {"known": params, "missing_required": {}, "optional": {}},
+            "required_capability": str(result.get("_node_id") or result.get("required_capability") or self._generic_capability_from_state(state)),
+            "execution_method": method,
+            "execution_method_policy": {"preferred_methods": [method], "disabled_methods": [m for m in ["web_search", "api_call", "content_generation", "runtime_generated_tool", "existing_tool", "knowledge_base", "shell"] if m != method], "fallback_allowed": False},
+            "execution_strategy": [method],
+            "source_policy": {"allow_external": method in {"api_call", "web_search"}, "allow_internal": True, "requires_live_evidence": method in {"api_call", "web_search"}},
+            "execution_ready": True,
+            "depends_on": [],
+            "requires_human_confirmation": False,
+            "missing_fields": [],
+        }
+        if next_steps:
+            step["validation_actions"] = next_steps
+        return [step]
+
     def _ensure_executable_workflow(self, *, result: dict, state: dict, slim_user_input: str) -> dict:
         if not isinstance(result, dict):
             result = {}
         existing = result.get("planned_steps")
+        if not isinstance(existing, list) or not existing:
+            existing = self._steps_from_execution_plan_action(result=result, state=state)
         if isinstance(existing, list) and existing:
             steps = [self._normalize_generated_step(step, index, state) for index, step in enumerate(existing) if isinstance(step, dict)]
             result["planned_steps"] = steps
+            result.setdefault("workflow", {"workflow_id": "runtime_workflow", "status": "ready"})
             result.setdefault("required_capabilities", [s.get("required_capability") for s in steps if s.get("required_capability")])
-            result.setdefault("execution_plan", {"steps": steps})
+            result.setdefault("execution_plan", {"steps": steps, "locked": True})
+            if isinstance(result.get("execution_plan"), dict):
+                result["execution_plan"]["steps"] = steps
+                result["execution_plan"]["locked"] = True
+                result["execution_plan"]["allowed_action_types"] = list(self.FIXED_EXECUTION_ACTIONS.keys())
             result.setdefault("agent_graph", self._build_agent_graph(steps))
             result.setdefault("blocking_missing_information", [])
+            result["planning_contract"] = {
+                "status": "locked",
+                "allowed_action_types": list(self.FIXED_EXECUTION_ACTIONS.keys()),
+                "execution_must_follow_locked_action": True,
+            }
             return result
-        recovered = self._recover_workflow_planning(
-            state=state,
-            slim_user_input=slim_user_input,
-            slim_previous_results=state.get("results", {}) if isinstance(state.get("results"), dict) else {},
-            error="planner_returned_empty_plan",
-        )
-        recovered["recovery"] = {"status": "empty_plan_repaired", "reason": "Workflow planning returned no executable steps."}
-        return recovered
+        return {
+            "workflow": {"workflow_id": "runtime_workflow", "status": "blocked"},
+            "planned_steps": [],
+            "execution_plan": {"steps": [], "locked": False, "allowed_action_types": list(self.FIXED_EXECUTION_ACTIONS.keys())},
+            "agent_graph": {"main_graph": {"nodes": [], "edges": []}, "subgraphs": []},
+            "blocking_missing_information": [],
+            "planning_contract": {
+                "status": "blocked",
+                "reason": "planner_returned_no_executable_action",
+                "allowed_action_types": list(self.FIXED_EXECUTION_ACTIONS.keys()),
+            },
+            "status": "blocked",
+            "message": "Workflow planning did not return an executable action.",
+        }
 
     def _normalize_generated_step(self, step: dict, index: int, state: dict) -> dict:
         out = dict(step)
@@ -594,11 +709,23 @@ class LLMJsonExecutor:
             }
         out["parameters"] = params
         out.setdefault("required_capability", self._generic_capability_from_state(state))
-        out.setdefault("execution_method", "content_generation")
-        out.setdefault("execution_method_policy", {"preferred_methods": [out.get("execution_method")], "fallback_allowed": True})
-        out.setdefault("execution_strategy", [out.get("execution_method")])
+        action_type = self._selected_action_type(out)
+        if not action_type:
+            out["execution_ready"] = False
+            out.setdefault("missing_fields", [])
+            out["missing_fields"] = list(dict.fromkeys([*out.get("missing_fields", []), "execution_decision.selected_action_type"]))
+            action_type = "no_op"
+        method = self._method_from_action_type(action_type)
+        out["action_type"] = action_type
+        out["execution_action"] = action_type
+        out["execution_method"] = method
+        out["execution_method_policy"] = {"preferred_methods": [method], "disabled_methods": [m for m in ["web_search", "api_call", "content_generation", "runtime_generated_tool", "existing_tool", "knowledge_base", "shell"] if m != method], "fallback_allowed": False}
+        out["execution_strategy"] = [method]
         out.setdefault("execution_ready", not bool(params.get("missing_required")))
-        out.setdefault("source_policy", {"allow_external": False, "allow_internal": True, "requires_live_evidence": False})
+        out["source_policy"] = out.get("source_policy") if isinstance(out.get("source_policy"), dict) else {}
+        out["source_policy"].setdefault("allow_external", method in {"api_call", "web_search"})
+        out["source_policy"].setdefault("allow_internal", True)
+        out["source_policy"].setdefault("requires_live_evidence", method in {"api_call", "web_search"})
         return out
 
     def _build_agent_graph(self, steps: list[dict]) -> dict:
@@ -689,8 +816,10 @@ class LLMJsonExecutor:
             "input_from": ["input_parsing", "intent_recognition", "requirement_completion", "context_awareness"],
             "parameters": {"known": known, "missing_required": {}, "optional": {}},
             "required_capability": capability,
+            "action_type": "call_llm",
+            "execution_decision": {"selected_action_type": "call_llm", "ranked_options": [{"action_type": "call_llm", "priority": 1, "reason": "recovery default for generic content generation"}]},
             "execution_method": "content_generation",
-            "execution_method_policy": {"preferred_methods": ["content_generation"], "fallback_allowed": True},
+            "execution_method_policy": {"preferred_methods": ["content_generation"], "fallback_allowed": False},
             "execution_strategy": ["content_generation"],
             "source_policy": {"allow_external": False, "allow_internal": True, "requires_live_evidence": False},
             "execution_ready": True,

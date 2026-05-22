@@ -383,6 +383,16 @@ class ToolCallExecutor:
                     })
                     continue
 
+            if method_contract.method in {"web_search", "api_call"} and not self._prepared_resource_allows_method(state=state, step_id=step_id, method=method_contract.method):
+                blocked_steps.append({
+                    "step_id": step_id,
+                    "status": "execution_resource_not_prepared",
+                    "reason": "The locked workflow method was not approved by execution_preparation.",
+                    "execution_method_contract": method_contract.to_dict(),
+                    "source_step": step,
+                })
+                continue
+
             if method_contract.method in {"web_search", "api_call"}:
                 routed_web_result = await self._try_strategy_web_evidence_execution(
                     run_id=run_id,
@@ -408,7 +418,7 @@ class ToolCallExecutor:
                     })
                     continue
 
-            if method_contract.method not in {"web_search", "api_call", "knowledge_base", "model_knowledge", "content_generation", "existing_tool", "runtime_generated_tool"}:
+            if method_contract.method not in {"web_search", "api_call", "knowledge_base", "model_knowledge", "content_generation", "existing_tool", "runtime_generated_tool", "shell", "human_interaction", "no_op"}:
                 blocked_steps.append({
                     "step_id": step_id,
                     "status": "unsupported_execution_method",
@@ -432,6 +442,16 @@ class ToolCallExecutor:
                     "step_id": step_id,
                     "status": "execution_method_unavailable",
                     "reason": "Strict runtime-native execution did not return a result and fallback is disabled.",
+                    "execution_method_contract": method_contract.to_dict(),
+                    "source_step": step,
+                })
+                continue
+
+            if method_contract.method in {"shell", "human_interaction", "no_op"}:
+                blocked_steps.append({
+                    "step_id": step_id,
+                    "status": "prepared_but_not_executed",
+                    "reason": "The locked action requires a prepared runtime artifact or user interaction before execution.",
                     "execution_method_contract": method_contract.to_dict(),
                     "source_step": step,
                 })
@@ -1166,6 +1186,63 @@ class ToolCallExecutor:
         })
         return result
 
+    def _locked_step_method(self, step: dict[str, Any]) -> str:
+        value = step.get("execution_method") if isinstance(step, dict) else None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        action_type = str(step.get("action_type") or step.get("execution_action") or "").strip()
+        return {
+            "call_llm": "content_generation",
+            "generate_code": "runtime_generated_tool",
+            "generate_shell": "shell",
+            "call_api": "api_call",
+            "web_query": "web_search",
+            "use_existing_tool": "existing_tool",
+            "read_knowledge": "knowledge_base",
+            "ask_user": "human_interaction",
+            "no_op": "no_op",
+        }.get(action_type, "")
+
+    def _force_method_contract(self, *, base: ExecutionMethodContract, method: str, reason: str, step: dict[str, Any]) -> ExecutionMethodContract:
+        step_policy = step.get("execution_method_policy") if isinstance(step.get("execution_method_policy"), dict) else {}
+        fallback_allowed = bool(step_policy.get("fallback_allowed", False))
+        return ExecutionMethodContract(
+            method=method,
+            confidence=max(float(base.confidence or 0), 0.95),
+            cost_level=self.execution_method_resolver._cost(method),
+            latency_level=self.execution_method_resolver._latency(method),
+            input_schema=base.input_schema,
+            output_schema=base.output_schema,
+            fallback=list(base.fallback or []) if fallback_allowed else [],
+            reason=reason,
+            proposal_source=base.proposal_source,
+            decision_source="locked_workflow_action_enforcer",
+        )
+
+    def _prepared_resource_allows_method(self, *, state: dict[str, Any], step_id: str, method: str) -> bool:
+        results = state.get("results") if isinstance(state, dict) and isinstance(state.get("results"), dict) else {}
+        prep = results.get("execution_preparation") if isinstance(results.get("execution_preparation"), dict) else {}
+        record = prep.get("execution_preparation_record") if isinstance(prep.get("execution_preparation_record"), dict) else prep
+        bundle = record.get("resource_bundle") if isinstance(record.get("resource_bundle"), dict) else {}
+        steps = bundle.get("steps") if isinstance(bundle.get("steps"), list) else []
+        if not steps:
+            return method not in {"web_search", "api_call"}
+        for item in steps:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("step_id")) != str(step_id):
+                continue
+            if str(item.get("execution_method") or "") != method:
+                return False
+            if method == "web_search":
+                web = item.get("web_collection") if isinstance(item.get("web_collection"), dict) else {}
+                return bool(web.get("required") and web.get("approved_in_preparation") and web.get("targets"))
+            if method == "api_call":
+                api = item.get("api_call_preparation") if isinstance(item.get("api_call_preparation"), dict) else {}
+                return bool(api.get("required") and api.get("approved_in_preparation") and api.get("endpoint_candidates"))
+            return True
+        return False
+
     def _enforce_intent_execution_contract(
         self,
         *,
@@ -1180,6 +1257,15 @@ class ToolCallExecutor:
         execution from bypassing the locked upstream intent contract. The logic
         is generic: it only reads the contract family and method policy.
         """
+        locked_method = self._locked_step_method(step)
+        if locked_method and locked_method != method_contract.method:
+            return self._force_method_contract(
+                base=method_contract,
+                method=locked_method,
+                reason="locked_workflow_action_method_enforced",
+                step=step,
+            )
+
         contract = {}
         if isinstance(plan.get("intent_contract"), dict):
             contract = plan.get("intent_contract") or {}

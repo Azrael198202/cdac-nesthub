@@ -19,6 +19,18 @@ class StaticTransformExecutor:
     records verification/repair state.
     """
 
+    FIXED_ACTION_METHODS = {
+        "call_llm": "content_generation",
+        "generate_code": "runtime_generated_tool",
+        "generate_shell": "shell",
+        "call_api": "api_call",
+        "web_query": "web_search",
+        "use_existing_tool": "existing_tool",
+        "read_knowledge": "knowledge_base",
+        "ask_user": "human_interaction",
+        "no_op": "no_op",
+    }
+
     def __init__(self) -> None:
         self.loader = ConfigLoader()
         self.validator = SchemaValidator()
@@ -128,12 +140,19 @@ class StaticTransformExecutor:
             params = step.get("parameters") if isinstance(step.get("parameters"), dict) else {}
             missing_required = params.get("missing_required") if isinstance(params.get("missing_required"), (list, dict)) else []
             method = self._execution_method(step)
-            passed = not missing_fields and not missing_required and bool(method)
+            action_type = str(step.get("action_type") or step.get("execution_action") or "").strip()
+            action_ok = (not action_type) or action_type in self.FIXED_ACTION_METHODS
+            expected_method = self.FIXED_ACTION_METHODS.get(action_type, method)
+            method_ok = bool(method) and method == expected_method
+            resource_ok = self._prepared_resource_ok(prep, str(step.get("step_id") or step.get("task_id") or f"step_{index + 1}"), method)
+            passed = not missing_fields and not missing_required and method_ok and action_ok and resource_ok
             checks.append({
                 "step_id": str(step.get("step_id") or step.get("task_id") or f"step_{index + 1}"),
                 "schema_check": "passed",
                 "parameter_check": "passed" if not missing_fields and not missing_required else "failed",
-                "execution_method_check": "passed" if method else "failed",
+                "action_type_check": "passed" if action_ok else "failed",
+                "execution_method_check": "passed" if method_ok else "failed",
+                "resource_preparation_check": "passed" if resource_ok else "failed",
                 "tool_presence_check": "not_required" if method in {"content_generation", "model_knowledge", "knowledge_base"} else "deferred_to_runtime_registry",
                 "confirmation_check": "requires_human_confirmation" if bool(step.get("requires_human_confirmation")) else "not_required",
                 "sandbox_check": "passed" if method in {"content_generation", "model_knowledge", "knowledge_base"} else "deferred_until_generated_resource_exists",
@@ -208,21 +227,43 @@ class StaticTransformExecutor:
 
     def _prepared_step(self, step: dict[str, Any], index: int) -> dict[str, Any]:
         method = self._execution_method(step)
+        action_type = str(step.get("action_type") or step.get("execution_action") or "").strip()
+        if not action_type:
+            action_type = self._action_type_for_method(method)
         step_id = str(step.get("step_id") or step.get("task_id") or f"step_{index + 1}")
         known = {}
         params = step.get("parameters") if isinstance(step.get("parameters"), dict) else {}
         if isinstance(params.get("known"), dict):
             known.update(params.get("known") or {})
+        source_policy = step.get("source_policy") if isinstance(step.get("source_policy"), dict) else {}
+        web_targets = step.get("source_targets") if isinstance(step.get("source_targets"), list) else []
+        endpoint_candidates = step.get("endpoint_candidates") if isinstance(step.get("endpoint_candidates"), list) else []
         return {
             "step_id": step_id,
+            "action_type": action_type,
             "execution_method": method,
-            "source_policy": step.get("source_policy") if isinstance(step.get("source_policy"), dict) else {},
+            "locked": True,
+            "source_policy": source_policy,
             "web_collection": {
                 "required": method == "web_search",
-                "targets": step.get("source_targets") if isinstance(step.get("source_targets"), list) else [],
+                "targets": web_targets,
+                "approved_in_preparation": method == "web_search" and bool(web_targets),
+                "status": "prepared" if method != "web_search" or web_targets else "missing_targets",
+            },
+            "api_call_preparation": {
+                "required": method == "api_call",
+                "parameters": known,
+                "endpoint_candidates": endpoint_candidates,
+                "approved_in_preparation": method == "api_call" and bool(endpoint_candidates),
+                "discovery_required": method == "api_call" and not endpoint_candidates,
+                "design_contract": {
+                    "capability": step.get("required_capability"),
+                    "input_schema": {"type": "object", "additionalProperties": True},
+                    "output_schema": {"type": "object", "additionalProperties": True},
+                },
             },
             "tool_generation": {
-                "required": method in {"runtime_generated_tool", "api_call", "existing_tool"},
+                "required": method in {"runtime_generated_tool", "existing_tool"},
                 "design_contract": {
                     "capability": step.get("required_capability"),
                     "input_schema": {"type": "object", "additionalProperties": True},
@@ -237,13 +278,35 @@ class StaticTransformExecutor:
             },
             "shell_generation": {
                 "required": method == "shell",
-                "design_contract": None,
+                "design_contract": {
+                    "objective": step.get("objective"),
+                    "parameters": known,
+                    "sandbox_required": True,
+                } if method == "shell" else None,
             },
             "sandbox_precheck": {
                 "required": method not in {"content_generation", "model_knowledge", "knowledge_base"},
                 "status": "passed" if method in {"content_generation", "model_knowledge", "knowledge_base"} else "deferred_until_artifact_exists",
             },
         }
+
+    def _prepared_resource_ok(self, prep: dict[str, Any], step_id: str, method: str) -> bool:
+        if method not in {"web_search", "api_call"}:
+            return True
+        bundle = prep.get("resource_bundle") if isinstance(prep.get("resource_bundle"), dict) else {}
+        steps = bundle.get("steps") if isinstance(bundle.get("steps"), list) else []
+        for item in steps:
+            if not isinstance(item, dict) or str(item.get("step_id")) != str(step_id):
+                continue
+            if str(item.get("execution_method") or "") != method:
+                return False
+            if method == "web_search":
+                web = item.get("web_collection") if isinstance(item.get("web_collection"), dict) else {}
+                return bool(web.get("approved_in_preparation") and web.get("targets"))
+            if method == "api_call":
+                api = item.get("api_call_preparation") if isinstance(item.get("api_call_preparation"), dict) else {}
+                return bool(api.get("approved_in_preparation") and api.get("endpoint_candidates"))
+        return False
 
     def _stage_payload(self, value: Any, preferred_key: str | None = None) -> dict[str, Any]:
         if not isinstance(value, dict):
@@ -321,6 +384,12 @@ class StaticTransformExecutor:
             seen.add(name)
             normalized.append({"name": name, "label": label, "required": True})
         return normalized
+
+    def _action_type_for_method(self, method: str) -> str:
+        for action_type, mapped_method in self.FIXED_ACTION_METHODS.items():
+            if mapped_method == method:
+                return action_type
+        return ""
 
     def _execution_method(self, step: dict[str, Any]) -> str:
         for key in ("execution_method", "method"):

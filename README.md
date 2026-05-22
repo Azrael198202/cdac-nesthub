@@ -148,3 +148,18 @@ python tools/validate_source_package.py
 ## v4.0 Provider Resolution
 
 This version adds a dedicated `provider_resolution` stage between `workflow_planning` and `pre_execution_validation`. Runtime provider binding artifacts such as `structured_api_providers.json` are generated under `runtime/sessions/{run_id}/provider_resolution/` and are not included in the source package. Core code remains domain-neutral and does not carry concrete business provider definitions.
+
+
+## v4.4 Action-Locked Execution Update
+
+- Workflow planning must choose one fixed `action_type`: `call_llm`, `generate_code`, `generate_shell`, `call_api`, `web_query`, `use_existing_tool`, `read_knowledge`, `ask_user`, or `no_op`.
+- `execution_method` is derived deterministically from `action_type` and locked in the workflow.
+- `execution_preparation` generates a resource bundle for the locked action only.
+- `execution` is not allowed to reselect the method or switch to web/API unless the locked workflow and preparation bundle approved it.
+- Empty workflow planning no longer silently continues as a fake executable plan.
+
+## v4.4 ranked execution decision
+
+Workflow planning now asks the model to rank fixed execution options before producing executable steps. The fixed options are `call_llm`, `generate_code`, `generate_shell`, `call_api`, `web_query`, `use_existing_tool`, `read_knowledge`, `ask_user`, and `no_op`. The selected option is stored in `execution_decision.selected_action_type`, then deterministically mapped to `execution_method`. Later stages are not allowed to infer or change the method from free-text action names.
+
+For external access, `execution_preparation` must prepare concrete web targets or API endpoint candidates. `pre_execution_validation` and `execution` block web/API execution when these resources were not prepared.

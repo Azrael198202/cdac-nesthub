@@ -161,7 +161,7 @@ class PipelineStageContract:
         stage = self.by_id[stage_id]
         return {
             "id": f"{stage.stage_id}_prompt",
-            "version": "4.1-execution-preparation",
+            "version": "4.4-ranked-execution-decision",
             "executor_type": stage.executor_type,
             "system": (
                 "Return one JSON object only. Follow the stage boundary exactly. "
@@ -174,6 +174,12 @@ class PipelineStageContract:
                 "Allowed decisions: " + ", ".join(stage.allowed_decisions),
                 "Forbidden decisions: " + ", ".join(stage.forbidden_decisions),
                 f"Write primary result under {stage.output_key} when applicable.",
+                "For workflow planning, first read the upstream intent/objective and known parameters, then rank the fixed execution options: call_llm, generate_code, generate_shell, call_api, web_query, use_existing_tool, read_knowledge, ask_user, no_op.",
+                "Workflow planning MUST output execution_decision with ranked_options and selected_action_type. Do not hide the decision inside a free-text action name.",
+                "Each executable step must copy the selected action_type from execution_decision unless it has a separately ranked execution_decision.",
+                "Map action_type to execution_method deterministically: call_llm=content_generation, generate_code=runtime_generated_tool, generate_shell=shell, call_api=api_call, web_query=web_search, use_existing_tool=existing_tool, read_knowledge=knowledge_base, ask_user=human_interaction, no_op=no_op.",
+                "For web_query or call_api, workflow_planning must state whether external resources are required; execution_preparation must prepare concrete targets/endpoints before execution.",
+                "Execution may only run actions/resources approved by execution_preparation.",
                 "Do not output placeholder key lists as the stage result.",
             ],
             "output_contract": {stage.output_key: "object"},
