@@ -62,6 +62,12 @@ let selectedArtifactIds = new Set();
 function selectedArtifactsForRequest(){
   return uploadedArtifacts.filter(item=>selectedArtifactIds.has(String(item.artifact_id||item.id||'')));
 }
+function consumeSelectedArtifactsAfterRequest(){
+  if(selectedArtifactIds.size){
+    selectedArtifactIds.clear();
+    renderArtifacts();
+  }
+}
 function renderArtifacts(){
   const box=document.getElementById('artifactList');
   if(!box)return;
@@ -140,6 +146,7 @@ async function sendMessage(){
     }, 2500);
     const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, uploaded_artifacts:selectedArtifactsForRequest()})});
     const data=await res.json();
+    consumeSelectedArtifactsAfterRequest();
     renderStudioResponse(data, text);
     const pendingItems = collectMissingInputs(data);
     if(pendingItems.length){ lastMissingInputs=pendingItems; lastPendingRunId=data.run_id||''; lastPendingInstruction=text; addMissingInputs(pendingItems, text, lastPendingRunId); }
@@ -293,6 +300,7 @@ async function skipCredentialAndContinue(){
   if(text){
     const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, provided_inputs:provided, uploaded_artifacts:selectedArtifactsForRequest()})});
     const data=await res.json();
+    consumeSelectedArtifactsAfterRequest();
     renderStudioResponse(data, text);
     await refreshState();
   }

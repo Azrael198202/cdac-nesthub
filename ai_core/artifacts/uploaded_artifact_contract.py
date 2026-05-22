@@ -315,9 +315,38 @@ class UploadedArtifactContractBuilder:
                 if isinstance(value, dict):
                     src = value.get("known") if isinstance(value.get("known"), dict) else value
                     for k, v in src.items():
-                        if v not in (None, "", [], {}):
+                        if self._is_usable_runtime_value(v):
                             known[str(k)] = v
         return known
+
+    def _is_usable_runtime_value(self, value: Any) -> bool:
+        """Return True only for concrete user/runtime values.
+
+        Planner stages often use placeholder strings such as "missing" when a
+        value still has to be collected.  Those placeholders must not satisfy an
+        uploaded callable's real input contract; otherwise the UI will not ask
+        for the callable parameter and execution will be blocked later.  This is
+        generic placeholder filtering, not business/domain logic.
+        """
+        if value in (None, "", [], {}):
+            return False
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return False
+            normalized = re.sub(r"[^a-z0-9]+", "_", text.casefold()).strip("_")
+            placeholder_values = {
+                "missing", "not_provided", "not_available", "none", "null",
+                "unknown", "undefined", "required", "todo", "tbd", "n_a", "na",
+                "your_api_key", "api_key", "placeholder", "sample", "example",
+            }
+            if normalized in placeholder_values:
+                return False
+            if text.startswith("<") and text.endswith(">"):
+                return False
+            if text.startswith("{") and text.endswith("}"):
+                return False
+        return True
 
     def _missing_inputs(self, artifact: dict[str, Any], known: dict[str, Any]) -> list[dict[str, Any]]:
         contract = artifact.get("input_contract") if isinstance(artifact.get("input_contract"), dict) else {}
@@ -345,7 +374,7 @@ class UploadedArtifactContractBuilder:
         candidates = [name] + self._aliases_for_required_field(name)
         normalized_candidates = {self._normalize_key(item) for item in candidates if item}
         for key, value in known.items():
-            if value in (None, "", [], {}):
+            if not self._is_usable_runtime_value(value):
                 continue
             if key in candidates or self._normalize_key(key) in normalized_candidates:
                 return value
