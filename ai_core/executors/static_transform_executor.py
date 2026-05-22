@@ -233,12 +233,18 @@ class StaticTransformExecutor:
             result = step.get("result") if isinstance(step, dict) and isinstance(step.get("result"), dict) else {}
             data = result.get("data") if isinstance(result.get("data"), dict) else {}
             has_material = any(data.get(k) not in (None, "", [], {}) for k in ("answer_material", "normalized_facts", "content", "output"))
+            source_step = step.get("source_step") if isinstance(step.get("source_step"), dict) else {}
+            method = self._execution_method(source_step) if source_step else ""
+            provenance = result.get("provenance") if isinstance(result.get("provenance"), dict) else step.get("provenance") if isinstance(step.get("provenance"), dict) else {}
+            has_source_evidence = bool(provenance or data.get("source_urls") or data.get("evidence_urls") or data.get("sources"))
+            external_ok = True if method not in {"web_search", "api_call"} else has_source_evidence
             verified_steps.append({
                 "step_id": step.get("step_id"),
                 "real_execution_check": "passed" if result else "failed",
+                "source_evidence_check": "passed" if external_ok else "failed",
                 "step_satisfaction_check": "passed" if has_material or result.get("status") == "success" else "needs_review",
                 "confidence_check": "passed" if result.get("status") in {"success", "completed"} else "needs_review",
-                "passed": bool(result) and (has_material or result.get("status") in {"success", "completed"}),
+                "passed": bool(result) and external_ok and (has_material or result.get("status") in {"success", "completed"}),
             })
         passed = bool(verified_steps) and all(item.get("passed") for item in verified_steps) and not blocked
         return {
@@ -302,12 +308,15 @@ class StaticTransformExecutor:
             "locked": True,
             "action_contract": action_contract,
             "agent_action_prompt_contract": AGENT_ACTION_PROMPT_CONTRACT,
+            "agent_execution_flow": step.get("agent_execution_flow") if isinstance(step.get("agent_execution_flow"), list) else [],
             "source_policy": source_policy,
             "web_collection": {
                 "required": method == "web_search",
                 "targets": web_targets,
                 "query_contract": query_contract,
                 "evidence_requirements": evidence_requirements,
+                "evidence_url_policy": {"preserve_planned_targets": True, "preserve_actual_result_urls": True, "compare_planned_and_actual": True},
+                "next_resource_stage": "api_contract_preparation" if endpoint_candidates else "web_evidence_collection",
                 "approved_in_preparation": method == "web_search" and bool(web_targets),
                 "discovery_required": method == "web_search" and not bool(web_targets),
                 "discovery_contract": {"allowed": True, "selection_policy": "collect explicit query/target references before execution; preserve collected source URLs as evidence"} if method == "web_search" and not bool(web_targets) else None,
@@ -319,6 +328,7 @@ class StaticTransformExecutor:
                 "endpoint_candidates": endpoint_candidates,
                 "query_contract": query_contract,
                 "evidence_requirements": evidence_requirements,
+                "evidence_url_policy": {"preserve_endpoint_candidates": True, "preserve_actual_request_url": True, "compare_planned_and_actual": True},
                 "approved_in_preparation": method == "api_call" and bool(endpoint_candidates),
                 "discovery_required": method == "api_call" and not endpoint_candidates,
                 "discovery_contract": {"allowed": action_type == "call_api_no_key", "credential_required": action_type == "call_api_with_key", "selection_policy": "no-key before key-required; free before paid"} if method == "api_call" else None,

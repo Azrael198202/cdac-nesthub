@@ -53,8 +53,11 @@ class OutputExecutor:
     async def _build(self, state: dict[str, Any], node_config: dict[str, Any]) -> dict[str, Any]:
         results = state.get("results", {}) if isinstance(state, dict) else {}
         final_synthesis_result = results.get("final_synthesis") if isinstance(results.get("final_synthesis"), dict) else {}
+        verification = results.get("result_verification") if isinstance(results.get("result_verification"), dict) else {}
+        verification_record = verification.get("verification_record") if isinstance(verification.get("verification_record"), dict) else verification
+        verification_failed = verification_record.get("status") == "failed"
         explicit_final = final_synthesis_result.get("final_answer") or final_synthesis_result.get("answer")
-        if isinstance(explicit_final, str) and explicit_final.strip():
+        if isinstance(explicit_final, str) and explicit_final.strip() and not verification_failed:
             return {
                 "_executor_type": "output",
                 "_node_id": node_config.get("node_id", "output"),

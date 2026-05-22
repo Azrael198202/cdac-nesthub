@@ -333,6 +333,18 @@ class ToolCallExecutor:
                 proposal_source="agent_action_planning",
                 decision_source="locked_workflow_contract",
             )
+            # v5.6: locked external actions must not be routed to runtime-native
+            # observation or unrelated generated tools. Execution follows the
+            # selected action and prepared resource bundle only.
+            locked_action = str(step.get("action_type") or step.get("execution_action") or "").strip()
+            locked_expected_method = self._locked_step_method(step)
+            if locked_expected_method and locked_expected_method != method_contract.method:
+                method_contract = self._force_method_contract(
+                    base=method_contract,
+                    method=locked_expected_method,
+                    reason="locked_action_method_enforced_before_execution",
+                    step=step,
+                )
             step["execution_method_decision"] = method_contract.to_dict()
             await event_bus.emit(run_id, {
                 "type": "EXECUTION_METHOD_RESOLVED",
@@ -346,7 +358,7 @@ class ToolCallExecutor:
             # If the plan explicitly asks for runtime-native observation, honor it
             # before any generic web/API/model fallback. This is a generic source
             # contract, not a domain-specific shortcut.
-            if self._step_requests_runtime_native(step, normalized_plan, required_capability or "runtime_current_observation"):
+            if method_contract.method not in {"web_search", "api_call"} and self._step_requests_runtime_native(step, normalized_plan, required_capability or "runtime_current_observation"):
                 runtime_native_result = self.capability_router.try_runtime_native(
                     run_id=run_id,
                     node_id=node_id,

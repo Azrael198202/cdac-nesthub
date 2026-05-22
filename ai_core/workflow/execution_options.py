@@ -90,16 +90,25 @@ SELECTION_RULES: tuple[str, ...] = (
 
 AGENT_ACTION_PROMPT_CONTRACT: dict[str, Any] = {
     "content": "Use upstream input, intent, completed requirements, clean context, and the agent objective only.",
-    "target": "Choose the next execution action and substeps. Do not execute the user task in this planning step.",
+    "target": "Choose the agent execution flow and the next concrete action. Do not execute the user task in this planning step.",
     "actions": [item.action_type for item in FIXED_EXECUTION_OPTIONS],
     "rules": list(SELECTION_RULES),
+    "flow_rules": [
+        "For every agent, output an agent_execution_flow before planned_steps.",
+        "The flow must show discovery/planning phases separately from real execution phases.",
+        "A planner LLM call may be used only to choose actions, discover candidate sources, or design a resource contract; it must not produce the final task result unless selected_action_type is llm_generate.",
+        "If a web/API candidate is selected, preserve query/target/endpoint values for execution_preparation and later verification.",
+        "If web discovery finds a structured endpoint candidate, the next flow phase should prepare an API contract before execution when that is more stable than page reading.",
+        "Use only fixed action_type values; never invent method names."
+    ],
     "required_output": {
         "execution_decision": {
             "selected_action_type": "one fixed action_type",
             "ranked_options": "array ranked by suitability and rules",
             "reason": "short domain-neutral reason"
         },
-        "planned_steps": "array of executable substeps using selected fixed action_type"
+        "agent_execution_flow": "array of phase objects: phase_id, phase_role, action_type, purpose, inputs, outputs, success_criteria, next_on_success, next_on_failure",
+        "planned_steps": "array of executable substeps using selected fixed action_type and carrying target/query/endpoint references"
     }
 }
 

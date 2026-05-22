@@ -201,6 +201,7 @@ class WorkflowContractBuilder:
             "required_capability": self.capability_from_state(state),
             "execution_decision": decision,
             "agent_action_prompt_contract": AGENT_ACTION_PROMPT_CONTRACT,
+            "agent_execution_flow": self.default_agent_execution_flow(action_type=action_type),
             "execution_ready": True,
             "human_interaction": {},
             "next_action": "execution_preparation",
@@ -248,8 +249,90 @@ class WorkflowContractBuilder:
         out.setdefault("depends_on", [])
         out.setdefault("requires_human_confirmation", False)
         out.setdefault("missing_fields", [])
+        out["agent_execution_flow"] = self.extract_agent_execution_flow(out, action_type=action_type)
         out["source_policy"] = self.source_policy_for_method(method)
         return out
+
+
+    def extract_agent_execution_flow(self, container: dict[str, Any], *, action_type: str) -> list[dict[str, Any]]:
+        """Extract or synthesize a domain-neutral agent execution flow.
+
+        The flow is planning material used by later stages. It is not final
+        answer material. It records why planner LLM calls are made, what
+        resource discovery is expected to produce, and which concrete action
+        should be executed next.
+        """
+        for candidate in self.iter_nested_dicts(container, max_depth=8):
+            flow = candidate.get("agent_execution_flow") or candidate.get("execution_flow") or candidate.get("substeps")
+            if isinstance(flow, list) and any(isinstance(item, dict) for item in flow):
+                return [dict(item) for item in flow if isinstance(item, dict)]
+        return self.default_agent_execution_flow(action_type=action_type)
+
+    def default_agent_execution_flow(self, *, action_type: str) -> list[dict[str, Any]]:
+        method = method_for_action(action_type)
+        flow: list[dict[str, Any]] = [
+            {
+                "phase_id": "phase_1",
+                "phase_role": "planner_llm_action_selection",
+                "action_type": "planner_llm",
+                "purpose": "rank fixed actions and choose the next concrete execution action",
+                "inputs": ["input_record", "intent_record", "requirement_record", "clean_context", "agent_objective"],
+                "outputs": ["execution_decision", "ranked_options", "selected_action_type"],
+                "success_criteria": ["selected_action_type is one fixed action", "planned_steps are produced"],
+                "next_on_success": "phase_2",
+                "next_on_failure": "repair_or_ask_user",
+            }
+        ]
+        if method in {"web_search", "api_call"}:
+            flow.append({
+                "phase_id": "phase_2",
+                "phase_role": "resource_discovery_or_contract_preparation",
+                "action_type": action_type,
+                "purpose": "collect stable query targets, candidate endpoints, request contract, and evidence URL policy before real execution",
+                "inputs": ["selected_action_type", "known_parameters", "candidate_targets"],
+                "outputs": ["query_contract", "targets_or_endpoints", "evidence_requirements"],
+                "success_criteria": ["targets or endpoints are preserved", "source URLs can be verified after execution"],
+                "next_on_success": "phase_3",
+                "next_on_failure": "resource_discovery_repair",
+            })
+            flow.append({
+                "phase_id": "phase_3",
+                "phase_role": "real_execution",
+                "action_type": action_type,
+                "execution_method": method,
+                "purpose": "execute only the locked prepared resource contract",
+                "inputs": ["resource_bundle", "validation_record"],
+                "outputs": ["execution_record", "provenance", "evidence_urls"],
+                "success_criteria": ["result comes from executed resource", "provenance contains source information"],
+                "next_on_success": "result_verification",
+                "next_on_failure": "feedback_repair",
+            })
+        else:
+            flow.append({
+                "phase_id": "phase_2",
+                "phase_role": "resource_preparation",
+                "action_type": action_type,
+                "execution_method": method,
+                "purpose": "prepare the resource contract required by the locked action",
+                "inputs": ["selected_action_type", "known_parameters"],
+                "outputs": ["resource_bundle"],
+                "success_criteria": ["resource bundle matches selected action"],
+                "next_on_success": "phase_3",
+                "next_on_failure": "feedback_repair",
+            })
+            flow.append({
+                "phase_id": "phase_3",
+                "phase_role": "real_execution",
+                "action_type": action_type,
+                "execution_method": method,
+                "purpose": "execute the prepared locked action",
+                "inputs": ["resource_bundle", "validation_record"],
+                "outputs": ["execution_record", "provenance"],
+                "success_criteria": ["execution result is produced by the selected action"],
+                "next_on_success": "result_verification",
+                "next_on_failure": "feedback_repair",
+            })
+        return flow
 
     def source_policy_for_method(self, method: str) -> dict[str, Any]:
         return {
