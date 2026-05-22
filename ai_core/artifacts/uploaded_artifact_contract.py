@@ -325,9 +325,54 @@ class UploadedArtifactContractBuilder:
         fields = []
         for name in required:
             text = str(name).strip()
-            if text and known.get(text) in (None, "", [], {}):
-                fields.append({"name": text, "label": text, "required": True, "source": "uploaded_artifact_contract"})
+            if not text:
+                continue
+            value = self._known_value_for_required_field(text, known)
+            if value in (None, "", [], {}):
+                fields.append({
+                    "name": text,
+                    "label": self._human_label(text),
+                    "required": True,
+                    "source": "uploaded_artifact_contract",
+                    "aliases": self._aliases_for_required_field(text),
+                    "merge_targets": [{"source_field": text}],
+                })
         return fields
+
+    def _known_value_for_required_field(self, name: str, known: dict[str, Any]) -> Any:
+        if not isinstance(known, dict):
+            return None
+        candidates = [name] + self._aliases_for_required_field(name)
+        normalized_candidates = {self._normalize_key(item) for item in candidates if item}
+        for key, value in known.items():
+            if value in (None, "", [], {}):
+                continue
+            if key in candidates or self._normalize_key(key) in normalized_candidates:
+                return value
+        return None
+
+    def _aliases_for_required_field(self, name: str) -> list[str]:
+        text = str(name or "").strip()
+        normalized = self._normalize_key(text)
+        aliases = [text]
+        # Generic parameter aliasing for uploaded callables.  The runtime does
+        # not know the domain; it only helps common human/external-file naming
+        # variants converge to the callable parameter name.
+        if normalized in {"city", "cityname", "place", "placeName".lower(), "location", "locationname"}:
+            aliases.extend(["city", "city_name", "place", "place_name", "location", "location_name"])
+        if normalized.endswith("name"):
+            stem = normalized[:-4]
+            if stem:
+                aliases.extend([stem, f"{stem}_name"])
+        aliases.append(text.replace("_", ""))
+        return list(dict.fromkeys(a for a in aliases if a))
+
+    def _normalize_key(self, value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().casefold())
+
+    def _human_label(self, value: str) -> str:
+        text = str(value or "").strip().replace("_", " ")
+        return text[:1].upper() + text[1:] if text else "Input"
 
     def _safe_name(self, value: str) -> str:
         text = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(value or "artifact"))[:80].strip("._")

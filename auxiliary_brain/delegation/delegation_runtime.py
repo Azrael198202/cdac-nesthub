@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 import copy
+import re
 
 from ai_core.agent_delegation import AgentExecutionRequest, PrimaryBrainDelegationClient
 from auxiliary_brain.storage import JsonStore
@@ -623,8 +624,28 @@ class AgentDelegationRuntime:
     def _collect_missing_agent_parameter_fields(self, participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         fields: list[dict[str, Any]] = []
         for participant in participants:
+            # If the agent is explicitly bound to uploaded artifacts, the real
+            # executable parameter contract is owned by artifact introspection
+            # in execution_preparation, not by the durable agent profile.
+            # This avoids asking stale or inferred agent-level fields before the
+            # uploaded file has been inspected. The UI will receive the concrete
+            # runtime fields produced from the artifact callable/signature.
+            if self._uses_uploaded_artifact_runtime(participant):
+                continue
             fields.extend(self.parameter_contract_service.to_missing_input_fields(participant))
         return fields
+
+    def _uses_uploaded_artifact_runtime(self, participant: dict[str, Any]) -> bool:
+        if not isinstance(participant, dict):
+            return False
+        artifacts = participant.get("uploaded_artifacts")
+        if isinstance(artifacts, list) and artifacts:
+            return True
+        policy = participant.get("artifact_policy") if isinstance(participant.get("artifact_policy"), dict) else {}
+        if policy.get("bind_uploaded_artifacts_to_agent") or str(policy.get("allowed_action") or "") == "use_uploaded_file":
+            return True
+        text = " ".join(str(participant.get(k) or "") for k in ("instruction", "execution_objective", "definition_instruction", "objective"))
+        return bool(re.search(r"\buse\s+file\b|\b[a-zA-Z0-9_.-]+\.[A-Za-z0-9]{1,8}\b", text, flags=re.I))
 
     def _apply_agent_parameter_values(self, participants: list[dict[str, Any]], provided_inputs: dict[str, Any]) -> None:
         if not isinstance(provided_inputs, dict):
