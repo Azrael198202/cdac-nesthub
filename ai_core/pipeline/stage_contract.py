@@ -33,7 +33,7 @@ PIPELINE_STAGES: tuple[StageContract, ...] = (
     ),
     StageContract(
         stage_id="requirement_completion",
-        owner="decide whether required parameters are complete",
+        owner="verify required parameters against the recognized intent and either continue or request missing information through UI",
         allowed_decisions=("required_parameter_check", "pause_for_missing_information", "merge_user_supplied_parameters"),
         forbidden_decisions=("tool_selection", "provider_selection", "runtime_execution", "final_answer_creation"),
         output_key="requirement_record",
@@ -41,7 +41,7 @@ PIPELINE_STAGES: tuple[StageContract, ...] = (
     ),
     StageContract(
         stage_id="context_awareness",
-        owner="prepare minimal clean context for planning",
+        owner="prepare minimal clean context for planning from upstream keys only",
         allowed_decisions=("session_state_read", "continuation_classification", "strict_context_reduction", "dependency_safe_summary"),
         forbidden_decisions=("business_intent_reclassification", "execution_method_locking", "tool_selection", "runtime_execution"),
         output_key="context_record",
@@ -49,32 +49,31 @@ PIPELINE_STAGES: tuple[StageContract, ...] = (
     ),
     StageContract(
         stage_id="workflow_planning",
-        owner="create executable workflow and lock execution policies",
-        allowed_decisions=("workflow_generation", "agent_graph_generation", "dependency_mapping", "execution_policy_locking"),
+        owner="create executable workflow, graphs, dependencies, execution methods, source policy, and execution plan",
+        allowed_decisions=("workflow_generation", "agent_graph_generation", "dependency_mapping", "execution_method_locking", "source_policy_locking"),
         forbidden_decisions=("runtime_execution", "result_synthesis", "unplanned_fallback"),
         output_key="execution_plan",
         executor_type="llm_json",
     ),
-
     StageContract(
-        stage_id="provider_resolution",
-        owner="bind planned capability needs to runtime-generated provider contracts",
-        allowed_decisions=("capability_binding", "provider_contract_generation", "fallback_binding", "source_policy_binding"),
+        stage_id="execution_preparation",
+        owner="prepare executable resources required by the locked workflow without executing the workflow",
+        allowed_decisions=("resource_bundle_generation", "prompt_contract_generation", "tool_design_generation", "sandbox_precheck", "source_collection"),
         forbidden_decisions=("business_intent_reclassification", "runtime_execution", "unplanned_provider_selection", "final_answer_creation"),
-        output_key="provider_resolution_record",
+        output_key="execution_preparation_record",
         executor_type="static_transform",
     ),
     StageContract(
         stage_id="pre_execution_validation",
-        owner="validate the locked plan before execution",
-        allowed_decisions=("schema_check", "parameter_check", "tool_presence_check", "generation_need_check", "confirmation_need_check"),
+        owner="validate schema, parameters, tools, confirmation gates, and sandbox executability before execution",
+        allowed_decisions=("schema_check", "parameter_check", "tool_presence_check", "generation_need_check", "confirmation_need_check", "sandbox_executability_check"),
         forbidden_decisions=("intent_reclassification", "execution_policy_rewrite", "runtime_execution", "final_answer_creation"),
         output_key="validation_record",
         executor_type="static_transform",
     ),
     StageContract(
         stage_id="execution",
-        owner="execute only the locked plan",
+        owner="execute only the locked plan and prepared resources",
         allowed_decisions=("planned_tool_call", "planned_provider_call", "planned_runtime_call", "trace_recording", "evidence_recording"),
         forbidden_decisions=("intent_reclassification", "execution_method_reselection", "unplanned_search", "final_answer_creation"),
         output_key="execution_record",
@@ -144,33 +143,30 @@ class PipelineStageContract:
 
     def generic_schema(self, stage_id: str) -> dict[str, Any]:
         stage = self.by_id[stage_id]
-        base: dict[str, Any] = {
+        return {
             "type": "object",
             "properties": {
                 "_executor_type": {"type": "string"},
                 "_node_id": {"type": "string"},
                 "_status": {"type": "string"},
                 stage.output_key: {"type": "object", "additionalProperties": True},
-                "previous_result_keys": {"type": "array", "items": {"type": "string"}},
                 "status": {"type": "string"},
                 "message": {"type": "string"},
                 "data": {"type": "object", "additionalProperties": True},
             },
             "additionalProperties": True,
         }
-        if stage.executor_type == "llm_json":
-            base["required"] = []
-        return base
 
     def prompt_template(self, stage_id: str) -> dict[str, Any]:
         stage = self.by_id[stage_id]
         return {
             "id": f"{stage.stage_id}_prompt",
-            "version": "4.0-provider-resolution",
+            "version": "4.1-execution-preparation",
             "executor_type": stage.executor_type,
             "system": (
                 "Return one JSON object only. Follow the stage boundary exactly. "
-                "Use domain-neutral fields. Do not introduce concrete business rules, providers, tools, APIs, files, or facts unless supplied by upstream state."
+                "Use domain-neutral fields. Do not introduce concrete business rules, providers, tools, APIs, files, or facts unless supplied by upstream state. "
+                "Every stage must carry forward the minimal upstream keys needed by the next stage."
             ),
             "user_template": "INPUT={{ user_input }}\nSTATE={{ previous_results }}\nRUNTIME={{ runtime_context }}",
             "runtime_rules": [
@@ -178,6 +174,7 @@ class PipelineStageContract:
                 "Allowed decisions: " + ", ".join(stage.allowed_decisions),
                 "Forbidden decisions: " + ", ".join(stage.forbidden_decisions),
                 f"Write primary result under {stage.output_key} when applicable.",
+                "Do not output placeholder key lists as the stage result.",
             ],
             "output_contract": {stage.output_key: "object"},
         }

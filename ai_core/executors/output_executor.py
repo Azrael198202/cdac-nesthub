@@ -75,7 +75,6 @@ class OutputExecutor:
                 "blocked_steps": blocked_steps,
                 "optional_human_interactions": optional_human_interactions,
                 "final_answer": message,
-                "previous_result_keys": list(results.keys()),
             }
 
         if status in self.WAITING_STATUSES or (blocked_steps and not execution_steps):
@@ -92,7 +91,6 @@ class OutputExecutor:
                 "human_interactions": human_interactions,
                 "missing_tools": missing_tools,
                 "final_answer": message,
-                "previous_result_keys": list(results.keys()),
             }
 
         tool_results: list[dict[str, Any]] = []
@@ -137,7 +135,6 @@ class OutputExecutor:
             "trust_summary": trust_summary,
             "executed_steps": len(execution_steps),
             "blocked_steps": blocked_steps,
-            "previous_result_keys": list(results.keys()),
         }
 
 

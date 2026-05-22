@@ -161,7 +161,7 @@ class ConversationCoreRuntime:
             "knowledge_available": bool(kb),
             "knowledge_answer": kb if kb else None,
             "knowledge_status": self.knowledge.status(),
-            "previous_result_keys": ["input_parsing", "intent_recognition"],
+            "upstream_refs": ["input_parsing", "intent_recognition"],
             "intent_type": intent.get("intent_type"),
         }
 

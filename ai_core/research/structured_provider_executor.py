@@ -151,14 +151,14 @@ class StructuredProviderExecutor:
         return {"status": "partial", "result": partial, "tool": {"id": "structured_provider_executor", "source": "api_or_sdk"}}
 
     def _load_policies(self, *, run_id: str) -> list[dict[str, Any]]:
-        path = self.session_root / run_id / "provider_resolution" / "structured_api_providers.json"
+        path = self.session_root / run_id / "execution_preparation" / "resource_bundle.json"
         if not path.exists():
             return []
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return []
-        providers = data.get("providers") if isinstance(data, dict) else data
+        providers = data.get("providers") or data.get("prepared_resources") if isinstance(data, dict) else data
         if not isinstance(providers, list):
             return []
         normalized: list[dict[str, Any]] = []

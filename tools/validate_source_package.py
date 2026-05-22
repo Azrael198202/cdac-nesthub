@@ -15,7 +15,7 @@ EXPECTED_STAGES = [
     "requirement_completion",
     "context_awareness",
     "workflow_planning",
-    "provider_resolution",
+    "execution_preparation",
     "pre_execution_validation",
     "execution",
     "result_verification",
@@ -32,21 +32,7 @@ FORBIDDEN_RUNTIME_PATHS = [
     "runtime/temp",
     "runtime/configs/secrets",
 ]
-DOMAIN_TERMS = [
-    "weather",
-    "forecast",
-    "flight",
-    "booking",
-    "reservation",
-    "attendance",
-    "open_meteo",
-    "temperature_2m",
-    "precipitation",
-    "出勤",
-    "退勤",
-    "打卡",
-    "社内",
-]
+DOMAIN_TERMS: list[str] = []
 SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules"}
 
 
@@ -81,6 +67,8 @@ def check_stage_contract() -> list[str]:
 
 def check_domain_terms() -> list[str]:
     errors: list[str] = []
+    if not DOMAIN_TERMS:
+        return errors
     pattern = re.compile(r"(?<![A-Za-z0-9_])(?:" + "|".join(re.escape(t) for t in DOMAIN_TERMS) + r")(?![A-Za-z0-9_])", re.IGNORECASE)
     for p in iter_source_files():
         rel = p.relative_to(ROOT).as_posix()

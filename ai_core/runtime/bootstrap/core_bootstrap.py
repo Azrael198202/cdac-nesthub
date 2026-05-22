@@ -1003,61 +1003,61 @@ class RuntimeBootstrap:
             if not p.exists():
                 p.write_text("", encoding="utf-8")
 
-# ---- v4.0 provider-resolution stage bootstrap overrides ----
+# ---- v4.1 execution-preparation stage bootstrap overrides ----
 # Kept at the end intentionally so the original bootstrap remains readable while
 # source packages can enforce the latest stage contract without carrying
 # runtime-generated files.
 from ai_core.pipeline.stage_contract import PipelineStageContract as _PipelineStageContract
 
 
-def _v40_stage_contract(self):
-    contract = getattr(self, "_v40_pipeline_contract", None)
+def _v41_stage_contract(self):
+    contract = getattr(self, "_v41_pipeline_contract", None)
     if contract is None:
         contract = _PipelineStageContract()
-        setattr(self, "_v40_pipeline_contract", contract)
+        setattr(self, "_v41_pipeline_contract", contract)
     return contract
 
 
-def _v40_ensure_workflow(self) -> None:
+def _v41_ensure_workflow(self) -> None:
     p = RUNTIME_CONFIGS / "workflows" / "base_orchestration.yaml"
     self.loader.save_yaml(p, {
         "workflow_id": "base_orchestration",
-        "name": "Domain Neutral Provider-Resolved Orchestration",
-        "version": "4.0",
+        "name": "Domain Neutral Execution-Preparation Orchestration",
+        "version": "4.1",
         "stage_boundary_policy": "locked_stage_contract",
-        "nodes": _v40_stage_contract(self).default_workflow_nodes(),
+        "nodes": _v41_stage_contract(self).default_workflow_nodes(),
     })
 
 
-def _v40_ensure_node_configs(self) -> None:
-    contract = _v40_stage_contract(self)
+def _v41_ensure_node_configs(self) -> None:
+    contract = _v41_stage_contract(self)
     for stage_id in contract.ordered_stage_ids():
         p = RUNTIME_GENERATED / "nodes" / f"{stage_id}.yaml"
         self.loader.save_yaml(p, contract.node_config(stage_id))
 
 
-def _v40_ensure_runtime_templates(self) -> None:
-    contract = _v40_stage_contract(self)
+def _v41_ensure_runtime_templates(self) -> None:
+    contract = _v41_stage_contract(self)
     for stage in contract.stages:
         self.template_generator.ensure_node_template(stage.stage_id, stage.executor_type)
 
 
-def _v40_ensure_prompts(self) -> None:
-    contract = _v40_stage_contract(self)
+def _v41_ensure_prompts(self) -> None:
+    contract = _v41_stage_contract(self)
     for stage_id in contract.ordered_stage_ids():
         p = RUNTIME_GENERATED / "prompts" / f"{stage_id}.yaml"
         self.loader.save_yaml(p, contract.prompt_template(stage_id))
 
 
-def _v40_ensure_schemas(self) -> None:
-    contract = _v40_stage_contract(self)
+def _v41_ensure_schemas(self) -> None:
+    contract = _v41_stage_contract(self)
     for stage_id in contract.ordered_stage_ids():
         p = RUNTIME_GENERATED / "schemas" / f"{stage_id}.schema.json"
         self.loader.save_json(p, contract.generic_schema(stage_id))
 
 
-def _v40_ensure_adapters(self) -> None:
-    contract = _v40_stage_contract(self)
+def _v41_ensure_adapters(self) -> None:
+    contract = _v41_stage_contract(self)
     for stage in contract.stages:
         if stage.executor_type != "llm_json":
             continue
@@ -1083,9 +1083,9 @@ def _v40_ensure_adapters(self) -> None:
         })
 
 
-RuntimeBootstrap._ensure_workflow = _v40_ensure_workflow
-RuntimeBootstrap._ensure_node_configs = _v40_ensure_node_configs
-RuntimeBootstrap._ensure_runtime_templates = _v40_ensure_runtime_templates
-RuntimeBootstrap._ensure_prompts = _v40_ensure_prompts
-RuntimeBootstrap._ensure_schemas = _v40_ensure_schemas
-RuntimeBootstrap._ensure_adapters = _v40_ensure_adapters
+RuntimeBootstrap._ensure_workflow = _v41_ensure_workflow
+RuntimeBootstrap._ensure_node_configs = _v41_ensure_node_configs
+RuntimeBootstrap._ensure_runtime_templates = _v41_ensure_runtime_templates
+RuntimeBootstrap._ensure_prompts = _v41_ensure_prompts
+RuntimeBootstrap._ensure_schemas = _v41_ensure_schemas
+RuntimeBootstrap._ensure_adapters = _v41_ensure_adapters

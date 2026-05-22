@@ -507,10 +507,123 @@ class LLMJsonExecutor:
                 schema_path=str(schema_path),
             )
 
+        result = self._postprocess_stage_result(node_id=node_id, result=result, state=state, slim_user_input=slim_user_input)
         result["_executor_type"] = "llm_json"
         result["_node_id"] = node_id
         result["_adapter_id"] = adapter.get("adapter_id")
         return result
+
+    def _postprocess_stage_result(self, *, node_id: str | None, result: dict, state: dict, slim_user_input: str) -> dict:
+        node = str(node_id or "")
+        if node == "workflow_planning":
+            return self._ensure_executable_workflow(result=result, state=state, slim_user_input=slim_user_input)
+        if node == "intent_recognition":
+            return self._ensure_intent_carry_forward(result=result, state=state)
+        if node == "input_parsing":
+            return self._ensure_input_carry_forward(result=result, state=state, slim_user_input=slim_user_input)
+        return result
+
+    def _ensure_input_carry_forward(self, *, result: dict, state: dict, slim_user_input: str) -> dict:
+        if not isinstance(result, dict):
+            result = {}
+        payload = self._loads_json_obj(str(state.get("input") or "")) or self._loads_json_obj(slim_user_input) or {}
+        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        agent_params = context.get("agent_parameters") if isinstance(context.get("agent_parameters"), dict) else payload.get("agent_parameters")
+        values = agent_params.get("values") if isinstance(agent_params, dict) and isinstance(agent_params.get("values"), dict) else {}
+        parsed = result.get("parsed_entities") if isinstance(result.get("parsed_entities"), dict) else {}
+        for k, v in values.items():
+            if v not in (None, "", [], {}):
+                parsed.setdefault(str(k), v)
+        if payload.get("objective") not in (None, ""):
+            parsed.setdefault("objective", payload.get("objective"))
+        result["parsed_entities"] = parsed
+        result.setdefault("original_input", str(payload.get("objective") or payload.get("instruction") or state.get("input") or "")[:1000])
+        result.setdefault("missing_information", [])
+        return result
+
+    def _ensure_intent_carry_forward(self, *, result: dict, state: dict) -> dict:
+        if not isinstance(result, dict):
+            result = {}
+        parsed = (state.get("results") or {}).get("input_parsing") if isinstance(state.get("results"), dict) else {}
+        if isinstance(parsed, dict):
+            entities = parsed.get("parsed_entities") if isinstance(parsed.get("parsed_entities"), dict) else {}
+            result.setdefault("normalized_intent", {})
+            if isinstance(result["normalized_intent"], dict):
+                for k, v in entities.items():
+                    if v not in (None, "", [], {}):
+                        result["normalized_intent"].setdefault(str(k), v)
+        result.setdefault("missing_information", [])
+        return result
+
+    def _ensure_executable_workflow(self, *, result: dict, state: dict, slim_user_input: str) -> dict:
+        if not isinstance(result, dict):
+            result = {}
+        existing = result.get("planned_steps")
+        if isinstance(existing, list) and existing:
+            steps = [self._normalize_generated_step(step, index, state) for index, step in enumerate(existing) if isinstance(step, dict)]
+            result["planned_steps"] = steps
+            result.setdefault("required_capabilities", [s.get("required_capability") for s in steps if s.get("required_capability")])
+            result.setdefault("execution_plan", {"steps": steps})
+            result.setdefault("agent_graph", self._build_agent_graph(steps))
+            result.setdefault("blocking_missing_information", [])
+            return result
+        recovered = self._recover_workflow_planning(
+            state=state,
+            slim_user_input=slim_user_input,
+            slim_previous_results=state.get("results", {}) if isinstance(state.get("results"), dict) else {},
+            error="planner_returned_empty_plan",
+        )
+        recovered["recovery"] = {"status": "empty_plan_repaired", "reason": "Workflow planning returned no executable steps."}
+        return recovered
+
+    def _normalize_generated_step(self, step: dict, index: int, state: dict) -> dict:
+        out = dict(step)
+        step_id = str(out.get("step_id") or out.get("task_id") or f"step_{index + 1}")
+        out["step_id"] = step_id
+        out.setdefault("task_id", step_id)
+        out.setdefault("depends_on", [])
+        out.setdefault("requires_human_confirmation", False)
+        params = out.get("parameters") if isinstance(out.get("parameters"), dict) else {}
+        if not any(k in params for k in ("known", "missing_required", "optional")):
+            params = {"known": params, "missing_required": {}, "optional": {}}
+        else:
+            params = {
+                "known": params.get("known") if isinstance(params.get("known"), dict) else {},
+                "missing_required": params.get("missing_required") if isinstance(params.get("missing_required"), (dict, list)) else {},
+                "optional": params.get("optional") if isinstance(params.get("optional"), dict) else {},
+            }
+        out["parameters"] = params
+        out.setdefault("required_capability", self._generic_capability_from_state(state))
+        out.setdefault("execution_method", "content_generation")
+        out.setdefault("execution_method_policy", {"preferred_methods": [out.get("execution_method")], "fallback_allowed": True})
+        out.setdefault("execution_strategy", [out.get("execution_method")])
+        out.setdefault("execution_ready", not bool(params.get("missing_required")))
+        out.setdefault("source_policy", {"allow_external": False, "allow_internal": True, "requires_live_evidence": False})
+        return out
+
+    def _build_agent_graph(self, steps: list[dict]) -> dict:
+        nodes = []
+        edges = []
+        for step in steps:
+            step_id = str(step.get("step_id"))
+            nodes.append({
+                "id": step_id,
+                "relation": "dependent" if step.get("depends_on") else "independent",
+                "execution_method": step.get("execution_method"),
+            })
+            for dep in step.get("depends_on") or []:
+                edges.append({"from": str(dep), "to": step_id, "context_policy": "strict_json_safe_summary"})
+        return {"main_graph": {"nodes": nodes, "edges": edges}, "subgraphs": []}
+
+    def _generic_capability_from_state(self, state: dict) -> str:
+        results = state.get("results") if isinstance(state.get("results"), dict) else {}
+        intent = results.get("intent_recognition") if isinstance(results.get("intent_recognition"), dict) else {}
+        for key in ("intent_type", "classified_intent", "intent", "name"):
+            value = intent.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return "generic_content_generation"
+
     def _recover_stage_result_after_provider_error(self, *, node_id: str | None, state: dict, slim_user_input: str, slim_previous_results: dict, error: str) -> dict | None:
         """Generic last-resort recovery for local JSON stage failures.
 
@@ -566,30 +679,35 @@ class LLMJsonExecutor:
                 for k, v in source.items():
                     if v not in (None, "", [], {}):
                         known[str(k)] = v
-        objective = str(payload.get("objective") or intent.get("intent_summary") or parsed.get("original_input") or "execute requested task")[:300]
-        capability = str(intent.get("intent_type") or "runtime_capability")[:120]
+        objective = str(payload.get("objective") or intent.get("intent_summary") or parsed.get("original_input") or state.get("input") or "execute requested task")[:500]
+        capability = str(intent.get("intent_type") or intent.get("classified_intent") or "generic_content_generation")[:120]
+        step = {
+            "step_id": "step_1",
+            "task_id": "step_1",
+            "step_type": "runtime_execution",
+            "objective": objective,
+            "input_from": ["input_parsing", "intent_recognition", "requirement_completion", "context_awareness"],
+            "parameters": {"known": known, "missing_required": {}, "optional": {}},
+            "required_capability": capability,
+            "execution_method": "content_generation",
+            "execution_method_policy": {"preferred_methods": ["content_generation"], "fallback_allowed": True},
+            "execution_strategy": ["content_generation"],
+            "source_policy": {"allow_external": False, "allow_internal": True, "requires_live_evidence": False},
+            "execution_ready": True,
+            "human_interaction": {},
+            "next_action": "execute",
+            "depends_on": [],
+            "requires_human_confirmation": False,
+            "missing_fields": [],
+        }
         return {
-            "planned_steps": [
-                {
-                    "step_id": "step_1",
-                    "task_id": "step_1",
-                    "step_type": "runtime_execution",
-                    "objective": objective,
-                    "input_from": ["input_parsing", "intent_recognition"],
-                    "parameters": {"known": known, "missing_required": [], "optional": {}},
-                    "required_capability": capability,
-                    "execution_strategy": ["runtime_native", "structured_provider", "web_evidence", "tool_generation"],
-                    "execution_ready": True,
-                    "human_interaction": {},
-                    "next_action": "execute",
-                    "depends_on": [],
-                    "requires_human_confirmation": False,
-                    "missing_fields": [],
-                }
-            ],
+            "workflow": {"workflow_id": "runtime_generated_workflow", "status": "ready"},
+            "agent_graph": {"main_graph": {"nodes": [{"id": "step_1", "relation": "independent", "execution_method": "content_generation"}], "edges": []}, "subgraphs": []},
+            "planned_steps": [step],
+            "execution_plan": {"steps": [step], "locked": True},
             "blocking_missing_information": [],
             "required_capabilities": [capability],
-            "execution_strategy": ["runtime_native", "structured_provider", "web_evidence", "tool_generation"],
+            "execution_strategy": ["content_generation"],
             "human_interaction": {},
             "recovery": {"status": "provider_error_recovered", "reason": error[:500]},
         }
