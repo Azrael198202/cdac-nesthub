@@ -8,6 +8,8 @@ import urllib.request
 import urllib.error
 import importlib.util
 import inspect
+import io
+import contextlib
 from pathlib import Path
 from typing import Any
 from datetime import datetime, timezone
@@ -1488,6 +1490,39 @@ class ToolCallExecutor:
         }
         return {"tool": {"id": "prepared_external_resource_executor", "source": "execution_preparation"}, "input": {"url": url, "method": method}, "result": result}
 
+    def _interaction_requests_from_validation(self, validation_payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Extract UI/runtime input requests from validation output.
+
+        pre_execution_validation is allowed to block execution when a locked
+        action has a prepared UI request (for example, missing runtime
+        parameters for an uploaded artifact or an optional credential prompt).
+        Execution must return that request to the UI instead of raising an
+        AttributeError or running an unrelated fallback.
+        """
+        if not isinstance(validation_payload, dict):
+            return []
+        checks = validation_payload.get("checks") if isinstance(validation_payload.get("checks"), list) else []
+        requests: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in checks:
+            if not isinstance(item, dict):
+                continue
+            req = item.get("ui_request") if isinstance(item.get("ui_request"), dict) else None
+            if not req:
+                continue
+            payload = dict(req)
+            payload.setdefault("step_id", item.get("step_id"))
+            payload.setdefault("required", True)
+            payload.setdefault("type", payload.get("type") or "collect_runtime_parameters")
+            payload.setdefault("title", payload.get("title") or "Additional input required")
+            payload.setdefault("message", payload.get("message") or "Please provide the required runtime input values and resume the workflow.")
+            key = json.dumps(payload, sort_keys=True, default=str)
+            if key in seen:
+                continue
+            seen.add(key)
+            requests.append(payload)
+        return requests
+
     async def _execute_uploaded_artifact(
         self,
         *,
@@ -1569,15 +1604,22 @@ class ToolCallExecutor:
         if not callable(func):
             raise RuntimeError("uploaded_python_artifact_has_no_callable_entrypoint")
         sig = inspect.signature(func)
-        if len(sig.parameters) == 1 and next(iter(sig.parameters.keys())) in {"payload", "input", "data", "params"}:
-            value = func(dict(known))
-        else:
-            kwargs = {name: known.get(name) for name in sig.parameters.keys() if name in known}
-            value = func(**kwargs)
+        stdout_buffer = io.StringIO()
+        with contextlib.redirect_stdout(stdout_buffer):
+            if len(sig.parameters) == 1 and next(iter(sig.parameters.keys())) in {"payload", "input", "data", "params"}:
+                value = func(dict(known))
+            else:
+                kwargs = {name: known.get(name) for name in sig.parameters.keys() if name in known}
+                value = func(**kwargs)
+        stdout_text = stdout_buffer.getvalue().strip()
         if isinstance(value, dict):
-            output = value.get("answer_material") or value.get("output") or value.get("result") or value
-            return {"status": "success", "output": output, "normalized_facts": value if isinstance(value, dict) else {}}
-        return {"status": "success", "output": value}
+            output = value.get("answer_material") or value.get("output") or value.get("result") or stdout_text or value
+            normalized = dict(value)
+            if stdout_text:
+                normalized.setdefault("stdout", stdout_text)
+            return {"status": "success", "output": output, "normalized_facts": normalized}
+        output = value if value not in (None, "", [], {}) else stdout_text
+        return {"status": "success" if output not in (None, "", [], {}) else "failed", "output": output, "stdout": stdout_text}
 
     def _prepared_resource_allows_method(self, *, state: dict[str, Any], step_id: str, method: str) -> bool:
         results = state.get("results") if isinstance(state, dict) and isinstance(state.get("results"), dict) else {}

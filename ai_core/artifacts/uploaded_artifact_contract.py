@@ -48,6 +48,17 @@ class UploadedArtifactContractBuilder:
         for item in self.registry.resolve_from_text(text_blob):
             raw.append(item)
 
+        # Deterministic uploaded-artifact binding guard.  When the locked action
+        # is an uploaded-file execution, a user-visible filename may be present
+        # only in upstream stage text, or the UI may have uploaded exactly one
+        # candidate file for the current session.  Resolve that before asking an
+        # LLM or falling back to ask_user.  This is generic resource binding, not
+        # domain/business logic.
+        if not raw and self._step_requests_uploaded_artifact(step):
+            registry_items = self.registry.list()
+            if len(registry_items) == 1 and isinstance(registry_items[0], dict):
+                raw.append(registry_items[0])
+
         refs: list[UploadedArtifactRef] = []
         seen: set[str] = set()
         for item in raw:
@@ -85,6 +96,26 @@ class UploadedArtifactContractBuilder:
             "approved_in_preparation": bool(selected.get("exists")) and not missing,
             "status": "missing_parameters" if missing else ("prepared" if selected.get("exists") else "missing_artifact"),
         }
+
+
+    def _step_requests_uploaded_artifact(self, step: dict[str, Any]) -> bool:
+        text_parts: list[str] = []
+        def visit(value: Any, depth: int = 0) -> None:
+            if depth > 4:
+                return
+            if isinstance(value, str):
+                text_parts.append(value)
+            elif isinstance(value, dict):
+                for nested in value.values():
+                    visit(nested, depth + 1)
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item, depth + 1)
+        visit(step)
+        text = " ".join(text_parts).casefold()
+        action = str(step.get("action_type") or step.get("execution_action") or "").casefold()
+        method = str(step.get("execution_method") or "").casefold()
+        return (action == "use_uploaded_file" or method == "uploaded_artifact" or "use_uploaded_file" in text or "uploaded_artifact" in text)
 
     def inspect_ref(self, ref: UploadedArtifactRef) -> dict[str, Any]:
         path = self._safe_path(ref.path)
@@ -194,7 +225,11 @@ class UploadedArtifactContractBuilder:
         text = str(value or "").strip()
         if not text or re.match(r"^https?://", text, flags=re.I):
             return None
-        path = Path(text)
+        # Registry records may be created on Windows and later read on a
+        # POSIX runtime (or vice versa).  Normalize separators before resolving
+        # relative paths so runtime\uploads\... can be found reliably.
+        normalized_text = text.replace("\\", "/")
+        path = Path(normalized_text)
         if not path.is_absolute():
             path = PROJECT_ROOT / path
         try:
