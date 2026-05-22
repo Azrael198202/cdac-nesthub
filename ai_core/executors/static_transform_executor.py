@@ -8,7 +8,7 @@ from typing import Any
 from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import PROJECT_ROOT, RUNTIME_DIR
 from ai_core.validation.schema_validator import SchemaValidator
-from ai_core.workflow.execution_options import ACTION_TO_METHOD, ACTION_CONTRACTS
+from ai_core.workflow.execution_options import ACTION_TO_METHOD, ACTION_CONTRACTS, AGENT_ACTION_PROMPT_CONTRACT, normalize_action_type
 
 
 class StaticTransformExecutor:
@@ -227,7 +227,7 @@ class StaticTransformExecutor:
 
     def _prepared_step(self, step: dict[str, Any], index: int) -> dict[str, Any]:
         method = self._execution_method(step)
-        action_type = str(step.get("action_type") or step.get("execution_action") or "").strip()
+        action_type = normalize_action_type(step.get("action_type") or step.get("execution_action"))
         if not action_type:
             action_type = self._action_type_for_method(method)
         step_id = str(step.get("step_id") or step.get("task_id") or f"step_{index + 1}")
@@ -245,12 +245,15 @@ class StaticTransformExecutor:
             "execution_method": method,
             "locked": True,
             "action_contract": action_contract,
+            "agent_action_prompt_contract": AGENT_ACTION_PROMPT_CONTRACT,
             "source_policy": source_policy,
             "web_collection": {
                 "required": method == "web_search",
                 "targets": web_targets,
                 "approved_in_preparation": method == "web_search" and bool(web_targets),
-                "status": "prepared" if method != "web_search" or web_targets else "missing_targets",
+                "discovery_required": method == "web_search" and not bool(web_targets),
+                "discovery_contract": {"allowed": True, "selection_policy": "use planned query/target fields when available; otherwise collect targets before execution"} if method == "web_search" and not bool(web_targets) else None,
+                "status": "prepared" if method != "web_search" or web_targets else "discovery_required",
             },
             "api_call_preparation": {
                 "required": method == "api_call",
@@ -305,7 +308,7 @@ class StaticTransformExecutor:
                 return False
             if method == "web_search":
                 web = item.get("web_collection") if isinstance(item.get("web_collection"), dict) else {}
-                return bool(web.get("approved_in_preparation") and web.get("targets"))
+                return bool(web.get("approved_in_preparation") or web.get("discovery_contract"))
             if method == "api_call":
                 api = item.get("api_call_preparation") if isinstance(item.get("api_call_preparation"), dict) else {}
                 return bool(api.get("approved_in_preparation") or api.get("discovery_contract"))

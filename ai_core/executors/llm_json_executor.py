@@ -8,7 +8,7 @@ from ai_core.llm.provider_router import ProviderRouter
 from ai_core.events.event_bus import event_bus
 from ai_core.validation.recoverable_validation_error import RecoverableValidationError
 from ai_core.workflow.workflow_contract_builder import WorkflowContractBuilder
-from ai_core.workflow.execution_options import ACTION_TO_METHOD, fixed_options_for_prompt
+from ai_core.workflow.execution_options import ACTION_TO_METHOD, AGENT_ACTION_PROMPT_CONTRACT, fixed_options_for_prompt, normalize_action_type
 from ai_core.validation.schema_auto_repair import SchemaAutoRepair
 from ai_core.validation.result_auto_repair import ResultAutoRepair
 from ai_core.evolution.runtime_learning import RuntimeLearningService
@@ -585,6 +585,7 @@ class LLMJsonExecutor:
             slim_user_input=slim_user_input,
         )
         normalized["planner_llm_role"] = "action_selection_only"
+        normalized["agent_action_prompt_contract"] = AGENT_ACTION_PROMPT_CONTRACT
         normalized["planner_output_can_enter_final_synthesis"] = False
         normalized["status"] = normalized.get("status") or "action_planned"
         return {
@@ -638,7 +639,7 @@ class LLMJsonExecutor:
         the workflow intent.
         """
         text = str(value or "").strip().lower()
-        return text if text in self.FIXED_EXECUTION_ACTIONS else default
+        return normalize_action_type(text, default)
 
     def _execution_decision_from_plan(self, container: dict) -> dict:
         if not isinstance(container, dict):
@@ -760,7 +761,7 @@ class LLMJsonExecutor:
         # create missing planned_steps, but it must not change the selected
         # execution action. This keeps workflow_planning as the single place
         # where the fixed action options are ranked and selected.
-        selected_action = self._selected_action_type(intent, clean_context, requirement_payload, parsed) or "llm_generate"
+        selected_action = self._selected_action_type(intent, clean_context, requirement_payload, parsed) or "ask_user"
         decision_source = self._execution_decision_from_plan(intent) or self._execution_decision_from_plan(clean_context) or {}
         raw_ranked = decision_source.get("ranked_options") if isinstance(decision_source.get("ranked_options"), list) else []
         ranked_options = []
@@ -935,7 +936,7 @@ class LLMJsonExecutor:
                         known[str(k)] = v
         objective = str(payload.get("objective") or intent.get("intent_summary") or parsed.get("original_input") or state.get("input") or "execute requested task")[:500]
         capability = str(intent.get("intent_type") or intent.get("classified_intent") or "generic_content_generation")[:120]
-        selected_action = self._selected_action_type(intent) or "llm_generate"
+        selected_action = self._selected_action_type(intent) or "ask_user"
         selected_method = self._method_from_action_type(selected_action)
         step = {
             "step_id": "step_1",
