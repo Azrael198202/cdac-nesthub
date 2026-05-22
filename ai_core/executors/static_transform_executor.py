@@ -385,6 +385,20 @@ class StaticTransformExecutor:
         upload_contract = self.uploaded_artifacts.build_contract(state=state or {}, step=step, step_id=step_id) if method == "uploaded_artifact" else {"required": False}
         upload_manifest_path = self.uploaded_artifacts.write_manifest(state=state or {}, step_id=step_id, contract=upload_contract) if method == "uploaded_artifact" else ""
         action_contract = ACTION_CONTRACTS.get(action_type, {})
+        prompt_contract = {
+            "required": method == "content_generation",
+            "source_phase": "prompt_contract_preparation",
+            "objective": str(step.get("objective") or ""),
+            "known_parameters": known,
+            "must_call_executor_llm": method == "content_generation",
+            "planner_output_can_enter_final_synthesis": False,
+        }
+        output_contract = {
+            "required": method == "content_generation",
+            "source_phase": "output_contract_preparation",
+            "expected_material_key": "answer_material",
+            "verification_policy": "verify generated material against objective and confirmed parameters; do not accept runtime observation as generated content",
+        }
         selected_api_endpoint = endpoint_candidates[0] if endpoint_candidates else ""
         credential_only = bool(credential_endpoint_candidates) and not bool(endpoint_candidates)
         discovered_api_contract = {
@@ -412,6 +426,8 @@ class StaticTransformExecutor:
             "agent_action_prompt_contract": AGENT_ACTION_PROMPT_CONTRACT,
             "agent_execution_flow": step.get("agent_execution_flow") if isinstance(step.get("agent_execution_flow"), list) else [],
             "source_policy": source_policy,
+            "prompt_contract": prompt_contract,
+            "output_contract": output_contract,
             "web_collection": {
                 "required": method == "web_search",
                 "targets": web_targets,

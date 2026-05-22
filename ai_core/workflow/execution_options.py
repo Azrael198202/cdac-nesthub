@@ -91,6 +91,8 @@ SELECTION_RULES: tuple[str, ...] = (
     "Prefer free/runtime options before paid options when both can satisfy the request.",
     "Prefer already-prepared local or registered resources before generating new code or using external access.",
     "Do not use web/API/external access unless the intent requires current, external, or evidence-backed information.",
+    "When the requested deliverable is final natural-language content and no reusable runtime artifact, code, shell, SDK, external source, or uploaded method is required, prefer llm_generate over generate_code or generate_complex_tool.",
+    "Use generate_code or generate_complex_tool only when the deliverable itself is executable source, a reusable tool/module, or an artifact that must be generated and sandboxed before use.",
     "Do not choose execution methods inside execution; agent_action_planning is the only owner of final action selection. Workflow planning may call planner LLM, but that is not final task execution.",
 )
 
@@ -108,6 +110,7 @@ AGENT_ACTION_PROMPT_CONTRACT: dict[str, Any] = {
         "If web discovery finds a structured endpoint candidate, the next flow phase MUST prepare an API contract before execution when that is more stable than page reading.",
         "If an uploaded artifact is selected, the next flow phase MUST inspect the artifact, infer required runtime parameters, request missing values through UI, and only then execute the artifact in sandbox.",
         "If the selected candidate requires credentials, do not discard it; output credential_fields and a user_interaction phase before API execution.",
+        "If the selected action is llm_generate, output a prompt_contract phase, an output_contract phase, an executor_llm_generation phase, and a verification phase.",
         "Use only fixed action_type values; never invent method names."
     ],
     "required_output": {

@@ -170,6 +170,76 @@ class WorkflowContractBuilder:
             "selection_rules": list(SELECTION_RULES),
         }
 
+    def _joined_request_text(self, *, state: dict[str, Any], result: dict[str, Any], container: dict[str, Any] | None = None) -> str:
+        """Collect generic request text for structural action-policy checks.
+
+        This is not domain or business logic. It only decides whether the
+        selected fixed action asks for a reusable runtime artifact when the
+        upstream text appears to request a final human-readable deliverable.
+        """
+        parts: list[str] = []
+        for value in (state.get("input"), result.get("message") if isinstance(result, dict) else None, result.get("objective") if isinstance(result, dict) else None):
+            if value not in (None, ""):
+                parts.append(str(value))
+        results = state.get("results") if isinstance(state.get("results"), dict) else {}
+        for key in ("input_parsing", "intent_recognition", "requirement_completion", "context_awareness"):
+            value = results.get(key)
+            if isinstance(value, dict):
+                for field in ("original_input", "recognized_intent", "classified_intent", "intent", "objective", "intent_summary"):
+                    if value.get(field) not in (None, ""):
+                        parts.append(str(value.get(field)))
+                data = value.get("data") if isinstance(value.get("data"), dict) else {}
+                for field in ("classified_intent", "normalized_input", "intent"):
+                    if data.get(field) not in (None, ""):
+                        parts.append(str(data.get(field)))
+        if isinstance(container, dict):
+            for field in ("content", "objective", "target", "action", "message"):
+                if container.get(field) not in (None, ""):
+                    parts.append(str(container.get(field)))
+        return "\n".join(parts).casefold()
+
+    def _looks_like_final_text_deliverable(self, text: str) -> bool:
+        """Generic content-deliverable detector, not domain-specific.
+
+        It is intentionally conservative: it only corrects tool-generation
+        choices when the wording asks for direct human-readable output and does
+        not ask for an executable/reusable artifact.
+        """
+        if not text:
+            return False
+        output_terms = {
+            "write", "compose", "draft", "generate text", "create text", "summarize", "explain",
+            "rewrite", "translate", "describe", "introduction", "description", "paragraph",
+            "essay", "article", "mail", "email", "message", "answer", "content",
+        }
+        artifact_terms = {
+            "code", "script", "shell", "command", "program", "module", "tool", "sdk", "api",
+            "endpoint", "function", "class", "package", "repository", "file", "upload", "browser",
+            "scrape", "crawl", "web", "http", "json", "yaml", "database", "sql",
+        }
+        import re
+        def contains_term(term: str) -> bool:
+            if " " in term:
+                return term in text
+            return re.search(r"(?<![a-z0-9_])" + re.escape(term) + r"(?![a-z0-9_])", text) is not None
+        has_output = any(contains_term(term) for term in output_terms)
+        has_artifact = any(contains_term(term) for term in artifact_terms)
+        return has_output and not has_artifact
+
+    def _correct_action_for_output_contract(self, *, action_type: str, state: dict[str, Any], result: dict[str, Any], container: dict[str, Any] | None = None) -> str:
+        """Prevent accidental runtime-artifact generation for direct output tasks.
+
+        The LLM still chooses the action. This guard only enforces the fixed
+        action contract when a reusable runtime artifact was selected without
+        an artifact-shaped request. It does not include business/domain terms.
+        """
+        if action_type not in {"generate_code", "generate_complex_tool"}:
+            return action_type
+        text = self._joined_request_text(state=state, result=result, container=container)
+        if self._looks_like_final_text_deliverable(text):
+            return "llm_generate"
+        return action_type
+
     def default_execution_decision(self, *, state: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
         results = state.get("results") if isinstance(state.get("results"), dict) else {}
         for value in (result, results.get("intent_recognition"), results.get("context_awareness"), results.get("requirement_completion"), results.get("input_parsing")):
@@ -189,6 +259,9 @@ class WorkflowContractBuilder:
         known = self.collect_known_parameters(state)
         objective = self.objective_from_state(state=state, result=result, slim_user_input=slim_user_input)
         action_type = str(decision.get("selected_action_type") or "llm_generate")
+        action_type = self._correct_action_for_output_contract(action_type=action_type, state=state, result=result, container=decision)
+        if action_type != decision.get("selected_action_type"):
+            decision = {**decision, "selected_action_type": action_type, "selected_execution_method": method_for_action(action_type), "selection_guard": "corrected_to_direct_output_generation"}
         return {
             "step_id": "step_1",
             "task_id": "step_1",
@@ -234,6 +307,10 @@ class WorkflowContractBuilder:
         action_type = normalize_action_type(out.get("action_type") or out.get("execution_action") or step_decision.get("selected_action_type"))
         if not is_fixed_action(action_type):
             action_type = normalize_action_type(decision.get("selected_action_type"), "ask_user")
+        corrected_action_type = self._correct_action_for_output_contract(action_type=action_type, state=state, result={}, container=out)
+        if corrected_action_type != action_type:
+            action_type = corrected_action_type
+            step_decision = {**(step_decision or decision), "selected_action_type": action_type, "selected_execution_method": method_for_action(action_type), "selection_guard": "corrected_to_direct_output_generation"}
         method = method_for_action(action_type)
         out["action_type"] = action_type
         out["execution_action"] = action_type
@@ -283,7 +360,44 @@ class WorkflowContractBuilder:
                 "next_on_failure": "repair_or_ask_user",
             }
         ]
-        if method in {"web_search", "api_call"}:
+        if action_type == "llm_generate" or method == "content_generation":
+            flow.append({
+                "phase_id": "phase_2",
+                "phase_role": "prompt_contract_preparation",
+                "action_type": "llm_generate",
+                "execution_method": "content_generation",
+                "purpose": "build a prompt contract from the objective and confirmed parameters without executing during planning",
+                "inputs": ["selected_action_type", "known_parameters", "objective"],
+                "outputs": ["prompt_contract", "model_route", "generation_constraints"],
+                "success_criteria": ["prompt contract contains objective and confirmed parameters", "planner output is not used as final content"],
+                "next_on_success": "phase_3",
+                "next_on_failure": "feedback_repair",
+            })
+            flow.append({
+                "phase_id": "phase_3",
+                "phase_role": "output_contract_preparation",
+                "action_type": "llm_generate",
+                "execution_method": "content_generation",
+                "purpose": "define expected final material and verification criteria for generated content",
+                "inputs": ["prompt_contract", "known_parameters"],
+                "outputs": ["output_contract", "verification_contract"],
+                "success_criteria": ["output contract is explicit", "verification criteria can be checked after execution"],
+                "next_on_success": "phase_4",
+                "next_on_failure": "feedback_repair",
+            })
+            flow.append({
+                "phase_id": "phase_4",
+                "phase_role": "executor_llm_generation",
+                "action_type": "llm_generate",
+                "execution_method": "content_generation",
+                "purpose": "call the executor LLM to produce the final requested content",
+                "inputs": ["prompt_contract", "output_contract", "validation_record"],
+                "outputs": ["answer_material", "execution_record"],
+                "success_criteria": ["answer_material is generated by executor LLM", "no runtime observation is substituted"],
+                "next_on_success": "result_verification",
+                "next_on_failure": "feedback_repair",
+            })
+        elif method in {"web_search", "api_call"}:
             flow.append({
                 "phase_id": "phase_2",
                 "phase_role": "resource_discovery",

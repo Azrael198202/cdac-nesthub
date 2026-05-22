@@ -364,7 +364,7 @@ class ToolCallExecutor:
             # If the plan explicitly asks for runtime-native observation, honor it
             # before any generic web/API/model fallback. This is a generic source
             # contract, not a domain-specific shortcut.
-            if method_contract.method not in {"web_search", "api_call", "uploaded_artifact"} and self._step_requests_runtime_native(step, normalized_plan, required_capability or "runtime_current_observation"):
+            if self._runtime_native_allowed_for_locked_step(step, method_contract.method) and self._step_requests_runtime_native(step, normalized_plan, required_capability or "runtime_current_observation"):
                 runtime_native_result = self.capability_router.try_runtime_native(
                     run_id=run_id,
                     node_id=node_id,
@@ -398,25 +398,27 @@ class ToolCallExecutor:
                     continue
 
             if method_contract.method == "runtime_generated_tool":
-                runtime_native_result = self.capability_router.try_runtime_native(
-                    run_id=run_id,
-                    node_id=node_id,
-                    step_id=step_id,
-                    capability=required_capability or "unknown_capability",
-                    step=step,
-                    state=state,
-                    plan=normalized_plan,
-                )
-                if not runtime_native_result and self._step_requests_runtime_native({**step, "required_source_level": "runtime_native"}, normalized_plan, required_capability or "runtime_current_observation"):
-                    runtime_native_result = self._try_runtime_native_observation(
+                runtime_native_result = None
+                if self._runtime_native_allowed_for_locked_step(step, method_contract.method):
+                    runtime_native_result = self.capability_router.try_runtime_native(
                         run_id=run_id,
                         node_id=node_id,
                         step_id=step_id,
-                        capability=required_capability or "runtime_current_observation",
-                        step={**step, "required_source_level": "runtime_native"},
+                        capability=required_capability or "unknown_capability",
+                        step=step,
                         state=state,
-                        normalized_plan=normalized_plan,
+                        plan=normalized_plan,
                     )
+                    if not runtime_native_result and self._step_requests_runtime_native({**step, "required_source_level": "runtime_native"}, normalized_plan, required_capability or "runtime_current_observation"):
+                        runtime_native_result = self._try_runtime_native_observation(
+                            run_id=run_id,
+                            node_id=node_id,
+                            step_id=step_id,
+                            capability=required_capability or "runtime_current_observation",
+                            step={**step, "required_source_level": "runtime_native"},
+                            state=state,
+                            normalized_plan=normalized_plan,
+                        )
                 if runtime_native_result:
                     runtime_result = runtime_native_result.get("result") if isinstance(runtime_native_result.get("result"), dict) else {}
                     runtime_result.setdefault("data", {})["execution_method_contract"] = method_contract.to_dict()
@@ -527,13 +529,13 @@ class ToolCallExecutor:
                 strategy = self._execution_strategy(step, normalized_plan)
 
             if method_contract.method == "runtime_generated_tool" and not method_contract.fallback:
-                # A strict runtime-native contract must never fall through to
-                # generic web or knowledge fallback. Runtime native was already
-                # attempted above; no result means execution is unavailable.
+                # Tool/code generation must be implemented by a prepared artifact
+                # generation contract. It must never silently become a runtime
+                # observation or unrelated generic tool.
                 blocked_steps.append({
                     "step_id": step_id,
-                    "status": "execution_method_unavailable",
-                    "reason": "Strict runtime-native execution did not return a result and fallback is disabled.",
+                    "status": "runtime_artifact_generation_not_prepared",
+                    "reason": "The locked action requires a generated artifact contract; execution must not substitute runtime observation.",
                     "execution_method_contract": method_contract.to_dict(),
                     "source_step": step,
                 })
@@ -1330,6 +1332,18 @@ class ToolCallExecutor:
             "ask_user": "human_interaction",
             "no_op": "no_op",
         }.get(action_type, "")
+
+    def _runtime_native_allowed_for_locked_step(self, step: dict[str, Any], method: str) -> bool:
+        action_type = str((step or {}).get("action_type") or (step or {}).get("execution_action") or "").strip()
+        # Runtime-native observation is allowed only when explicitly requested by
+        # the locked step/source contract. It must not become a generic fallback
+        # for code/tool generation or content generation.
+        if method in {"content_generation", "web_search", "api_call", "uploaded_artifact", "existing_tool", "external_skill", "static_response"}:
+            return False
+        if action_type in {"generate_code", "generate_complex_tool", "generate_shell", "llm_generate"}:
+            return False
+        text = " ".join(str((step or {}).get(k) or "") for k in ("required_source_level", "source_level", "execution_mode", "execution_method"))
+        return "runtime_native" in text or "native_observation" in text or "primary_runtime" in text
 
     def _force_method_contract(self, *, base: ExecutionMethodContract, method: str, reason: str, step: dict[str, Any]) -> ExecutionMethodContract:
         step_policy = step.get("execution_method_policy") if isinstance(step.get("execution_method_policy"), dict) else {}
