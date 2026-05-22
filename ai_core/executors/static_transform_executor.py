@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -288,8 +289,11 @@ class StaticTransformExecutor:
         if isinstance(params.get("known"), dict):
             known.update(params.get("known") or {})
         source_policy = step.get("source_policy") if isinstance(step.get("source_policy"), dict) else {}
-        web_targets = step.get("source_targets") if isinstance(step.get("source_targets"), list) else []
-        endpoint_candidates = step.get("endpoint_candidates") if isinstance(step.get("endpoint_candidates"), list) else []
+        references = self._extract_execution_references(step)
+        web_targets = references["web_targets"]
+        endpoint_candidates = references["endpoint_candidates"]
+        query_contract = references["query_contract"]
+        evidence_requirements = references["evidence_requirements"]
         action_contract = ACTION_CONTRACTS.get(action_type, {})
         return {
             "step_id": step_id,
@@ -302,16 +306,20 @@ class StaticTransformExecutor:
             "web_collection": {
                 "required": method == "web_search",
                 "targets": web_targets,
+                "query_contract": query_contract,
+                "evidence_requirements": evidence_requirements,
                 "approved_in_preparation": method == "web_search" and bool(web_targets),
                 "discovery_required": method == "web_search" and not bool(web_targets),
-                "discovery_contract": {"allowed": True, "selection_policy": "use planned query/target fields when available; otherwise collect targets before execution"} if method == "web_search" and not bool(web_targets) else None,
+                "discovery_contract": {"allowed": True, "selection_policy": "collect explicit query/target references before execution; preserve collected source URLs as evidence"} if method == "web_search" and not bool(web_targets) else None,
                 "status": "prepared" if method != "web_search" or web_targets else "discovery_required",
             },
             "api_call_preparation": {
                 "required": method == "api_call",
                 "parameters": known,
                 "endpoint_candidates": endpoint_candidates,
-                "approved_in_preparation": method == "api_call" and (bool(endpoint_candidates) or action_type == "call_api_no_key"),
+                "query_contract": query_contract,
+                "evidence_requirements": evidence_requirements,
+                "approved_in_preparation": method == "api_call" and bool(endpoint_candidates),
                 "discovery_required": method == "api_call" and not endpoint_candidates,
                 "discovery_contract": {"allowed": action_type == "call_api_no_key", "credential_required": action_type == "call_api_with_key", "selection_policy": "no-key before key-required; free before paid"} if method == "api_call" else None,
                 "design_contract": {
@@ -348,6 +356,89 @@ class StaticTransformExecutor:
             },
         }
 
+    def _extract_execution_references(self, step: dict[str, Any]) -> dict[str, Any]:
+        """Collect generic external references selected during action planning.
+
+        This function is intentionally domain-neutral. It preserves URLs,
+        endpoint candidates, query text, and target strings produced by planner
+        LLM output so execution_preparation can approve the exact resources and
+        result_verification can cite the same evidence references later.
+        """
+        raw_values: list[Any] = []
+        containers: list[Any] = [step]
+        for key in ("execution_decision", "parameters", "metadata", "data", "query_contract", "web_collection", "api_call_preparation"):
+            value = step.get(key) if isinstance(step, dict) else None
+            if isinstance(value, dict):
+                containers.append(value)
+        decision = step.get("execution_decision") if isinstance(step.get("execution_decision"), dict) else {}
+        ranked = decision.get("ranked_options") if isinstance(decision.get("ranked_options"), list) else []
+        containers.extend([item for item in ranked if isinstance(item, dict)])
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            for key in (
+                "target", "targets", "url", "urls", "uri", "uris", "source_url", "source_urls",
+                "source_targets", "endpoint", "endpoints", "endpoint_url", "endpoint_candidates",
+                "query", "search_query", "request_url", "reference_url", "evidence_url", "evidence_urls",
+            ):
+                if key in container:
+                    raw_values.append(container.get(key))
+        flat: list[str] = []
+        def add(value: Any) -> None:
+            if value in (None, "", [], {}):
+                return
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    flat.append(text)
+            elif isinstance(value, dict):
+                for k in ("url", "uri", "target", "endpoint", "query", "search_query", "value"):
+                    add(value.get(k))
+            elif isinstance(value, list):
+                for item in value:
+                    add(item)
+            else:
+                text = str(value).strip()
+                if text:
+                    flat.append(text)
+        for value in raw_values:
+            add(value)
+        seen: set[str] = set()
+        unique: list[str] = []
+        for item in flat:
+            key = item.strip()
+            if key and key not in seen:
+                seen.add(key)
+                unique.append(key)
+        url_like = [item for item in unique if re.match(r"^https?://", item, flags=re.IGNORECASE)]
+        non_url = [item for item in unique if item not in url_like]
+        method = self._execution_method(step)
+        if method == "web_search":
+            web_targets = unique
+            endpoint_candidates = url_like
+        elif method == "api_call":
+            endpoint_candidates = url_like or unique
+            web_targets = url_like
+        else:
+            web_targets = url_like
+            endpoint_candidates = url_like
+        query_text = " ".join(non_url[:3]).strip()
+        return {
+            "web_targets": web_targets,
+            "endpoint_candidates": endpoint_candidates,
+            "query_contract": {
+                "query": query_text,
+                "targets": unique,
+                "source": "agent_action_planning",
+                "preserve_result_urls": True,
+            },
+            "evidence_requirements": {
+                "preserve_requested_targets": True,
+                "preserve_result_urls": True,
+                "minimum_source_count": 1 if method in {"web_search", "api_call"} else 0,
+            },
+        }
+
     def _prepared_resource_ok(self, prep: dict[str, Any], step_id: str, method: str) -> bool:
         if method not in {"web_search", "api_call"}:
             return True
@@ -360,10 +451,10 @@ class StaticTransformExecutor:
                 return False
             if method == "web_search":
                 web = item.get("web_collection") if isinstance(item.get("web_collection"), dict) else {}
-                return bool(web.get("approved_in_preparation") or web.get("discovery_contract"))
+                return bool(web.get("approved_in_preparation") and web.get("targets"))
             if method == "api_call":
                 api = item.get("api_call_preparation") if isinstance(item.get("api_call_preparation"), dict) else {}
-                return bool(api.get("approved_in_preparation") or api.get("discovery_contract"))
+                return bool(api.get("approved_in_preparation") and api.get("endpoint_candidates"))
         return False
 
     def _stage_payload(self, value: Any, preferred_key: str | None = None) -> dict[str, Any]:
