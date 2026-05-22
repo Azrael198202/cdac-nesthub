@@ -135,6 +135,31 @@ class ToolCallExecutor:
         capability_result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         previous_results = state.get("results", {})
+        validation_result = previous_results.get("pre_execution_validation") if isinstance(previous_results.get("pre_execution_validation"), dict) else {}
+        validation_payload = validation_result.get("validation_record") if isinstance(validation_result.get("validation_record"), dict) else validation_result
+        if validation_payload and validation_payload.get("status") != "passed":
+            return {
+                "_executor_type": "tool_call",
+                "_node_id": node_id,
+                "status": "blocked",
+                "message": "Execution stopped because pre_execution_validation did not pass. Repair loop must regenerate planning/preparation/validation before execution.",
+                "execution_steps": [],
+                "blocked_steps": [{
+                    "step_id": "pre_execution_validation",
+                    "status": "validation_failed",
+                    "reason": "pre_execution_validation.status must be passed before execution.",
+                    "validation_record": validation_payload,
+                }],
+                "human_interactions": [],
+                "missing_tools": [],
+                "safety_holds": [],
+                "repair_instruction": {
+                    "target_stage": "feedback_repair",
+                    "retry_from": "workflow_planning",
+                    "max_repair_attempts": 3,
+                    "required_result": "pre_execution_validation.status == passed",
+                },
+            }
         workflow_plan = previous_results.get("workflow_planning", {})
         normalized_plan = self.normalizer.normalize(workflow_plan)
         normalized_plan = self.planning_recovery.recover_if_empty(

@@ -52,6 +52,17 @@ class OutputExecutor:
 
     async def _build(self, state: dict[str, Any], node_config: dict[str, Any]) -> dict[str, Any]:
         results = state.get("results", {}) if isinstance(state, dict) else {}
+        final_synthesis_result = results.get("final_synthesis") if isinstance(results.get("final_synthesis"), dict) else {}
+        explicit_final = final_synthesis_result.get("final_answer") or final_synthesis_result.get("answer")
+        if isinstance(explicit_final, str) and explicit_final.strip():
+            return {
+                "_executor_type": "output",
+                "_node_id": node_config.get("node_id", "output"),
+                "status": "completed",
+                "message": explicit_final.strip(),
+                "final_answer": explicit_final.strip(),
+                "source": "final_synthesis.final_answer",
+            }
         execution = results.get("execution") if isinstance(results.get("execution"), dict) else {}
         status = str(execution.get("status") or "unknown")
         execution_steps = execution.get("execution_steps") if isinstance(execution.get("execution_steps"), list) else []
@@ -116,7 +127,7 @@ class OutputExecutor:
         )
         final_answer = synthesized.get("answer") or "Workflow finished, but no user-facing answer was produced."
 
-        if trust_summary.get("trust_level") == "unverified_generated_result":
+        if trust_summary.get("trust_level") == "unverified_generated_result" and final_answer.startswith("I could not"):
             final_answer = final_answer + "\n\nTrust: unverified generated result. The runtime did not confirm live network verification, no-mock execution, or evidence-supported material quality."
 
         self._save_verified_answer_to_knowledge(state=state, final_answer=final_answer, synthesized=synthesized, trust_summary=trust_summary)

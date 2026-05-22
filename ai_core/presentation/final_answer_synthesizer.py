@@ -30,6 +30,19 @@ class FinalAnswerSynthesizer:
         trust_summary: dict[str, Any],
     ) -> dict[str, Any]:
         sanitized = self.sanitizer.sanitize_materials(materials)
+        direct_answer = self._direct_generated_answer_material(sanitized)
+        if direct_answer:
+            return {
+                "answer": direct_answer,
+                "result_material": [{"source": "answer_material", "status": "success", "content": {"answer": direct_answer}}],
+                "synthesis": {
+                    "source": "direct_answer_material",
+                    "raw_source_material_returned": False,
+                    "normalized_facts_only": False,
+                    "verified_facts_only": False,
+                    "reason": "The locked workflow selected model/content generation, so generated answer material is the final deliverable.",
+                },
+            }
         facts = self.guard.filter(self.normalizer.normalize(materials=sanitized, state=state))
         deterministic = self._deterministic_summary(facts=facts, sanitized=sanitized, trust_summary=trust_summary)
         answer = deterministic
@@ -56,6 +69,40 @@ class FinalAnswerSynthesizer:
                 "verified_facts_only": True,
             },
         }
+
+
+    def _direct_generated_answer_material(self, sanitized: list[dict[str, Any]]) -> str:
+        """Return user-facing generated content when it is the planned deliverable.
+
+        Evidence/fact synthesis is correct for retrieval tasks, but model/content
+        generation tasks produce answer material directly. This method is generic:
+        it only reads public answer/text fields from execution materials and
+        avoids internal debug labels.
+        """
+        def scan(value: Any) -> str:
+            if isinstance(value, dict):
+                for key in ("answer_material", "final_answer", "answer", "generated_content", "content", "text"):
+                    item = value.get(key)
+                    if isinstance(item, str) and item.strip():
+                        text = self.sanitizer.sanitize_value(item).strip()
+                        if text and not any(marker in text for marker in self.DEBUG_MARKERS):
+                            return text
+                    if isinstance(item, dict):
+                        nested = scan(item)
+                        if nested:
+                            return nested
+                for child in value.values():
+                    if isinstance(child, (dict, list)):
+                        nested = scan(child)
+                        if nested:
+                            return nested
+            if isinstance(value, list):
+                for item in value[:20]:
+                    nested = scan(item)
+                    if nested:
+                        return nested
+            return ""
+        return scan(sanitized)
 
     def _model_synthesis_enabled(self, state: dict[str, Any], facts: list[dict[str, Any]]) -> bool:
         output_policy = (((state.get("runtime") or {}) if isinstance(state, dict) else {}).get("output_policy") or {})

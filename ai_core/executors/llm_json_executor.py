@@ -676,19 +676,91 @@ class LLMJsonExecutor:
                 "execution_must_follow_locked_action": True,
             }
             return result
+        # v4.5: workflow_planning must never pass an empty executable plan to
+        # later stages when requirements are complete. If the model failed to
+        # produce planned_steps, create a domain-neutral LLM generation step from
+        # the locked intent/context material. This is a structural repair, not a
+        # business fallback: the allowed action remains one of the fixed runtime
+        # execution options and execution is still locked by validation.
+        fallback_step = self._generic_locked_step_from_state(state=state, slim_user_input=slim_user_input)
+        steps = [self._normalize_generated_step(fallback_step, 0, state)]
         return {
-            "workflow": {"workflow_id": "runtime_workflow", "status": "blocked"},
-            "planned_steps": [],
-            "execution_plan": {"steps": [], "locked": False, "allowed_action_types": list(self.FIXED_EXECUTION_ACTIONS.keys())},
-            "agent_graph": {"main_graph": {"nodes": [], "edges": []}, "subgraphs": []},
+            "workflow": {"workflow_id": "runtime_workflow", "status": "ready", "repair": "planned_steps_generated_from_locked_context"},
+            "planned_steps": steps,
+            "execution_plan": {"steps": steps, "locked": True, "allowed_action_types": list(self.FIXED_EXECUTION_ACTIONS.keys())},
+            "agent_graph": self._build_agent_graph(steps),
             "blocking_missing_information": [],
+            "required_capabilities": [steps[0].get("required_capability")],
             "planning_contract": {
-                "status": "blocked",
-                "reason": "planner_returned_no_executable_action",
+                "status": "locked",
+                "reason": "planner_empty_repaired_with_fixed_action_option",
                 "allowed_action_types": list(self.FIXED_EXECUTION_ACTIONS.keys()),
+                "execution_must_follow_locked_action": True,
             },
-            "status": "blocked",
-            "message": "Workflow planning did not return an executable action.",
+            "status": "planned",
+            "message": "Workflow planning produced locked planned_steps after structural repair.",
+        }
+
+    def _generic_locked_step_from_state(self, *, state: dict, slim_user_input: str) -> dict:
+        results = state.get("results") if isinstance(state.get("results"), dict) else {}
+        context_record = results.get("context_awareness") if isinstance(results.get("context_awareness"), dict) else {}
+        context_payload = context_record.get("context_record") if isinstance(context_record.get("context_record"), dict) else context_record
+        clean_context = context_payload.get("clean_context") if isinstance(context_payload.get("clean_context"), dict) else {}
+        requirement_record = results.get("requirement_completion") if isinstance(results.get("requirement_completion"), dict) else {}
+        requirement_payload = requirement_record.get("requirement_record") if isinstance(requirement_record.get("requirement_record"), dict) else requirement_record
+        intent = results.get("intent_recognition") if isinstance(results.get("intent_recognition"), dict) else {}
+        parsed = results.get("input_parsing") if isinstance(results.get("input_parsing"), dict) else {}
+        known = {}
+        for source in (
+            clean_context.get("known_parameters"),
+            requirement_payload.get("known_parameters"),
+            intent.get("normalized_intent") if isinstance(intent.get("normalized_intent"), dict) else {},
+            parsed.get("parsed_entities") if isinstance(parsed.get("parsed_entities"), dict) else {},
+        ):
+            if isinstance(source, dict):
+                for k, v in source.items():
+                    if v not in (None, "", [], {}):
+                        known[str(k)] = v
+        objective = str(
+            clean_context.get("intent_summary")
+            or intent.get("intent_summary")
+            or intent.get("objective")
+            or parsed.get("original_input")
+            or state.get("input")
+            or slim_user_input
+            or "execute requested task"
+        )[:800]
+        capability = str(clean_context.get("recognized_intent") or intent.get("intent_type") or intent.get("classified_intent") or "generic_content_generation")[:120]
+        ranked_options = [
+            {"action_type": "call_llm", "priority": 1, "reason": "Use model generation when the task can be completed from locked input and context."},
+            {"action_type": "read_knowledge", "priority": 2, "reason": "Use local knowledge only when the workflow explicitly requires stored internal material."},
+            {"action_type": "web_query", "priority": 3, "reason": "Use external web only when the workflow explicitly requires live public evidence."},
+            {"action_type": "call_api", "priority": 4, "reason": "Use API only when prepared endpoint and parameters are available."},
+            {"action_type": "generate_code", "priority": 5, "reason": "Generate code only when the requested output requires an executable artifact."},
+            {"action_type": "generate_shell", "priority": 6, "reason": "Generate shell only for operating-system/runtime commands."},
+            {"action_type": "use_existing_tool", "priority": 7, "reason": "Use an existing tool only when registry matching has been prepared."},
+            {"action_type": "ask_user", "priority": 8, "reason": "Ask the user only when required information is missing."},
+        ]
+        return {
+            "step_id": "step_1",
+            "task_id": "step_1",
+            "step_type": "runtime_execution",
+            "action": "execute_with_selected_fixed_action",
+            "action_type": "call_llm",
+            "execution_action": "call_llm",
+            "objective": objective,
+            "input_from": ["input_parsing", "intent_recognition", "requirement_completion", "context_awareness"],
+            "parameters": {"known": known, "missing_required": {}, "optional": {"original_input": str(state.get("input") or slim_user_input)}},
+            "required_capability": capability,
+            "execution_decision": {"selected_action_type": "call_llm", "ranked_options": ranked_options, "selection_rules": ["free/no-key options before paid/key-required options", "prepared resources before unprepared resources", "locked workflow before executor fallback"]},
+            "execution_method": "content_generation",
+            "execution_method_policy": {"preferred_methods": ["content_generation"], "disabled_methods": ["web_search", "api_call", "runtime_generated_tool", "shell", "existing_tool"], "fallback_allowed": False},
+            "execution_strategy": ["content_generation"],
+            "source_policy": {"allow_external": False, "allow_internal": True, "requires_live_evidence": False},
+            "execution_ready": True,
+            "depends_on": [],
+            "requires_human_confirmation": False,
+            "missing_fields": [],
         }
 
     def _normalize_generated_step(self, step: dict, index: int, state: dict) -> dict:

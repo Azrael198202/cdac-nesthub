@@ -163,3 +163,11 @@ This version adds a dedicated `provider_resolution` stage between `workflow_plan
 Workflow planning now asks the model to rank fixed execution options before producing executable steps. The fixed options are `call_llm`, `generate_code`, `generate_shell`, `call_api`, `web_query`, `use_existing_tool`, `read_knowledge`, `ask_user`, and `no_op`. The selected option is stored in `execution_decision.selected_action_type`, then deterministically mapped to `execution_method`. Later stages are not allowed to infer or change the method from free-text action names.
 
 For external access, `execution_preparation` must prepare concrete web targets or API endpoint candidates. `pre_execution_validation` and `execution` block web/API execution when these resources were not prepared.
+
+
+## v4.5 validation repair loop
+
+- workflow_planning must always produce locked `planned_steps` when requirements are complete.
+- pre_execution_validation failure blocks execution and routes to repair.
+- execution no longer runs after failed validation.
+- final answer delivery prefers `final_synthesis.final_answer`; generated answer material can be returned for locked content-generation workflows.
