@@ -121,7 +121,7 @@ class ExecutionMethodProposalEngine:
                 add("api_call", 0.74, "semantic_classifier", "semantic category prefers external structured access")
 
         if not proposals:
-            add("web_search", 0.45, "runtime_default", "no stronger executable method was proposed")
+            add("content_generation", 0.45, "runtime_default", "no stronger executable method was proposed")
         return self._dedupe(proposals)
 
     def _explicit_proposals(self, *items: Any) -> list[dict[str, Any]]:
@@ -193,10 +193,10 @@ class ExecutionMethodResolver:
         else:
             candidates.sort(key=lambda p: float(p.get("confidence") or 0), reverse=True)
 
-        chosen = candidates[0] if candidates else {"method": "web_search", "confidence": 0.4, "source": "runtime_default", "reason": "no candidate"}
-        method = str(chosen.get("method") or "web_search")
+        chosen = candidates[0] if candidates else {"method": "content_generation", "confidence": 0.4, "source": "runtime_default", "reason": "no candidate"}
+        method = str(chosen.get("method") or "content_generation")
         fallback_allowed = bool(policy.get("fallback_allowed", True))
-        fallback = [m for m in self.DEFAULT_FALLBACKS.get(method, ["web_search"]) if m not in disabled] if fallback_allowed else []
+        fallback = [m for m in self.DEFAULT_FALLBACKS.get(method, []) if m not in disabled] if fallback_allowed else []
         return ExecutionMethodContract(
             method=method,
             confidence=float(chosen.get("confidence") or 0.5),

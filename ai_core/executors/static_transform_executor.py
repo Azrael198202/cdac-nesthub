@@ -262,17 +262,41 @@ class StaticTransformExecutor:
     def _merge_known(self, *records: dict[str, Any]) -> dict[str, Any]:
         known: dict[str, Any] = {}
         for record in records:
-            for key in ("known_parameters", "parameters", "parsed_entities", "entities", "slots", "normalized_intent"):
-                value = record.get(key) if isinstance(record, dict) else None
-                if isinstance(value, dict):
-                    nested = value.get("known") if isinstance(value.get("known"), dict) else value
+            if not isinstance(record, dict):
+                continue
+            for item in self._known_parameter_candidates(record):
+                if isinstance(item, dict):
+                    nested = item.get("known") if isinstance(item.get("known"), dict) else item
                     for k, v in nested.items():
                         if v not in (None, "", [], {}):
                             known[str(k)] = v
-            missing = record.get("missing_information") if isinstance(record, dict) else None
-            if isinstance(missing, list):
-                continue
+            for k, v in record.items():
+                if k.startswith("_") or k in {"status", "message", "data", "missing_information", "missing_fields"}:
+                    continue
+                if isinstance(v, (str, int, float, bool, list)) and v not in (None, "", [], {}):
+                    known.setdefault(str(k), v)
         return known
+
+    def _known_parameter_candidates(self, record: dict[str, Any]) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        for key in ("known_parameters", "parameters", "parsed_entities", "entities", "slots", "normalized_intent"):
+            value = record.get(key)
+            if isinstance(value, dict):
+                candidates.append(value)
+        context = record.get("context") if isinstance(record.get("context"), dict) else {}
+        containers = [context, record.get("data") if isinstance(record.get("data"), dict) else {}]
+        for container in containers:
+            agent_parameters = container.get("agent_parameters") if isinstance(container.get("agent_parameters"), dict) else {}
+            values = agent_parameters.get("values") if isinstance(agent_parameters.get("values"), dict) else {}
+            if values:
+                candidates.append(values)
+        input_record = record.get("input_record") if isinstance(record.get("input_record"), dict) else {}
+        if input_record:
+            candidates.extend(self._known_parameter_candidates(input_record))
+        intent_record = record.get("intent_record") if isinstance(record.get("intent_record"), dict) else {}
+        if intent_record:
+            candidates.extend(self._known_parameter_candidates(intent_record))
+        return candidates
 
     def _collect_missing(self, input_record: dict[str, Any], intent_record: dict[str, Any], known: dict[str, Any]) -> list[dict[str, Any]]:
         fields: list[Any] = []

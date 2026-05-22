@@ -1205,7 +1205,7 @@ class ToolCallExecutor:
             forced = next((m for m in preferred if m not in disabled and m in {"runtime_generated_tool", "existing_tool"}), "runtime_generated_tool")
             reason = "locked_runtime_observation_contract_blocked_external_method"
         elif method_contract.method in disabled:
-            forced = next((m for m in preferred if m not in disabled), "web_search")
+            forced = next((m for m in preferred if m not in disabled), "content_generation")
             reason = "method_disabled_by_step_policy"
 
         if not forced:
