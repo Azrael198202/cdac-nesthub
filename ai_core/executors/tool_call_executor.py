@@ -7,7 +7,9 @@ import sys
 import urllib.request
 import urllib.error
 import importlib.util
+import importlib.machinery
 import inspect
+import ast
 import io
 import contextlib
 import re
@@ -1956,7 +1958,7 @@ class ToolCallExecutor:
             )
             source_code = str(generated.get("source_code") or "").strip()
             if not source_code:
-                return None
+                source_code = self._runtime_generated_source_fallback(str(step.get("objective") or state.get("input") or ""))
             artifact_path = self._write_generated_source_artifact(
                 run_id=run_id,
                 step_id=step_id,
@@ -2041,10 +2043,12 @@ class ToolCallExecutor:
         }
         prompt = {
             "system": (
-                "Return JSON only. Generate a safe, self-contained Python 3 script "
-                "that satisfies the objective. The script must be executable as a "
-                "standalone file and print its result to stdout. Do not include "
-                "markdown fences."
+                "Return JSON only. Generate a safe Python 3 script that satisfies "
+                "the objective. Prefer the Python standard library when it is sufficient. "
+                "If an external Python package is necessary, import it normally; the runtime "
+                "will detect and prepare missing Python packages before execution. "
+                "The script must be executable as a standalone file and print its result "
+                "to stdout. Do not include markdown fences."
             )
         }
         rendered = (
@@ -2070,12 +2074,21 @@ class ToolCallExecutor:
                 schema=schema,
             )
             if isinstance(generated, dict) and str(generated.get("source_code") or "").strip():
-                return generated
+                source_code = str(generated.get("source_code") or "").strip()
+                if source_code:
+                    generated["source_code"] = source_code
+                    return generated
         except Exception:
             pass
         # Generic last-resort artifact. It is intentionally domain-neutral and
         # only exposes the runtime timestamp plus the requested objective.
-        fallback = (
+        fallback = self._runtime_generated_source_fallback(objective)
+        return {"status": "fallback_generated", "source_code": fallback, "notes": "generic_runtime_timestamp_fallback"}
+
+
+    @staticmethod
+    def _runtime_generated_source_fallback(objective: str) -> str:
+        return (
             "from datetime import datetime, timezone\n"
             "def main():\n"
             f"    objective = {objective!r}\n"
@@ -2084,7 +2097,104 @@ class ToolCallExecutor:
             "if __name__ == \"__main__\":\n"
             "    main()\n"
         )
-        return {"status": "fallback_generated", "source_code": fallback, "notes": "generic_runtime_timestamp_fallback"}
+
+    @classmethod
+    def _source_external_imports(cls, source_code: str, *, missing_only: bool = False) -> list[str]:
+        """Return non-stdlib top-level imports used by generated source.
+
+        This is a generic dependency detector. It does not decide whether the
+        source is acceptable; it only identifies Python modules that may need a
+        runtime package preparation step before execution.
+        """
+        try:
+            tree = ast.parse(str(source_code or ""))
+        except SyntaxError:
+            return []
+        stdlib = set(getattr(sys, "stdlib_module_names", set()) or set())
+        builtin = set(sys.builtin_module_names)
+        allowed = stdlib | builtin | {"__future__"}
+        found: list[str] = []
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [alias.name.split(".", 1)[0] for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                if node.level and node.level > 0:
+                    continue
+                if node.module:
+                    names = [node.module.split(".", 1)[0]]
+            for name in names:
+                if not name or name in allowed:
+                    continue
+                if missing_only and importlib.util.find_spec(name) is not None:
+                    continue
+                if name not in found:
+                    found.append(name)
+        return found
+
+    @staticmethod
+    def _missing_module_from_stderr(stderr: str) -> str:
+        text = str(stderr or "")
+        match = re.search(r"ModuleNotFoundError:\s+No module named ['\"]([^'\"]+)['\"]", text)
+        if not match:
+            match = re.search(r"ImportError:\s+No module named ['\"]([^'\"]+)['\"]", text)
+        if not match:
+            return ""
+        return match.group(1).split(".", 1)[0].strip()
+
+    @staticmethod
+    def _runtime_install_allowed() -> bool:
+        raw_install = str(__import__("os").environ.get("AI_CORE_ALLOW_INSTALL", "true")).strip().lower()
+        raw_network = str(__import__("os").environ.get("AI_CORE_ALLOW_NETWORK_INSTALL", "true")).strip().lower()
+        denied = {"0", "false", "no", "off"}
+        return raw_install not in denied and raw_network not in denied
+
+    def _prepare_python_dependencies_for_source(self, source_code: str, *, cwd: Path) -> list[dict[str, Any]]:
+        """Install missing external Python modules for a generated script.
+
+        The first strategy uses static import detection. A second retry strategy
+        in `_execute_python_artifact` handles dynamic imports reported by the
+        interpreter. The package name defaults to the missing module name because
+        generated runtime artifacts should declare/import installable packages by
+        their public import name when possible.
+        """
+        records: list[dict[str, Any]] = []
+        if not self._runtime_install_allowed():
+            for module in self._source_external_imports(source_code, missing_only=True):
+                records.append({"module": module, "status": "blocked", "reason": "install_not_allowed"})
+            return records
+        for module in self._source_external_imports(source_code, missing_only=True):
+            records.append(self._install_python_module(module, cwd=cwd))
+        return records
+
+    def _install_python_module(self, module_name: str, *, cwd: Path) -> dict[str, Any]:
+        module = str(module_name or "").split(".", 1)[0].strip()
+        if not module:
+            return {"module": module, "status": "skipped", "reason": "empty_module"}
+        if importlib.util.find_spec(module) is not None:
+            return {"module": module, "status": "ready", "changed": False}
+        if not self._runtime_install_allowed():
+            return {"module": module, "status": "blocked", "reason": "install_not_allowed"}
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-m", "pip", "install", module],
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            importlib.invalidate_caches()
+            ready = importlib.util.find_spec(module) is not None
+            return {
+                "module": module,
+                "status": "ready" if ready else "failed",
+                "changed": completed.returncode == 0,
+                "returncode": completed.returncode,
+                "stdout": (completed.stdout or "")[-4000:],
+                "stderr": (completed.stderr or "")[-4000:],
+            }
+        except Exception as exc:
+            return {"module": module, "status": "failed", "error": str(exc)}
 
     def _write_generated_source_artifact(
         self,
@@ -2102,21 +2212,39 @@ class ToolCallExecutor:
         return artifact_path
 
     def _execute_python_artifact(self, artifact_path: Path) -> dict[str, Any]:
+        dependency_records: list[dict[str, Any]] = []
         try:
-            completed = subprocess.run(
+            source_code = artifact_path.read_text(encoding="utf-8", errors="ignore")
+            dependency_records.extend(self._prepare_python_dependencies_for_source(source_code, cwd=artifact_path.parent))
+        except Exception as exc:
+            dependency_records.append({"status": "failed", "stage": "dependency_scan", "error": str(exc)})
+
+        def run_once() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
                 [sys.executable, str(artifact_path)],
                 cwd=str(artifact_path.parent),
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
+
+        try:
+            completed = run_once()
+            missing_module = self._missing_module_from_stderr(completed.stderr) if completed.returncode != 0 else ""
+            if missing_module:
+                install_record = self._install_python_module(missing_module, cwd=artifact_path.parent)
+                install_record["stage"] = "retry_after_interpreter_error"
+                dependency_records.append(install_record)
+                if install_record.get("status") == "ready":
+                    completed = run_once()
             return {
                 "returncode": completed.returncode,
                 "stdout": completed.stdout,
                 "stderr": completed.stderr,
+                "dependencies": dependency_records,
             }
         except Exception as exc:
-            return {"returncode": -1, "stdout": "", "stderr": str(exc)}
+            return {"returncode": -1, "stdout": "", "stderr": str(exc), "dependencies": dependency_records}
 
     def _runtime_agent_identity(self, *, state: dict[str, Any], step: dict[str, Any]) -> dict[str, str]:
         previous = state.get("results") if isinstance(state.get("results"), dict) else {}
