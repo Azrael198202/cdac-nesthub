@@ -100,10 +100,19 @@ class AgentParameterContractService:
                 ),
                 timeout=55,
             )
-            return self._normalize_contract_result(result, source="runtime_llm")
+            normalized = self._normalize_contract_result(result, source="runtime_llm")
+            if not normalized.get("parameters") and self._looks_like_open_capability(execution_objective or definition_instruction):
+                return self._open_capability_fallback_contract(source="runtime_llm_empty")
+            return normalized
         except Exception as exc:
-            # Safe fallback: do not invent business-specific parameters in code.
-            # The UI/runtime can retry contract generation when a provider is available.
+            # Safe fallback: keep source/config free of domain-specific slots.
+            # For open capability definitions, collect a generic task input at
+            # execution time so the runtime pauses instead of running without
+            # the values needed for that specific task.
+            if self._looks_like_open_capability(execution_objective or definition_instruction):
+                contract = self._open_capability_fallback_contract(source="runtime_llm_unavailable")
+                contract["contract_generation_error"] = str(exc)
+                return contract
             return {
                 "contract_type": "agent_parameter_contract",
                 "source": "runtime_llm_unavailable",
@@ -111,6 +120,45 @@ class AgentParameterContractService:
                 "missing_information": [],
                 "contract_generation_error": str(exc),
             }
+
+
+    def _looks_like_open_capability(self, text: str) -> bool:
+        """Detect reusable capability definitions without domain keywords.
+
+        A definition phrased as an ability usually needs fresh task-run input
+        later. This structural guard prevents empty parameter contracts when the
+        runtime LLM is unavailable, while avoiding hard-coded business slots.
+        """
+        normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if not normalized:
+            return False
+        open_markers = (
+            "can ",
+            "able to ",
+            "capable of ",
+            "support ",
+            "supports ",
+            "handle ",
+            "handles ",
+        )
+        return normalized.startswith(open_markers) or any(f" {marker}" in normalized for marker in open_markers)
+
+    def _open_capability_fallback_contract(self, *, source: str) -> dict[str, Any]:
+        contract = {
+            "contract_type": "agent_parameter_contract",
+            "source": source,
+            "parameters": [
+                self._parameter_record(
+                    name="task_input",
+                    label="Task input",
+                    description="Provide the task-specific input values required for this run.",
+                    required=True,
+                    values=[],
+                )
+            ],
+        }
+        contract["missing_information"] = self.missing_parameters({"parameter_contract": contract})
+        return contract
 
     def build_contract(self, *, definition_instruction: str, execution_objective: str, participant_name: str) -> dict[str, Any]:
         # Backward-compatible non-LLM path. It only uses explicit config when
