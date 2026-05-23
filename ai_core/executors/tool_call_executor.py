@@ -1598,10 +1598,10 @@ class ToolCallExecutor:
         if not isinstance(values, dict):
             return normalized
         for key, value in values.items():
-            if isinstance(value, list) and len(value) == 1:
-                normalized[str(key)] = value[0]
-            else:
-                normalized[str(key)] = value
+            # Keep list values intact. Whether a callable expects a list is
+            # determined by its own signature contract and by the UI field type,
+            # not by a hard-coded single-value collapse.
+            normalized[str(key)] = value
         return normalized
 
     def _run_uploaded_python_artifact(self, path: Path, entry: dict[str, Any], known: dict[str, Any]) -> dict[str, Any]:

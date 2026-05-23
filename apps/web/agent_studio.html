@@ -277,7 +277,8 @@ function normalizeInteractionItem(raw, idx){
   const field = String(it.field || it.name || it.source_field || it.parameter || it.parameter_name || ('field_'+idx)).trim();
   const label = String(it.label || it.title || it.display_name || field).trim();
   const message = String(it.question || it.prompt || it.message || it.description || ('Please provide this information: '+label+'.')).trim();
-  const inputType = String(it.input_type || it.type || it.ui_type || 'text').trim();
+  let inputType = String(it.input_type || it.type || it.ui_type || 'text').trim();
+  if(['array','list','multi','multiple'].includes(inputType.toLowerCase())){ inputType='list'; }
   return {
     ...it,
     kind: String(it.kind || it.type_kind || 'human_information_required'),
@@ -319,7 +320,7 @@ function openMissingInputModal(items, runId){
     const wrap=document.createElement('div');
     const label=document.createElement('label');
     label.className='fieldLabel';
-    label.textContent=String(it.label||field);
+    label.textContent=String(it.label||field) + (it.required===false ? ' (optional)' : '');
     const hint=document.createElement('div');
     hint.className='fieldHint';
     let sourceText='';
@@ -342,7 +343,8 @@ function openMissingInputModal(items, runId){
     input.dataset.values='[]';
     input.dataset.aliases=JSON.stringify(it.aliases||[]);
     input.dataset.mergeTargets=JSON.stringify(it.merge_targets||[]);
-    input.placeholder=inputType==='list' ? 'Enter one value, then click Continue or Done' : String(it.placeholder||field);
+    input.dataset.required=it.required===false ? 'false' : 'true';
+    input.placeholder=inputType==='list' ? 'Enter values separated by comma/new line, or add one by one' : String(it.placeholder||field);
     wrap.appendChild(label);
     wrap.appendChild(hint);
     wrap.appendChild(input);
@@ -379,7 +381,10 @@ function addListValue(input, chips){
   const raw=input.value.trim();
   let values=[];
   try{ values=JSON.parse(input.dataset.values||'[]'); }catch(e){ values=[]; }
-  if(raw){ values.push(raw); input.value=''; }
+  if(raw){
+    raw.split(/[\n,]+/).map(v=>v.trim()).filter(Boolean).forEach(v=>values.push(v));
+    input.value='';
+  }
   input.dataset.values=JSON.stringify(values);
   if(chips){ chips.textContent = values.length ? ('Values: ' + values.join(' | ')) : 'No values added yet.'; }
 }
@@ -404,17 +409,24 @@ async function skipCredentialAndContinue(){
 async function submitMissingInputs(){
   const provided={};
   const inputs=document.querySelectorAll('[id^="missing_form_"]');
+  const missingRequired=[];
   inputs.forEach(input=>{
     const field=(input.dataset.field||'').trim();
     const kind=(input.dataset.kind||'').trim();
     const inputType=(input.dataset.inputType||'').trim();
+    const required=input.dataset.required!=='false';
     let value=input.value.trim();
     if(!field){ return; }
     if(inputType==='list'){
       let values=[];
       try{ values=JSON.parse(input.dataset.values||'[]'); }catch(e){ values=[]; }
-      if(value){ values.push(value); }
+      if(value){ value.split(/[\n,]+/).map(v=>v.trim()).filter(Boolean).forEach(v=>values.push(v)); }
       value=values;
+    }
+    const empty=Array.isArray(value) ? value.length===0 : String(value||'').trim()==='';
+    if(empty){
+      if(required){ missingRequired.push(field); }
+      return;
     }
     if(kind==='secret_input' || kind==='optional_credential_choice'){
       provided.secret_key=field;
@@ -431,8 +443,7 @@ async function submitMissingInputs(){
       }catch(e){}
     }
   });
-  const hasValue=Object.values(provided).some(v=>Array.isArray(v) ? v.length>0 : String(v||'').trim()!=='');
-  if(!hasValue){ addMessage('Please enter at least one value before continuing.','item error'); return; }
+  if(missingRequired.length){ addMessage('Please enter required value(s): '+missingRequired.join(', '),'item error'); return; }
   closeMissingInputModal();
   if(provided.secret_key && provided.value){
     await saveRuntimeSecret(provided.secret_key, provided.value);

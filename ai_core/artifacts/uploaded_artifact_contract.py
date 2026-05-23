@@ -250,7 +250,7 @@ class UploadedArtifactContractBuilder:
             for idx, arg in enumerate(args):
                 if arg.arg in {"self", "cls"}:
                     continue
-                properties[arg.arg] = {"type": "string"}
+                properties[arg.arg] = self._schema_from_annotation(arg.annotation)
                 if idx < default_offset:
                     required.append(arg.arg)
             if len(args) == 1 and args[0].arg in {"payload", "input", "data", "params"}:
@@ -272,6 +272,40 @@ class UploadedArtifactContractBuilder:
                 "additionalProperties": True,
             },
         }
+
+    def _schema_from_annotation(self, annotation: ast.AST | None) -> dict[str, Any]:
+        """Map Python type annotations to a small JSON-schema shape.
+
+        This is intentionally domain-neutral. It only reads the syntax of the
+        callable signature and never infers meaning from parameter names.
+        """
+        if annotation is None:
+            return {"type": "string"}
+        text = self._annotation_text(annotation).replace(" ", "")
+        lowered = text.casefold()
+        if lowered in {"list", "list[str]", "typing.list[str]", "sequence[str]", "typing.sequence[str]", "tuple[str]", "typing.tuple[str]"} or lowered.startswith("list[") or lowered.startswith("typing.list["):
+            return {"type": "array", "items": {"type": "string"}}
+        if lowered in {"int", "integer"}:
+            return {"type": "integer"}
+        if lowered in {"float", "double", "number"}:
+            return {"type": "number"}
+        if lowered in {"bool", "boolean"}:
+            return {"type": "boolean"}
+        if "list[" in lowered or "sequence[" in lowered or "tuple[" in lowered:
+            return {"type": "array", "items": {"type": "string"}}
+        return {"type": "string"}
+
+    def _annotation_text(self, annotation: ast.AST) -> str:
+        try:
+            return ast.unparse(annotation)
+        except Exception:
+            if isinstance(annotation, ast.Name):
+                return annotation.id
+            if isinstance(annotation, ast.Attribute):
+                return annotation.attr
+            if isinstance(annotation, ast.Subscript):
+                return self._annotation_text(annotation.value)
+            return ""
 
     def _extract_argparse_required(self, tree: ast.AST) -> list[str]:
         required: list[str] = []
@@ -327,7 +361,7 @@ class UploadedArtifactContractBuilder:
             placeholder_values = {
                 "missing", "not_provided", "not_available", "none", "null",
                 "unknown", "undefined", "required", "todo", "tbd", "n_a", "na",
-                "your_api_key", "api_key", "placeholder", "sample", "example",
+                "placeholder", "sample", "example",
             }
             if normalized in placeholder_values:
                 return False
@@ -338,29 +372,56 @@ class UploadedArtifactContractBuilder:
         return True
 
     def _missing_inputs(self, artifact: dict[str, Any], known: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return UI fields for missing callable inputs.
+
+        Required parameters block execution when absent. Optional parameters are
+        included in the same UI request when any required input is missing, so a
+        user can provide optional values before the artifact runs without making
+        those values mandatory.
+        """
         contract = artifact.get("input_contract") if isinstance(artifact.get("input_contract"), dict) else {}
-        required = contract.get("required") if isinstance(contract.get("required"), list) else []
-        fields = []
+        properties = contract.get("properties") if isinstance(contract.get("properties"), dict) else {}
+        required = [str(x) for x in (contract.get("required") if isinstance(contract.get("required"), list) else [])]
+        fields: list[dict[str, Any]] = []
+        missing_required: list[str] = []
         for name in required:
+            if self._known_value_for_required_field(name, known) in (None, "", [], {}):
+                missing_required.append(name)
+        if not missing_required:
+            return []
+        ordered_names: list[str] = []
+        for name in missing_required:
+            if name not in ordered_names:
+                ordered_names.append(name)
+        for name in properties.keys():
             text = str(name).strip()
-            if not text:
-                continue
-            value = self._known_value_for_required_field(text, known)
-            if value in (None, "", [], {}):
-                fields.append({
-                    "name": text,
-                    "label": self._human_label(text),
-                    "required": True,
-                    "field": text,
-                    "type": "text",
-                    "input_type": "text",
-                    "placeholder": "Enter " + self._human_label(text),
-                    "description": "This value is required by the selected uploaded artifact.",
-                    "source": "uploaded_artifact_contract",
-                    "aliases": self._aliases_for_required_field(text),
-                    "merge_targets": [{"source_field": text}],
-                })
+            if text and text not in ordered_names and self._known_value_for_required_field(text, known) in (None, "", [], {}):
+                ordered_names.append(text)
+        for name in ordered_names:
+            required_flag = name in missing_required
+            schema = properties.get(name) if isinstance(properties.get(name), dict) else {"type": "string"}
+            fields.append(self._parameter_field(name, schema=schema, required=required_flag))
         return fields
+
+    def _parameter_field(self, name: str, *, schema: dict[str, Any], required: bool) -> dict[str, Any]:
+        value_type = str(schema.get("type") or "string")
+        input_type = "list" if value_type == "array" else ("number" if value_type in {"integer", "number"} else "text")
+        label = self._human_label(name)
+        description = "This value is required by the selected uploaded artifact." if required else "Optional value accepted by the selected uploaded artifact."
+        return {
+            "name": name,
+            "label": label,
+            "required": required,
+            "field": name,
+            "type": input_type,
+            "input_type": input_type,
+            "placeholder": ("Enter one value, then add it" if input_type == "list" else "Enter " + label),
+            "description": description,
+            "source": "uploaded_artifact_contract",
+            "aliases": self._aliases_for_required_field(name),
+            "merge_targets": [{"source_field": name}],
+            "item_type": schema.get("items", {}).get("type") if isinstance(schema.get("items"), dict) else None,
+        }
 
     def _known_value_for_required_field(self, name: str, known: dict[str, Any]) -> Any:
         if not isinstance(known, dict):
@@ -376,19 +437,19 @@ class UploadedArtifactContractBuilder:
 
     def _aliases_for_required_field(self, name: str) -> list[str]:
         text = str(name or "").strip()
-        normalized = self._normalize_key(text)
         aliases = [text]
-        # Generic parameter aliasing for uploaded callables.  The runtime does
-        # not know the domain; it only helps common human/external-file naming
-        # variants converge to the callable parameter name.
-        if normalized in {"city", "cityname", "place", "placeName".lower(), "location", "locationname"}:
-            aliases.extend(["city", "city_name", "place", "place_name", "location", "location_name"])
-        if normalized.endswith("name"):
-            stem = normalized[:-4]
-            if stem:
-                aliases.extend([stem, f"{stem}_name"])
-        aliases.append(text.replace("_", ""))
+        compact = text.replace("_", "")
+        dashed = text.replace("_", "-")
+        spaced = text.replace("_", " ")
+        camel = self._snake_to_camel(text)
+        aliases.extend([compact, dashed, spaced, camel])
         return list(dict.fromkeys(a for a in aliases if a))
+
+    def _snake_to_camel(self, value: str) -> str:
+        parts = [p for p in str(value or "").split("_") if p]
+        if not parts:
+            return ""
+        return parts[0] + "".join(p[:1].upper() + p[1:] for p in parts[1:])
 
     def _normalize_key(self, value: Any) -> str:
         return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().casefold())
