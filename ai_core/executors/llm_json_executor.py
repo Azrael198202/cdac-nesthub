@@ -84,16 +84,20 @@ class LLMJsonExecutor:
         # Role-specific packs are useful later, but they can add irrelevant
         # behavioral text (for example writer/retrieval rules) and destabilize
         # local JSON output. Keep only date/time normalization context here.
-        if node_id == "input_parsing":
+        if node_id in {"input_parsing", "intent_recognition"}:
+            # Early JSON stages must stay small and deterministic.  Role packs can
+            # contain long execution / verification guidance that belongs to later
+            # planning stages and can make local JSON models emit malformed JSON.
+            # Keep these two stages domain-neutral and schema-focused.
             role_profile = {
-                "role_id": "generic_input_parser",
-                "role_type": "input_parsing",
-                "required_skills": ["extract_runtime_parameters"],
+                "role_id": "generic_input_parser" if node_id == "input_parsing" else "generic_intent_classifier",
+                "role_type": node_id,
+                "required_skills": ["extract_runtime_parameters"] if node_id == "input_parsing" else ["classify_request_shape"],
                 "prompt_policy": {
-                    "max_context_tokens": 1200,
+                    "max_context_tokens": 900 if node_id == "input_parsing" else 700,
                     "include_full_trace": False,
                     "include_only_evidence_summary": False,
-                    "max_previous_result_items": 0,
+                    "max_previous_result_items": 1 if node_id == "intent_recognition" else 0,
                     "max_evidence_items": 0,
                     "max_chars_per_evidence": 0,
                 },
@@ -119,6 +123,38 @@ class LLMJsonExecutor:
             limit=stage_prompt_limit or None,
         )
         runtime_context = self.input_slimmer.slim_runtime_context(node_id=node_id, runtime_context=runtime_context)
+
+        deterministic_intent = None
+        if node_id == "intent_recognition":
+            deterministic_intent = self._deterministic_intent_for_clear_runtime_reference(
+                state=state,
+                slim_user_input=slim_user_input,
+                slim_previous_results=slim_previous_results,
+            )
+            if deterministic_intent is not None:
+                deterministic_intent = self._postprocess_stage_result(
+                    node_id=node_id,
+                    result=deterministic_intent,
+                    state=state,
+                    slim_user_input=slim_user_input,
+                )
+                deterministic_intent["_executor_type"] = "deterministic_json"
+                deterministic_intent["_node_id"] = node_id
+                deterministic_intent["_adapter_id"] = adapter.get("adapter_id")
+                try:
+                    self.validator.validate_data(deterministic_intent, schema)
+                except Exception:
+                    # Continue to the LLM path if a future schema becomes stricter.
+                    deterministic_intent = None
+                if deterministic_intent is not None:
+                    await event_bus.emit(run_id, {
+                        "type": "DETERMINISTIC_INTENT_RESOLVED",
+                        "title": "Intent resolved before LLM",
+                        "message": "A clear runtime artifact reference was resolved without calling the JSON model.",
+                        "node_id": node_id,
+                    })
+                    return deterministic_intent
+
         if node_id not in {"input_parsing", "intent_recognition", "workflow_planning"}:
             runtime_context["role_profile"] = {
                 "role_id": role_profile.get("role_id"),
@@ -873,9 +909,70 @@ class LLMJsonExecutor:
         node = str(node_id or "")
         if node == "input_parsing":
             return self._recover_input_parsing(state=state, slim_user_input=slim_user_input, error=error)
+        if node == "intent_recognition":
+            return self._recover_intent_recognition(state=state, slim_user_input=slim_user_input, slim_previous_results=slim_previous_results, error=error)
         if node == "workflow_planning":
             return self._recover_main_workflow_planning(state=state, slim_user_input=slim_user_input, slim_previous_results=slim_previous_results, error=error)
         return None
+
+    def _deterministic_intent_for_clear_runtime_reference(self, *, state: dict, slim_user_input: str, slim_previous_results: dict) -> dict | None:
+        """Resolve unambiguous uploaded-artifact requests without a heavy JSON LLM.
+
+        This is domain-neutral: it only checks whether the current request refers
+        to an artifact already available in the runtime registry/context.  The
+        later agent_action_planning/execution_preparation stages still inspect
+        the artifact and decide concrete execution details.
+        """
+        try:
+            refs = self.workflow_contract_builder.referenced_artifacts_for_state(state, slim_user_input)
+        except Exception:
+            refs = []
+        if not refs:
+            return None
+        payload = self._loads_json_obj(slim_user_input) or {}
+        previous = slim_previous_results if isinstance(slim_previous_results, dict) else {}
+        parsed = previous.get("input_parsing") if isinstance(previous.get("input_parsing"), dict) else {}
+        summary = str(payload.get("objective") or payload.get("instruction") or parsed.get("original_input") or state.get("input") or "use uploaded artifact")[:500]
+        return {
+            "intent_type": "use_uploaded_artifact",
+            "intent_summary": summary,
+            "normalized_intent": {
+                "action_hint": "use_uploaded_file",
+                "artifact_refs": refs,
+                "source": "deterministic_artifact_reference",
+            },
+            "required_capabilities": ["uploaded_artifact_execution"],
+            "execution_strategy": {"preferred_action_type": "use_uploaded_file"},
+            "confidence": {"overall": 0.91, "intent": 0.95, "parameter_understanding": 0.75, "execution_readiness": 0.7},
+            "human_review": {"required": False},
+            "reason": "The request references an uploaded artifact that is available in the runtime registry/context.",
+        }
+
+    def _recover_intent_recognition(self, *, state: dict, slim_user_input: str, slim_previous_results: dict, error: str) -> dict:
+        deterministic = self._deterministic_intent_for_clear_runtime_reference(
+            state=state,
+            slim_user_input=slim_user_input,
+            slim_previous_results=slim_previous_results,
+        )
+        if deterministic is not None:
+            deterministic["recovery"] = {"status": "provider_error_recovered", "reason": error[:500]}
+            return deterministic
+        payload = self._loads_json_obj(slim_user_input) or self._loads_json_obj(str(state.get("input") or "")) or {}
+        previous = slim_previous_results if isinstance(slim_previous_results, dict) else {}
+        parsed = previous.get("input_parsing") if isinstance(previous.get("input_parsing"), dict) else {}
+        summary = str(payload.get("objective") or payload.get("instruction") or parsed.get("original_input") or state.get("input") or "handle user request")[:500]
+        entities = parsed.get("parsed_entities") if isinstance(parsed.get("parsed_entities"), dict) else {}
+        return {
+            "intent_type": "generic_user_request",
+            "intent_summary": summary,
+            "normalized_intent": {"request": summary, "known_parameters": entities},
+            "required_capabilities": [],
+            "execution_strategy": {"preferred_action_type": "llm_generate"},
+            "confidence": {"overall": 0.55, "intent": 0.55, "parameter_understanding": 0.5, "execution_readiness": 0.45},
+            "human_review": {"required": False},
+            "reason": "Recovered a minimal generic intent after the JSON model failed to return an object.",
+            "recovery": {"status": "provider_error_recovered", "reason": error[:500]},
+        }
 
     def _recover_input_parsing(self, *, state: dict, slim_user_input: str, error: str) -> dict:
         payload = self._loads_json_obj(slim_user_input) or self._loads_json_obj(str(state.get("input") or "")) or {}
