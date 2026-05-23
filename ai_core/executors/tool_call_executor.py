@@ -2188,6 +2188,38 @@ class ToolCallExecutor:
         return value[:80] or "runtime_artifact"
 
 
+    def _executor_generation_instruction(self, *, step: dict[str, Any]) -> str:
+        """Build a generic final-deliverable instruction for content generation."""
+        parts: list[str] = []
+        for key in ("execution_instruction", "executor_instruction", "content", "instruction", "request"):
+            value = step.get(key) if isinstance(step, dict) else None
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+        prompt_contract = step.get("prompt_contract") if isinstance(step.get("prompt_contract"), dict) else {}
+        for key in ("executor_instruction", "objective", "request"):
+            value = prompt_contract.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+        flow = step.get("agent_execution_flow") if isinstance(step.get("agent_execution_flow"), list) else []
+        for item in flow:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("phase_role") or "") == "executor_llm_generation":
+                purpose = item.get("purpose")
+                if isinstance(purpose, str) and purpose.strip():
+                    parts.append(purpose.strip())
+        objective = step.get("objective")
+        if isinstance(objective, str) and objective.strip():
+            parts.append(objective.strip())
+        seen: set[str] = set()
+        unique: list[str] = []
+        for part in parts:
+            compact = " ".join(part.split())
+            if compact and compact not in seen:
+                seen.add(compact)
+                unique.append(compact)
+        return "\n".join(unique) or "Generate the requested final content."
+
     async def _try_model_generation_execution(
         self,
         *,
@@ -2236,16 +2268,20 @@ class ToolCallExecutor:
         }
         prompt = {
             "system": (
-                "Return JSON only. Generate the requested final content from the "
-                "provided objective and parameters. Do not browse the web, cite "
-                "external sources, invent provenance, or return code unless code "
-                "itself is explicitly the requested final content."
+                "Return JSON only. Produce the final deliverable itself from the "
+                "executor instruction, objective, and confirmed parameters. Do not "
+                "summarize the request, do not describe what the agent can do, do not "
+                "return a plan, and do not echo parameters as the answer. Do not browse "
+                "the web, cite external sources, invent provenance, or return code unless "
+                "code itself is explicitly the requested final deliverable."
             )
         }
+        executor_instruction = self._executor_generation_instruction(step=step)
         rendered = (
-            "OBJECTIVE=" + str(step.get("objective") or state.get("input") or "")[:600] +
-            "\nPARAMETERS=" + json.dumps(make_json_safe(known), ensure_ascii=False, separators=(",", ":"))[:1200] +
-            "\nReturn a concise completed result in answer_material."
+            "FINAL_DELIVERABLE_REQUEST=" + executor_instruction[:1200] +
+            "\nOBJECTIVE=" + str(step.get("objective") or state.get("input") or "")[:600] +
+            "\nCONFIRMED_PARAMETERS=" + json.dumps(make_json_safe(known), ensure_ascii=False, separators=(",", ":"))[:1600] +
+            "\nReturn one JSON object where answer_material contains only the completed final deliverable, not a requirements summary."
         )
         try:
             generated = await self.provider_router.generate_json(
@@ -2279,16 +2315,24 @@ class ToolCallExecutor:
         answer = str(generated.get("answer_material") or generated.get("final_answer") or generated.get("content") or "").strip()
         if not answer:
             return None
+        quality = self._generated_answer_quality(answer=answer, step=step, known=known)
+        if not quality.get("passed"):
+            return {
+                "input": tool_input,
+                "result": {
+                    "status": "failed_quality_gate",
+                    "error": {"code": "generated_answer_quality_failed", "message": str(quality.get("reason") or "quality gate failed")},
+                    "data": {"answer_material_quality": quality},
+                    "source": "model_generated_content",
+                    "requires_human_confirmation": False,
+                },
+            }
         result = {
             "status": "success",
             "data": {
                 "answer_material": answer,
                 "normalized_facts": generated.get("normalized_facts") if isinstance(generated.get("normalized_facts"), list) else [],
-                "answer_material_quality": {
-                    "passed": True,
-                    "reason": "model_generated_content_contract",
-                    "source_type": "model_generated",
-                },
+                "answer_material_quality": quality,
             },
             "source": "model_generated_content",
             "requires_human_confirmation": False,
@@ -2304,6 +2348,32 @@ class ToolCallExecutor:
             },
         }
         return {"input": tool_input, "result": result}
+
+    def _generated_answer_quality(self, *, answer: str, step: dict[str, Any], known: dict[str, Any]) -> dict[str, Any]:
+        """Generic guard against returning planning/request summaries as final content."""
+        text = " ".join(str(answer or "").split())
+        lower = text.casefold()
+        if not text:
+            return {"passed": False, "reason": "empty_answer_material", "source_type": "model_generated"}
+        summary_markers = (
+            " can ", " capable of ", " is able to ", "the request is", "requirements",
+            "parameters", "based on the provided", "will generate", "next step",
+        )
+        if len(text.split()) < 30 and any(marker in f" {lower} " for marker in summary_markers):
+            return {"passed": False, "reason": "answer_looks_like_request_summary", "source_type": "model_generated"}
+        requested_counts: list[int] = []
+        import re
+        for value in known.values():
+            for match in re.findall(r"(?<!\d)(\d{2,5})(?!\d)", str(value)):
+                try:
+                    requested_counts.append(int(match))
+                except ValueError:
+                    pass
+        if requested_counts:
+            target = max(requested_counts)
+            if target >= 50 and len(text.split()) < max(30, int(target * 0.4)):
+                return {"passed": False, "reason": "answer_too_short_for_requested_size", "source_type": "model_generated", "requested_size_hint": target, "actual_words": len(text.split())}
+        return {"passed": True, "reason": "model_generated_content_contract", "source_type": "model_generated"}
 
     async def _try_local_knowledge_execution(
         self,

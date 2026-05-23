@@ -45,9 +45,28 @@ class WorkflowContractBuilder:
         steps = self.extract_planned_steps(result)
         if not steps:
             steps = [self.default_step(state=state, result=result, decision=decision, slim_user_input=slim_user_input)]
-        normalized_steps = [self.normalize_step(step=step, index=index, state=state, decision=decision) for index, step in enumerate(steps) if isinstance(step, dict)]
+        execution_instruction = self.extract_execution_instruction(result)
+        normalized_steps = [
+            self.normalize_step(
+                step=step,
+                index=index,
+                state=state,
+                decision=decision,
+                execution_instruction=execution_instruction,
+            )
+            for index, step in enumerate(steps)
+            if isinstance(step, dict)
+        ]
         if not normalized_steps:
-            normalized_steps = [self.normalize_step(step=self.default_step(state=state, result=result, decision=decision, slim_user_input=slim_user_input), index=0, state=state, decision=decision)]
+            normalized_steps = [
+                self.normalize_step(
+                    step=self.default_step(state=state, result=result, decision=decision, slim_user_input=slim_user_input),
+                    index=0,
+                    state=state,
+                    decision=decision,
+                    execution_instruction=execution_instruction,
+                )
+            ]
         agent_graph = result.get("agent_graph") if isinstance(result.get("agent_graph"), dict) else self.build_agent_graph(normalized_steps)
         workflow = result.get("workflow") if isinstance(result.get("workflow"), dict) else {}
         workflow.setdefault("workflow_id", "runtime_workflow")
@@ -107,6 +126,51 @@ class WorkflowContractBuilder:
                     "ranked_options": candidate.get("ranked_options") if isinstance(candidate.get("ranked_options"), list) else [{"action_type": selected, "priority": 1}],
                 })
         return {}
+
+
+    def extract_execution_instruction(self, container: dict[str, Any]) -> str:
+        """Extract a generic executor-facing instruction from planner output.
+
+        Planner stages may describe the requested final deliverable in nested
+        ranking/substep records while the normalized step objective remains a
+        broad capability statement.  The executor needs the concrete deliverable
+        instruction, but must not use planner text as the final answer.
+        """
+        fragments: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: Any) -> None:
+            if value in (None, "", [], {}):
+                return
+            if isinstance(value, str):
+                text = " ".join(value.strip().split())
+                if text and text not in seen:
+                    seen.add(text)
+                    fragments.append(text)
+            elif isinstance(value, dict):
+                compact = {str(k): v for k, v in value.items() if v not in (None, "", [], {})}
+                if compact:
+                    text = str(compact)
+                    if text not in seen:
+                        seen.add(text)
+                        fragments.append(text)
+            elif isinstance(value, list):
+                for item in value[:8]:
+                    add(item)
+
+        for candidate in self.iter_nested_dicts(container, max_depth=8):
+            if not isinstance(candidate, dict):
+                continue
+            if self.extract_execution_decision(candidate).get("selected_action_type") == "llm_generate" or normalize_action_type(candidate.get("action_type")) == "llm_generate":
+                for key in ("content", "instruction", "objective", "request", "task"):
+                    add(candidate.get(key))
+                params = candidate.get("parameters")
+                if isinstance(params, dict):
+                    add(params)
+            substeps = candidate.get("substep_generation")
+            if isinstance(substeps, list):
+                add(substeps)
+        return "\n".join(fragments)[:2000]
 
     def extract_planned_steps(self, container: dict[str, Any]) -> list[dict[str, Any]]:
         """Return the deepest valid planned_steps array from nested output.
@@ -369,7 +433,7 @@ class WorkflowContractBuilder:
             "decision_guard": "available_uploaded_artifact_reference",
         }
 
-    def normalize_step(self, *, step: dict[str, Any], index: int, state: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
+    def normalize_step(self, *, step: dict[str, Any], index: int, state: dict[str, Any], decision: dict[str, Any], execution_instruction: str = "") -> dict[str, Any]:
         out = dict(step)
         step_id = str(out.get("step_id") or out.get("task_id") or f"step_{index + 1}")
         out["step_id"] = step_id
@@ -409,6 +473,11 @@ class WorkflowContractBuilder:
         out["action_type"] = action_type
         out["execution_action"] = action_type
         out["execution_decision"] = step_decision or decision
+        if execution_instruction and method == "content_generation":
+            out.setdefault("execution_instruction", execution_instruction)
+            out.setdefault("prompt_contract", {})
+            if isinstance(out["prompt_contract"], dict):
+                out["prompt_contract"].setdefault("executor_instruction", execution_instruction)
         out["agent_action_prompt_contract"] = AGENT_ACTION_PROMPT_CONTRACT
         out["execution_method"] = method
         out["execution_method_policy"] = {"preferred_methods": [method], "disabled_methods": [m for m in set(ACTION_TO_METHOD.values()) if m != method], "fallback_allowed": False}
