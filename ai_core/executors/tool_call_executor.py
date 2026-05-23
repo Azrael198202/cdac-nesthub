@@ -1997,6 +1997,9 @@ class ToolCallExecutor:
                     "stdout": stdout,
                     "stderr": stderr,
                     "returncode": execution.get("returncode"),
+                    "timed_out": execution.get("timed_out", False),
+                    "bounded_by_runtime": execution.get("bounded_by_runtime", False),
+                    "dependencies": execution.get("dependencies") or [],
                     "agent_artifact_mapping": identity,
                     "execution_method_contract": method_contract.to_dict(),
                 },
@@ -2048,7 +2051,9 @@ class ToolCallExecutor:
                 "If an external Python package is necessary, import it normally; the runtime "
                 "will detect and prepare missing Python packages before execution. "
                 "The script must be executable as a standalone file and print its result "
-                "to stdout. Do not include markdown fences."
+                "to stdout. The script must finish by itself. Do not create unbounded loops, "
+                "background daemons, interactive prompts, or waits without a fixed upper bound. "
+                "For repeated output, emit a small bounded sample and exit. Do not include markdown fences."
             )
         }
         rendered = (
@@ -2219,9 +2224,16 @@ class ToolCallExecutor:
         except Exception as exc:
             dependency_records.append({"status": "failed", "stage": "dependency_scan", "error": str(exc)})
 
+        def _decode_timeout_stream(value: Any) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, bytes):
+                return value.decode("utf-8", errors="replace")
+            return str(value)
+
         def run_once() -> subprocess.CompletedProcess[str]:
             return subprocess.run(
-                [sys.executable, str(artifact_path)],
+                [sys.executable, "-u", str(artifact_path)],
                 cwd=str(artifact_path.parent),
                 capture_output=True,
                 text=True,
@@ -2242,9 +2254,31 @@ class ToolCallExecutor:
                 "stdout": completed.stdout,
                 "stderr": completed.stderr,
                 "dependencies": dependency_records,
+                "timed_out": False,
+            }
+        except subprocess.TimeoutExpired as exc:
+            stdout = _decode_timeout_stream(getattr(exc, "stdout", ""))
+            stderr = _decode_timeout_stream(getattr(exc, "stderr", ""))
+            if stdout.strip():
+                return {
+                    "returncode": 0,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "dependencies": dependency_records,
+                    "timed_out": True,
+                    "bounded_by_runtime": True,
+                    "message": "generated_process_stopped_after_timeout_with_output",
+                }
+            return {
+                "returncode": -1,
+                "stdout": stdout,
+                "stderr": stderr or str(exc),
+                "dependencies": dependency_records,
+                "timed_out": True,
+                "bounded_by_runtime": True,
             }
         except Exception as exc:
-            return {"returncode": -1, "stdout": "", "stderr": str(exc), "dependencies": dependency_records}
+            return {"returncode": -1, "stdout": "", "stderr": str(exc), "dependencies": dependency_records, "timed_out": False}
 
     def _runtime_agent_identity(self, *, state: dict[str, Any], step: dict[str, Any]) -> dict[str, str]:
         previous = state.get("results") if isinstance(state.get("results"), dict) else {}
