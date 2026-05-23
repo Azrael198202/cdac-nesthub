@@ -317,18 +317,11 @@ class AgentStudioService:
         )
         artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
         explicit_runtime_parameters = self._extract_runtime_parameters_from_instruction(instruction)
-        # Task graphs do not own durable parameter values.  Parameter schemas live
-        # on participants, while uploaded artifact parameters are discovered from
-        # the selected artifact during execution_preparation.  Keeping a blank
-        # task-level contract here prevents stale values from leaking into
-        # unrelated future runs and avoids referencing an undefined
-        # participant-only parameter_contract.
-        schema_contract = {
-            "contract_type": "task_runtime_parameter_contract",
-            "parameters": [],
-            "missing_information": [],
-            "runtime_scope": "task_run",
-        }
+        # Agent profiles own capability and parameter schema, but never durable
+        # task-run values.  Keep the LLM/config-derived schema and clear values
+        # so each task execution must collect fresh runtime parameters unless
+        # the task instruction explicitly supplies them.
+        schema_contract = self._parameter_contract_schema_only(parameter_contract)
         payload = {
             "participant_id": participant_id,
             "name": participant_name,
@@ -348,8 +341,8 @@ class AgentStudioService:
             "uploaded_artifacts": artifact_refs,
             "artifact_policy": {
                 "bind_uploaded_artifacts_to_agent": bool(artifact_refs),
-                "allowed_action": "use_uploaded_file",
-                "parameter_collection_owner": "ui",
+                "allowed_action": "use_uploaded_file" if artifact_refs else "",
+                "parameter_collection_owner": "ui" if artifact_refs else "agent_runtime",
             },
         }
         path = self.store.write_json(f"generated/agents/{participant_id}.json", payload)

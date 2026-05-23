@@ -55,6 +55,10 @@ class AgentDelegationRuntime:
         self._record_progress(run_payload, "prepare", "Preparing delegation run", "running")
         self._record_global_mind_graph_progress(run_payload, task_mind_graph)
 
+        # Apply task-scoped parameters before checking missing agent values.
+        # Values supplied in the task instruction or resume form belong only to
+        # this in-memory run and are not written back to durable agent profiles.
+        self._apply_task_runtime_parameters_to_selected(selected, task_graph.get("runtime_parameters") if isinstance(task_graph, dict) else {})
         missing_parameter_fields = self._collect_missing_agent_parameter_fields(selected)
         if missing_parameter_fields:
             pending_action = {
@@ -628,6 +632,21 @@ class AgentDelegationRuntime:
                 "values": param.get("values") if isinstance(param.get("values"), list) else [],
             })
         return out
+
+
+    def _apply_task_runtime_parameters_to_selected(self, participants: list[dict[str, Any]], runtime_parameters: Any) -> None:
+        """Apply current task-run parameters to participant copies only.
+
+        This lets commands such as `topic=fukuoka` or UI-provided values satisfy
+        agent parameter contracts for the current run without persisting those
+        values to the agent profile.
+        """
+        if not isinstance(runtime_parameters, dict) or not runtime_parameters:
+            return
+        for participant in participants:
+            if not isinstance(participant, dict):
+                continue
+            self.parameter_contract_service.apply_values(participant, runtime_parameters)
 
     def _collect_missing_agent_parameter_fields(self, participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         fields: list[dict[str, Any]] = []

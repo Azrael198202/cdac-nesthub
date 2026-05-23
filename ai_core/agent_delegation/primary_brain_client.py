@@ -602,6 +602,9 @@ class PrimaryBrainDelegationClient:
             "could not produce a verified answer",
             "could not produce a verified final answer",
             "source only",
+            "classified intent is",
+            "initial capability needs",
+            "no missing required parameters",
         ]
         if any(fragment in lower for fragment in placeholder_fragments):
             return False
