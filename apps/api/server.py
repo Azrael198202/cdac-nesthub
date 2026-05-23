@@ -52,6 +52,7 @@ class ArtifactEditRequest(BaseModel):
 
 class ArtifactProposalActionRequest(BaseModel):
     feedback: str | None = None
+    new_content: str | None = None
 
 
 class AgentStudioModelSelectionRequest(BaseModel):
@@ -203,7 +204,13 @@ async def agent_studio_artifact_edit_download(proposal_id: str):
 
 
 @app.post("/api/agent-studio/artifact-edit/{proposal_id}/confirm")
-async def agent_studio_artifact_edit_confirm(proposal_id: str):
+async def agent_studio_artifact_edit_confirm(proposal_id: str, req: ArtifactProposalActionRequest | None = None):
+    if req and req.new_content is not None:
+        meta = artifact_edit_service._read_meta(proposal_id)
+        if meta:
+            draft_path = artifact_edit_service._safe_path(str(meta.get("draft_path") or ""))
+            if draft_path:
+                draft_path.write_text(req.new_content, encoding="utf-8")
     payload = artifact_edit_service.confirm(proposal_id)
     return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
 

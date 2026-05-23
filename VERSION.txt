@@ -1,1 +1,1 @@
-7.5-artifact-edit-handler-fix
+7.6-artifact-edit-review-flow-fix

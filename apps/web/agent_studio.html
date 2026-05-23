@@ -35,7 +35,7 @@
 </main>
 <div id="missingInputModal" class="modalBackdrop"><div class="modal"><h3>Required input</h3><div class="small" id="missingInputSummary"></div><div id="missingInputFields"></div><div class="modalActions"><button class="btn" onclick="closeMissingInputModal()">Cancel</button><button id="skipCredentialBtn" class="btn" style="display:none" onclick="skipCredentialAndContinue()">Continue without this key</button><button class="btn primary" onclick="submitMissingInputs()">Submit & Continue</button></div></div></div>
 
-<div id="artifactEditModal" class="modalBackdrop"><div class="modal"><h3 id="artifactEditTitle">Edit uploaded artifact</h3><div class="small" id="artifactEditSummary"></div><label class="fieldLabel">Modification request / feedback</label><textarea id="artifactEditInstruction" class="fieldInput area" placeholder="Describe how the uploaded file should be modified."></textarea><div id="artifactEditPreviewWrap" style="display:none"><label class="fieldLabel">Draft preview</label><div id="artifactEditPreview" class="pre"></div><div class="row"><a id="artifactEditDownload" class="btn" href="#" target="_blank">Download draft</a></div></div><div class="modalActions"><button class="btn" onclick="cancelArtifactEdit()">Cancel</button><button class="btn" id="artifactEditReviseBtn" style="display:none" onclick="reviseArtifactEdit()">Modify again</button><button class="btn primary" id="artifactEditConfirmBtn" style="display:none" onclick="confirmArtifactEdit()">Confirm replacement</button><button class="btn primary" id="artifactEditCreateBtn" onclick="createArtifactEditProposal()">Generate modified file</button></div></div></div>
+<div id="artifactEditModal" class="modalBackdrop"><div class="modal"><h3 id="artifactEditTitle">Edit uploaded artifact</h3><div class="small" id="artifactEditSummary"></div><label class="fieldLabel">Modification request / feedback</label><textarea id="artifactEditInstruction" class="fieldInput area" placeholder="Describe how the uploaded file should be modified."></textarea><div id="artifactEditPreviewWrap" style="display:none"><label class="fieldLabel">Draft preview</label><textarea id="artifactEditPreview" class="fieldInput area" style="min-height:260px" spellcheck="false"></textarea><div class="row"><a id="artifactEditDownload" class="btn" href="#" target="_blank">Download draft</a></div></div><div class="modalActions"><button class="btn" onclick="cancelArtifactEdit()">Cancel</button><button class="btn" id="artifactEditReviseBtn" style="display:none" onclick="reviseArtifactEdit()">Modify again</button><button class="btn primary" id="artifactEditConfirmBtn" style="display:none" onclick="confirmArtifactEdit()">Confirm replacement</button><button class="btn primary" id="artifactEditCreateBtn" onclick="createArtifactEditProposal()">Generate modified file</button></div></div></div>
 <script>
 const messages = document.getElementById('messages');
 function renderJson(obj){ return JSON.stringify(obj, null, 2); }
@@ -114,7 +114,7 @@ function openArtifactEdit(id){
   document.getElementById('artifactEditTitle').textContent='Edit uploaded artifact';
   document.getElementById('artifactEditSummary').textContent=artifact ? `File: ${artifact.name||artifact.filename||id}` : `Artifact: ${id}`;
   document.getElementById('artifactEditInstruction').value='';
-  document.getElementById('artifactEditPreview').textContent='';
+  document.getElementById('artifactEditPreview').value='';
   document.getElementById('artifactEditPreviewWrap').style.display='none';
   document.getElementById('artifactEditCreateBtn').style.display='inline-block';
   document.getElementById('artifactEditReviseBtn').style.display='none';
@@ -137,7 +137,7 @@ async function createArtifactEditProposal(){
 function showArtifactProposal(data){
   const proposal=data.proposal||{};
   artifactEditState.proposalId=proposal.proposal_id||'';
-  document.getElementById('artifactEditPreview').textContent=data.preview || '';
+  document.getElementById('artifactEditPreview').value=data.preview || '';
   const link=document.getElementById('artifactEditDownload');
   link.href=proposal.download_url || '#';
   document.getElementById('artifactEditPreviewWrap').style.display='block';
@@ -160,14 +160,21 @@ async function reviseArtifactEdit(){
 }
 async function confirmArtifactEdit(){
   if(!artifactEditState.proposalId){ return; }
+  setStudioStatus('confirming artifact edit', true);
   try{
-    const res=await fetch(`/api/agent-studio/artifact-edit/${encodeURIComponent(artifactEditState.proposalId)}/confirm`,{method:'POST'});
+    const currentContent=document.getElementById('artifactEditPreview').value;
+    const res=await fetch(`/api/agent-studio/artifact-edit/${encodeURIComponent(artifactEditState.proposalId)}/confirm`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({new_content: currentContent})
+    });
     const data=await res.json();
     if(!res.ok || data.ok===false){ throw new Error(data.message||'confirm failed'); }
     closeArtifactEditModal();
     addMessage('Artifact modification confirmed. Original file was backed up and the confirmed draft replaced the active artifact.','item final');
     await refreshArtifacts();
   }catch(e){ addMessage('Confirm artifact edit failed: '+e,'item error'); }
+  finally{ setStudioStatus('ready', false); }
 }
 async function cancelArtifactEdit(){
   if(artifactEditState.proposalId){

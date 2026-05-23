@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,7 +72,16 @@ class ArtifactEditService:
             edited = str(new_content)
             generation = {"mode": "user_supplied_content"}
         else:
-            edited, generation = await self._generate_edit(base_text=base_text, instruction=instruction, feedback=feedback, filename=str(artifact.get("filename") or original.name))
+            deterministic = self._try_deterministic_edit(
+                base_text=base_text,
+                instruction=instruction,
+                feedback=feedback,
+                filename=str(artifact.get("filename") or original.name),
+            )
+            if deterministic is not None:
+                edited, generation = deterministic
+            else:
+                edited, generation = await self._generate_edit(base_text=base_text, instruction=instruction, feedback=feedback, filename=str(artifact.get("filename") or original.name))
         proposal_id = "edit_" + uuid4().hex[:12]
         suffix = original.suffix or ".txt"
         draft_path = self.proposal_dir / f"{proposal_id}{suffix}"
@@ -129,6 +139,121 @@ class ArtifactEditService:
                 item["last_edit_proposal_id"] = proposal_id
                 item["updated_at"] = self._now()
         self.registry.write(items)
+
+    def _try_deterministic_edit(self, *, base_text: str, instruction: str, feedback: str, filename: str) -> tuple[str, dict[str, Any]] | None:
+        """Apply small, safe structural edits without asking the LLM.
+
+        This is intentionally generic: it only triggers when the user explicitly
+        asks to convert named function parameters to list types. It preserves the
+        original function by renaming it to a private single-call helper, then
+        adds a thin public wrapper that accepts scalar or list inputs and loops
+        through the cartesian product. This prevents an edit request from getting
+        stuck in a review dialog with only an advisory text response.
+        """
+        combined = f"{instruction}\n{feedback}".lower()
+        if not filename.lower().endswith(".py"):
+            return None
+        if "list" not in combined or "parameter" not in combined:
+            return None
+
+        params = []
+        for name in re.findall(r"`([A-Za-z_]\w*)`", instruction + "\n" + feedback):
+            if name not in params:
+                params.append(name)
+        if not params:
+            # Fallback to conservative known identifiers mentioned as words.
+            for name in re.findall(r"\b([A-Za-z_]\w*)\b", instruction + "\n" + feedback):
+                if name not in {"change", "parameters", "parameter", "file", "list", "types", "function", "accept", "multiple", "and", "the", "to", "so", "that", "can", "information", "for", "dates", "cities"} and name not in params:
+                    params.append(name)
+        if not params:
+            return None
+
+        lines = base_text.splitlines()
+        def_index = None
+        def_indent = ""
+        def_name = ""
+        sig_line = ""
+        for i, line in enumerate(lines):
+            m = re.match(r"^(\s*)def\s+([A-Za-z_]\w*)\s*\((.*?)\)\s*:\s*$", line)
+            if not m:
+                continue
+            signature_params = m.group(3)
+            if any(re.search(rf"(^|[,\s]){re.escape(param)}\s*(:|=|,|$)", signature_params) for param in params):
+                def_index = i
+                def_indent = m.group(1)
+                def_name = m.group(2)
+                sig_line = line
+                break
+        if def_index is None or not def_name:
+            return None
+
+        # Find function block end by indentation.
+        block_end = len(lines)
+        for j in range(def_index + 1, len(lines)):
+            line = lines[j]
+            if line.strip() and not line.startswith(def_indent + " ") and not line.startswith(def_indent + "\t"):
+                block_end = j
+                break
+
+        original_block = lines[def_index:block_end]
+        helper_name = f"_{def_name}_single"
+        original_block[0] = re.sub(r"def\s+" + re.escape(def_name) + r"\s*\(", f"def {helper_name}(", original_block[0], count=1)
+
+        # Extract parameter defaults from original signature.
+        sig_match = re.match(r"^(\s*)def\s+[A-Za-z_]\w*\s*\((.*?)\)\s*:\s*$", sig_line)
+        original_params_raw = [part.strip() for part in (sig_match.group(2) if sig_match else "").split(",") if part.strip()]
+        selected = [p for p in params if any(re.match(rf"{re.escape(p)}\b", raw) for raw in original_params_raw)]
+        if not selected:
+            return None
+        wrapper_params = []
+        for raw in original_params_raw:
+            name = re.split(r"[:=]", raw, 1)[0].strip()
+            if name in selected:
+                if "=" in raw:
+                    default = raw.split("=", 1)[1].strip()
+                    wrapper_params.append(f"{name}: List[str] = {default}")
+                else:
+                    wrapper_params.append(f"{name}: List[str]")
+            else:
+                wrapper_params.append(raw)
+
+        loop_names = []
+        prep_lines = []
+        for name in selected:
+            plural = f"{name}_items"
+            loop_names.append((name, plural))
+            prep_lines.append(f"{def_indent}    {plural} = {name} if isinstance({name}, list) else ([{name}] if {name} is not None else [None])")
+        call_args = []
+        for raw in original_params_raw:
+            name = re.split(r"[:=]", raw, 1)[0].strip()
+            if name in selected:
+                call_args.append(f"one_{name}")
+            else:
+                call_args.append(name)
+        wrapper = [f"{def_indent}def {def_name}({', '.join(wrapper_params)}):"]
+        wrapper += prep_lines
+        if len(loop_names) == 1:
+            name, plural = loop_names[0]
+            wrapper.append(f"{def_indent}    for one_{name} in {plural}:")
+            wrapper.append(f"{def_indent}        {helper_name}({', '.join(call_args)})")
+        else:
+            first_name, first_plural = loop_names[0]
+            wrapper.append(f"{def_indent}    for one_{first_name} in {first_plural}:")
+            current_indent = def_indent + "        "
+            for name, plural in loop_names[1:]:
+                wrapper.append(f"{current_indent}for one_{name} in {plural}:")
+                current_indent += "    "
+            wrapper.append(f"{current_indent}{helper_name}({', '.join(call_args)})")
+
+        new_lines = lines[:def_index] + wrapper + [""] + original_block + lines[block_end:]
+        edited = "\n".join(new_lines) + ("\n" if base_text.endswith("\n") else "")
+        if "List" in edited and not re.search(r"from\s+typing\s+import\s+.*\bList\b", edited):
+            insert_at = 0
+            while insert_at < len(new_lines) and (new_lines[insert_at].startswith("#!") or new_lines[insert_at].startswith("# -*-")):
+                insert_at += 1
+            new_lines.insert(insert_at, "from typing import List")
+            edited = "\n".join(new_lines) + ("\n" if base_text.endswith("\n") else "")
+        return edited, {"mode": "deterministic_python_list_parameter_edit", "changed_parameters": selected}
 
     async def _generate_edit(self, *, base_text: str, instruction: str, feedback: str, filename: str) -> tuple[str, dict[str, Any]]:
         schema = {
