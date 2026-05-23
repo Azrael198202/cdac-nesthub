@@ -34,6 +34,8 @@
   <section class="panel"><h2>Workflow / Results / Traces <span id="graphCount" class="small"></span></h2><div class="scroll" id="rightPane"></div></section>
 </main>
 <div id="missingInputModal" class="modalBackdrop"><div class="modal"><h3>Required input</h3><div class="small" id="missingInputSummary"></div><div id="missingInputFields"></div><div class="modalActions"><button class="btn" onclick="closeMissingInputModal()">Cancel</button><button id="skipCredentialBtn" class="btn" style="display:none" onclick="skipCredentialAndContinue()">Continue without this key</button><button class="btn primary" onclick="submitMissingInputs()">Submit & Continue</button></div></div></div>
+
+<div id="artifactEditModal" class="modalBackdrop"><div class="modal"><h3 id="artifactEditTitle">Edit uploaded artifact</h3><div class="small" id="artifactEditSummary"></div><label class="fieldLabel">Modification request / feedback</label><textarea id="artifactEditInstruction" class="fieldInput area" placeholder="Describe how the uploaded file should be modified."></textarea><div id="artifactEditPreviewWrap" style="display:none"><label class="fieldLabel">Draft preview</label><div id="artifactEditPreview" class="pre"></div><div class="row"><a id="artifactEditDownload" class="btn" href="#" target="_blank">Download draft</a></div></div><div class="modalActions"><button class="btn" onclick="cancelArtifactEdit()">Cancel</button><button class="btn" id="artifactEditReviseBtn" style="display:none" onclick="reviseArtifactEdit()">Modify again</button><button class="btn primary" id="artifactEditConfirmBtn" style="display:none" onclick="confirmArtifactEdit()">Confirm replacement</button><button class="btn primary" id="artifactEditCreateBtn" onclick="createArtifactEditProposal()">Generate modified file</button></div></div></div>
 <script>
 const messages = document.getElementById('messages');
 function renderJson(obj){ return JSON.stringify(obj, null, 2); }
@@ -57,10 +59,16 @@ let modelSelectionState = null;
 let suppressModelSave = false;
 let uploadedArtifacts = [];
 let selectedArtifactIds = new Set();
+let artifactEditState = {artifactId:"", proposalId:""};
 
 
-function selectedArtifactsForRequest(){
-  return uploadedArtifacts.filter(item=>selectedArtifactIds.has(String(item.artifact_id||item.id||'')));
+function selectedArtifactsForRequest(messageText=''){
+  const text=String(messageText||'').toLowerCase();
+  return uploadedArtifacts.filter(item=>{
+    const id=String(item.artifact_id||item.id||'');
+    const name=String(item.name||item.filename||'').toLowerCase();
+    return selectedArtifactIds.has(id) || (name && text.includes(name));
+  });
 }
 function consumeSelectedArtifactsAfterRequest(){
   if(selectedArtifactIds.size){
@@ -78,12 +86,80 @@ function renderArtifacts(){
     const el=document.createElement('div');
     el.className='artifactItem';
     const checked=selectedArtifactIds.has(id) ? 'checked' : '';
-    el.innerHTML=`<div class="artifactMeta"><div class="artifactName">${escapeHtml(item.name||item.filename||id)}</div><div class="artifactPath">${escapeHtml(item.path||'')}</div><div class="small">${escapeHtml(item.mime_type||'')} ${item.size_bytes?(' / '+item.size_bytes+' bytes'):''}</div></div><label class="checkLabel"><input type="checkbox" ${checked} onchange="toggleArtifactSelection('${escapeHtml(id)}', this.checked)"> bind</label>`;
+    el.innerHTML=`<div class="artifactMeta"><div class="artifactName">${escapeHtml(item.name||item.filename||id)}</div><div class="artifactPath">${escapeHtml(item.path||'')}</div><div class="small">${escapeHtml(item.mime_type||'')} ${item.size_bytes?(' / '+item.size_bytes+' bytes'):''}</div></div><div style="display:flex;align-items:center;gap:6px"><button class="copyBtn" onclick="openArtifactEdit('${escapeHtml(id)}')">Edit</button><label class="checkLabel"><input type="checkbox" ${checked} onchange="toggleArtifactSelection('${escapeHtml(id)}', this.checked)"> bind once</label></div>`;
     box.appendChild(el);
   });
 }
 function toggleArtifactSelection(id, checked){
   if(checked) selectedArtifactIds.add(id); else selectedArtifactIds.delete(id);
+}
+
+function openArtifactEdit(id){
+  const artifact=uploadedArtifacts.find(x=>String(x.artifact_id||x.id||'')===String(id));
+  artifactEditState={artifactId:String(id||''), proposalId:''};
+  document.getElementById('artifactEditTitle').textContent='Edit uploaded artifact';
+  document.getElementById('artifactEditSummary').textContent=artifact ? `File: ${artifact.name||artifact.filename||id}` : `Artifact: ${id}`;
+  document.getElementById('artifactEditInstruction').value='';
+  document.getElementById('artifactEditPreview').textContent='';
+  document.getElementById('artifactEditPreviewWrap').style.display='none';
+  document.getElementById('artifactEditCreateBtn').style.display='inline-block';
+  document.getElementById('artifactEditReviseBtn').style.display='none';
+  document.getElementById('artifactEditConfirmBtn').style.display='none';
+  document.getElementById('artifactEditModal').classList.add('show');
+}
+function closeArtifactEditModal(){ document.getElementById('artifactEditModal').classList.remove('show'); }
+async function createArtifactEditProposal(){
+  const instruction=document.getElementById('artifactEditInstruction').value.trim();
+  if(!instruction){ addMessage('Please enter a modification request for the file.','item error'); return; }
+  setStudioStatus('editing artifact', true);
+  try{
+    const res=await fetch(`/api/agent-studio/artifacts/${encodeURIComponent(artifactEditState.artifactId)}/edit-proposal`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instruction})});
+    const data=await res.json();
+    if(!res.ok || data.ok===false){ throw new Error(data.message||'edit proposal failed'); }
+    showArtifactProposal(data);
+  }catch(e){ addMessage('Artifact edit failed: '+e,'item error'); }
+  finally{ setStudioStatus('ready', false); }
+}
+function showArtifactProposal(data){
+  const proposal=data.proposal||{};
+  artifactEditState.proposalId=proposal.proposal_id||'';
+  document.getElementById('artifactEditPreview').textContent=data.preview || '';
+  const link=document.getElementById('artifactEditDownload');
+  link.href=proposal.download_url || '#';
+  document.getElementById('artifactEditPreviewWrap').style.display='block';
+  document.getElementById('artifactEditCreateBtn').style.display='none';
+  document.getElementById('artifactEditReviseBtn').style.display='inline-block';
+  document.getElementById('artifactEditConfirmBtn').style.display='inline-block';
+  document.getElementById('artifactEditSummary').textContent='Review the generated draft. Download it, add feedback, modify again, confirm replacement, or cancel.';
+}
+async function reviseArtifactEdit(){
+  const feedback=document.getElementById('artifactEditInstruction').value.trim();
+  if(!artifactEditState.proposalId){ return; }
+  setStudioStatus('revising artifact', true);
+  try{
+    const res=await fetch(`/api/agent-studio/artifact-edit/${encodeURIComponent(artifactEditState.proposalId)}/revise`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({feedback})});
+    const data=await res.json();
+    if(!res.ok || data.ok===false){ throw new Error(data.message||'revision failed'); }
+    showArtifactProposal(data);
+  }catch(e){ addMessage('Artifact revision failed: '+e,'item error'); }
+  finally{ setStudioStatus('ready', false); }
+}
+async function confirmArtifactEdit(){
+  if(!artifactEditState.proposalId){ return; }
+  try{
+    const res=await fetch(`/api/agent-studio/artifact-edit/${encodeURIComponent(artifactEditState.proposalId)}/confirm`,{method:'POST'});
+    const data=await res.json();
+    if(!res.ok || data.ok===false){ throw new Error(data.message||'confirm failed'); }
+    closeArtifactEditModal();
+    addMessage('Artifact modification confirmed. Original file was backed up and the confirmed draft replaced the active artifact.','item final');
+    await refreshArtifacts();
+  }catch(e){ addMessage('Confirm artifact edit failed: '+e,'item error'); }
+}
+async function cancelArtifactEdit(){
+  if(artifactEditState.proposalId){
+    try{ await fetch(`/api/agent-studio/artifact-edit/${encodeURIComponent(artifactEditState.proposalId)}/cancel`,{method:'POST'}); }catch(e){}
+  }
+  closeArtifactEditModal();
 }
 async function refreshArtifacts(){
   try{
@@ -105,7 +181,6 @@ async function uploadArtifacts(){
     const data=await res.json();
     if(!res.ok || data.ok===false){ throw new Error(data.message||'upload failed'); }
     const created=Array.isArray(data.artifacts)?data.artifacts:[];
-    created.forEach(item=>selectedArtifactIds.add(String(item.artifact_id||item.id||'')));
     uploadedArtifacts=Array.isArray(data.registry)?data.registry:created;
     renderArtifacts();
     addProgressMessage('uploaded artifact count: '+created.length);
@@ -144,7 +219,7 @@ async function sendMessage(){
     hintTimer=setInterval(()=>{
       if(hintIndex<hints.length){ addProgressMessage(hints[hintIndex++]); }
     }, 2500);
-    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, uploaded_artifacts:selectedArtifactsForRequest()})});
+    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, uploaded_artifacts:selectedArtifactsForRequest(text)})});
     const data=await res.json();
     consumeSelectedArtifactsAfterRequest();
     renderStudioResponse(data, text);
@@ -298,7 +373,7 @@ async function skipCredentialAndContinue(){
   }
   const text=lastPendingInstruction || lastSubmittedInstruction;
   if(text){
-    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, provided_inputs:provided, uploaded_artifacts:selectedArtifactsForRequest()})});
+    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, provided_inputs:provided, uploaded_artifacts:selectedArtifactsForRequest(text)})});
     const data=await res.json();
     consumeSelectedArtifactsAfterRequest();
     renderStudioResponse(data, text);
@@ -344,7 +419,7 @@ async function submitMissingInputs(){
   if(lastPendingRunId){ await resumePendingRun(lastPendingRunId, provided); return; }
   const text=lastPendingInstruction || lastSubmittedInstruction;
   if(text){
-    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, provided_inputs:provided, uploaded_artifacts:selectedArtifactsForRequest()})});
+    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, provided_inputs:provided, uploaded_artifacts:selectedArtifactsForRequest(text)})});
     const data=await res.json();
     addMessage(renderJson(data), data.status==='completed'?'item':'item error');
     await refreshState();
@@ -571,7 +646,7 @@ function deriveMissingInputs(run){
     const fieldName = firstSecret.name || apiSource.secret_key || pending.secret_key || 'runtime_access_key';
     return [{kind:kind, field:String(fieldName), message:String(pending.message||request.message||'A credential-protected method is available. Enter a key to use it, or continue without this key to try another allowed method.'), input_type:'password', provider:String(provider), source_url:String(sourceUrl), api_source:apiSource, api_sources:apiSources}];
   }
-  if(kind==='collect_runtime_parameters' || kind==='runtime_parameter_input' || kind==='uploaded_artifact_parameters'){
+  if(kind==='collect_runtime_parameters' || kind==='runtime_parameter_input' || kind==='uploaded_artifact_parameters' || kind==='studio_pre_execution_uploaded_artifact_parameters'){
     const request = pending.request || {};
     const fields = Array.isArray(request.fields) ? request.fields : [];
     if(fields.length){

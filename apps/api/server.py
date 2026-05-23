@@ -2,13 +2,14 @@ import asyncio
 from typing import Any
 
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, FileResponse
 from pydantic import BaseModel
 from pathlib import Path
 from uuid import uuid4
 import json
 
 from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
+from ai_core.artifacts.artifact_edit_service import ArtifactEditService
 
 from ai_core.evolution.approval_learning import ApprovalLearningService
 from ai_core.orchestration.workflow_runtime import WorkflowRuntime
@@ -40,6 +41,17 @@ class AgentStudioRequest(BaseModel):
 class AgentStudioSecretRequest(BaseModel):
     key: str
     value: str
+
+
+class ArtifactEditRequest(BaseModel):
+    instruction: str
+    feedback: str | None = None
+    base_proposal_id: str | None = None
+    new_content: str | None = None
+
+
+class ArtifactProposalActionRequest(BaseModel):
+    feedback: str | None = None
 
 
 class AgentStudioModelSelectionRequest(BaseModel):
@@ -121,6 +133,7 @@ async def agent_studio_home():
 
 
 artifact_registry = UploadedArtifactRegistry()
+artifact_edit_service = ArtifactEditService()
 
 def _read_artifact_registry() -> list[dict[str, Any]]:
     return artifact_registry.list()
@@ -164,6 +177,56 @@ async def agent_studio_upload_artifacts(files: list[UploadFile] = File(...)):
         created.append(item)
     _write_artifact_registry(registry)
     return JSONResponse({"ok": True, "artifacts": created, "registry": registry})
+
+
+@app.post("/api/agent-studio/artifacts/{artifact_id}/edit-proposal")
+async def agent_studio_artifact_edit_proposal(artifact_id: str, req: ArtifactEditRequest):
+    payload = await artifact_edit_service.propose_edit(
+        artifact_id=artifact_id,
+        instruction=req.instruction,
+        feedback=req.feedback or "",
+        base_proposal_id=req.base_proposal_id or "",
+        new_content=req.new_content,
+    )
+    return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
+
+
+@app.get("/api/agent-studio/artifact-edit/{proposal_id}/download")
+async def agent_studio_artifact_edit_download(proposal_id: str):
+    meta = artifact_edit_service._read_meta(proposal_id)
+    if not meta:
+        return JSONResponse({"ok": False, "status": "not_found"}, status_code=404)
+    path = artifact_edit_service._safe_path(str(meta.get("draft_path") or ""))
+    if not path or not path.exists():
+        return JSONResponse({"ok": False, "status": "missing_file"}, status_code=404)
+    return FileResponse(str(path), filename=Path(str(meta.get("artifact_name") or path.name)).name)
+
+
+@app.post("/api/agent-studio/artifact-edit/{proposal_id}/confirm")
+async def agent_studio_artifact_edit_confirm(proposal_id: str):
+    payload = artifact_edit_service.confirm(proposal_id)
+    return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
+
+
+@app.post("/api/agent-studio/artifact-edit/{proposal_id}/cancel")
+async def agent_studio_artifact_edit_cancel(proposal_id: str):
+    payload = artifact_edit_service.cancel(proposal_id)
+    return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
+
+
+@app.post("/api/agent-studio/artifact-edit/{proposal_id}/revise")
+async def agent_studio_artifact_edit_revise(proposal_id: str, req: ArtifactProposalActionRequest):
+    meta = artifact_edit_service._read_meta(proposal_id)
+    if not meta:
+        return JSONResponse({"ok": False, "status": "not_found"}, status_code=404)
+    payload = await artifact_edit_service.propose_edit(
+        artifact_id=str(meta.get("artifact_id") or ""),
+        instruction=str(meta.get("instruction") or ""),
+        feedback=req.feedback or "",
+        base_proposal_id=proposal_id,
+    )
+    return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
+
 
 @app.get("/api/agent-studio/model-selection")
 async def agent_studio_model_selection_state():

@@ -561,7 +561,7 @@ class AgentDelegationRuntime:
                 "relationship": participant_plan.get("relationship") or own_node.get("relation") or "independent",
                 "depends_on": participant_plan.get("depends_on") or own_node.get("depends_on") or [],
                 "agent_parameters": {
-                    "values": participant.get("runtime_parameters") or {},
+                    "values": self._merged_runtime_parameters(task_graph, participant),
                     "missing": self.parameter_contract_service.missing_parameters(participant),
                 },
                 "uploaded_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
@@ -586,7 +586,7 @@ class AgentDelegationRuntime:
                 "peer_result_format": "strict_json_safe_summary",
             },
             "agent_parameters": {
-                "values": participant.get("runtime_parameters") or {},
+                "values": self._merged_runtime_parameters(task_graph, participant),
                 "contract": self._compact_parameter_contract(participant.get("parameter_contract") or {}),
             },
             "uploaded_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
@@ -604,6 +604,14 @@ class AgentDelegationRuntime:
         return shared_context
 
 
+
+    def _merged_runtime_parameters(self, task_graph: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        if isinstance(task_graph.get("runtime_parameters"), dict):
+            values.update(task_graph.get("runtime_parameters") or {})
+        if isinstance(participant.get("runtime_parameters"), dict):
+            values.update(participant.get("runtime_parameters") or {})
+        return values
 
     def _compact_parameter_contract(self, contract: Any) -> dict[str, Any]:
         if not isinstance(contract, dict):

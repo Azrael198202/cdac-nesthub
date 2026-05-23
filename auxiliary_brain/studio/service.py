@@ -13,6 +13,7 @@ from ai_core.interaction.natural_conversation import NaturalConversationService
 from ai_core.runtime.modeling.model_runtime_preflight import ModelRuntimePreflight
 from auxiliary_brain.parameters.agent_parameter_contract import AgentParameterContractService
 from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
+from ai_core.artifacts.uploaded_artifact_contract import UploadedArtifactContractBuilder
 
 
 class AgentStudioService:
@@ -29,6 +30,7 @@ class AgentStudioService:
         self.model_preflight = ModelRuntimePreflight()
         self.parameter_contract_service = AgentParameterContractService()
         self.artifact_registry = UploadedArtifactRegistry()
+        self.uploaded_artifact_contract = UploadedArtifactContractBuilder()
         self.store.ensure_workspace()
         self.community_id = self._ensure_community()
 
@@ -50,7 +52,7 @@ class AgentStudioService:
             return preflight
 
         if routed.action == "execute_task":
-            return await self.execute_task(routed.name)
+            return await self.execute_task(routed.name, provided_inputs=provided_inputs, instruction=message)
         if routed.action == "feedback_adaptation":
             return await self.handle_feedback(message, routed.name)
         feedback = self.feedback_classifier.classify(message, fallback_target=self._latest_task_name())
@@ -181,6 +183,7 @@ class AgentStudioService:
             participant_name=participant_name,
         )
         artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
+        explicit_runtime_parameters = self._extract_runtime_parameters_from_instruction(instruction)
         # Task graphs do not own durable parameter values.  Parameter schemas live
         # on participants, while uploaded artifact parameters are discovered from
         # the selected artifact during execution_preparation.  Keeping a blank
@@ -235,6 +238,7 @@ class AgentStudioService:
         participants = self.store.list_json("generated/agents")
         selected_ids = [p.get("participant_id") for p in self._select_participants_for_instruction(instruction, participants)]
         artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
+        explicit_runtime_parameters = self._extract_runtime_parameters_from_instruction(instruction)
         # Task graphs do not own durable parameter values.  Parameter schemas live
         # on participants, while uploaded artifact parameters are discovered from
         # the selected artifact during execution_preparation.  Keeping a blank
@@ -259,7 +263,7 @@ class AgentStudioService:
             "selected_participant_ids": selected_ids,
             "uploaded_artifacts": artifact_refs,
             "parameter_contract": schema_contract,
-            "runtime_parameters": {},
+            "runtime_parameters": explicit_runtime_parameters,
             "tasks": [
                 {
                     "task_id": f"{graph_id}_delegate_{index + 1}",
@@ -283,7 +287,7 @@ class AgentStudioService:
             "uploaded_artifacts": artifact_refs,
         }
 
-    async def execute_task(self, task_name: str | None) -> dict[str, Any]:
+    async def execute_task(self, task_name: str | None, provided_inputs: dict[str, Any] | None = None, instruction: str | None = None) -> dict[str, Any]:
         if not task_name:
             return {
                 "action": "execute_task_graph",
@@ -302,7 +306,34 @@ class AgentStudioService:
         all_participants = self.store.list_json("generated/agents")
         selected_ids = set(task_graph.get("selected_participant_ids") or [])
         participants = [p for p in all_participants if p.get("participant_id") in selected_ids] or all_participants
-        result = await self.delegation_runtime.execute_task(task_graph, participants)
+        runtime_parameters = {}
+        if isinstance(task_graph.get("runtime_parameters"), dict):
+            runtime_parameters.update(task_graph.get("runtime_parameters") or {})
+        runtime_parameters.update(self._extract_runtime_parameters_from_instruction(instruction or ""))
+        if isinstance(provided_inputs, dict):
+            runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+        preflight = self._preflight_uploaded_artifact_parameters(task_graph, participants, runtime_parameters)
+        if preflight.get("status") == "requires_input":
+            run_id = new_id("delegation_run")
+            run_payload = {
+                "run_id": run_id,
+                "origin": "auxiliary_brain",
+                "status": "requires_input",
+                "task_name": str(task_graph.get("task_name") or task_graph.get("graph_id") or task_name),
+                "current_stage": "waiting_for_uploaded_artifact_parameters",
+                "pending_action": preflight.get("pending_action"),
+                "missing_inputs": preflight.get("missing_inputs") or [],
+                "runtime_parameters": runtime_parameters,
+                "pre_execution_parameter_analysis": preflight.get("analysis"),
+                "completed_at": self._now(),
+            }
+            self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+            status = "requires_input"
+            result = run_payload
+        else:
+            task_graph = dict(task_graph)
+            task_graph["runtime_parameters"] = runtime_parameters
+            result = await self.delegation_runtime.execute_task(task_graph, participants)
         status = result.get("status", "completed")
         response = {
             "action": "execute_task_graph",
@@ -358,7 +389,33 @@ class AgentStudioService:
         all_participants = self.store.list_json("generated/agents")
         selected_ids = set(task_graph.get("selected_participant_ids") or [])
         participants = [p for p in all_participants if p.get("participant_id") in selected_ids] or all_participants
-        result = await self.delegation_runtime.resume_task(run_payload, task_graph, participants, provided_inputs=provided_inputs)
+        pending = run_payload.get("pending_action") if isinstance(run_payload.get("pending_action"), dict) else {}
+        if str(pending.get("kind") or "") == "studio_pre_execution_uploaded_artifact_parameters":
+            runtime_parameters = {}
+            if isinstance(task_graph.get("runtime_parameters"), dict):
+                runtime_parameters.update(task_graph.get("runtime_parameters") or {})
+            if isinstance(run_payload.get("runtime_parameters"), dict):
+                runtime_parameters.update(run_payload.get("runtime_parameters") or {})
+            if isinstance(provided_inputs, dict):
+                runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+            preflight = self._preflight_uploaded_artifact_parameters(task_graph, participants, runtime_parameters)
+            if preflight.get("status") == "requires_input":
+                run_payload.update({
+                    "status": "requires_input",
+                    "current_stage": "waiting_for_uploaded_artifact_parameters",
+                    "pending_action": preflight.get("pending_action"),
+                    "missing_inputs": preflight.get("missing_inputs") or [],
+                    "runtime_parameters": runtime_parameters,
+                    "completed_at": self._now(),
+                })
+                self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+                result = run_payload
+            else:
+                task_graph = dict(task_graph)
+                task_graph["runtime_parameters"] = runtime_parameters
+                result = await self.delegation_runtime.execute_task(task_graph, participants)
+        else:
+            result = await self.delegation_runtime.resume_task(run_payload, task_graph, participants, provided_inputs=provided_inputs)
         status = result.get("status", "completed")
         response = {
             "action": "resume_task_graph",
@@ -402,7 +459,7 @@ class AgentStudioService:
                 "api_source": api_source,
                 "api_sources": api_sources,
             }]
-        if kind in {"collect_runtime_parameters", "runtime_parameter_input", "uploaded_artifact_parameters"}:
+        if kind in {"collect_runtime_parameters", "runtime_parameter_input", "uploaded_artifact_parameters", "studio_pre_execution_uploaded_artifact_parameters"}:
             request = pending.get("request") if isinstance(pending.get("request"), dict) else {}
             fields = request.get("fields") if isinstance(request.get("fields"), list) else []
             normalized = []
@@ -462,6 +519,101 @@ class AgentStudioService:
             return "Delegated primary-runtime execution paused after schema validation failed. Runtime auto repair should handle structural errors before asking the user."
         return "Delegated primary-runtime execution is paused."
 
+
+
+    def _extract_runtime_parameters_from_instruction(self, instruction: str) -> dict[str, Any]:
+        """Extract explicit task-run parameters from the current instruction.
+
+        This is generic syntax extraction, not domain logic. It supports common
+        forms such as `name=value`, `name: value`, and `name 用 value`. Values are
+        task-scoped and are not stored back onto the durable agent profile.
+        """
+        text = str(instruction or "")
+        out: dict[str, Any] = {}
+        for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:)\s*([^,;\n]+)", text):
+            key = match.group(1).strip()
+            value = match.group(2).strip().strip("'\"")
+            if key and value:
+                out[key] = value
+        for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:用|为|是|as)\s*([A-Za-z0-9_.:/-]+)", text, flags=re.I):
+            key = match.group(1).strip()
+            value = match.group(2).strip().strip("'\"")
+            if key and value and key not in out:
+                out[key] = value
+        return out
+
+    def _preflight_uploaded_artifact_parameters(self, task_graph: dict[str, Any], participants: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> dict[str, Any]:
+        """Inspect uploaded artifacts before delegating execution.
+
+        Uploaded-file callable parameters are collected before primary runtime
+        execution starts. This prevents the later execution phase from repeatedly
+        pausing for file parameters and keeps task-specified parameters scoped to
+        the current run.
+        """
+        all_missing: list[dict[str, Any]] = []
+        analyses: list[dict[str, Any]] = []
+        for participant in participants:
+            artifacts = participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or []
+            if not artifacts:
+                continue
+            step = {
+                "step_id": "studio_pre_execution_uploaded_artifact",
+                "execution_method": "uploaded_artifact",
+                "action_type": "use_uploaded_file",
+                "uploaded_artifacts": artifacts,
+                "parameters": runtime_parameters,
+                "runtime_parameters": runtime_parameters,
+                "objective": participant.get("execution_objective") or participant.get("instruction") or task_graph.get("instruction") or "",
+            }
+            state = {
+                "run_id": "studio_pre_execution",
+                "input": task_graph.get("instruction") or "",
+                "runtime_parameters": runtime_parameters,
+                "provided_inputs": runtime_parameters,
+                "runtime_context": {
+                    "uploaded_artifacts": artifacts,
+                    "available_artifacts": artifacts,
+                    "agent_parameters": {"values": runtime_parameters},
+                },
+                "results": {
+                    "context_awareness": {
+                        "clean_context": {
+                            "uploaded_artifacts": artifacts,
+                            "available_artifacts": artifacts,
+                            "known_parameters": runtime_parameters,
+                        }
+                    }
+                },
+            }
+            contract = self.uploaded_artifact_contract.build_contract(state=state, step=step, step_id="step_1")
+            analyses.append(contract)
+            for field in contract.get("missing_parameter_fields") or []:
+                if isinstance(field, dict):
+                    all_missing.append(field)
+        # Deduplicate fields by normalized name.
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for field in all_missing:
+            key = str(field.get("field") or field.get("name") or "").strip().casefold()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(field)
+        if deduped:
+            return {
+                "status": "requires_input",
+                "missing_inputs": deduped,
+                "analysis": analyses,
+                "pending_action": {
+                    "kind": "studio_pre_execution_uploaded_artifact_parameters",
+                    "message": "Uploaded artifact parameters are required before task execution.",
+                    "request": {
+                        "input_mode": "form",
+                        "fields": deduped,
+                    },
+                },
+            }
+        return {"status": "ready", "analysis": analyses}
 
     def _derive_execution_objective(self, instruction: str, participant_name: str | None = None) -> str:
         """Extract the participant's reusable work objective from a creation command.
