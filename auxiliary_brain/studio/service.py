@@ -55,6 +55,9 @@ class AgentStudioService:
             return await self.execute_task(routed.name, provided_inputs=provided_inputs, instruction=message)
         if routed.action == "feedback_adaptation":
             return await self.handle_feedback(message, routed.name)
+        artifact_edit = await self._maybe_handle_artifact_edit_message(message, uploaded_artifacts=uploaded_artifacts)
+        if artifact_edit is not None:
+            return artifact_edit
         feedback = self.feedback_classifier.classify(message, fallback_target=self._latest_task_name())
         if feedback.get("matched"):
             return await self.handle_feedback(message, feedback.get("target_task"))
@@ -348,6 +351,12 @@ class AgentStudioService:
             pending_action = result.get("pending_action")
             response["pending_action"] = pending_action
             response["missing_inputs"] = self._normalize_missing_inputs(result.get("missing_inputs", []), pending_action)
+            response["interaction_request"] = {
+                "type": "collect_runtime_parameters",
+                "kind": str((pending_action or {}).get("kind") or "runtime_parameter_input"),
+                "fields": response["missing_inputs"],
+                "message": self._paused_message(response["missing_inputs"], pending_action),
+            }
             response["message"] = self._paused_message(response["missing_inputs"], pending_action)
         return response
 
@@ -431,6 +440,12 @@ class AgentStudioService:
             pending_action = result.get("pending_action")
             response["pending_action"] = pending_action
             response["missing_inputs"] = self._normalize_missing_inputs(result.get("missing_inputs", []), pending_action)
+            response["interaction_request"] = {
+                "type": "collect_runtime_parameters",
+                "kind": str((pending_action or {}).get("kind") or "runtime_parameter_input"),
+                "fields": response["missing_inputs"],
+                "message": self._paused_message(response["missing_inputs"], pending_action),
+            }
             response["message"] = self._paused_message(response["missing_inputs"], pending_action)
         return response
 
@@ -539,6 +554,11 @@ class AgentStudioService:
             key = match.group(1).strip()
             value = match.group(2).strip().strip("'\"")
             if key and value and key not in out:
+                out[key] = value
+        for match in re.finditer(r"\b(?:with|for|using)\s+([A-Za-z_][A-Za-z0-9_]*)\s+([^,;\n]+)", text, flags=re.I):
+            key = match.group(1).strip()
+            value = match.group(2).strip().strip("'\"")
+            if key and value and key not in out and len(value.split()) <= 4:
                 out[key] = value
         return out
 

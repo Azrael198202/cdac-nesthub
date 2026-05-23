@@ -562,7 +562,7 @@ class AgentDelegationRuntime:
                 "depends_on": participant_plan.get("depends_on") or own_node.get("depends_on") or [],
                 "agent_parameters": {
                     "values": self._merged_runtime_parameters(task_graph, participant),
-                    "missing": self.parameter_contract_service.missing_parameters(participant),
+                    "missing": [] if self._uses_uploaded_artifact_runtime_for_task(participant, task_graph) else self.parameter_contract_service.missing_parameters(participant),
                 },
                 "uploaded_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
                 "available_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
@@ -587,7 +587,7 @@ class AgentDelegationRuntime:
             },
             "agent_parameters": {
                 "values": self._merged_runtime_parameters(task_graph, participant),
-                "contract": self._compact_parameter_contract(participant.get("parameter_contract") or {}),
+                "contract": {} if self._uses_uploaded_artifact_runtime_for_task(participant, task_graph) else self._compact_parameter_contract(participant.get("parameter_contract") or {}),
             },
             "uploaded_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
             "available_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
@@ -653,6 +653,15 @@ class AgentDelegationRuntime:
         if policy.get("bind_uploaded_artifacts_to_agent") or str(policy.get("allowed_action") or "") == "use_uploaded_file":
             return True
         text = " ".join(str(participant.get(k) or "") for k in ("instruction", "execution_objective", "definition_instruction", "objective"))
+        return bool(re.search(r"\buse\s+file\b|\b[a-zA-Z0-9_.-]+\.[A-Za-z0-9]{1,8}\b", text, flags=re.I))
+
+    def _uses_uploaded_artifact_runtime_for_task(self, participant: dict[str, Any], task_graph: dict[str, Any]) -> bool:
+        if self._uses_uploaded_artifact_runtime(participant):
+            return True
+        artifacts = task_graph.get("uploaded_artifacts") if isinstance(task_graph, dict) else None
+        if isinstance(artifacts, list) and artifacts:
+            return True
+        text = " ".join(str((task_graph or {}).get(k) or "") for k in ("instruction", "task_name", "objective"))
         return bool(re.search(r"\buse\s+file\b|\b[a-zA-Z0-9_.-]+\.[A-Za-z0-9]{1,8}\b", text, flags=re.I))
 
     def _apply_agent_parameter_values(self, participants: list[dict[str, Any]], provided_inputs: dict[str, Any]) -> None:
@@ -925,10 +934,16 @@ class AgentDelegationRuntime:
             for param in params:
                 if isinstance(param, dict):
                     param["values"] = []
-            if isinstance(contract, dict):
+            if self._uses_uploaded_artifact_runtime(item):
+                contract = {"contract_type": "task_runtime_parameter_contract", "parameters": [], "missing_information": [], "runtime_scope": "task_run"}
+                item["parameter_contract"] = contract
+                item["missing_information"] = []
+            elif isinstance(contract, dict):
                 contract["missing_information"] = self.parameter_contract_service.missing_parameters({"parameter_contract": contract, "runtime_parameters": {}})
                 item["parameter_contract"] = contract
-            item["missing_information"] = item.get("parameter_contract", {}).get("missing_information", []) if isinstance(item.get("parameter_contract"), dict) else []
+                item["missing_information"] = item.get("parameter_contract", {}).get("missing_information", []) if isinstance(item.get("parameter_contract"), dict) else []
+            else:
+                item["missing_information"] = []
             fresh.append(item)
         return fresh
 
