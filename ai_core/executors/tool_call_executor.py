@@ -439,11 +439,33 @@ class ToolCallExecutor:
                         "priority_path": "execution_method_runtime_generated_tool",
                     })
                     continue
+                generated_tool_result = await self._try_runtime_generated_tool_execution(
+                    run_id=run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    capability=required_capability or "runtime_generated_tool",
+                    step=step,
+                    state=state,
+                    method_contract=method_contract,
+                )
+                if generated_tool_result:
+                    result_obj = generated_tool_result.get("result") if isinstance(generated_tool_result.get("result"), dict) else {}
+                    execution_steps.append({
+                        "step_id": step_id,
+                        "status": "executed",
+                        "tool": generated_tool_result.get("tool"),
+                        "input": generated_tool_result.get("input"),
+                        "result": result_obj,
+                        "provenance": result_obj.get("provenance") if isinstance(result_obj, dict) else None,
+                        "source_step": step,
+                        "priority_path": "runtime_generated_artifact_contract",
+                    })
+                    continue
                 if not method_contract.fallback:
                     blocked_steps.append({
                         "step_id": step_id,
-                        "status": "execution_method_unavailable",
-                        "reason": "The resolved execution contract required a runtime method, but no runtime implementation returned a result.",
+                        "status": "runtime_artifact_generation_failed",
+                        "reason": "The locked generated-artifact action did not produce an executable artifact result.",
                         "execution_method_contract": method_contract.to_dict(),
                         "source_step": step,
                     })
