@@ -7,15 +7,17 @@
   <style>
     :root { color-scheme: dark; --bg:#0f172a; --panel:#111827; --card:#1f2937; --line:#334155; --text:#e5e7eb; --muted:#93c5fd; --accent:#0ea5e9; --danger:#991b1b; }
     *{box-sizing:border-box} html,body{height:100%;overflow:hidden} body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif;font-size:14px}
-    header{height:82px;display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--line);gap:12px;overflow:hidden}
-    h1{font-size:18px;margin:0 0 4px}.sub{color:#a5b4fc;font-size:12px}.status{color:#bae6fd;display:flex;align-items:center;gap:8px}.status.running::before{content:'';width:10px;height:10px;border:2px solid #38bdf8;border-top-color:transparent;border-radius:50%;display:inline-block;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.btn{border:0;border-radius:10px;background:#334155;color:white;padding:10px 14px;font-weight:700;cursor:pointer}.btn.primary{background:#0369a1}.btn.danger{background:var(--danger)}.btn:disabled{opacity:.6;cursor:not-allowed}
-    main{display:grid;grid-template-columns:minmax(0,26fr) minmax(0,44fr) minmax(0,30fr);gap:10px;height:calc(100vh - 82px);padding:10px;overflow:hidden;min-width:0}.panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);min-height:0;min-width:0;display:flex;flex-direction:column;overflow:hidden}.panel h2{font-size:14px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}.scroll{padding:12px;overflow:auto;min-height:0;flex:1}.item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}.pill{display:inline-block;margin:3px 4px 0 0;padding:3px 7px;border-radius:999px;background:#0f766e;color:#ccfbf1;font-size:12px}.path{color:#93c5fd;font-size:12px;word-break:break-all}.console{border-top:1px solid var(--line);padding:12px;background:#0b1220}.input{width:100%;height:72px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px;resize:none}.row{display:flex;gap:8px;margin-top:10px}.message{white-space:pre-wrap}.user{border-color:#0ea5e9}.error{border-color:#f59e0b}.final{border-color:#22c55e}.pre{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;background:#020617;border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;max-height:220px;max-width:100%}.small{font-size:12px;color:#bfdbfe}.sectionTitle{color:#bfdbfe;font-weight:700;margin:12px 0 8px}.empty{color:#94a3b8;font-size:13px}.cardHeader{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.copyBtn{border:1px solid var(--line);border-radius:8px;background:#0b1220;color:#bfdbfe;padding:4px 8px;cursor:pointer;font-size:12px}.copyBtn:hover{border-color:#38bdf8;color:#e0f2fe}.toast{position:fixed;right:20px;bottom:20px;background:#064e3b;border:1px solid #22c55e;color:#dcfce7;padding:10px 14px;border-radius:10px;z-index:50}.progressLine{display:flex;align-items:center;gap:8px;margin:6px 0;color:#bfdbfe}.progressDot{width:8px;height:8px;border-radius:999px;background:#38bdf8;animation:pulse 1.2s ease-in-out infinite}.progressDot.done{background:#22c55e;animation:none}.progressDot.wait{background:#f59e0b;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.15)}}
-    .modalBackdrop{position:fixed;inset:0;background:rgba(2,6,23,.72);display:none;align-items:center;justify-content:center;z-index:80}.modalBackdrop.show{display:flex}.modal{width:min(720px,92vw);max-height:86vh;overflow:auto;background:#111827;border:1px solid var(--line);border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.45);padding:18px}.modal h3{margin:0 0 6px;font-size:18px}.fieldLabel{display:block;margin:14px 0 6px;font-weight:700;color:#bfdbfe}.fieldHint{font-size:12px;color:#cbd5e1;white-space:pre-wrap}.fieldInput{width:100%;min-height:40px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px}.fieldInput.area{min-height:110px;font-family:ui-monospace,Consolas,monospace}.modalActions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}.badge{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 8px;color:#bae6fd;font-size:12px}.modelBar{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px;max-width:720px;min-width:0}.modelGroup{display:flex;align-items:center;gap:5px;background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:6px 8px;white-space:nowrap}.modelGroup label{font-size:12px;color:#bfdbfe}.modelSelect{background:#020617;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px;max-width:280px;min-width:220px}.radioGroup{display:flex;gap:8px;align-items:center}.radioGroup label{font-size:12px;color:#e0f2fe;white-space:nowrap}.modelHint{width:100%;text-align:right;font-size:11px;color:#93c5fd;line-height:1.1}.uploadBox{border:1px dashed #38bdf8;border-radius:12px;padding:10px;margin-bottom:10px;background:#0b1220}.artifactList{margin-top:8px}.artifactItem{display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--line);border-radius:10px;padding:7px 8px;margin-top:6px;background:#111827}.artifactMeta{min-width:0}.artifactName{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.artifactPath{font-size:11px;color:#93c5fd;word-break:break-all}.checkLabel{display:flex;align-items:center;gap:6px;font-size:12px;color:#e0f2fe}.fileInput{width:100%;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:8px}
+    header{height:82px;display:grid;grid-template-columns:minmax(280px,1fr) auto minmax(420px,1fr);align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);gap:12px;overflow:hidden}
+    h1{font-size:18px;margin:0 0 4px}.sub{color:#a5b4fc;font-size:12px}.status{justify-self:center;color:#bae6fd;display:flex;align-items:center;justify-content:center;gap:8px;min-width:110px;padding:6px 12px;border:1px solid var(--line);border-radius:999px;background:#0b1220}.status.running::before{content:'';width:10px;height:10px;border:2px solid #38bdf8;border-top-color:transparent;border-radius:50%;display:inline-block;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.btn{border:0;border-radius:10px;background:#334155;color:white;padding:10px 14px;font-weight:700;cursor:pointer}.btn.primary{background:#0369a1}.btn.danger{background:var(--danger)}.btn:disabled{opacity:.6;cursor:not-allowed}
+    main{display:grid;grid-template-columns:minmax(0,26fr) minmax(0,44fr) minmax(0,30fr);gap:10px;height:calc(100vh - 82px);padding:10px;overflow:hidden;min-width:0;transition:grid-template-columns .18s ease}main.rightCollapsed{grid-template-columns:minmax(0,30fr) minmax(0,70fr) 44px}.panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);min-height:0;min-width:0;display:flex;flex-direction:column;overflow:hidden}.panel.collapsed .scroll{display:none}.panel.collapsed h2{writing-mode:vertical-rl;transform:rotate(180deg);align-items:center;height:100%;justify-content:flex-start;gap:8px;padding:12px 8px}.panel.collapsed h2 .small{display:none}.panel h2{font-size:14px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}.scroll{padding:12px;overflow:auto;min-height:0;flex:1}.item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}.pill{display:inline-block;margin:3px 4px 0 0;padding:3px 7px;border-radius:999px;background:#0f766e;color:#ccfbf1;font-size:12px}.path{color:#93c5fd;font-size:12px;word-break:break-all}.console{border-top:1px solid var(--line);padding:12px;background:#0b1220}.input{width:100%;height:72px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px;resize:none}.row{display:flex;gap:8px;margin-top:10px}.message{white-space:pre-wrap;line-height:1.55}.answerText{display:flex;flex-direction:column;gap:6px;line-height:1.5}.answerBlock{border-left:3px solid #38bdf8;padding-left:10px;margin:6px 0}.answerLine{display:block}.internalNote{color:#93c5fd;font-size:12px}.hiddenRaw{display:none}.detailsBox{margin-top:8px}.detailsBox summary{cursor:pointer;color:#bfdbfe;font-weight:700}.pre.compact{max-height:120px;font-size:12px}.user{border-color:#0ea5e9}.error{border-color:#f59e0b}.final{border-color:#22c55e}.pre{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;background:#020617;border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;max-height:220px;max-width:100%}.small{font-size:12px;color:#bfdbfe}.sectionTitle{color:#bfdbfe;font-weight:700;margin:12px 0 8px}.empty{color:#94a3b8;font-size:13px}.cardHeader{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.copyBtn{border:1px solid var(--line);border-radius:8px;background:#0b1220;color:#bfdbfe;padding:4px 8px;cursor:pointer;font-size:12px}.copyBtn:hover{border-color:#38bdf8;color:#e0f2fe}.toast{position:fixed;right:20px;bottom:20px;background:#064e3b;border:1px solid #22c55e;color:#dcfce7;padding:10px 14px;border-radius:10px;z-index:50}.progressLine{display:flex;align-items:center;gap:8px;margin:6px 0;color:#bfdbfe}.progressDot{width:8px;height:8px;border-radius:999px;background:#38bdf8;animation:pulse 1.2s ease-in-out infinite}.progressDot.done{background:#22c55e;animation:none}.progressDot.wait{background:#f59e0b;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.15)}}
+    .commandGrid{display:grid;grid-template-columns:1fr;gap:10px;margin-top:12px}.commandCategory{border:1px solid var(--line);border-radius:12px;background:#0b1220;padding:10px}.commandCategory h4{margin:0 0 8px;color:#bfdbfe}.commandItem{border-top:1px solid #1e293b;padding:8px 0}.commandItem:first-of-type{border-top:0}.commandTitle{display:flex;gap:8px;align-items:center;justify-content:space-between;font-weight:700}.commandPatterns{font-size:12px;color:#cbd5e1;margin-top:4px}.commandDesc{font-size:12px;color:#93c5fd;margin-top:4px}.disabledCommand{opacity:.55}
+    .modalBackdrop{position:fixed;inset:0;background:rgba(2,6,23,.72);display:none;align-items:center;justify-content:center;z-index:80}.modalBackdrop.show{display:flex}.modal{width:min(720px,92vw);max-height:86vh;overflow:auto;background:#111827;border:1px solid var(--line);border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.45);padding:18px}.modal h3{margin:0 0 6px;font-size:18px}.fieldLabel{display:block;margin:14px 0 6px;font-weight:700;color:#bfdbfe}.fieldHint{font-size:12px;color:#cbd5e1;white-space:pre-wrap}.fieldInput{width:100%;min-height:40px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px}.fieldInput.area{min-height:110px;font-family:ui-monospace,Consolas,monospace}.modalActions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}.badge{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 8px;color:#bae6fd;font-size:12px}.modelBar{justify-self:end;display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px;max-width:820px;min-width:0;overflow:hidden}.modelGroup{display:flex;align-items:center;gap:5px;background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:6px 8px;white-space:nowrap}.modelGroup label{font-size:12px;color:#bfdbfe}.modelSelect{background:#020617;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px;max-width:280px;min-width:220px}.radioGroup{display:flex;gap:8px;align-items:center}.radioGroup label{font-size:12px;color:#e0f2fe;white-space:nowrap}.modelHint{width:100%;text-align:right;font-size:11px;color:#93c5fd;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.uploadBox{border:1px dashed #38bdf8;border-radius:12px;padding:10px;margin-bottom:10px;background:#0b1220}.artifactList{margin-top:8px}.artifactItem{display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--line);border-radius:10px;padding:7px 8px;margin-top:6px;background:#111827}.artifactMeta{min-width:0}.artifactName{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.artifactPath{font-size:11px;color:#93c5fd;word-break:break-all}.checkLabel{display:flex;align-items:center;gap:6px;font-size:12px;color:#e0f2fe}.fileInput{width:100%;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:8px}
   </style>
 </head>
 <body>
 <header>
   <div><h1>Runtime Agent Studio</h1><div class="sub">Auxiliary layer manages participants and tasks. Primary runtime executes delegated work.</div></div>
+  <div class="status" id="status">ready</div>
   <div class="modelBar">
     <div class="modelGroup radioGroup">
       <label><input type="radio" name="modelMode" value="local_only" onchange="onModelModeChanged()"> Local only</label>
@@ -23,23 +25,50 @@
       <label><input type="radio" name="modelMode" value="hybrid" onchange="onModelModeChanged()"> Hybrid</label>
     </div>
     <div class="modelGroup"><label id="modelSelectLabel" for="initialModelSelect">Initial model</label><select id="initialModelSelect" class="modelSelect" onchange="saveModelSelection()"></select></div>
+    <button class="btn" title="Command help" aria-label="Command help" onclick="openCommandHelpModal()">?</button>
     <button class="btn" onclick="refreshState()">Refresh</button>
-    <div class="status" id="status">ready</div>
     <div id="modelPolicyHint" class="modelHint"></div>
   </div>
 </header>
-<main>
+<main id="studioMain">
   <section class="panel"><h2>Interactive Console <span id="profileCount" class="small"></span></h2><div class="scroll" id="messages"></div><div class="console"><div class="uploadBox"><div class="cardHeader"><b>Uploaded artifacts</b><button class="copyBtn" onclick="refreshArtifacts()">Refresh</button></div><input id="artifactUploadInput" class="fileInput" type="file" multiple onchange="uploadArtifacts()" /><div class="small">Files selected here can be bound to create-agent messages and used as external methods during execution.</div><div id="artifactList" class="artifactList"><div class="empty">No uploaded artifact.</div></div></div><textarea id="input" class="input" placeholder="Enter a message, request, or runtime instruction."></textarea><div class="row"><button id="sendBtn" class="btn primary" onclick="sendMessage()">Send</button><button class="btn" onclick="quickExecute()">Execute Named Task</button></div></div></section>
   <section class="panel"><h2>Generated Participants <span id="participantCount" class="small"></span></h2><div class="scroll" id="participants"></div></section>
-  <section class="panel"><h2>Workflow / Results / Traces <span id="graphCount" class="small"></span></h2><div class="scroll" id="rightPane"></div></section>
+  <section class="panel" id="tracePanel"><h2><span>Workflow / Results / Traces <span id="graphCount" class="small"></span></span><button id="traceToggleBtn" class="copyBtn" onclick="toggleTracePanel()">&gt;&gt;</button></h2><div class="scroll" id="rightPane"></div></section>
 </main>
 <div id="missingInputModal" class="modalBackdrop"><div class="modal"><h3>Required input</h3><div class="small" id="missingInputSummary"></div><div id="missingInputFields"></div><div class="modalActions"><button class="btn" onclick="closeMissingInputModal()">Cancel</button><button id="skipCredentialBtn" class="btn" style="display:none" onclick="skipCredentialAndContinue()">Continue without this key</button><button class="btn primary" onclick="submitMissingInputs()">Submit & Continue</button></div></div></div>
 
 <div id="artifactEditModal" class="modalBackdrop"><div class="modal"><h3 id="artifactEditTitle">Edit uploaded artifact</h3><div class="small" id="artifactEditSummary"></div><label class="fieldLabel">Modification request / feedback</label><textarea id="artifactEditInstruction" class="fieldInput area" placeholder="Describe how the uploaded file should be modified."></textarea><div id="artifactEditPreviewWrap" style="display:none"><label class="fieldLabel">Draft preview</label><textarea id="artifactEditPreview" class="fieldInput area" style="min-height:260px" spellcheck="false"></textarea><div class="row"><a id="artifactEditDownload" class="btn" href="#" target="_blank">Download draft</a></div></div><div class="modalActions"><button class="btn" onclick="cancelArtifactEdit()">Cancel</button><button class="btn" id="artifactEditReviseBtn" style="display:none" onclick="reviseArtifactEdit()">Modify again</button><button class="btn primary" id="artifactEditConfirmBtn" style="display:none" onclick="confirmArtifactEdit()">Confirm replacement</button><button class="btn primary" id="artifactEditCreateBtn" onclick="createArtifactEditProposal()">Generate modified file</button></div></div></div>
+
+<div id="commandHelpModal" class="modalBackdrop"><div class="modal"><h3>Command help</h3><div class="small">Commands are loaded from the effective command registry. Runtime custom commands are included here.</div><div id="commandHelpContent"><div class="empty">Loading commands...</div></div><div class="modalActions"><button class="btn" onclick="closeCommandHelpModal()">Close</button></div></div></div>
 <script>
 const messages = document.getElementById('messages');
 function renderJson(obj){ return JSON.stringify(obj, null, 2); }
-function addMessage(text, cls='item') { const el=document.createElement('div'); el.className=cls; el.innerHTML=`<div class="message">${escapeHtml(text)}</div>`; messages.appendChild(el); messages.scrollTop=messages.scrollHeight; }
+function formatAnswerHtml(text){
+  let raw=String(text||'').trim();
+  if(!raw){ return '<div class="message">(no answer)</div>'; }
+  raw=raw.replace(/\s*(🌍\s*城市:)/g, '\n$1')
+         .replace(/\s*(📅\s*日期:)/g, '\n$1')
+         .replace(/\s*(🌡️\s*最高温:)/g, '\n$1')
+         .replace(/\s*(📉\s*最低温:)/g, '\n$1')
+         .replace(/\s*(☁️\s*天气:)/g, '\n$1')
+         .replace(/\s*\|\s*/g, '\n');
+  const blocks=raw.split(/\n(?=🌍\s*城市:)/).map(x=>x.trim()).filter(Boolean);
+  if(blocks.length>1){
+    return '<div class="answerText">'+blocks.map(block=>'<div class="answerBlock">'+block.split(/\n+/).map(line=>'<span class="answerLine">'+escapeHtml(line.trim())+'</span>').join('')+'</div>').join('')+'</div>';
+  }
+  return '<div class="answerText">'+raw.split(/\n+/).map(line=>'<span class="answerLine">'+escapeHtml(line.trim())+'</span>').join('')+'</div>';
+}
+function addMessage(text, cls='item', options={}) {
+  const el=document.createElement('div');
+  el.className=cls;
+  if(options.html){ el.innerHTML=options.html; }
+  else { el.innerHTML=`<div class="message">${escapeHtml(text)}</div>`; }
+  messages.appendChild(el);
+  messages.scrollTop=messages.scrollHeight;
+}
+function addFinalAnswer(text, cls='item final'){
+  addMessage('', cls, {html: '<div class="small" style="font-weight:700;margin-bottom:6px">Final Answer:</div>'+formatAnswerHtml(text)});
+}
 function renderStudioResponse(data, originalText){
   if(data && data.action==='artifact_edit_proposal'){
     if(data.status==='pending_review' && data.proposal){
@@ -48,7 +77,7 @@ function renderStudioResponse(data, originalText){
       addMessage(data.message || 'A modified draft file was generated for review.', 'item final');
       return;
     }
-    addMessage(data.message || renderJson(data), data.status==='requires_input' ? 'item error' : 'item');
+    addMessage(data.message || 'Artifact edit requires attention.', data.status==='requires_input' ? 'item error' : 'item');
     return;
   }
   if(data && data.interaction_request && data.interaction_request.type==='select_uploaded_artifact'){
@@ -57,14 +86,17 @@ function renderStudioResponse(data, originalText){
   }
   if(data && (data.action==='conversation_message' || data.action==='model_preflight')){
     const answer = data.final_answer || data.message || '';
-    addMessage(answer || '(no answer)', data.status==='blocked' ? 'item error' : 'item final');
+    addFinalAnswer(answer || '(no answer)', data.status==='blocked' ? 'item error' : 'item final');
     return;
   }
-  addMessage(renderJson(data), data && data.status==='completed' ? 'item' : 'item error');
+  if(data && data.final_answer){ addFinalAnswer(data.final_answer, data.status==='completed' ? 'item final' : 'item error'); return; }
+  const status = data && data.status ? String(data.status) : 'received';
+  const action = data && data.action ? String(data.action) : 'runtime response';
+  addMessage(`${action}: ${status}`, data && data.status==='completed' ? 'item' : 'item error');
 }
 function escapeHtml(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function setStudioStatus(text, running=false){ const el=document.getElementById('status'); el.textContent=text; el.classList.toggle('running', !!running); }
-function addProgressMessage(text){ addMessage('Progress: '+text, 'item'); }
+function addProgressMessage(text){ setStudioStatus(text, true); }
 let lastSubmittedInstruction = '';
 let lastMissingInputs = [];
 let lastPendingRunId = '';
@@ -246,7 +278,7 @@ async function sendMessage(){
     renderStudioResponse(data, text);
     const pendingItems = collectMissingInputs(data);
     if(pendingItems.length){ lastMissingInputs=pendingItems; lastPendingRunId=data.run_id||''; lastPendingInstruction=text; addMissingInputs(pendingItems, text, lastPendingRunId); }
-    if(data.action!=='conversation_message' && data.final_answer){ addMessage('Final Answer:\n'+data.final_answer,'item final'); }
+    // Final answers are rendered by renderStudioResponse; do not duplicate or show raw runtime JSON here.
     await refreshState();
   }catch(e){
     addMessage('Error: '+e,'item error');
@@ -618,6 +650,61 @@ async function saveModelSelection(){
   modelSelectionState=data;
   renderModelSelection(data);
 }
+
+async function openCommandHelpModal(){
+  const modal=document.getElementById('commandHelpModal');
+  if(modal) modal.classList.add('show');
+  await loadCommandHelp();
+}
+function closeCommandHelpModal(){
+  const modal=document.getElementById('commandHelpModal');
+  if(modal) modal.classList.remove('show');
+}
+async function loadCommandHelp(){
+  const box=document.getElementById('commandHelpContent');
+  if(!box) return;
+  box.innerHTML='<div class="empty">Loading commands...</div>';
+  try{
+    const res=await fetch('/api/agent-studio/command-set');
+    const data=await res.json();
+    const commands=Array.isArray(data.command_registry) ? data.command_registry : ((data.command_set && Array.isArray(data.command_set.commands)) ? data.command_set.commands : []);
+    renderCommandHelp(commands);
+  }catch(e){
+    box.innerHTML='<div class="item error">Failed to load command registry: '+escapeHtml(e)+'</div>';
+  }
+}
+function renderCommandHelp(commands){
+  const box=document.getElementById('commandHelpContent');
+  if(!box) return;
+  if(!Array.isArray(commands) || !commands.length){ box.innerHTML='<div class="empty">No command registry entries found.</div>'; return; }
+  const groups={};
+  commands.forEach(cmd=>{
+    const cat=String(cmd.category||'custom');
+    if(!groups[cat]) groups[cat]=[];
+    groups[cat].push(cmd);
+  });
+  const cats=Object.keys(groups).sort();
+  box.innerHTML='<div class="commandGrid"></div>';
+  const grid=box.querySelector('.commandGrid');
+  cats.forEach(cat=>{
+    const section=document.createElement('div');
+    section.className='commandCategory';
+    const items=groups[cat].slice().sort((a,b)=>(Number(b.priority||0)-Number(a.priority||0)) || String(a.command_id||'').localeCompare(String(b.command_id||'')));
+    section.innerHTML='<h4>'+escapeHtml(cat)+' <span class="badge">'+items.length+'</span></h4>';
+    items.forEach(cmd=>{
+      const enabled=cmd.enabled!==false;
+      const patterns=Array.isArray(cmd.patterns)?cmd.patterns:[];
+      const item=document.createElement('div');
+      item.className='commandItem '+(enabled?'':'disabledCommand');
+      item.innerHTML='<div class="commandTitle"><span>'+escapeHtml(cmd.command_id||cmd.action||'command')+'</span><span class="badge">'+escapeHtml(enabled?'enabled':'disabled')+'</span></div>'+
+        '<div class="commandDesc">'+escapeHtml(cmd.description||cmd.action||'')+'</div>'+
+        '<div class="commandPatterns"><b>Patterns:</b> '+escapeHtml(patterns.join(', ')||'(none)')+'</div>';
+      section.appendChild(item);
+    });
+    grid.appendChild(section);
+  });
+}
+
 async function ensureSelectedModelCredential(){
   await saveModelSelection();
   const data=modelSelectionState;
@@ -629,14 +716,25 @@ async function ensureSelectedModelCredential(){
 }
 
 function quickExecute(){ const name=prompt('Task name to execute'); if(name){ document.getElementById('input').value='execute '+name; sendMessage(); }}
+
+function toggleTracePanel(){
+  const main=document.getElementById('studioMain');
+  const panel=document.getElementById('tracePanel');
+  const btn=document.getElementById('traceToggleBtn');
+  const collapsed=!panel.classList.contains('collapsed');
+  panel.classList.toggle('collapsed', collapsed);
+  main.classList.toggle('rightCollapsed', collapsed);
+  btn.innerHTML=collapsed?'&lt;&lt;':'&gt;&gt;';
+}
+
 async function refreshState(){ try{ const res=await fetch('/api/agent-studio/state'); const data=await res.json(); renderState(data); }catch(e){ console.error(e); }}
 function renderState(data){
   const ps=data.participants||[]; document.getElementById('participantCount').textContent=ps.length; const pbox=document.getElementById('participants'); pbox.innerHTML=''; if(!ps.length)pbox.innerHTML='<div class="empty">No participant.</div>'; ps.forEach(p=>{ const el=document.createElement('div'); el.className='item'; el.innerHTML=`<b>${escapeHtml(p.name||p.participant_id)}</b><div class="small">${escapeHtml(p.participant_id||'')}</div><span class="pill">${escapeHtml(p.status||'created')}</span><span class="pill">delegate_to_ai_core</span><div class="path">${escapeHtml(p._path||'')}</div>`; pbox.appendChild(el); });
   const right=document.getElementById('rightPane'); const graphs=data.task_graphs||[]; const runs=data.task_runs||[]; const deliveries=data.deliveries||[]; const traces=data.traces||[]; document.getElementById('graphCount').textContent=graphs.length; right.innerHTML='';
-  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Task Graphs</div>'); if(!graphs.length) right.insertAdjacentHTML('beforeend','<div class="empty">No task graph.</div>'); graphs.forEach(g=>right.appendChild(card(g.task_name||g.graph_id, renderJson(g))));
+  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Task Graphs</div>'); if(!graphs.length) right.insertAdjacentHTML('beforeend','<div class="empty">No task graph.</div>'); graphs.forEach(g=>right.appendChild(compactJsonCard(g.task_name||g.graph_id, g)));
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Delegation Runs</div>'); if(!runs.length) right.insertAdjacentHTML('beforeend','<div class="empty">No run.</div>'); runs.forEach(r=>right.appendChild(runCard(r)));
-  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Deliveries</div>'); if(!deliveries.length) right.insertAdjacentHTML('beforeend','<div class="empty">No delivery.</div>'); deliveries.forEach(d=>right.appendChild(card(d.delivery_id||'delivery', d.final_answer || renderJson(d))));
-  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Runtime Traces</div>'); if(!traces.length) right.insertAdjacentHTML('beforeend','<div class="empty">No trace.</div>'); traces.forEach(t=>right.appendChild(card(t.trace_id||'trace', renderJson(t))));
+  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Deliveries</div>'); if(!deliveries.length) right.insertAdjacentHTML('beforeend','<div class="empty">No delivery.</div>'); deliveries.forEach(d=>right.appendChild(deliveryCard(d)));
+  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Runtime Traces</div>'); if(!traces.length) right.insertAdjacentHTML('beforeend','<div class="empty">No trace.</div>'); traces.forEach(t=>right.appendChild(compactJsonCard(t.trace_id||'trace', t)));
 }
 
 function collectMissingInputs(payload){
@@ -748,11 +846,41 @@ function runCard(r){
     });
     el.appendChild(wrap);
   }
+  const details=document.createElement('details');
+  details.className='detailsBox';
+  const summary=document.createElement('summary');
+  summary.textContent='Show raw JSON';
   const pre=document.createElement('div');
-  pre.className='pre';
+  pre.className='pre compact';
   pre.textContent=jsonText;
-  el.appendChild(pre);
+  details.appendChild(summary);
+  details.appendChild(pre);
+  el.appendChild(details);
   return el;
+}
+function deliveryCard(d){
+  const el=document.createElement('div');
+  el.className='item final';
+  const title=d.delivery_id||'delivery';
+  const header=document.createElement('div');
+  header.className='cardHeader';
+  const label=document.createElement('b'); label.textContent=title;
+  const copy=document.createElement('button'); copy.className='copyBtn'; copy.textContent='📋 Copy'; copy.onclick=()=>copyText(d.final_answer||renderJson(d));
+  header.appendChild(label); header.appendChild(copy); el.appendChild(header);
+  const body=document.createElement('div'); body.innerHTML=formatAnswerHtml(d.final_answer||''); el.appendChild(body);
+  if(!d.final_answer){ const details=document.createElement('details'); details.className='detailsBox'; details.innerHTML='<summary>Show raw JSON</summary><div class="pre compact"></div>'; details.querySelector('.pre').textContent=renderJson(d); el.appendChild(details); }
+  return el;
+}
+function compactJsonCard(title, obj){
+  const el=document.createElement('div'); el.className='item';
+  const header=document.createElement('div'); header.className='cardHeader';
+  const label=document.createElement('b'); label.textContent=title;
+  const copy=document.createElement('button'); copy.className='copyBtn'; copy.textContent='📋 Copy'; copy.onclick=()=>copyText(renderJson(obj));
+  header.appendChild(label); header.appendChild(copy); el.appendChild(header);
+  const status=obj && obj.status ? obj.status : '';
+  const stage=obj && obj.current_stage ? obj.current_stage : '';
+  if(status || stage){ const meta=document.createElement('div'); meta.className='small'; meta.textContent=[status?('status: '+status):'', stage?('stage: '+stage):''].filter(Boolean).join(' / '); el.appendChild(meta); }
+  const details=document.createElement('details'); details.className='detailsBox'; const summary=document.createElement('summary'); summary.textContent='Show raw JSON'; const pre=document.createElement('div'); pre.className='pre compact'; pre.textContent=renderJson(obj); details.appendChild(summary); details.appendChild(pre); el.appendChild(details); return el;
 }
 function card(title, body){
   const el=document.createElement('div');

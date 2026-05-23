@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+
+from ai_core.commands import CommandSetService
 
 
 @dataclass
@@ -18,36 +19,53 @@ class StudioCommandRouter:
 
     def __init__(self, config_path: str | Path = "configs/agent_studio_commands.json") -> None:
         self.config_path = Path(config_path)
+        self.command_set_service = CommandSetService(default_path=self.config_path)
         self.config = self._load_config()
 
     def route(self, message: str) -> RoutedCommand:
+        """Route user text through the effective command registry.
+
+        commands[] is the source of truth.  This avoids spreading command phrase
+        if/else checks across Studio code.  Runtime command-set overlays can add
+        or disable commands without changing this router.
+        """
         text = message.strip()
         lowered = text.lower()
-        phrases = self.config.get("command_phrases", {})
-        if self._matches(lowered, phrases.get("execute_task", [])):
-            return RoutedCommand("execute_task", self._extract_execute_name(text), text)
-        if self._matches(lowered, phrases.get("feedback_adaptation", [])):
-            return RoutedCommand("feedback_adaptation", self._extract_feedback_target(text), text)
-        if self._matches(lowered, phrases.get("create_task", [])):
-            return RoutedCommand("create_task", self._extract_named_value(text), text)
-        if self._matches(lowered, phrases.get("create_participant", [])):
-            return RoutedCommand("create_participant", self._extract_named_value(text), text)
+        matched = self._match_registry(lowered)
+        if matched:
+            action = str(matched.get("action") or matched.get("command_id") or "chat")
+            name = self._extract_name_for_action(action, text)
+            return RoutedCommand(action, name, text)
         return RoutedCommand("chat", None, text)
 
     def _load_config(self) -> dict:
-        if not self.config_path.exists():
-            return {
-                "command_phrases": {
-                    "create_participant": ["create an agent", "create a participant"],
-                    "create_task": ["create a task"],
-                    "execute_task": ["execute"],
-                }
-            }
+        return self.command_set_service.get_effective()
+
+    def reload(self) -> None:
+        self.config = self._load_config()
+
+    def _registry(self) -> list[dict]:
         try:
-            loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
-            return loaded if isinstance(loaded, dict) else {}
+            return self.command_set_service._normalize_registry(self.config)
         except Exception:
-            return {}
+            return []
+
+    def _match_registry(self, lowered: str) -> dict | None:
+        for entry in self._registry():
+            if not bool(entry.get("enabled", True)):
+                continue
+            if self._matches(lowered, entry.get("patterns", [])):
+                return entry
+        return None
+
+    def _extract_name_for_action(self, action: str, text: str) -> str | None:
+        if action == "execute_task":
+            return self._extract_execute_name(text)
+        if action == "feedback_adaptation":
+            return self._extract_feedback_target(text)
+        if action in {"create_task", "create_participant", "update_participant", "delete_participant"}:
+            return self._extract_named_value(text)
+        return self._extract_named_value(text)
 
     def _matches(self, lowered: str, options: list[str]) -> bool:
         for option in options:

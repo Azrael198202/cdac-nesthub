@@ -15,6 +15,7 @@ from auxiliary_brain.parameters.agent_parameter_contract import AgentParameterCo
 from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
 from ai_core.artifacts.uploaded_artifact_contract import UploadedArtifactContractBuilder
 from ai_core.artifacts.artifact_edit_service import ArtifactEditService
+from ai_core.commands import CommandSetService
 
 
 class AgentStudioService:
@@ -33,11 +34,16 @@ class AgentStudioService:
         self.artifact_registry = UploadedArtifactRegistry()
         self.uploaded_artifact_contract = UploadedArtifactContractBuilder()
         self.artifact_edit_service = ArtifactEditService()
+        self.command_set_service = CommandSetService()
         self.store.ensure_workspace()
         self.community_id = self._ensure_community()
 
     async def handle_message(self, message: str, provided_inputs: dict[str, Any] | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         routed = self.router.route(message)
+        if routed.action == "list_command_set":
+            return self.list_command_set()
+        if routed.action == "update_command_set":
+            return self.update_command_set(message)
         if routed.action == "create_participant":
             return await self.create_participant(message, routed.name, uploaded_artifacts=uploaded_artifacts)
         if routed.action == "create_task":
@@ -65,6 +71,27 @@ class AgentStudioService:
             return await self.handle_feedback(message, feedback.get("target_task"))
         return await self.natural_conversation.reply(message, latest_task=self._latest_task_name())
 
+    def list_command_set(self) -> dict[str, Any]:
+        payload = self.command_set_service.list_commands()
+        payload.update({
+            "action": "list_command_set",
+            "origin": "ai_core",
+            "message": "Default and runtime-customized command set is listed.",
+        })
+        return payload
+
+    def update_command_set(self, message: str) -> dict[str, Any]:
+        result = self.command_set_service.update_from_instruction(message)
+        # Refresh router cache so the new phrases work immediately at runtime.
+        try:
+            self.router.reload()
+        except Exception:
+            pass
+        result.update({
+            "action": "update_command_set",
+            "origin": "ai_core",
+        })
+        return result
 
 
     async def _maybe_handle_artifact_edit_message(self, message: str, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
@@ -293,9 +320,9 @@ class AgentStudioService:
         # Task graphs do not own durable parameter values.  Parameter schemas live
         # on participants, while uploaded artifact parameters are discovered from
         # the selected artifact during execution_preparation.  Keeping a blank
-        # task-level contract here prevents stale values such as location/api_key
-        # from leaking into unrelated future runs and avoids referencing an
-        # undefined participant-only parameter_contract.
+        # task-level contract here prevents stale values from leaking into
+        # unrelated future runs and avoids referencing an undefined
+        # participant-only parameter_contract.
         schema_contract = {
             "contract_type": "task_runtime_parameter_contract",
             "parameters": [],
@@ -348,9 +375,9 @@ class AgentStudioService:
         # Task graphs do not own durable parameter values.  Parameter schemas live
         # on participants, while uploaded artifact parameters are discovered from
         # the selected artifact during execution_preparation.  Keeping a blank
-        # task-level contract here prevents stale values such as location/api_key
-        # from leaking into unrelated future runs and avoids referencing an
-        # undefined participant-only parameter_contract.
+        # task-level contract here prevents stale values from leaking into
+        # unrelated future runs and avoids referencing an undefined
+        # participant-only parameter_contract.
         schema_contract = {
             "contract_type": "task_runtime_parameter_contract",
             "parameters": [],

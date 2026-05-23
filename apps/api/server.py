@@ -10,6 +10,7 @@ import json
 
 from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
 from ai_core.artifacts.artifact_edit_service import ArtifactEditService
+from ai_core.commands import CommandSetService
 
 from ai_core.evolution.approval_learning import ApprovalLearningService
 from ai_core.orchestration.workflow_runtime import WorkflowRuntime
@@ -62,6 +63,17 @@ class AgentStudioModelSelectionRequest(BaseModel):
     selected_api_model_id: str | None = None
     allow_escalation: bool = True
     ask_for_missing_keys_at_start: bool = True
+
+
+
+
+class CommandSetUpdateRequest(BaseModel):
+    commands: list[dict[str, Any]] | None = None
+    # Backward-compatible input only. CommandSetService migrates this into
+    # commands[] before saving; routing never reads command_phrases directly.
+    command_phrases: dict[str, list[str]] | None = None
+    feedback_intents: dict[str, list[str]] | None = None
+    raw_update: dict[str, Any] | None = None
 
 
 class AgentStudioResumeRunRequest(BaseModel):
@@ -135,6 +147,7 @@ async def agent_studio_home():
 
 artifact_registry = UploadedArtifactRegistry()
 artifact_edit_service = ArtifactEditService()
+command_set_service = CommandSetService()
 
 def _read_artifact_registry() -> list[dict[str, Any]]:
     return artifact_registry.list()
@@ -243,6 +256,31 @@ async def agent_studio_model_selection_state():
 @app.post("/api/agent-studio/model-selection")
 async def agent_studio_model_selection_update(req: AgentStudioModelSelectionRequest):
     return JSONResponse(model_selection_store.update(req.dict()))
+
+
+
+@app.get("/api/agent-studio/command-set")
+async def agent_studio_command_set():
+    return JSONResponse(command_set_service.list_commands())
+
+
+@app.post("/api/agent-studio/command-set")
+async def agent_studio_command_set_update(req: CommandSetUpdateRequest):
+    update = req.raw_update if isinstance(req.raw_update, dict) else {}
+    if req.commands is not None:
+        update.setdefault("commands", []).extend(req.commands)
+    if req.command_phrases is not None:
+        # Legacy client input. Service migrates it to commands[].
+        update.setdefault("command_phrases", {}).update(req.command_phrases)
+    if req.feedback_intents is not None:
+        update.setdefault("feedback_intents", {}).update(req.feedback_intents)
+    payload = command_set_service.update_runtime(update)
+    try:
+        studio_service.router.reload()
+    except Exception:
+        pass
+    return JSONResponse(payload)
+
 
 @app.get("/api/agent-studio/state")
 async def agent_studio_state():
