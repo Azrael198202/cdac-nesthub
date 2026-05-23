@@ -14,6 +14,7 @@ from ai_core.runtime.modeling.model_runtime_preflight import ModelRuntimePreflig
 from auxiliary_brain.parameters.agent_parameter_contract import AgentParameterContractService
 from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
 from ai_core.artifacts.uploaded_artifact_contract import UploadedArtifactContractBuilder
+from ai_core.artifacts.artifact_edit_service import ArtifactEditService
 
 
 class AgentStudioService:
@@ -31,6 +32,7 @@ class AgentStudioService:
         self.parameter_contract_service = AgentParameterContractService()
         self.artifact_registry = UploadedArtifactRegistry()
         self.uploaded_artifact_contract = UploadedArtifactContractBuilder()
+        self.artifact_edit_service = ArtifactEditService()
         self.store.ensure_workspace()
         self.community_id = self._ensure_community()
 
@@ -63,6 +65,107 @@ class AgentStudioService:
             return await self.handle_feedback(message, feedback.get("target_task"))
         return await self.natural_conversation.reply(message, latest_task=self._latest_task_name())
 
+
+
+    async def _maybe_handle_artifact_edit_message(self, message: str, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+        """Create a reviewable edit proposal for an uploaded artifact when the
+        user asks to change or regenerate a file.
+
+        This is a generic artifact-edit bridge for Agent Studio.  It only
+        decides whether the current user message is an artifact edit request and
+        resolves the referenced uploaded artifact.  The actual modification is
+        delegated to ArtifactEditService, which creates a draft file and waits
+        for user confirmation before replacing the original.
+        """
+        text = str(message or "").strip()
+        if not text:
+            return None
+        if not self._looks_like_artifact_edit_request(text):
+            return None
+
+        refs = self._resolve_uploaded_artifacts_for_instruction(text, uploaded_artifacts)
+        if not refs:
+            registry_items = self.artifact_registry.list()
+            if len(registry_items) == 1:
+                refs = [registry_items[0]]
+        if not refs:
+            return {
+                "action": "artifact_edit_request",
+                "origin": "auxiliary_brain",
+                "status": "requires_input",
+                "message": "Please upload or select the file to modify before requesting a file edit.",
+                "interaction_request": {
+                    "type": "select_uploaded_artifact",
+                    "kind": "artifact_selection",
+                    "fields": [{
+                        "field": "artifact_id",
+                        "label": "Uploaded file",
+                        "input_type": "artifact_selector",
+                        "required": True,
+                        "description": "Select the uploaded artifact to modify.",
+                    }],
+                },
+            }
+
+        artifact = refs[0]
+        artifact_id = str(artifact.get("artifact_id") or artifact.get("id") or "").strip()
+        if not artifact_id:
+            return {
+                "action": "artifact_edit_request",
+                "origin": "auxiliary_brain",
+                "status": "blocked",
+                "message": "The selected artifact does not have a resolvable artifact_id.",
+                "uploaded_artifacts": refs,
+            }
+
+        proposal = await self.artifact_edit_service.propose_edit(
+            artifact_id=artifact_id,
+            instruction=text,
+        )
+        if not proposal.get("ok"):
+            return {
+                "action": "artifact_edit_proposal",
+                "origin": "auxiliary_brain",
+                "status": proposal.get("status", "failed"),
+                "message": proposal.get("message") or "Could not create an artifact edit proposal.",
+                "proposal": proposal.get("proposal"),
+                "uploaded_artifacts": refs,
+            }
+        return {
+            "action": "artifact_edit_proposal",
+            "origin": "auxiliary_brain",
+            "status": "pending_review",
+            "message": "A modified draft file was generated. Review it, download it, provide feedback for another revision, confirm replacement, or cancel.",
+            "artifact": artifact,
+            "proposal": proposal.get("proposal"),
+            "preview": proposal.get("preview"),
+            "interaction_request": {
+                "type": "review_artifact_edit_proposal",
+                "kind": "artifact_edit_review",
+                "proposal": proposal.get("proposal"),
+                "preview": proposal.get("preview"),
+                "actions": ["download", "revise", "confirm", "cancel"],
+            },
+        }
+
+    def _looks_like_artifact_edit_request(self, message: str) -> bool:
+        """Generic command-shape detection for file modification requests.
+
+        The detector is intentionally not domain-specific.  It looks for a file
+        reference plus an edit/regeneration verb, or a direct instruction that
+        says to generate a new file/code file from an uploaded file.
+        """
+        text = str(message or "")
+        lowered = text.casefold()
+        file_ref = bool(re.search(r"\b[\w .()\-]+\.[A-Za-z0-9]{1,12}\b", text))
+        edit_words = (
+            "change", "modify", "update", "edit", "rewrite", "refactor", "convert", "replace", "regenerate",
+            "generate a new", "generate new", "new code file", "new file", "修改", "更改", "更新", "编辑", "生成新", "重新生成",
+        )
+        file_words = ("file", "code file", "uploaded", "artifact", "文件", "代码")
+        has_edit = any(word in lowered for word in edit_words)
+        has_file_word = any(word in lowered for word in file_words)
+        return bool(has_edit and (file_ref or has_file_word))
 
     async def handle_feedback(self, message: str, task_name: str | None = None) -> dict[str, Any]:
         feedback = self.feedback_classifier.classify(message, fallback_target=task_name or self._latest_task_name())

@@ -41,6 +41,20 @@ const messages = document.getElementById('messages');
 function renderJson(obj){ return JSON.stringify(obj, null, 2); }
 function addMessage(text, cls='item') { const el=document.createElement('div'); el.className=cls; el.innerHTML=`<div class="message">${escapeHtml(text)}</div>`; messages.appendChild(el); messages.scrollTop=messages.scrollHeight; }
 function renderStudioResponse(data, originalText){
+  if(data && data.action==='artifact_edit_proposal'){
+    if(data.status==='pending_review' && data.proposal){
+      showArtifactProposal({proposal:data.proposal, preview:data.preview||''});
+      document.getElementById('artifactEditModal').classList.add('show');
+      addMessage(data.message || 'A modified draft file was generated for review.', 'item final');
+      return;
+    }
+    addMessage(data.message || renderJson(data), data.status==='requires_input' ? 'item error' : 'item');
+    return;
+  }
+  if(data && data.interaction_request && data.interaction_request.type==='select_uploaded_artifact'){
+    addMessage(data.message || 'Please select an uploaded artifact.', 'item error');
+    return;
+  }
   if(data && (data.action==='conversation_message' || data.action==='model_preflight')){
     const answer = data.final_answer || data.message || '';
     addMessage(answer || '(no answer)', data.status==='blocked' ? 'item error' : 'item final');
