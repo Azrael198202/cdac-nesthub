@@ -279,22 +279,51 @@ class ExecutionReuseStore:
         if not lines:
             lines = [raw.strip()]
         compact: list[str] = []
-        seen_repeated_tail = 0
-        previous = None
+        suppressed = 0
+        previous_raw = None
         for line in lines:
-            if line == previous:
-                seen_repeated_tail += 1
+            if line == previous_raw:
+                suppressed += 1
                 continue
-            previous = line
+            previous_raw = line
+            if compact and self._lines_are_redundant(compact[-1], line):
+                # Keep the more informative representative of a near-duplicate
+                # output group. This is evidence-structure based: it compares
+                # line similarity after removing volatile numbers/punctuation and
+                # does not depend on task names or business vocabulary.
+                compact[-1] = line if len(line) >= len(compact[-1]) else compact[-1]
+                suppressed += 1
+                continue
             compact.append(line)
             if len(compact) >= max_lines:
                 break
         result = "\n".join(compact)
-        if seen_repeated_tail:
-            result += f"\n...[{seen_repeated_tail} repeated output lines compacted]"
+        if suppressed:
+            result += f"\n...[{suppressed} repeated or redundant output lines compacted]"
         if len(result) > max_chars:
             result = result[:max_chars].rstrip() + " ...[truncated]"
         return result
+
+    def _lines_are_redundant(self, a: str, b: str) -> bool:
+        left = self._line_signature(a)
+        right = self._line_signature(b)
+        if not left or not right:
+            return False
+        if left == right:
+            return True
+        sa, sb = set(left.split()), set(right.split())
+        if not sa or not sb:
+            return False
+        overlap = len(sa & sb) / max(1, min(len(sa), len(sb)))
+        prefix_related = left in right or right in left
+        return overlap >= 0.65 or prefix_related
+
+    def _line_signature(self, text: str) -> str:
+        import re
+        lowered = str(text or "").casefold()
+        lowered = re.sub(r"\d+(?:[:./-]\d+)*", " ", lowered)
+        lowered = re.sub(r"[^a-z_]+", " ", lowered)
+        return " ".join(part for part in lowered.split() if len(part) > 1)
 
     def _select_artifact_function(self, path: Path, provided_inputs: dict[str, Any]) -> str | None:
         functions = self._public_python_functions(path)
@@ -590,8 +619,11 @@ class ExecutionReuseStore:
     def _extract_final_answer(self, run_payload: dict[str, Any]) -> str:
         synthesis = run_payload.get("synthesis") if isinstance(run_payload, dict) else None
         if isinstance(synthesis, dict):
-            return str(synthesis.get("final_answer") or synthesis.get("answer") or "")
-        return str(run_payload.get("final_answer") or "") if isinstance(run_payload, dict) else ""
+            return self.compact_final_answer(str(synthesis.get("final_answer") or synthesis.get("answer") or ""))
+        return self.compact_final_answer(str(run_payload.get("final_answer") or "")) if isinstance(run_payload, dict) else ""
+
+    def compact_final_answer(self, text: str) -> str:
+        return self._normalize_process_output(str(text or ""), max_lines=8, max_chars=2400)
 
     def _mark_used(self, task_name: str) -> None:
         asset = self.get_asset(task_name)

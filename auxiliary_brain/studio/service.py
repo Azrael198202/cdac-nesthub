@@ -115,6 +115,9 @@ class AgentStudioService:
             return "Hello. How can I help?"
         return None
 
+    def _compact_final_answer(self, value: Any) -> str:
+        return self.execution_reuse_store.compact_final_answer(str(value or ""))
+
     async def _try_reused_task_execution(
         self,
         task_name: str,
@@ -169,7 +172,7 @@ class AgentStudioService:
             reused = await self.execution_reuse_store.execute_reused_asset(asset=decision.asset, provided_inputs=runtime_parameters)
             if reused.get("status") == "completed":
                 run_id = new_id("delegation_run")
-                final_answer = reused.get("final_answer") or "Reused execution completed."
+                final_answer = self._compact_final_answer(reused.get("final_answer") or "Reused execution completed.")
                 payload = {
                     "run_id": run_id,
                     "origin": "auxiliary_brain",
@@ -197,7 +200,7 @@ class AgentStudioService:
             # look like first-time executions.  Return the failure with trace so
             # the repair layer or user feedback can fix the reusable asset.
             run_id = new_id("delegation_run")
-            final_answer = reused.get("final_answer") or reused.get("stderr") or reused.get("reason") or "Reusable execution failed."
+            final_answer = self._compact_final_answer(reused.get("final_answer") or reused.get("stderr") or reused.get("reason") or "Reusable execution failed.")
             payload = {
                 "run_id": run_id,
                 "origin": "auxiliary_brain",
@@ -435,7 +438,7 @@ class AgentStudioService:
             "feedback": feedback,
             "strategy": strategy,
             "repair_candidate": repair_candidate,
-            "final_answer": synthesis.get("final_answer"),
+            "final_answer": self._compact_final_answer(synthesis.get("final_answer")),
             "delivery": result.get("delivery"),
         }
 
@@ -653,7 +656,7 @@ class AgentStudioService:
             "status": status,
             "task_name": task_name,
             "run_id": result.get("run_id"),
-            "final_answer": (result.get("synthesis") or {}).get("final_answer"),
+            "final_answer": self._compact_final_answer((result.get("synthesis") or {}).get("final_answer")),
             "delivery": result.get("delivery"),
         }
         if status in {"requires_key", "requires_input", "paused"}:
@@ -761,7 +764,7 @@ class AgentStudioService:
             "task_name": task_name,
             "run_id": result.get("run_id"),
             "resumed_from_run_id": run_id,
-            "final_answer": (result.get("synthesis") or {}).get("final_answer"),
+            "final_answer": self._compact_final_answer((result.get("synthesis") or {}).get("final_answer")),
             "delivery": result.get("delivery"),
         }
         if status in {"requires_key", "requires_input", "paused"}:

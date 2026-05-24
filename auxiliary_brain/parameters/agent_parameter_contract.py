@@ -102,7 +102,7 @@ class AgentParameterContractService:
             )
             normalized = self._normalize_contract_result(result, source="runtime_llm")
             if not normalized.get("parameters") and self._looks_like_open_capability(execution_objective or definition_instruction):
-                return self._open_capability_fallback_contract(source="runtime_llm_empty")
+                return self._fallback_contract_for_objective(execution_objective or definition_instruction, source="runtime_llm_empty")
             return normalized
         except Exception as exc:
             # Safe fallback: keep source/config free of domain-specific slots.
@@ -110,7 +110,7 @@ class AgentParameterContractService:
             # execution time so the runtime pauses instead of running without
             # the values needed for that specific task.
             if self._looks_like_open_capability(execution_objective or definition_instruction):
-                contract = self._open_capability_fallback_contract(source="runtime_llm_unavailable")
+                contract = self._fallback_contract_for_objective(execution_objective or definition_instruction, source="runtime_llm_unavailable")
                 contract["contract_generation_error"] = str(exc)
                 return contract
             return {
@@ -142,6 +142,37 @@ class AgentParameterContractService:
             "handles ",
         )
         return normalized.startswith(open_markers) or any(f" {marker}" in normalized for marker in open_markers)
+
+
+    def _fallback_contract_for_objective(self, text: str, *, source: str) -> dict[str, Any]:
+        """Build a safe generic fallback when runtime model inference fails.
+
+        The fallback is based on capability shape, not on project/business
+        vocabulary. If the agent is defined as producing user-facing text, the
+        UI collects reusable content constraints instead of a single opaque
+        task_input field. Other open capabilities keep the generic field.
+        """
+        if self._looks_like_content_output_capability(text):
+            parameters = [
+                self._parameter_record(name="subject", label="Subject", description="Main subject or request to produce.", required=True, values=[]),
+                self._parameter_record(name="size_constraint", label="Size constraint", description="Required size, amount, or length constraint if any.", required=False, values=[]),
+                self._parameter_record(name="style_constraint", label="Style constraint", description="Requested tone, style, or format constraint if any.", required=False, values=[]),
+                self._parameter_record(name="audience_context", label="Audience context", description="Target reader, user, or recipient context if any.", required=False, values=[]),
+                self._parameter_record(name="output_language", label="Output language", description="Language for the final output if specified.", required=False, values=[]),
+                self._parameter_record(name="source_policy", label="Source policy", description="Whether references, evidence, or citations are required.", required=False, values=[]),
+            ]
+            contract = {"contract_type": "agent_parameter_contract", "source": source, "parameters": parameters}
+            contract["missing_information"] = self.missing_parameters({"parameter_contract": contract})
+            return contract
+        return self._open_capability_fallback_contract(source=source)
+
+    def _looks_like_content_output_capability(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", str(text or "").strip().casefold())
+        if not normalized:
+            return False
+        output_verbs = ("write", "compose", "draft", "generate", "create", "produce")
+        output_objects = ("text", "content", "document", "message", "post", "summary", "report", "article", "essay", "story")
+        return any(re.search(rf"\b{verb}\b", normalized) for verb in output_verbs) and any(re.search(rf"\b{obj}s?\b", normalized) for obj in output_objects)
 
     def _open_capability_fallback_contract(self, *, source: str) -> dict[str, Any]:
         contract = {
