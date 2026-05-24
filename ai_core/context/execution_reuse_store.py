@@ -122,13 +122,21 @@ class ExecutionReuseStore:
         asset = self.get_asset(task_name)
         if not asset:
             return ReuseDecision(False, "no_reusable_asset")
-        missing = self.missing_inputs(asset, provided_inputs or {})
+        provided = provided_inputs or {}
+        # When a reusable asset is invoked without any runtime values, expose the
+        # full saved input contract once, including optional fields.  This lets
+        # the user supply optional values without forcing them on every resume.
+        # After the user submits at least one value, only required missing fields
+        # can block execution.
+        include_optional = len(provided) == 0
+        missing = self.missing_inputs(asset, provided, include_optional=include_optional)
         if missing:
             return ReuseDecision(False, "missing_runtime_inputs", asset=asset, missing_inputs=missing)
         return ReuseDecision(True, "asset_ready", asset=asset, missing_inputs=[])
 
-    def missing_inputs(self, asset: dict[str, Any], provided_inputs: dict[str, Any]) -> list[dict[str, Any]]:
+    def missing_inputs(self, asset: dict[str, Any], provided_inputs: dict[str, Any], *, include_optional: bool = False) -> list[dict[str, Any]]:
         fields = []
+        provided = provided_inputs or {}
         for item in asset.get("parameter_schema") or []:
             if not isinstance(item, dict):
                 continue
@@ -136,14 +144,15 @@ class ExecutionReuseStore:
             if not key:
                 continue
             required = bool(item.get("required", True))
-            if required and provided_inputs.get(key) in (None, "", [], {}):
+            value_missing = provided.get(key) in (None, "", [], {})
+            if value_missing and (required or include_optional):
                 fields.append({
                     "field": key,
                     "name": key,
                     "label": item.get("label") or key,
                     "input_type": item.get("input_type") or item.get("type") or "text",
-                    "required": True,
-                    "description": item.get("description") or "Runtime value required by the reused execution asset.",
+                    "required": required,
+                    "description": item.get("description") or ("Runtime value required by the reusable executable asset." if required else "Optional value accepted by the reusable executable asset."),
                 })
         return fields
 
@@ -275,6 +284,7 @@ class ExecutionReuseStore:
         raw = str(text or "")
         if not raw.strip():
             return ""
+        raw = self._compact_repeated_segments(raw)
         lines = [line.strip() for line in raw.splitlines() if line.strip()]
         if not lines:
             lines = [raw.strip()]
@@ -282,6 +292,7 @@ class ExecutionReuseStore:
         suppressed = 0
         previous_raw = None
         for line in lines:
+            line = self._compact_repeated_segments(line)
             if line == previous_raw:
                 suppressed += 1
                 continue
@@ -303,6 +314,22 @@ class ExecutionReuseStore:
         if len(result) > max_chars:
             result = result[:max_chars].rstrip() + " ...[truncated]"
         return result
+
+    def _compact_repeated_segments(self, text: str) -> str:
+        import re
+        value = str(text or "").strip()
+        if not value:
+            return ""
+        # Collapse exact adjacent repeated fragments even when a generated tool
+        # prints them on a single line instead of separate stdout lines.  The
+        # detection is structural and language-agnostic: it looks for adjacent
+        # repeated spans and keeps one representative.
+        for _ in range(4):
+            new_value = re.sub(r"(?s)\b(.{8,240}?)\s+\1\b", r"\1", value)
+            if new_value == value:
+                break
+            value = new_value.strip()
+        return value
 
     def _lines_are_redundant(self, a: str, b: str) -> bool:
         left = self._line_signature(a)
