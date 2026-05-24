@@ -452,6 +452,9 @@ function openMissingInputModal(items, runId){
     const kind=String(it.kind||'human_information_required');
     const field=String(it.field||it.name||('field_'+idx));
     const message=String(it.message||it.question||'Please provide this value.');
+    const description=String(it.description||'');
+    const normalizedMessage=message.replace(/\s+/g,' ').trim();
+    const normalizedDescription=description.replace(/\s+/g,' ').trim();
     const validation=String(it.validation_error||'');
     const provider=String(it.provider || (it.api_source&&it.api_source.provider) || '');
     const sourceUrl=String(it.source_url || (it.api_source&&it.api_source.url) || '');
@@ -469,7 +472,8 @@ function openMissingInputModal(items, runId){
       const names=sourceList.slice(0,3).map(x=>String((x&&x.provider)|| (x&&x.name) || (x&&x.url) || '')).filter(Boolean);
       if(names.length){ sourceText += '\nCandidate sources: ' + names.join(' | '); }
     }
-    hint.textContent=message + (it.description ? '\n' + String(it.description) : '') + sourceText + (validation ? '\n\nValidation error:\n' + validation : '');
+    const descriptionText = (normalizedDescription && normalizedDescription !== normalizedMessage) ? ('\n' + description) : '';
+    hint.textContent=message + descriptionText + sourceText + (validation ? '\n\nValidation error:\n' + validation : '');
     const inputType=String(it.input_type||'');
     const area = inputType==='textarea' || (kind==='validation_recovery' && field==='corrected_json');
     const input=document.createElement(area?'textarea':'input');
@@ -952,7 +956,7 @@ function deriveMissingInputs(run){
         kind:String(f.kind||kind),
         field:String(f.field||f.name||f.source_field||('field_'+idx)),
         label:String(f.label||f.title||f.name||f.field||('Input '+(idx+1))),
-        message:String(f.question||f.prompt||f.message||f.description||f.label||request.message||'Please provide this value.'),
+        message:String(f.question||f.prompt||f.message||f.label||request.message||'Please provide this value.'),
         input_type:String(f.input_type||f.type||f.ui_type||'text'),
         placeholder:String(f.placeholder||''),
         description:String(f.description||f.help_text||''),
