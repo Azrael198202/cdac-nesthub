@@ -16,6 +16,7 @@ from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
 from ai_core.artifacts.uploaded_artifact_contract import UploadedArtifactContractBuilder
 from ai_core.artifacts.artifact_edit_service import ArtifactEditService
 from ai_core.commands import CommandSetService
+from ai_core.context.execution_reuse_store import ExecutionReuseStore
 
 
 class AgentStudioService:
@@ -35,10 +36,32 @@ class AgentStudioService:
         self.uploaded_artifact_contract = UploadedArtifactContractBuilder()
         self.artifact_edit_service = ArtifactEditService()
         self.command_set_service = CommandSetService()
+        self.execution_reuse_store = ExecutionReuseStore()
         self.store.ensure_workspace()
         self.community_id = self._ensure_community()
 
     async def handle_message(self, message: str, provided_inputs: dict[str, Any] | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None, session_id: str | None = None) -> dict[str, Any]:
+        short_cached = self.execution_reuse_store.get_short_answer(message)
+        if short_cached:
+            return {
+                "action": "short_answer_cache",
+                "origin": "auxiliary_brain",
+                "status": "completed",
+                "final_answer": short_cached.get("answer"),
+                "memory_saved": False,
+                "context_trace": {"short_answer_cache": True, "llm_used": False, "planning_used": False},
+            }
+        direct = self._direct_ephemeral_answer(message)
+        if direct is not None:
+            self.execution_reuse_store.save_short_answer(query=message, answer=direct, source="ephemeral_direct")
+            return {
+                "action": "ephemeral_chat",
+                "origin": "auxiliary_brain",
+                "status": "completed",
+                "final_answer": direct,
+                "memory_saved": False,
+                "context_trace": {"short_answer_cache": False, "llm_used": False, "planning_used": False},
+            }
         routed = self.router.route(message)
         if routed.action == "list_command_set":
             return self.list_command_set()
@@ -70,6 +93,104 @@ class AgentStudioService:
         if feedback.get("matched"):
             return await self.handle_feedback(message, feedback.get("target_task"))
         return await self.natural_conversation.reply(message, latest_task=self._latest_task_name(), session_id=session_id)
+
+    def _direct_ephemeral_answer(self, message: str) -> str | None:
+        text = str(message or "").strip()
+        if not text or len(text) > 120:
+            return None
+        compact = " ".join(text.casefold().rstrip("?.!。？！").split())
+        # Generic language-capability style questions can be answered without
+        # workflow planning or long-term memory promotion.
+        if re.fullmatch(r"(can|could) you (speak|use|understand|reply in|respond in) [a-z][a-z ._-]{1,40}", compact):
+            target = compact.split()[-1]
+            return f"Yes, I can respond in {target}."
+        if compact in {"hello", "hi", "hey"}:
+            return "Hello. How can I help?"
+        return None
+
+    async def _try_reused_task_execution(
+        self,
+        task_name: str,
+        task_graph: dict[str, Any],
+        participants: list[dict[str, Any]],
+        runtime_parameters: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        decision = self.execution_reuse_store.decide(task_name, runtime_parameters)
+        if decision.reason == "no_reusable_asset":
+            return None
+        if decision.reason == "missing_runtime_inputs":
+            run_id = new_id("delegation_run")
+            fields = decision.missing_inputs or []
+            payload = {
+                "run_id": run_id,
+                "origin": "auxiliary_brain",
+                "status": "requires_input",
+                "task_name": task_name,
+                "current_stage": "waiting_for_reused_asset_parameters",
+                "pending_action": {"kind": "runtime_parameter_input", "source": "execution_reuse_asset"},
+                "missing_inputs": fields,
+                "runtime_parameters": runtime_parameters,
+                "completed_at": self._now(),
+                "context_trace": {
+                    "task_registry": True,
+                    "agent_registry": True,
+                    "artifact_registry": bool((decision.asset or {}).get("artifact_paths")),
+                    "planning_used": False,
+                    "llm_used": False,
+                    "reuse_asset_id": (decision.asset or {}).get("asset_id"),
+                },
+            }
+            self.store.write_json(f"generated/results/{run_id}.json", payload)
+            return {
+                "action": "execute_task_graph",
+                "origin": "auxiliary_brain",
+                "status": "requires_input",
+                "task_name": task_name,
+                "run_id": run_id,
+                "pending_action": payload["pending_action"],
+                "missing_inputs": fields,
+                "interaction_request": {
+                    "type": "collect_runtime_parameters",
+                    "kind": "runtime_parameter_input",
+                    "fields": fields,
+                    "message": self._paused_message(fields, payload["pending_action"]),
+                },
+                "message": self._paused_message(fields, payload["pending_action"]),
+                "context_trace": payload["context_trace"],
+            }
+        if decision.reusable and decision.asset:
+            reused = await self.execution_reuse_store.execute_reused_asset(asset=decision.asset, provided_inputs=runtime_parameters)
+            if reused.get("status") == "completed":
+                run_id = new_id("delegation_run")
+                final_answer = reused.get("final_answer") or "Reused execution completed."
+                payload = {
+                    "run_id": run_id,
+                    "origin": "auxiliary_brain",
+                    "status": "completed",
+                    "task_name": task_name,
+                    "current_stage": "completed",
+                    "synthesis": {"status": "completed", "final_answer": final_answer},
+                    "reuse_execution": reused,
+                    "completed_at": self._now(),
+                    "context_trace": reused.get("context_trace"),
+                }
+                self.store.write_json(f"generated/results/{run_id}.json", payload)
+                return {
+                    "action": "execute_task_graph",
+                    "origin": "auxiliary_brain",
+                    "status": "completed",
+                    "task_name": task_name,
+                    "run_id": run_id,
+                    "final_answer": final_answer,
+                    "context_trace": reused.get("context_trace"),
+                }
+            # Reuse asset exists but cannot be executed directly; keep the normal
+            # runtime path while reporting that planning should remain bypassed
+            # where the downstream runtime can honor the saved contracts.
+            task_graph.setdefault("reuse_context", decision.asset)
+            task_graph.setdefault("runtime_options", {})["reuse_asset_id"] = decision.asset.get("asset_id")
+            return None
+        return None
 
     def list_command_set(self) -> dict[str, Any]:
         payload = self.command_set_service.list_commands()
@@ -438,6 +559,9 @@ class AgentStudioService:
         runtime_parameters.update(self._extract_runtime_parameters_from_instruction(instruction or ""))
         if isinstance(provided_inputs, dict):
             runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+        reuse_response = await self._try_reused_task_execution(task_name, task_graph, participants, runtime_parameters)
+        if reuse_response is not None:
+            return reuse_response
         preflight = self._preflight_uploaded_artifact_parameters(task_graph, participants, runtime_parameters)
         if preflight.get("status") == "requires_input":
             run_id = new_id("delegation_run")
@@ -461,6 +585,11 @@ class AgentStudioService:
             task_graph["runtime_parameters"] = runtime_parameters
             result = await self.delegation_runtime.execute_task(task_graph, participants)
         status = result.get("status", "completed")
+        if status == "completed":
+            try:
+                self.execution_reuse_store.register_success(task_graph=task_graph, participants=participants, run_payload=result)
+            except Exception:
+                pass
         response = {
             "action": "execute_task_graph",
             "origin": "auxiliary_brain",
@@ -522,7 +651,21 @@ class AgentStudioService:
         selected_ids = set(task_graph.get("selected_participant_ids") or [])
         participants = [p for p in all_participants if p.get("participant_id") in selected_ids] or all_participants
         pending = run_payload.get("pending_action") if isinstance(run_payload.get("pending_action"), dict) else {}
-        if str(pending.get("kind") or "") == "studio_pre_execution_uploaded_artifact_parameters":
+        if str(pending.get("source") or "") == "execution_reuse_asset":
+            runtime_parameters = {}
+            if isinstance(run_payload.get("runtime_parameters"), dict):
+                runtime_parameters.update(run_payload.get("runtime_parameters") or {})
+            if isinstance(provided_inputs, dict):
+                runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+            reuse_response = await self._try_reused_task_execution(task_name, task_graph, participants, runtime_parameters)
+            if reuse_response is not None:
+                reuse_response["action"] = "resume_task_graph"
+                reuse_response["resumed_from_run_id"] = run_id
+                return reuse_response
+            task_graph = dict(task_graph)
+            task_graph["runtime_parameters"] = runtime_parameters
+            result = await self.delegation_runtime.execute_task(task_graph, participants)
+        elif str(pending.get("kind") or "") == "studio_pre_execution_uploaded_artifact_parameters":
             runtime_parameters = {}
             if isinstance(task_graph.get("runtime_parameters"), dict):
                 runtime_parameters.update(task_graph.get("runtime_parameters") or {})
@@ -549,6 +692,11 @@ class AgentStudioService:
         else:
             result = await self.delegation_runtime.resume_task(run_payload, task_graph, participants, provided_inputs=provided_inputs)
         status = result.get("status", "completed")
+        if status == "completed":
+            try:
+                self.execution_reuse_store.register_success(task_graph=task_graph, participants=participants, run_payload=result)
+            except Exception:
+                pass
         response = {
             "action": "resume_task_graph",
             "origin": "auxiliary_brain",

@@ -1,18 +1,43 @@
-# cdac-nesthub 9.0 Session UI Fix2
+# cdac-nesthub 9.0
 
-This package contains the session UI runtime fixes.
+This package adds the session UI and the execution reuse layer.
 
-## Main fixes
+## Main additions
 
-- Fixed API startup error by importing `SessionMemoryStore` in `apps/api/server.py`.
-- Added screen-testable session operations: create session, list sessions, switch session, keep active `session_id`, feedback promotion, and context boundary warning.
-- Added runtime data reset script for clean local tests.
-- Removed generated runtime artifacts, Python caches, and old markdown changelog files from the package.
+- Left sidebar session UI: new session, session list, switch session, collapse sidebar.
+- Session persistence: structured conversation turns, summaries, feedback, and local memory.
+- Execution reuse registry:
+  - saves successful task / agent / artifact execution assets;
+  - reuses saved task assets on later executions;
+  - bypasses planning when a reusable artifact is available;
+  - asks only for missing runtime parameters when a saved parameter schema exists;
+  - exposes `context_trace` so the UI can confirm whether task registry, artifact registry, LLM, or planning was used.
+- Short answer cache for ephemeral chat that should not enter long-term memory.
+- Runtime reset script for clean UI testing.
 
-## Reset test data
+## Reset local test data
+
+```bash
+python scripts/reset_runtime_data.py --yes
+```
+
+To also remove runtime-generated artifacts, traces, checkpoints, and deliveries:
 
 ```bash
 python scripts/reset_runtime_data.py --yes --include-runtime-generated
 ```
 
-The script clears only runtime session/vector/generated test data under the project runtime directory. If `RUNTIME_POSTGRES_DSN` or `DATABASE_URL` is configured, it also truncates the runtime memory tables.
+## Confirm reuse behavior
+
+After a task succeeds once, execute the same task again. The response should include `context_trace` similar to:
+
+```json
+{
+  "task_registry": true,
+  "artifact_registry": true,
+  "planning_used": false,
+  "llm_used": false
+}
+```
+
+For LLM-generation agents, the second execution should reuse the saved task and parameter contract. It may still call the LLM to generate the final answer, but it should not recreate the agent or re-plan the task.
