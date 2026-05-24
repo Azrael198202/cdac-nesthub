@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from ai_core.config.paths import RUNTIME_SESSIONS
 from ai_core.runtime.environment.runtime_command_executor import RuntimeCommandExecutor
+from ai_core.context.execution_capability import ExecutionCapabilityResolver
 
 
 @dataclass
@@ -37,6 +38,7 @@ class ExecutionReuseStore:
         self.root = root or RUNTIME_SESSIONS
         self.root.mkdir(parents=True, exist_ok=True)
         self.sqlite_path = self.root / "execution_reuse.sqlite3"
+        self.capability_resolver = ExecutionCapabilityResolver()
         self._init_sqlite()
 
     def register_success(
@@ -143,41 +145,44 @@ class ExecutionReuseStore:
         return fields
 
     async def execute_reused_asset(self, *, asset: dict[str, Any], provided_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
-        mode = str(asset.get("execution_mode") or "")
-        paths = [p for p in asset.get("artifact_paths") or [] if isinstance(p, str) and p.strip()]
-        existing = [Path(p) for p in paths if Path(p).exists() and Path(p).suffix == ".py"]
-
-        # Backward-compatible self-healing: older registry rows could be saved
-        # as llm_generation even when a verified Python artifact was present.
-        # Artifact execution must win because it is deterministic and avoids
-        # needless model calls.
-        if existing:
-            path = existing[0]
-            result = await self._execute_python_artifact(path=path, asset=asset, provided_inputs=provided_inputs or {})
+        capability = self.capability_resolver.resolve(asset, provided_inputs or {})
+        if capability.mode == "executable_artifact" and capability.artifact_paths:
+            path = Path(capability.artifact_paths[0])
+            result = await self._execute_python_artifact(
+                path=path,
+                asset=asset,
+                provided_inputs=provided_inputs or {},
+                function_name=capability.callable_name,
+                capability_reason=capability.reason,
+            )
             self._mark_used(str(asset.get("task_name") or ""))
             return result
 
-        if mode == "llm_generation":
+        if capability.mode == "model_generation":
             generated = await self._execute_llm_generation(asset=asset, provided_inputs=provided_inputs or {})
             self._mark_used(str(asset.get("task_name") or ""))
             return generated
         return {
             "ok": False,
             "status": "fallback_required",
-            "execution_mode": mode or "agent_runtime",
-            "reason": "reusable_asset_requires_runtime_execution",
+            "execution_mode": capability.mode,
+            "reason": capability.reason,
+            "capability": capability.__dict__,
             "context_trace": {
                 "task_registry": True,
-                "artifact_registry": bool(asset.get("artifact_paths")),
-                "planning_used": False,
-                "llm_used": mode == "llm_generation",
+                "agent_registry": True,
+                "artifact_registry": bool(capability.artifact_paths),
+                "planning_used": capability.requires_planning,
+                "llm_used": capability.requires_model,
                 "reuse_asset_id": asset.get("asset_id"),
+                "capability_mode": capability.mode,
+                "capability_reason": capability.reason,
             },
         }
 
-    async def _execute_python_artifact(self, *, path: Path, asset: dict[str, Any], provided_inputs: dict[str, Any]) -> dict[str, Any]:
+    async def _execute_python_artifact(self, *, path: Path, asset: dict[str, Any], provided_inputs: dict[str, Any], function_name: str | None = None, capability_reason: str = "") -> dict[str, Any]:
         env = {"RUNTIME_INPUTS_JSON": json.dumps(provided_inputs or {}, ensure_ascii=False)}
-        function_name = self._select_artifact_function(path, provided_inputs)
+        function_name = function_name or self._select_artifact_function(path, provided_inputs)
         if function_name:
             runner = self._build_function_runner(path=path, function_name=function_name, provided_inputs=provided_inputs)
             command = [sys.executable, "-c", runner]
@@ -209,6 +214,8 @@ class ExecutionReuseStore:
                 "planning_used": False,
                 "llm_used": False,
                 "reuse_asset_id": asset.get("asset_id"),
+                "capability_mode": "executable_artifact",
+                "capability_reason": capability_reason or "verified_executable_artifact",
             },
         }
 
@@ -351,6 +358,18 @@ class ExecutionReuseStore:
                     query_key text primary key,
                     answer_json text not null,
                     updated_at text not null
+                )
+                """
+            )
+            con.execute(
+                """
+                create table if not exists repair_candidates(
+                    repair_id text primary key,
+                    task_name text not null,
+                    asset_id text not null,
+                    repair_json text not null,
+                    status text not null,
+                    created_at text not null
                 )
                 """
             )
@@ -518,6 +537,50 @@ class ExecutionReuseStore:
         text = str(query or "").strip().casefold()
         text = text.strip(" \t\r\n?.!。？！")
         return " ".join(text.split())
+
+    def record_repair_candidate(self, *, task_name: str | None, feedback: str, run_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Record user feedback as a generic self-repair candidate.
+
+        The runtime does not patch source code blindly. It stores the failing
+        asset/run evidence and the user's feedback so the next execution can
+        prefer verifiable repair paths or a human-approved regeneration flow.
+        """
+        target = str(task_name or "").strip()
+        asset = self.get_asset(target) if target else None
+        now = self._now()
+        record = {
+            "repair_id": "repair_" + uuid4().hex[:16],
+            "task_name": target,
+            "asset_id": (asset or {}).get("asset_id"),
+            "feedback": str(feedback or ""),
+            "run_id": str((run_payload or {}).get("run_id") or ""),
+            "status": "candidate",
+            "created_at": now,
+        }
+        with sqlite3.connect(self.sqlite_path) as con:
+            con.execute(
+                """
+                insert into repair_candidates(repair_id, task_name, asset_id, repair_json, status, created_at)
+                values(?, ?, ?, ?, ?, ?)
+                """,
+                (record["repair_id"], target, record.get("asset_id") or "", json.dumps(record, ensure_ascii=False), record["status"], now),
+            )
+        self._append_jsonl("repair_candidates.jsonl", record)
+        return record
+
+    def latest_repair_candidate(self, task_name: str) -> dict[str, Any] | None:
+        with sqlite3.connect(self.sqlite_path) as con:
+            row = con.execute(
+                "select repair_json from repair_candidates where task_name=? order by created_at desc limit 1",
+                (str(task_name or "").strip(),),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            data = json.loads(row[0] or "{}")
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()

@@ -365,14 +365,25 @@ class AgentStudioService:
             }
         latest_run = self._latest_run_for_task(target_task)
         if not latest_run:
+            repair_candidate = self.execution_reuse_store.record_repair_candidate(
+                task_name=target_task,
+                feedback=message,
+                run_payload={},
+            )
             return {
                 "action": "runtime_feedback",
                 "origin": "auxiliary_brain",
-                "status": "blocked",
+                "status": "recorded",
                 "task_name": target_task,
-                "message": "Feedback was recorded, but no previous run result was found to re-optimize.",
+                "message": "Feedback was recorded as a self-repair candidate, but no previous run result was found to re-optimize.",
                 "feedback": feedback,
+                "repair_candidate": repair_candidate,
             }
+        repair_candidate = self.execution_reuse_store.record_repair_candidate(
+            task_name=target_task,
+            feedback=message,
+            run_payload=latest_run,
+        )
         strategy = self.rerun_strategy.choose(feedback=feedback, run_payload=latest_run)
         if strategy.get("strategy") != "node_level_resynthesis":
             return {
@@ -380,9 +391,10 @@ class AgentStudioService:
                 "origin": "auxiliary_brain",
                 "status": "recorded",
                 "task_name": target_task,
-                "message": "Feedback was recorded.",
+                "message": "Feedback was recorded as a self-repair candidate.",
                 "feedback": feedback,
                 "strategy": strategy,
+                "repair_candidate": repair_candidate,
             }
         result = await self.delegation_runtime.reoptimize_result(
             run_payload=latest_run,
@@ -400,6 +412,7 @@ class AgentStudioService:
             "message": "Feedback was applied and the result was re-optimized with model escalation.",
             "feedback": feedback,
             "strategy": strategy,
+            "repair_candidate": repair_candidate,
             "final_answer": synthesis.get("final_answer"),
             "delivery": result.get("delivery"),
         }
