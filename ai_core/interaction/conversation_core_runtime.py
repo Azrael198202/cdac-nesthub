@@ -298,7 +298,7 @@ class ConversationCoreRuntime:
                 "knowledge_used": True,
                 "source": "runtime_knowledge",
             }
-        answer = await self._direct_answer(text, parsed, intent, plan, run_id)
+        answer = await self._direct_answer(text, parsed, intent, context, plan, run_id)
         return {
             "status": "completed",
             "execution_mode": "model_response",
@@ -356,7 +356,7 @@ class ConversationCoreRuntime:
             "user_facing": True,
         }
 
-    async def _direct_answer(self, text: str, parsed: dict[str, Any], intent: dict[str, Any], plan: dict[str, Any], run_id: str) -> str:
+    async def _direct_answer(self, text: str, parsed: dict[str, Any], intent: dict[str, Any], context: dict[str, Any], plan: dict[str, Any], run_id: str) -> str:
         schema = {
             "type": "object",
             "required": ["answer"],

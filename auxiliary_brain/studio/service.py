@@ -72,6 +72,13 @@ class AgentStudioService:
         if routed.action == "create_task":
             return self.create_task_graph(message, routed.name, uploaded_artifacts=uploaded_artifacts)
 
+        # If the message is exactly a known task name, treat it as an execution
+        # request. This keeps the UI natural: users can type `taskC` after
+        # creating it, without falling into ordinary chat or re-planning.
+        bare_task_name = self._resolve_bare_task_name(message)
+        if routed.action == "chat" and bare_task_name:
+            return await self.execute_task(bare_task_name, provided_inputs=provided_inputs, instruction=message)
+
         # Model-dependent paths must not enter the runtime if the selected
         # provider mode is impossible to satisfy. This prevents confusing late
         # failures such as input_parsing failing with "No real LLM provider is
@@ -190,6 +197,21 @@ class AgentStudioService:
             task_graph.setdefault("reuse_context", decision.asset)
             task_graph.setdefault("runtime_options", {})["reuse_asset_id"] = decision.asset.get("asset_id")
             return None
+        return None
+
+    def _resolve_bare_task_name(self, message: str) -> str | None:
+        text = str(message or "").strip().strip(" .,:;\"'")
+        if not text or len(text.split()) != 1:
+            return None
+        resolved = self._resolve_task_name(text)
+        if resolved:
+            return resolved
+        # Be tolerant of case-only differences in the visible task name.
+        lowered = text.casefold()
+        for graph in self.store.list_json("generated/tasks"):
+            name = str(graph.get("task_name") or graph.get("graph_id") or "").strip()
+            if name and name.casefold() == lowered:
+                return name
         return None
 
     def list_command_set(self) -> dict[str, Any]:

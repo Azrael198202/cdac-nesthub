@@ -97,7 +97,16 @@ function renderStudioResponse(data, originalText){
     addFinalAnswer(answer || '(no answer)', data.status==='blocked' ? 'item error' : 'item final');
     return;
   }
-  if(data && data.final_answer){ addFinalAnswer(data.final_answer, data.status==='completed' ? 'item final' : 'item error'); return; }
+  if(data && data.final_answer){
+    const ans=String(data.final_answer||'').trim();
+    if(ans.toLowerCase()==='thinking...' || ans.toLowerCase()==='thinking'){
+      addMessage('Execution is still running. Refreshing state...', 'item');
+      refreshState();
+      return;
+    }
+    addFinalAnswer(data.final_answer, data.status==='completed' ? 'item final' : 'item error');
+    return;
+  }
   const status = data && data.status ? String(data.status) : 'received';
   const action = data && data.action ? String(data.action) : 'runtime response';
   addMessage(`${action}: ${status}`, data && data.status==='completed' ? 'item' : 'item error');
@@ -829,10 +838,63 @@ async function refreshState(){ try{ const res=await fetch('/api/agent-studio/sta
 function renderState(data){
   const ps=data.participants||[]; document.getElementById('participantCount').textContent=ps.length; const pbox=document.getElementById('participants'); pbox.innerHTML=''; if(!ps.length)pbox.innerHTML='<div class="empty">No participant.</div>'; ps.forEach(p=>{ const el=document.createElement('div'); el.className='item'; el.innerHTML=`<b>${escapeHtml(p.name||p.participant_id)}</b><div class="small">${escapeHtml(p.participant_id||'')}</div><span class="pill">${escapeHtml(p.status||'created')}</span><span class="pill">delegate_to_ai_core</span><div class="path">${escapeHtml(p._path||'')}</div>`; pbox.appendChild(el); });
   const right=document.getElementById('rightPane'); const graphs=data.task_graphs||[]; const runs=data.task_runs||[]; const deliveries=data.deliveries||[]; const traces=data.traces||[]; document.getElementById('graphCount').textContent=graphs.length; right.innerHTML='';
-  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Task Graphs</div>'); if(!graphs.length) right.insertAdjacentHTML('beforeend','<div class="empty">No task graph.</div>'); graphs.forEach(g=>right.appendChild(compactJsonCard(g.task_name||g.graph_id, g)));
+  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Execution Flow</div>');
+  const latestRun = runs.length ? runs[0] : null;
+  if(latestRun){ right.appendChild(executionFlowCard(latestRun)); }
+  else if(graphs.length){ right.appendChild(taskGraphFlowCard(graphs[0])); }
+  else { right.insertAdjacentHTML('beforeend','<div class="empty">No execution flow yet.</div>'); }
+  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Task Graphs</div>'); if(!graphs.length) right.insertAdjacentHTML('beforeend','<div class="empty">No task graph.</div>'); graphs.forEach(g=>right.appendChild(taskGraphCard(g)));
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Delegation Runs</div>'); if(!runs.length) right.insertAdjacentHTML('beforeend','<div class="empty">No run.</div>'); runs.forEach(r=>right.appendChild(runCard(r)));
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Deliveries</div>'); if(!deliveries.length) right.insertAdjacentHTML('beforeend','<div class="empty">No delivery.</div>'); deliveries.forEach(d=>right.appendChild(deliveryCard(d)));
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Runtime Traces</div>'); if(!traces.length) right.insertAdjacentHTML('beforeend','<div class="empty">No trace.</div>'); traces.forEach(t=>right.appendChild(compactJsonCard(t.trace_id||'trace', t)));
+}
+
+function executionFlowCard(r){
+  const el=document.createElement('div');
+  el.className='item';
+  const events=Array.isArray(r.progress_events)?r.progress_events:[];
+  const ctx=r.context_trace || (r.reuse_execution&&r.reuse_execution.context_trace) || {};
+  el.innerHTML='<div class="cardHeader"><b>'+escapeHtml(r.task_name||r.run_id||'execution')+'</b><span class="pill">'+escapeHtml(r.status||'unknown')+'</span></div>';
+  if(ctx && Object.keys(ctx).length){
+    const ctxLine=document.createElement('div');
+    ctxLine.className='small';
+    ctxLine.textContent='Context hit: '+Object.keys(ctx).filter(k=>ctx[k]===true || k==='reuse_asset_id').map(k=>k+'='+ctx[k]).join(' / ');
+    el.appendChild(ctxLine);
+  }
+  if(events.length){
+    events.slice(-12).forEach(ev=>el.appendChild(progressLine(ev.label||ev.stage||'step', ev.status||'running')));
+  } else {
+    ['task lookup','participant lookup','execution','final answer'].forEach((name,idx)=>el.appendChild(progressLine(name, idx<2?'completed':(r.status==='completed'?'completed':'running'))));
+  }
+  return el;
+}
+
+function taskGraphFlowCard(g){
+  const el=document.createElement('div');
+  el.className='item';
+  el.innerHTML='<div class="cardHeader"><b>'+escapeHtml(g.task_name||g.graph_id||'task graph')+'</b><span class="pill">'+escapeHtml(g.status||'created')+'</span></div>';
+  ['task graph created','waiting for execution'].forEach((name,idx)=>el.appendChild(progressLine(name, idx===0?'completed':'waiting')));
+  return el;
+}
+
+function progressLine(label, status){
+  const line=document.createElement('div');
+  const cls=status==='completed'?'done':(status==='waiting'?'wait':'');
+  line.className='progressLine';
+  line.innerHTML='<span class="progressDot '+cls+'"></span><span>'+escapeHtml(label)+'</span><span class="small">'+escapeHtml(status||'running')+'</span>';
+  return line;
+}
+
+function taskGraphCard(g){
+  const el=compactJsonCard(g.task_name||g.graph_id, g);
+  const selected=Array.isArray(g.selected_participant_ids)?g.selected_participant_ids:[];
+  if(selected.length){
+    const info=document.createElement('div');
+    info.className='small';
+    info.textContent='Selected participants: '+selected.join(', ');
+    el.insertBefore(info, el.querySelector('details'));
+  }
+  return el;
 }
 
 function collectMissingInputs(payload){
@@ -922,6 +984,10 @@ function runCard(r){
   el.appendChild(header);
   const stage=String(r.current_stage||'');
   if(stage){ const stageEl=document.createElement('div'); stageEl.className='small'; stageEl.textContent='Current stage: '+stage; el.appendChild(stageEl); }
+  const ctx=r.context_trace || (r.reuse_execution&&r.reuse_execution.context_trace) || {};
+  if(ctx && Object.keys(ctx).length){ const ctxEl=document.createElement('div'); ctxEl.className='small'; ctxEl.textContent='Context trace: '+Object.keys(ctx).map(k=>k+'='+ctx[k]).join(' / '); el.appendChild(ctxEl); }
+  const finalText=(r.synthesis&&r.synthesis.final_answer) || r.final_answer || '';
+  if(finalText){ const ans=document.createElement('div'); ans.className='answerText'; ans.innerHTML=formatAnswerHtml(finalText); el.appendChild(ans); }
   const derivedInputs=deriveMissingInputs(r);
   if(derivedInputs.length){
     const resolve=document.createElement('button');
