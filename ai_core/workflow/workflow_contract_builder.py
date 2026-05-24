@@ -318,13 +318,45 @@ class WorkflowContractBuilder:
                 extracted = self.extract_execution_decision(value)
                 if extracted.get("selected_action_type"):
                     return extracted
-        selected = "ask_user"
+        selected = self.default_action_from_structural_context(state=state, result=result)
         ranked = []
         for i, item in enumerate(fixed_options_for_prompt()):
             priority = 1 if item["action_type"] == selected else i + 2
-            ranked.append({**item, "priority": priority, "reason": "planner did not provide a valid fixed action; request action clarification instead of guessing execution"})
+            reason = "selected by structural fallback after planner did not return one fixed action"
+            ranked.append({**item, "priority": priority, "reason": reason})
         ranked.sort(key=lambda x: int(x["priority"]))
-        return {"selected_action_type": selected, "selected_execution_method": method_for_action(selected), "ranked_options": ranked, "selection_rules": list(SELECTION_RULES)}
+        return {"selected_action_type": selected, "selected_execution_method": method_for_action(selected), "ranked_options": ranked, "selection_rules": list(SELECTION_RULES), "decision_source": "structural_fallback"}
+
+    def default_action_from_structural_context(self, *, state: dict[str, Any], result: dict[str, Any]) -> str:
+        """Choose a safe fixed action using only generic runtime structure.
+
+        This is intentionally domain-neutral.  It does not inspect business
+        words.  It only checks whether more user input is structurally missing,
+        whether an uploaded/local artifact is explicitly available as an
+        execution method, and whether planner output contains executor-facing
+        material that can be turned into a content-generation contract.
+        """
+        if self.has_missing_required_input(state=state, result=result):
+            return "ask_user"
+        if self.referenced_artifacts_for_state(state, ""):
+            return "use_uploaded_file"
+        if self.extract_execution_instruction(result):
+            return "llm_generate"
+        known = self.collect_known_parameters(state)
+        if known:
+            return "llm_generate"
+        return "ask_user"
+
+    def has_missing_required_input(self, *, state: dict[str, Any], result: dict[str, Any]) -> bool:
+        for container in (result, state.get("results") if isinstance(state.get("results"), dict) else {}):
+            for candidate in self.iter_nested_dicts(container, max_depth=6):
+                for key in ("missing_required", "missing_information", "blocking_missing_information", "missing_fields"):
+                    value = candidate.get(key) if isinstance(candidate, dict) else None
+                    if isinstance(value, dict) and any(v not in (None, "", [], {}) for v in value.values()):
+                        return True
+                    if isinstance(value, list) and any(v not in (None, "", [], {}) for v in value):
+                        return True
+        return False
 
     def default_step(self, *, state: dict[str, Any], result: dict[str, Any], decision: dict[str, Any], slim_user_input: str) -> dict[str, Any]:
         known = self.collect_known_parameters(state)
