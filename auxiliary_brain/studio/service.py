@@ -38,7 +38,7 @@ class AgentStudioService:
         self.store.ensure_workspace()
         self.community_id = self._ensure_community()
 
-    async def handle_message(self, message: str, provided_inputs: dict[str, Any] | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    async def handle_message(self, message: str, provided_inputs: dict[str, Any] | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None, session_id: str | None = None) -> dict[str, Any]:
         routed = self.router.route(message)
         if routed.action == "list_command_set":
             return self.list_command_set()
@@ -69,7 +69,7 @@ class AgentStudioService:
         feedback = self.feedback_classifier.classify(message, fallback_target=self._latest_task_name())
         if feedback.get("matched"):
             return await self.handle_feedback(message, feedback.get("target_task"))
-        return await self.natural_conversation.reply(message, latest_task=self._latest_task_name())
+        return await self.natural_conversation.reply(message, latest_task=self._latest_task_name(), session_id=session_id)
 
     def list_command_set(self) -> dict[str, Any]:
         payload = self.command_set_service.list_commands()

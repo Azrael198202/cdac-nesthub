@@ -24,7 +24,7 @@ class NaturalConversationService:
         self.model_selection = UserModelSelectionStore()
         self.core_runtime = ConversationCoreRuntime()
 
-    async def reply(self, message: str, *, latest_task: str | None = None) -> dict[str, Any]:
+    async def reply(self, message: str, *, latest_task: str | None = None, session_id: str | None = None) -> dict[str, Any]:
         text = str(message or "").strip()
         if not text:
             answer = "可以。请直接输入问题、说明、写作要求，或使用明确指令创建智能体、创建任务、执行任务。"
@@ -34,7 +34,7 @@ class NaturalConversationService:
         # delegated as an agent/task, but it is parsed, classified, planned,
         # executed, and finalized through generic runtime stages.
         try:
-            result = await self.core_runtime.run(text, latest_task=latest_task)
+            result = await self.core_runtime.run(text, latest_task=latest_task, session_id=session_id)
             if isinstance(result, dict) and (result.get("final_answer") or result.get("message")):
                 return result
         except Exception:

@@ -7,6 +7,8 @@ import json
 import re
 
 from ai_core.config.paths import RUNTIME_TRACES
+from ai_core.context.session_memory_store import SessionMemoryStore
+from ai_core.context.vector_memory_store import VectorMemoryStore
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.llm.provider_router import ProviderRouter
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
@@ -25,13 +27,25 @@ class ConversationCoreRuntime:
         self.router = ProviderRouter()
         self.knowledge = KnowledgeService()
         self.model_selection = UserModelSelectionStore()
+        self.sessions = SessionMemoryStore()
+        self.vector_memory = VectorMemoryStore()
 
-    async def run(self, message: str, *, latest_task: str | None = None) -> dict[str, Any]:
+    async def run(self, message: str, *, latest_task: str | None = None, session_id: str | None = None) -> dict[str, Any]:
         run_id = "conversation_core_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+        active_session_id = self.sessions.start_or_get_session(session_id, metadata={"latest_task": latest_task or ""})
+        context_window = self.sessions.load_context_window(active_session_id)
         state: dict[str, Any] = {
             "run_id": run_id,
+            "session_id": active_session_id,
             "input": str(message or ""),
             "latest_task": latest_task,
+            "session_id": active_session_id,
+            "context_window": {
+                "rolling_summary": context_window.rolling_summary,
+                "recent_turns": context_window.recent_turns,
+                "open_items": context_window.open_items,
+                "boundary": context_window.boundary,
+            },
             "results": {},
             "progress_events": [],
         }
@@ -47,7 +61,7 @@ class ConversationCoreRuntime:
         self._event(state, "intent_recognition", "completed")
 
         self._event(state, "context_awareness", "running")
-        context = self._context_awareness(state["input"], intent)
+        context = self._context_awareness(state["input"], intent, state.get("context_window", {}))
         state["results"]["context_awareness"] = context
         self._event(state, "context_awareness", "completed")
 
@@ -66,8 +80,10 @@ class ConversationCoreRuntime:
         state["results"]["output"] = output
         self._event(state, "output", "completed")
 
-        self._write_trace(state)
         final_answer = str(output.get("final_answer") or output.get("message") or "").strip()
+        self._persist_conversation_turn(active_session_id, run_id, state["input"], final_answer, state.get("results", {}))
+        state["session_boundary"] = self.sessions.boundary_status(active_session_id)
+        self._write_trace(state)
         return {
             "action": "conversation_message",
             "origin": "ai_core",
@@ -79,8 +95,17 @@ class ConversationCoreRuntime:
             "knowledge_used": bool(execution.get("knowledge_used")),
             "knowledge_status": context.get("knowledge_status", {}),
             "latest_task": latest_task,
+            "session_id": active_session_id,
+            "context_window": {
+                "rolling_summary": context_window.rolling_summary,
+                "recent_turns": context_window.recent_turns,
+                "open_items": context_window.open_items,
+                "boundary": context_window.boundary,
+            },
             "workflow_results": state["results"],
             "progress_events": state["progress_events"],
+            "session_boundary": state.get("session_boundary", {}),
+            "evaluation_prompt": "请评价本次回答质量。优质结果可以沉淀为本地经验。",
             "user_facing": True,
         }
 
@@ -155,12 +180,18 @@ class ConversationCoreRuntime:
             fallback=fallback,
         )
 
-    def _context_awareness(self, text: str, intent: dict[str, Any]) -> dict[str, Any]:
+    def _context_awareness(self, text: str, intent: dict[str, Any], context_window: dict[str, Any] | None = None) -> dict[str, Any]:
         kb = self.knowledge.answer_from_knowledge(text)
+        vector_hits = self.vector_memory.search(text, limit=5, usage_scope="retrieval_context")
         return {
             "knowledge_available": bool(kb),
             "knowledge_answer": kb if kb else None,
             "knowledge_status": self.knowledge.status(),
+            "session_context": context_window or {},
+            "retrieved_context": [
+                {"text": str(item.get("text") or "")[:1200], "score": item.get("score"), "metadata": item.get("metadata", {})}
+                for item in vector_hits
+            ],
             "upstream_refs": ["input_parsing", "intent_recognition"],
             "intent_type": intent.get("intent_type"),
         }
@@ -235,6 +266,8 @@ class ConversationCoreRuntime:
             "context_summary": {
                 "knowledge_available": context.get("knowledge_available"),
                 "knowledge_status": context.get("knowledge_status"),
+                "session_context": context.get("session_context", {}),
+                "retrieved_context": context.get("retrieved_context", []),
             },
             "user_message": text,
         }
@@ -343,6 +376,8 @@ class ConversationCoreRuntime:
             "parsed": parsed,
             "intent": intent,
             "plan": plan,
+            "session_context": context.get("session_context", {}) if isinstance(context, dict) else {},
+            "retrieved_context": context.get("retrieved_context", []) if isinstance(context, dict) else [],
         }
         result = await self._json_stage(
             run_id,
@@ -393,6 +428,36 @@ class ConversationCoreRuntime:
         out["_node_id"] = node_id
         out["_fallback_reason"] = "empty_or_invalid_model_result"
         return out
+
+    def _persist_conversation_turn(self, session_id: str, run_id: str, user_input: str, final_answer: str, results: dict[str, Any]) -> None:
+        try:
+            self.sessions.append_turn(
+                session_id=session_id,
+                run_id=run_id,
+                user_input=user_input,
+                final_answer=final_answer,
+                stage_results=results,
+                metadata={"source": "conversation_core"},
+            )
+            compact = self._compact_summary_text(user_input, final_answer)
+            self.sessions.save_summary(
+                session_id=session_id,
+                summary_text=compact,
+                open_items=[],
+                source_run_id=run_id,
+            )
+            self.vector_memory.add_text(
+                text=compact,
+                metadata={"session_id": session_id, "run_id": run_id},
+                memory_type="conversation_summary",
+                usage_scope="retrieval_context",
+            )
+        except Exception:
+            pass
+
+    def _compact_summary_text(self, user_input: str, final_answer: str, *, max_chars: int = 1600) -> str:
+        text = "User input:\n" + str(user_input or "").strip() + "\n\nFinal answer:\n" + str(final_answer or "").strip()
+        return text[:max_chars]
 
     def _event(self, state: dict[str, Any], stage: str, status: str) -> None:
         state.setdefault("progress_events", []).append({

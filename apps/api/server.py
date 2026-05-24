@@ -26,17 +26,27 @@ runtime = WorkflowRuntime()
 studio_service = AgentStudioService()
 bootstrap_service = RuntimeBootstrapService()
 model_selection_store = UserModelSelectionStore()
+session_store = SessionMemoryStore()
 
 
 class ChatRequest(BaseModel):
     message: str
     local_model: str | None = None
+    session_id: str | None = None
+
+
+class ConversationFeedbackRequest(BaseModel):
+    session_id: str
+    run_id: str
+    rating: str
+    note: str | None = None
 
 
 class AgentStudioRequest(BaseModel):
     message: str
     provided_inputs: dict[str, Any] | None = None
     uploaded_artifacts: list[dict[str, Any]] | None = None
+    session_id: str | None = None
 
 
 class AgentStudioSecretRequest(BaseModel):
@@ -282,6 +292,29 @@ async def agent_studio_command_set_update(req: CommandSetUpdateRequest):
     return JSONResponse(payload)
 
 
+
+
+@app.get("/api/agent-studio/sessions")
+async def agent_studio_sessions(limit: int = 50):
+    return JSONResponse({"ok": True, "sessions": session_store.list_sessions(limit=limit)})
+
+
+@app.post("/api/agent-studio/sessions")
+async def agent_studio_create_session(payload: dict[str, Any] | None = None):
+    meta = payload if isinstance(payload, dict) else {}
+    sid = session_store.start_or_get_session(None, metadata={"title": str(meta.get("title") or "New session")})
+    return JSONResponse({"ok": True, "session_id": sid, "session": session_store.get_session_snapshot(sid)})
+
+
+@app.get("/api/agent-studio/sessions/{session_id}")
+async def agent_studio_session_snapshot(session_id: str, limit: int = 20):
+    return JSONResponse({"ok": True, "session": session_store.get_session_snapshot(session_id, limit=limit)})
+
+
+@app.post("/api/agent-studio/sessions/{session_id}/rename")
+async def agent_studio_rename_session(session_id: str, payload: dict[str, Any]):
+    return JSONResponse({"ok": True, "session": session_store.rename_session(session_id, str(payload.get("title") or ""))})
+
 @app.get("/api/agent-studio/state")
 async def agent_studio_state():
     return JSONResponse(studio_service.snapshot())
@@ -290,7 +323,21 @@ async def agent_studio_state():
 @app.post("/api/agent-studio/message")
 async def agent_studio_message(req: AgentStudioRequest):
     try:
-        payload = await studio_service.handle_message(req.message, provided_inputs=req.provided_inputs, uploaded_artifacts=req.uploaded_artifacts)
+        active_session_id = session_store.start_or_get_session(req.session_id, metadata={"surface": "agent_studio"})
+        payload = await studio_service.handle_message(req.message, provided_inputs=req.provided_inputs, uploaded_artifacts=req.uploaded_artifacts, session_id=active_session_id)
+        if isinstance(payload, dict):
+            payload.setdefault("session_id", active_session_id)
+            final_answer = str(payload.get("final_answer") or payload.get("message") or payload.get("status") or "")
+            if final_answer.strip():
+                session_store.append_turn(
+                    session_id=active_session_id,
+                    run_id=str(payload.get("run_id") or payload.get("resumed_from_run_id") or payload.get("task_name") or "studio_run"),
+                    user_input=req.message,
+                    final_answer=final_answer,
+                    stage_results={"agent_studio_payload": payload},
+                    metadata={"action": str(payload.get("action") or "")},
+                )
+                payload["session_boundary"] = session_store.boundary_status(active_session_id)
         return JSONResponse(payload)
     except Exception as exc:
         return JSONResponse(
@@ -332,8 +379,37 @@ async def version():
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
     run_id, state = await runtime.prepare(req.message, local_model=req.local_model)
+    state["session_id"] = req.session_id or state.get("session_id")
     asyncio.create_task(runtime.run_prepared(state))
     return {"run_id": run_id}
+
+
+@app.post("/api/conversation/feedback")
+async def conversation_feedback(req: ConversationFeedbackRequest):
+    from ai_core.context.session_memory_store import SessionMemoryStore
+    from ai_core.context.vector_memory_store import VectorMemoryStore
+
+    store = SessionMemoryStore()
+    record = store.record_feedback(
+        session_id=req.session_id,
+        run_id=req.run_id,
+        rating=req.rating,
+        note=req.note or "",
+    )
+    promoted = False
+    if str(req.rating or "").strip().lower() in {"good", "great", "excellent", "useful", "優良", "高品質", "好"}:
+        window = store.load_context_window(req.session_id, limit=3)
+        text = window.rolling_summary or "\n".join(
+            [str(t.get("user_input", "")) + "\n" + str(t.get("final_answer", "")) for t in window.recent_turns]
+        )
+        VectorMemoryStore().add_text(
+            text=text,
+            metadata={"session_id": req.session_id, "run_id": req.run_id, "feedback_id": record.get("feedback_id")},
+            memory_type="approved_conversation_pattern",
+            usage_scope="retrieval_context",
+        )
+        promoted = True
+    return JSONResponse({"ok": True, "feedback": record, "promoted_to_local_memory": promoted})
 
 
 @app.post("/api/resume")
