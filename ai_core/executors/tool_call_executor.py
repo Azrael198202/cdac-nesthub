@@ -2475,7 +2475,7 @@ class ToolCallExecutor:
         try:
             generated = await self.provider_router.generate_json(
                 run_id=run_id,
-                node_id="execution",
+                node_id="content_generation_execution",
                 adapter={
                     "adapter_id": "content_generation_execution_adapter",
                     "provider_route": ["ollama", "openai"],

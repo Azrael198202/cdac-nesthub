@@ -101,8 +101,11 @@ class AgentParameterContractService:
                 timeout=55,
             )
             normalized = self._normalize_contract_result(result, source="runtime_llm")
-            if not normalized.get("parameters") and self._looks_like_open_capability(execution_objective or definition_instruction):
-                return self._fallback_contract_for_objective(execution_objective or definition_instruction, source="runtime_llm_empty")
+            objective_text = execution_objective or definition_instruction
+            if not normalized.get("parameters") and self._looks_like_open_capability(objective_text):
+                return self._fallback_contract_for_objective(objective_text, source="runtime_llm_empty")
+            if self._looks_like_content_output_capability(objective_text):
+                normalized = self._ensure_content_output_contract_shape(normalized, source="runtime_llm_enriched")
             return normalized
         except Exception as exc:
             # Safe fallback: keep source/config free of domain-specific slots.
@@ -153,18 +156,68 @@ class AgentParameterContractService:
         task_input field. Other open capabilities keep the generic field.
         """
         if self._looks_like_content_output_capability(text):
-            parameters = [
-                self._parameter_record(name="subject", label="Subject", description="Main subject or request to produce.", required=True, values=[]),
-                self._parameter_record(name="size_constraint", label="Size constraint", description="Required size, amount, or length constraint if any.", required=False, values=[]),
-                self._parameter_record(name="style_constraint", label="Style constraint", description="Requested tone, style, or format constraint if any.", required=False, values=[]),
-                self._parameter_record(name="audience_context", label="Audience context", description="Target reader, user, or recipient context if any.", required=False, values=[]),
-                self._parameter_record(name="output_language", label="Output language", description="Language for the final output if specified.", required=False, values=[]),
-                self._parameter_record(name="source_policy", label="Source policy", description="Whether references, evidence, or citations are required.", required=False, values=[]),
-            ]
-            contract = {"contract_type": "agent_parameter_contract", "source": source, "parameters": parameters}
+            contract = {"contract_type": "agent_parameter_contract", "source": source, "parameters": self._content_output_parameters()}
             contract["missing_information"] = self.missing_parameters({"parameter_contract": contract})
             return contract
         return self._open_capability_fallback_contract(source=source)
+
+
+    def _content_output_parameters(self) -> list[dict[str, Any]]:
+        """Generic parameter shape for user-facing content deliverables.
+
+        These slots describe output constraints, not any business domain. They
+        keep open-ended content agents from collapsing to one opaque input and
+        give the UI enough fields for repeatable execution.
+        """
+        return [
+            self._parameter_record(name="subject", label="Subject", description="Main subject or request to produce.", required=True, values=[]),
+            self._parameter_record(name="size_constraint", label="Size constraint", description="Required size, amount, or length constraint.", required=True, values=[]),
+            self._parameter_record(name="style_constraint", label="Style constraint", description="Requested tone, style, or output format.", required=True, values=[]),
+            self._parameter_record(name="audience_context", label="Audience context", description="Target reader, user, or recipient context.", required=True, values=[]),
+            self._parameter_record(name="output_language", label="Output language", description="Language for the final output.", required=False, values=[]),
+            self._parameter_record(name="source_policy", label="Source policy", description="Whether references, evidence, or citations are required.", required=True, values=[]),
+        ]
+
+    def _ensure_content_output_contract_shape(self, contract: dict[str, Any], *, source: str) -> dict[str, Any]:
+        """Enrich sparse model-inferred contracts for content output agents.
+
+        The model may return only a single vague field. For reusable agents that
+        produce user-facing content, a minimal output-constraint contract is more
+        reliable and still domain-neutral. Existing explicit model fields/values
+        are preserved and generic missing constraint slots are appended.
+        """
+        if not isinstance(contract, dict):
+            contract = {}
+        params = contract.get("parameters") if isinstance(contract.get("parameters"), list) else []
+        generic = self._content_output_parameters()
+        existing_by_name = {str(p.get("name") or "").casefold(): p for p in params if isinstance(p, dict)}
+        vague_names = {"task_input", "input", "subject", "request"}
+        sparse = len(params) < 3 or all(str(p.get("name") or "").casefold() in vague_names for p in params if isinstance(p, dict))
+        if not sparse:
+            contract["missing_information"] = self.missing_parameters({"parameter_contract": contract})
+            return contract
+        merged: list[dict[str, Any]] = []
+        used: set[str] = set()
+        for gp in generic:
+            name = str(gp.get("name") or "").casefold()
+            existing = existing_by_name.get(name)
+            if existing:
+                updated = dict(gp)
+                updated.update({k: v for k, v in existing.items() if v not in (None, "", [], {}) or k == "values"})
+                merged.append(updated)
+            else:
+                merged.append(gp)
+            used.add(name)
+        for p in params:
+            name = str(p.get("name") or "").casefold()
+            if name and name not in used:
+                merged.append(p)
+                used.add(name)
+        enriched = dict(contract)
+        enriched["source"] = source
+        enriched["parameters"] = merged
+        enriched["missing_information"] = self.missing_parameters({"parameter_contract": enriched})
+        return enriched
 
     def _looks_like_content_output_capability(self, text: str) -> bool:
         normalized = re.sub(r"\s+", " ", str(text or "").strip().casefold())

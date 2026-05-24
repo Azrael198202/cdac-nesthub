@@ -969,16 +969,49 @@ class AgentDelegationRuntime:
     def _select_participants(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not participants:
             return []
-        text = (str(task_graph.get("instruction") or "") + " " + str(task_graph.get("task_name") or "")).lower()
+        text = (str(task_graph.get("instruction") or "") + " " + str(task_graph.get("task_name") or "")).casefold()
         selected = []
         for participant in participants:
-            name = str(participant.get("name") or "").lower()
-            pid = str(participant.get("participant_id") or participant.get("id") or "").lower()
+            name = str(participant.get("name") or participant.get("agent_name") or "").casefold()
+            pid = str(participant.get("participant_id") or participant.get("id") or "").casefold()
             if name and name in text:
                 selected.append(participant)
             elif pid and pid in text:
                 selected.append(participant)
-        return selected or participants
+        return self._dedupe_participants_for_execution(selected or participants)
+
+    def _dedupe_participants_for_execution(self, participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Keep one participant per reusable capability identity.
+
+        Duplicate agent profiles can appear after repeated create-agent commands.
+        Execution should not run identical participants twice for one task. This
+        uses generic identity fields only and prefers the most recently created
+        profile so the latest parameter contract/artifact binding wins.
+        """
+        chosen: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for participant in participants:
+            if not isinstance(participant, dict):
+                continue
+            key = self._participant_reuse_key(participant)
+            if not key:
+                key = str(participant.get("participant_id") or participant.get("id") or len(order))
+            existing = chosen.get(key)
+            if existing is None:
+                chosen[key] = participant
+                order.append(key)
+                continue
+            if str(participant.get("created_at") or "") >= str(existing.get("created_at") or ""):
+                chosen[key] = participant
+        return [chosen[k] for k in order if k in chosen]
+
+    def _participant_reuse_key(self, participant: dict[str, Any]) -> str:
+        name = str(participant.get("name") or participant.get("agent_name") or participant.get("display_name") or "").strip().casefold()
+        objective = str(participant.get("execution_objective") or participant.get("instruction") or "").strip().casefold()
+        objective = re.sub(r"\s+", " ", objective)[:180]
+        artifacts = participant.get("uploaded_artifacts") if isinstance(participant.get("uploaded_artifacts"), list) else []
+        artifact_sig = ",".join(sorted(str(a.get("artifact_id") or a.get("path") or a.get("filename") or "") for a in artifacts if isinstance(a, dict)))
+        return "|".join(part for part in (name, objective, artifact_sig) if part)
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()

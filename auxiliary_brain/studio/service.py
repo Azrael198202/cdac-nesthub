@@ -1093,16 +1093,41 @@ class AgentStudioService:
     def _select_participants_for_instruction(self, instruction: str, participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not participants:
             return []
-        text = instruction.lower()
+        text = instruction.casefold()
         selected = []
         for participant in participants:
-            name = str(participant.get("name") or "").lower()
-            pid = str(participant.get("participant_id") or "").lower()
+            name = str(participant.get("name") or participant.get("agent_name") or "").casefold()
+            pid = str(participant.get("participant_id") or "").casefold()
             if name and name in text:
                 selected.append(participant)
             elif pid and pid in text:
                 selected.append(participant)
-        return selected or participants
+        return self._dedupe_selected_participants(selected or participants)
+
+    def _dedupe_selected_participants(self, participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        chosen: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for participant in participants:
+            if not isinstance(participant, dict):
+                continue
+            key = self._participant_reuse_key(participant)
+            if not key:
+                key = str(participant.get("participant_id") or len(order))
+            current = chosen.get(key)
+            if current is None:
+                chosen[key] = participant
+                order.append(key)
+            elif str(participant.get("created_at") or "") >= str(current.get("created_at") or ""):
+                chosen[key] = participant
+        return [chosen[k] for k in order if k in chosen]
+
+    def _participant_reuse_key(self, participant: dict[str, Any]) -> str:
+        name = str(participant.get("name") or participant.get("agent_name") or participant.get("display_name") or "").strip().casefold()
+        objective = str(participant.get("execution_objective") or participant.get("instruction") or "").strip().casefold()
+        objective = re.sub(r"\s+", " ", objective)[:180]
+        artifacts = participant.get("uploaded_artifacts") if isinstance(participant.get("uploaded_artifacts"), list) else []
+        artifact_sig = ",".join(sorted(str(a.get("artifact_id") or a.get("path") or a.get("filename") or "") for a in artifacts if isinstance(a, dict)))
+        return "|".join(part for part in (name, objective, artifact_sig) if part)
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
