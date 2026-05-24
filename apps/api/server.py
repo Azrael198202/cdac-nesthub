@@ -18,6 +18,7 @@ from ai_core.events.event_bus import event_bus
 from auxiliary_brain.studio import AgentStudioService
 from ai_core.runtime.bootstrap import RuntimeBootstrapService
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
+from ai_core.context.session_memory_store import SessionMemoryStore
 
 import traceback
 approval_learning = ApprovalLearningService()
@@ -373,7 +374,7 @@ async def agent_studio_resume_run(req: AgentStudioResumeRunRequest):
 
 @app.get("/api/version")
 async def version():
-    return JSONResponse({"version": "v9.0-session-ui-fix2", "name": "session-ui-runtime"})
+    return JSONResponse({"version": "v9.0-session-ui-fix3", "name": "session-ui-runtime"})
 
 
 @app.post("/api/chat")
