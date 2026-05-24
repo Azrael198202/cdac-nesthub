@@ -14,6 +14,7 @@ import io
 import contextlib
 import re
 from pathlib import Path
+from ai_core.runtime.generated_execution.source_safety import write_bounded_python_copy
 from typing import Any
 from datetime import datetime, timezone
 
@@ -1994,8 +1995,8 @@ class ToolCallExecutor:
                     "answer_material": answer_material,
                     "artifact_path": str(artifact_path),
                     "source_code": source_code,
-                    "stdout": stdout,
-                    "stderr": stderr,
+                    "stdout": self._normalize_generated_process_output(stdout),
+                    "stderr": self._normalize_generated_process_output(stderr),
                     "returncode": execution.get("returncode"),
                     "timed_out": execution.get("timed_out", False),
                     "bounded_by_runtime": execution.get("bounded_by_runtime", False),
@@ -2216,6 +2217,31 @@ class ToolCallExecutor:
         artifact_path.write_text(source_code, encoding="utf-8")
         return artifact_path
 
+    def _normalize_generated_process_output(self, text: str, *, max_lines: int = 12, max_chars: int = 2000) -> str:
+        raw = str(text or "")
+        if not raw.strip():
+            return ""
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        if not lines:
+            lines = [raw.strip()]
+        compact: list[str] = []
+        skipped_repeats = 0
+        previous = None
+        for line in lines:
+            if line == previous:
+                skipped_repeats += 1
+                continue
+            previous = line
+            compact.append(line)
+            if len(compact) >= max_lines:
+                break
+        result = "\n".join(compact)
+        if skipped_repeats:
+            result += f"\n...[{skipped_repeats} repeated output lines compacted]"
+        if len(result) > max_chars:
+            result = result[:max_chars].rstrip() + " ...[truncated]"
+        return result
+
     def _execute_python_artifact(self, artifact_path: Path) -> dict[str, Any]:
         dependency_records: list[dict[str, Any]] = []
         try:
@@ -2232,9 +2258,10 @@ class ToolCallExecutor:
             return str(value)
 
         def run_once() -> subprocess.CompletedProcess[str]:
+            executable_path = write_bounded_python_copy(artifact_path)
             return subprocess.run(
-                [sys.executable, "-u", str(artifact_path)],
-                cwd=str(artifact_path.parent),
+                [sys.executable, "-u", str(executable_path)],
+                cwd=str(executable_path.parent),
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -2251,8 +2278,8 @@ class ToolCallExecutor:
                     completed = run_once()
             return {
                 "returncode": completed.returncode,
-                "stdout": completed.stdout,
-                "stderr": completed.stderr,
+                "stdout": self._normalize_generated_process_output(completed.stdout),
+                "stderr": self._normalize_generated_process_output(completed.stderr),
                 "dependencies": dependency_records,
                 "timed_out": False,
             }
@@ -2262,8 +2289,8 @@ class ToolCallExecutor:
             if stdout.strip():
                 return {
                     "returncode": 0,
-                    "stdout": stdout,
-                    "stderr": stderr,
+                    "stdout": self._normalize_generated_process_output(stdout),
+                    "stderr": self._normalize_generated_process_output(stderr),
                     "dependencies": dependency_records,
                     "timed_out": True,
                     "bounded_by_runtime": True,
@@ -2271,8 +2298,8 @@ class ToolCallExecutor:
                 }
             return {
                 "returncode": -1,
-                "stdout": stdout,
-                "stderr": stderr or str(exc),
+                "stdout": self._normalize_generated_process_output(stdout),
+                "stderr": self._normalize_generated_process_output(stderr or str(exc)),
                 "dependencies": dependency_records,
                 "timed_out": True,
                 "bounded_by_runtime": True,

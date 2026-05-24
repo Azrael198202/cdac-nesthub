@@ -191,12 +191,34 @@ class AgentStudioService:
                     "final_answer": final_answer,
                     "context_trace": reused.get("context_trace"),
                 }
-            # Reuse asset exists but cannot be executed directly; keep the normal
-            # runtime path while reporting that planning should remain bypassed
-            # where the downstream runtime can honor the saved contracts.
-            task_graph.setdefault("reuse_context", decision.asset)
-            task_graph.setdefault("runtime_options", {})["reuse_asset_id"] = decision.asset.get("asset_id")
-            return None
+            # A direct reuse asset was selected and execution was attempted.
+            # Do not silently fall back to full planning on execution failure,
+            # because that hides reusable-asset defects and makes repeated runs
+            # look like first-time executions.  Return the failure with trace so
+            # the repair layer or user feedback can fix the reusable asset.
+            run_id = new_id("delegation_run")
+            final_answer = reused.get("final_answer") or reused.get("stderr") or reused.get("reason") or "Reusable execution failed."
+            payload = {
+                "run_id": run_id,
+                "origin": "auxiliary_brain",
+                "status": "failed",
+                "task_name": task_name,
+                "current_stage": "reuse_execution_failed",
+                "synthesis": {"status": "failed", "final_answer": final_answer},
+                "reuse_execution": reused,
+                "completed_at": self._now(),
+                "context_trace": reused.get("context_trace"),
+            }
+            self.store.write_json(f"generated/results/{run_id}.json", payload)
+            return {
+                "action": "execute_task_graph",
+                "origin": "auxiliary_brain",
+                "status": "failed",
+                "task_name": task_name,
+                "run_id": run_id,
+                "final_answer": final_answer,
+                "context_trace": reused.get("context_trace"),
+            }
         return None
 
     def _resolve_bare_task_name(self, message: str) -> str | None:

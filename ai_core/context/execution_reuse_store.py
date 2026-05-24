@@ -4,6 +4,8 @@ import ast
 import json
 import os
 import sqlite3
+import subprocess
+import tempfile
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -13,6 +15,7 @@ from uuid import uuid4
 
 from ai_core.config.paths import RUNTIME_SESSIONS
 from ai_core.runtime.environment.runtime_command_executor import RuntimeCommandExecutor
+from ai_core.runtime.generated_execution.source_safety import write_bounded_python_copy
 from ai_core.context.execution_capability import ExecutionCapabilityResolver
 
 
@@ -185,28 +188,30 @@ class ExecutionReuseStore:
         function_name = function_name or self._select_artifact_function(path, provided_inputs)
         if function_name:
             runner = self._build_function_runner(path=path, function_name=function_name, provided_inputs=provided_inputs)
-            command = [sys.executable, "-c", runner]
+            command = [sys.executable, "-u", "-c", runner]
             cwd = path.parent
         else:
-            command = [sys.executable, str(path)]
-            cwd = path.parent
-        result = await RuntimeCommandExecutor().run_exec(
-            command,
-            cwd=cwd,
-            env=env,
-            timeout_seconds=int(os.getenv("RUNTIME_REUSE_TIMEOUT_SECONDS", "30")),
-            kind="python",
-        )
+            executable_path = write_bounded_python_copy(path)
+            command = [sys.executable, "-u", str(executable_path)]
+            cwd = executable_path.parent
+        result = await self._run_python_artifact_bounded(command=command, cwd=cwd, env=env)
+        stdout = self._normalize_process_output(result.get("stdout") or "")
+        stderr = self._normalize_process_output(result.get("stderr") or "")
+        has_useful_output = bool(stdout.strip())
+        completed = result.get("returncode") == 0 or (result.get("timed_out") and has_useful_output)
+        final_answer = (stdout or stderr or result.get("reason") or "").strip()
         return {
-            "ok": result.returncode == 0,
-            "status": "completed" if result.returncode == 0 else "failed",
+            "ok": completed,
+            "status": "completed" if completed else "failed",
             "execution_mode": "python_artifact",
             "artifact_path": str(path),
             "invoked_function": function_name,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "returncode": result.returncode,
-            "final_answer": (result.stdout or result.stderr or "").strip(),
+            "stdout": stdout,
+            "stderr": stderr,
+            "returncode": result.get("returncode"),
+            "timed_out": bool(result.get("timed_out")),
+            "bounded_by_runtime": bool(result.get("bounded_by_runtime")),
+            "final_answer": final_answer,
             "context_trace": {
                 "task_registry": True,
                 "agent_registry": True,
@@ -218,6 +223,78 @@ class ExecutionReuseStore:
                 "capability_reason": capability_reason or "verified_executable_artifact",
             },
         }
+
+    async def _run_python_artifact_bounded(self, *, command: list[str], cwd: Path, env: dict[str, str]) -> dict[str, Any]:
+        import asyncio
+        timeout = max(2, int(os.getenv("RUNTIME_REUSE_TIMEOUT_SECONDS", "30")))
+        proc_env = os.environ.copy()
+        proc_env.update({str(k): str(v) for k, v in (env or {}).items()})
+
+        def _run() -> dict[str, Any]:
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=str(cwd),
+                    env=proc_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+                return {
+                    "returncode": completed.returncode,
+                    "stdout": completed.stdout or "",
+                    "stderr": completed.stderr or "",
+                    "timed_out": False,
+                    "bounded_by_runtime": False,
+                    "reason": "",
+                }
+            except subprocess.TimeoutExpired as exc:
+                return {
+                    "returncode": 124,
+                    "stdout": self._decode_timeout_stream(getattr(exc, "stdout", "")),
+                    "stderr": self._decode_timeout_stream(getattr(exc, "stderr", "")),
+                    "timed_out": True,
+                    "bounded_by_runtime": True,
+                    "reason": "process_exceeded_runtime_window",
+                }
+            except FileNotFoundError as exc:
+                return {"returncode": 127, "stdout": "", "stderr": str(exc), "timed_out": False, "bounded_by_runtime": False, "reason": "command_not_found"}
+            except Exception as exc:
+                return {"returncode": 1, "stdout": "", "stderr": str(exc), "timed_out": False, "bounded_by_runtime": False, "reason": "command_error"}
+
+        return await asyncio.to_thread(_run)
+
+    def _decode_timeout_stream(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return str(value)
+
+    def _normalize_process_output(self, text: str, *, max_lines: int = 12, max_chars: int = 2000) -> str:
+        raw = str(text or "")
+        if not raw.strip():
+            return ""
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        if not lines:
+            lines = [raw.strip()]
+        compact: list[str] = []
+        seen_repeated_tail = 0
+        previous = None
+        for line in lines:
+            if line == previous:
+                seen_repeated_tail += 1
+                continue
+            previous = line
+            compact.append(line)
+            if len(compact) >= max_lines:
+                break
+        result = "\n".join(compact)
+        if seen_repeated_tail:
+            result += f"\n...[{seen_repeated_tail} repeated output lines compacted]"
+        if len(result) > max_chars:
+            result = result[:max_chars].rstrip() + " ...[truncated]"
+        return result
 
     def _select_artifact_function(self, path: Path, provided_inputs: dict[str, Any]) -> str | None:
         functions = self._public_python_functions(path)
