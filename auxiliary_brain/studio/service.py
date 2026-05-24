@@ -17,6 +17,7 @@ from ai_core.artifacts.uploaded_artifact_contract import UploadedArtifactContrac
 from ai_core.artifacts.artifact_edit_service import ArtifactEditService
 from ai_core.commands import CommandSetService
 from ai_core.context.execution_reuse_store import ExecutionReuseStore
+from auxiliary_brain.studio.instruction_workflow_planner import InstructionWorkflowPlanner
 
 
 class AgentStudioService:
@@ -37,6 +38,7 @@ class AgentStudioService:
         self.artifact_edit_service = ArtifactEditService()
         self.command_set_service = CommandSetService()
         self.execution_reuse_store = ExecutionReuseStore()
+        self.instruction_workflow_planner = InstructionWorkflowPlanner()
         self.store.ensure_workspace()
         self.community_id = self._ensure_community()
 
@@ -543,9 +545,20 @@ class AgentStudioService:
         graph_id = new_id("graph")
         task_name = name or graph_id
         participants = self.store.list_json("generated/agents")
-        selected_ids = [p.get("participant_id") for p in self._select_participants_for_instruction(instruction, participants)]
         artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
         explicit_runtime_parameters = self._extract_runtime_parameters_from_instruction(instruction)
+        workflow_plan = self.instruction_workflow_planner.plan(
+            instruction=instruction,
+            participants=participants,
+            graph_id=graph_id,
+            new_id_fn=new_id,
+        )
+        for generated_participant in workflow_plan.generated_participants:
+            generated_participant.setdefault("created_at", self._now())
+            pid = str(generated_participant.get("participant_id") or "").strip()
+            if pid:
+                self.store.write_json(f"generated/agents/{pid}.json", generated_participant)
+        selected_ids = [p.get("participant_id") for p in workflow_plan.selected_participants]
         # Task graphs do not own durable parameter values.  Parameter schemas live
         # on participants, while uploaded artifact parameters are discovered from
         # the selected artifact during execution_preparation.  Keeping a blank
@@ -571,15 +584,14 @@ class AgentStudioService:
             "uploaded_artifacts": artifact_refs,
             "parameter_contract": schema_contract,
             "runtime_parameters": explicit_runtime_parameters,
-            "tasks": [
-                {
-                    "task_id": f"{graph_id}_delegate_{index + 1}",
-                    "participant_id": participant_id,
-                    "execution_owner": "ai_core",
-                    "status": "pending",
-                }
-                for index, participant_id in enumerate(selected_ids)
-            ],
+            "tasks": workflow_plan.tasks,
+            "instruction_coverage": workflow_plan.coverage,
+            "workflow_planning": {
+                "mode": "generic_instruction_decomposition",
+                "generated_participant_ids": [p.get("participant_id") for p in workflow_plan.generated_participants],
+                "step_count": len(workflow_plan.tasks),
+                "coverage_status": workflow_plan.coverage.get("status"),
+            },
             "final_synthesis_owner": "ai_core",
         }
         path = self.store.write_json(f"generated/tasks/{task_name}.json", payload)
