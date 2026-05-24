@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from pathlib import Path
 from uuid import uuid4
 import json
+import base64
 
 from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
 from ai_core.artifacts.artifact_edit_service import ArtifactEditService
@@ -65,6 +66,16 @@ class ArtifactEditRequest(BaseModel):
 class ArtifactProposalActionRequest(BaseModel):
     feedback: str | None = None
     new_content: str | None = None
+
+
+class ArtifactUploadItem(BaseModel):
+    filename: str
+    content_base64: str
+    content_type: str | None = None
+
+
+class ArtifactUploadJsonRequest(BaseModel):
+    files: list[ArtifactUploadItem]
 
 
 class AgentStudioModelSelectionRequest(BaseModel):
@@ -170,15 +181,14 @@ def _write_artifact_registry(items: list[dict[str, Any]]) -> None:
 async def agent_studio_artifacts():
     return JSONResponse({"ok": True, "artifacts": _read_artifact_registry()})
 
-@app.post("/api/agent-studio/artifacts")
-async def agent_studio_upload_artifacts(files: list[UploadFile] = File(...)):
+def _store_uploaded_artifact_items(items: list[dict[str, Any]]) -> dict[str, Any]:
     upload_dir = Path("runtime") / "uploads" / "files"
     upload_dir.mkdir(parents=True, exist_ok=True)
     registry = _read_artifact_registry()
     existing_ids = {str(item.get("artifact_id")) for item in registry if isinstance(item, dict)}
     created: list[dict[str, Any]] = []
-    for file in files:
-        original_name = Path(file.filename or "uploaded_file").name
+    for source in items:
+        original_name = Path(str(source.get("filename") or "uploaded_file")).name
         suffix = Path(original_name).suffix
         artifact_id = f"artifact_{uuid4().hex[:12]}"
         while artifact_id in existing_ids:
@@ -186,22 +196,52 @@ async def agent_studio_upload_artifacts(files: list[UploadFile] = File(...)):
         existing_ids.add(artifact_id)
         stored_name = f"{artifact_id}{suffix}"
         target = upload_dir / stored_name
-        content = await file.read()
+        content = bytes(source.get("content") or b"")
         target.write_bytes(content)
         item = {
             "artifact_id": artifact_id,
             "name": original_name,
             "filename": original_name,
             "path": str(target),
-            "mime_type": file.content_type or "application/octet-stream",
+            "mime_type": str(source.get("content_type") or "application/octet-stream"),
             "size_bytes": len(content),
             "role": "method_candidate",
-            "source": "agent_studio_upload",
+            "source": str(source.get("source") or "agent_studio_upload"),
         }
         registry.append(item)
         created.append(item)
     _write_artifact_registry(registry)
-    return JSONResponse({"ok": True, "artifacts": created, "registry": registry})
+    return {"ok": True, "artifacts": created, "registry": registry}
+
+
+@app.post("/api/agent-studio/artifacts")
+async def agent_studio_upload_artifacts(files: list[UploadFile] = File(...)):
+    items: list[dict[str, Any]] = []
+    for file in files:
+        items.append({
+            "filename": file.filename or "uploaded_file",
+            "content_type": file.content_type or "application/octet-stream",
+            "content": await file.read(),
+            "source": "agent_studio_upload_multipart",
+        })
+    return JSONResponse(_store_uploaded_artifact_items(items))
+
+
+@app.post("/api/agent-studio/artifacts-json")
+async def agent_studio_upload_artifacts_json(req: ArtifactUploadJsonRequest):
+    items: list[dict[str, Any]] = []
+    for file in req.files:
+        try:
+            content = base64.b64decode(file.content_base64.encode("ascii"), validate=True)
+        except Exception as exc:
+            return JSONResponse({"ok": False, "message": f"invalid base64 content for {file.filename}: {exc}"}, status_code=400)
+        items.append({
+            "filename": file.filename or "uploaded_file",
+            "content_type": file.content_type or "application/octet-stream",
+            "content": content,
+            "source": "agent_studio_upload_json",
+        })
+    return JSONResponse(_store_uploaded_artifact_items(items))
 
 
 @app.post("/api/agent-studio/artifacts/{artifact_id}/edit-proposal")

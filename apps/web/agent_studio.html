@@ -329,6 +329,40 @@ async function refreshArtifacts(){
     renderArtifacts();
   }catch(e){ addMessage('Artifact refresh failed: '+e,'item error'); }
 }
+
+function fileToBase64Payload(file){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onload=()=>{
+      const raw=String(reader.result||'');
+      const marker='base64,';
+      const idx=raw.indexOf(marker);
+      resolve({filename:file.name||'uploaded_file', content_type:file.type||'application/octet-stream', content_base64: idx>=0 ? raw.slice(idx+marker.length) : raw});
+    };
+    reader.onerror=()=>reject(reader.error||new Error('file read failed'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function parseUploadError(res){
+  let text='';
+  try{ text=await res.text(); }catch(e){}
+  if(text){
+    try{ const data=JSON.parse(text); return data.message || data.detail || text; }catch(e){ return text; }
+  }
+  return 'HTTP '+res.status;
+}
+
+async function uploadArtifactsAsJson(files){
+  const payloadFiles=[];
+  for(const file of files){ payloadFiles.push(await fileToBase64Payload(file)); }
+  const res=await fetch('/api/agent-studio/artifacts-json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files:payloadFiles})});
+  if(!res.ok){ throw new Error(await parseUploadError(res)); }
+  const data=await res.json();
+  if(!data.ok){ throw new Error(data.message||'upload failed'); }
+  return data;
+}
+
 async function uploadArtifacts(){
   const input=document.getElementById('artifactUploadInput');
   const files=input&&input.files?Array.from(input.files):[];
@@ -337,14 +371,21 @@ async function uploadArtifacts(){
   files.forEach(file=>form.append('files', file));
   setStudioStatus('uploading', true);
   try{
-    const res=await fetch('/api/agent-studio/artifacts',{method:'POST',body:form});
-    const data=await res.json();
-    if(!res.ok || data.ok===false){ throw new Error(data.message||'upload failed'); }
+    let data=null;
+    try{
+      const res=await fetch('/api/agent-studio/artifacts',{method:'POST',body:form});
+      if(!res.ok){ throw new Error(await parseUploadError(res)); }
+      data=await res.json();
+      if(!data.ok){ throw new Error(data.message||'upload failed'); }
+    }catch(primaryError){
+      addProgressMessage('multipart upload unavailable; retrying with JSON fallback');
+      data=await uploadArtifactsAsJson(files);
+    }
     const created=Array.isArray(data.artifacts)?data.artifacts:[];
     uploadedArtifacts=Array.isArray(data.registry)?data.registry:created;
     renderArtifacts();
     addProgressMessage('uploaded artifact count: '+created.length);
-  }catch(e){ addMessage('Artifact upload failed: '+e,'item error'); }
+  }catch(e){ addMessage('Artifact upload failed: '+(e&&e.message?e.message:e),'item error'); }
   finally{ if(input) input.value=''; setStudioStatus('ready', false); }
 }
 
