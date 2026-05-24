@@ -18,6 +18,7 @@ from ai_core.artifacts.artifact_edit_service import ArtifactEditService
 from ai_core.commands import CommandSetService
 from ai_core.context.execution_reuse_store import ExecutionReuseStore
 from auxiliary_brain.studio.instruction_workflow_planner import InstructionWorkflowPlanner
+from auxiliary_brain.studio.runtime_semantic_planner import RuntimeSemanticPlanner
 
 
 class AgentStudioService:
@@ -39,6 +40,7 @@ class AgentStudioService:
         self.command_set_service = CommandSetService()
         self.execution_reuse_store = ExecutionReuseStore()
         self.instruction_workflow_planner = InstructionWorkflowPlanner()
+        self.runtime_semantic_planner = RuntimeSemanticPlanner()
         self.store.ensure_workspace()
         self.community_id = self._ensure_community()
 
@@ -547,11 +549,17 @@ class AgentStudioService:
         participants = self.store.list_json("generated/agents")
         artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
         explicit_runtime_parameters = self._extract_runtime_parameters_from_instruction(instruction)
+        semantic_plan = self.runtime_semantic_planner.build_plan(
+            instruction=instruction,
+            participants=participants,
+            run_id=graph_id,
+        )
         workflow_plan = self.instruction_workflow_planner.plan(
             instruction=instruction,
             participants=participants,
             graph_id=graph_id,
             new_id_fn=new_id,
+            semantic_plan=semantic_plan,
         )
         for generated_participant in workflow_plan.generated_participants:
             generated_participant.setdefault("created_at", self._now())
@@ -587,7 +595,9 @@ class AgentStudioService:
             "tasks": workflow_plan.tasks,
             "instruction_coverage": workflow_plan.coverage,
             "workflow_planning": {
-                "mode": "generic_instruction_decomposition",
+                "mode": workflow_plan.coverage.get("planning_mode"),
+                "semantic_step_count": workflow_plan.coverage.get("semantic_step_count"),
+                "semantic_plan_status": (semantic_plan.get("coverage_notes") or []),
                 "generated_participant_ids": [p.get("participant_id") for p in workflow_plan.generated_participants],
                 "step_count": len(workflow_plan.tasks),
                 "coverage_status": workflow_plan.coverage.get("status"),

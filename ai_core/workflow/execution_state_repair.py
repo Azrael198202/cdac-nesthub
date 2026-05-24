@@ -18,59 +18,10 @@ class ExecutionStateRepair:
     rules and runtime-configured refinement-field policies.
     """
 
-    DEFAULT_OPTIONAL_REFINEMENT_FIELDS = {
-        "time_range",
-        "output_format",
-        "formatting_style",
-        "output_language",
-        "language",
-        "detail_preferences",
-        "presentation_style",
-        "sorting_preference",
-        "verbosity",
-        "tone",
-    }
-
-    DEFAULT_READ_ONLY_ACTION_HINTS = {
-        "query",
-        "search",
-        "retrieve",
-        "read",
-        "lookup",
-        "analyze",
-        "summarize",
-        "inspect",
-        "check",
-        "compare",
-        "obtain",
-        "fetch",
-        "get",
-        "collect",
-        "observe",
-        "access",
-    }
-
-    DEFAULT_READ_ONLY_STRATEGY_HINTS = {
-        "evidence",
-        "retrieval",
-        "retrieve",
-        "search",
-        "lookup",
-        "knowledge",
-        "observation",
-        "read",
-    }
-
-    DEFAULT_IRREVERSIBLE_ACTION_HINTS = {
-        "create",
-        "update",
-        "delete",
-        "remove",
-        "send",
-        "submit",
-        "commit",
-        "install",
-    }
+    DEFAULT_OPTIONAL_REFINEMENT_FIELDS: set[str] = set()
+    DEFAULT_READ_ONLY_ACTION_HINTS: set[str] = set()
+    DEFAULT_READ_ONLY_STRATEGY_HINTS: set[str] = set()
+    DEFAULT_IRREVERSIBLE_ACTION_HINTS: set[str] = set()
 
     def __init__(self, config_path: Path | None = None) -> None:
         self.config_path = config_path or (RUNTIME_DIR / "configs" / "orchestration" / "execution_state_repair.yaml")

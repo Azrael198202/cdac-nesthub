@@ -85,7 +85,6 @@ class StudioCommandRouter:
 
     def _extract_named_value(self, text: str) -> str | None:
         # Prefer quoted names so commands such as
-        # Create an agent named "Writing Agent" ...
         # preserve the user-visible identity exactly.
         quoted_patterns = [
             r"\bnamed\s+[\"']([^\"']+)[\"']",

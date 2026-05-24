@@ -270,32 +270,13 @@ class WorkflowContractBuilder:
         return "\n".join(parts).casefold()
 
     def _looks_like_final_text_deliverable(self, text: str) -> bool:
-        """Generic content-deliverable detector, not domain-specific.
+        """Return False without vocabulary inference.
 
-        It is intentionally conservative: it only corrects tool-generation
-        choices when the wording asks for direct human-readable output and does
-        not ask for an executable/reusable artifact.
+        ai_core must not infer task meaning from embedded keyword lists.
+        Output-vs-artifact decisions must come from runtime semantic planning,
+        schemas, or model-produced normalized contracts.
         """
-        if not text:
-            return False
-        output_terms = {
-            "write", "compose", "draft", "generate text", "create text", "summarize", "explain",
-            "rewrite", "translate", "describe", "introduction", "description", "paragraph",
-            "essay", "article", "mail", "email", "message", "answer", "content",
-        }
-        artifact_terms = {
-            "code", "script", "shell", "command", "program", "module", "tool", "sdk", "api",
-            "endpoint", "function", "class", "package", "repository", "file", "upload", "browser",
-            "scrape", "crawl", "web", "http", "json", "yaml", "database", "sql",
-        }
-        import re
-        def contains_term(term: str) -> bool:
-            if " " in term:
-                return term in text
-            return re.search(r"(?<![a-z0-9_])" + re.escape(term) + r"(?![a-z0-9_])", text) is not None
-        has_output = any(contains_term(term) for term in output_terms)
-        has_artifact = any(contains_term(term) for term in artifact_terms)
-        return has_output and not has_artifact
+        return False
 
     def _correct_action_for_output_contract(self, *, action_type: str, state: dict[str, Any], result: dict[str, Any], container: dict[str, Any] | None = None) -> str:
         """Prevent accidental runtime-artifact generation for direct output tasks.
