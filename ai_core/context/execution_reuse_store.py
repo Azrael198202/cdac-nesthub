@@ -123,16 +123,36 @@ class ExecutionReuseStore:
         if not asset:
             return ReuseDecision(False, "no_reusable_asset")
         provided = provided_inputs or {}
-        # When a reusable asset is invoked without any runtime values, expose the
-        # full saved input contract once, including optional fields.  This lets
-        # the user supply optional values without forcing them on every resume.
-        # After the user submits at least one value, only required missing fields
-        # can block execution.
-        include_optional = len(provided) == 0
+        # When a reusable asset has not yet received a usable value for any of
+        # its required contract fields, expose the full saved input contract once,
+        # including optional fields.  Do not use len(provided)==0 here: generic
+        # runtime state can contain unrelated keys, placeholders, or metadata,
+        # and those must not hide optional fields from the first user-facing
+        # collection screen.  After at least one required field has a usable
+        # value, only missing required fields can block execution.
+        include_optional = not self._has_usable_required_contract_value(asset, provided)
         missing = self.missing_inputs(asset, provided, include_optional=include_optional)
         if missing:
             return ReuseDecision(False, "missing_runtime_inputs", asset=asset, missing_inputs=missing)
         return ReuseDecision(True, "asset_ready", asset=asset, missing_inputs=[])
+
+
+    def _has_usable_required_contract_value(self, asset: dict[str, Any], provided_inputs: dict[str, Any]) -> bool:
+        provided = provided_inputs or {}
+        if not isinstance(provided, dict):
+            return False
+        for item in asset.get("parameter_schema") or []:
+            if not isinstance(item, dict):
+                continue
+            if not bool(item.get("required", True)):
+                continue
+            key = str(item.get("field") or item.get("name") or "").strip()
+            if not key:
+                continue
+            value = provided.get(key)
+            if value not in (None, "", [], {}):
+                return True
+        return False
 
     def missing_inputs(self, asset: dict[str, Any], provided_inputs: dict[str, Any], *, include_optional: bool = False) -> list[dict[str, Any]]:
         fields = []
