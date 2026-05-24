@@ -373,7 +373,7 @@ async def agent_studio_resume_run(req: AgentStudioResumeRunRequest):
 
 @app.get("/api/version")
 async def version():
-    return JSONResponse({"version": "v3.1.2", "name": "model-provider-preflight"})
+    return JSONResponse({"version": "v9.0-session-ui-fix2", "name": "session-ui-runtime"})
 
 
 @app.post("/api/chat")
