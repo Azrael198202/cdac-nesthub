@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import sqlite3
@@ -52,11 +53,16 @@ class ExecutionReuseStore:
         if status != "completed":
             return {"ok": False, "reason": "run_not_completed", "status": status}
 
-        parameter_schema = self._collect_parameter_schema(task_graph, participants)
         artifact_paths = self._collect_artifact_paths(task_graph, participants, run_payload)
-        execution_mode = "python_artifact" if artifact_paths else "agent_runtime"
-        if self._is_llm_generation_profile(participants):
-            execution_mode = "llm_generation"
+        if artifact_paths:
+            # A verified executable artifact is the strongest reusable asset.
+            # Do not downgrade it to model generation just because the original
+            # agent instruction used words such as "write" or "generate".
+            execution_mode = "python_artifact"
+            parameter_schema = self._collect_artifact_parameter_schema(artifact_paths)
+        else:
+            parameter_schema = self._collect_parameter_schema(task_graph, participants)
+            execution_mode = "llm_generation" if self._is_llm_generation_profile(participants) else "agent_runtime"
 
         asset = {
             "asset_id": "asset_" + uuid4().hex[:16],
@@ -138,37 +144,19 @@ class ExecutionReuseStore:
 
     async def execute_reused_asset(self, *, asset: dict[str, Any], provided_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         mode = str(asset.get("execution_mode") or "")
-        if mode == "python_artifact":
-            paths = [p for p in asset.get("artifact_paths") or [] if isinstance(p, str) and p.strip()]
-            existing = [Path(p) for p in paths if Path(p).exists() and Path(p).suffix == ".py"]
-            if existing:
-                path = existing[0]
-                env = {"RUNTIME_INPUTS_JSON": json.dumps(provided_inputs or {}, ensure_ascii=False)}
-                result = await RuntimeCommandExecutor().run_exec(
-                    [sys.executable, str(path)],
-                    cwd=path.parent,
-                    env=env,
-                    timeout_seconds=int(os.getenv("RUNTIME_REUSE_TIMEOUT_SECONDS", "30")),
-                    kind="python",
-                )
-                self._mark_used(str(asset.get("task_name") or ""))
-                return {
-                    "ok": result.returncode == 0,
-                    "status": "completed" if result.returncode == 0 else "failed",
-                    "execution_mode": "python_artifact",
-                    "artifact_path": str(path),
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
-                    "returncode": result.returncode,
-                    "final_answer": (result.stdout or result.stderr or "").strip(),
-                    "context_trace": {
-                        "task_registry": True,
-                        "artifact_registry": True,
-                        "planning_used": False,
-                        "llm_used": False,
-                        "reuse_asset_id": asset.get("asset_id"),
-                    },
-                }
+        paths = [p for p in asset.get("artifact_paths") or [] if isinstance(p, str) and p.strip()]
+        existing = [Path(p) for p in paths if Path(p).exists() and Path(p).suffix == ".py"]
+
+        # Backward-compatible self-healing: older registry rows could be saved
+        # as llm_generation even when a verified Python artifact was present.
+        # Artifact execution must win because it is deterministic and avoids
+        # needless model calls.
+        if existing:
+            path = existing[0]
+            result = await self._execute_python_artifact(path=path, asset=asset, provided_inputs=provided_inputs or {})
+            self._mark_used(str(asset.get("task_name") or ""))
+            return result
+
         if mode == "llm_generation":
             generated = await self._execute_llm_generation(asset=asset, provided_inputs=provided_inputs or {})
             self._mark_used(str(asset.get("task_name") or ""))
@@ -186,6 +174,72 @@ class ExecutionReuseStore:
                 "reuse_asset_id": asset.get("asset_id"),
             },
         }
+
+    async def _execute_python_artifact(self, *, path: Path, asset: dict[str, Any], provided_inputs: dict[str, Any]) -> dict[str, Any]:
+        env = {"RUNTIME_INPUTS_JSON": json.dumps(provided_inputs or {}, ensure_ascii=False)}
+        function_name = self._select_artifact_function(path, provided_inputs)
+        if function_name:
+            runner = self._build_function_runner(path=path, function_name=function_name, provided_inputs=provided_inputs)
+            command = [sys.executable, "-c", runner]
+            cwd = path.parent
+        else:
+            command = [sys.executable, str(path)]
+            cwd = path.parent
+        result = await RuntimeCommandExecutor().run_exec(
+            command,
+            cwd=cwd,
+            env=env,
+            timeout_seconds=int(os.getenv("RUNTIME_REUSE_TIMEOUT_SECONDS", "30")),
+            kind="python",
+        )
+        return {
+            "ok": result.returncode == 0,
+            "status": "completed" if result.returncode == 0 else "failed",
+            "execution_mode": "python_artifact",
+            "artifact_path": str(path),
+            "invoked_function": function_name,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "returncode": result.returncode,
+            "final_answer": (result.stdout or result.stderr or "").strip(),
+            "context_trace": {
+                "task_registry": True,
+                "agent_registry": True,
+                "artifact_registry": True,
+                "planning_used": False,
+                "llm_used": False,
+                "reuse_asset_id": asset.get("asset_id"),
+            },
+        }
+
+    def _select_artifact_function(self, path: Path, provided_inputs: dict[str, Any]) -> str | None:
+        functions = self._public_python_functions(path)
+        if not functions:
+            return None
+        input_keys = {str(k) for k in (provided_inputs or {}).keys()}
+        for fn in functions:
+            args = set(fn.get("args") or [])
+            if args and args.issubset(input_keys):
+                return str(fn.get("name") or "")
+        if len(functions) == 1 and (functions[0].get("args") or []):
+            return str(functions[0].get("name") or "")
+        return None
+
+    def _build_function_runner(self, *, path: Path, function_name: str, provided_inputs: dict[str, Any]) -> str:
+        return "\n".join([
+            "import importlib.util, json",
+            f"module_path = {json.dumps(str(path))}",
+            "inputs = json.loads(" + json.dumps(json.dumps(provided_inputs or {}, ensure_ascii=False)) + ")",
+            "spec = importlib.util.spec_from_file_location('runtime_reuse_module', module_path)",
+            "module = importlib.util.module_from_spec(spec)",
+            "spec.loader.exec_module(module)",
+            f"fn = getattr(module, {json.dumps(function_name)})",
+            "import inspect",
+            "sig = inspect.signature(fn)",
+            "kwargs = {name: inputs[name] for name in sig.parameters.keys() if name in inputs}",
+            "result = fn(**kwargs)",
+            "print(json.dumps(result, ensure_ascii=False, default=str) if not isinstance(result, str) else result)",
+        ])
 
     async def _execute_llm_generation(self, *, asset: dict[str, Any], provided_inputs: dict[str, Any]) -> dict[str, Any]:
         from ai_core.llm.provider_router import ProviderRouter
@@ -300,6 +354,60 @@ class ExecutionReuseStore:
                 )
                 """
             )
+
+    def _collect_artifact_parameter_schema(self, artifact_paths: list[str]) -> list[dict[str, Any]]:
+        fields: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in artifact_paths:
+            path = Path(raw)
+            if not path.exists() or path.suffix != ".py":
+                continue
+            for fn in self._public_python_functions(path):
+                for arg in fn.get("args") or []:
+                    key = str(arg).strip()
+                    if key and key not in seen:
+                        seen.add(key)
+                        fields.append({
+                            "field": key,
+                            "name": key,
+                            "label": key,
+                            "input_type": self._annotation_to_input_type((fn.get("annotations") or {}).get(key)),
+                            "required": key not in set(fn.get("defaults") or []),
+                            "description": "Runtime value required by the reusable executable artifact.",
+                        })
+                if fields:
+                    return fields
+        return fields
+
+    def _public_python_functions(self, path: Path) -> list[dict[str, Any]]:
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        functions: list[dict[str, Any]] = []
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef) or node.name.startswith("_"):
+                continue
+            args = [a.arg for a in node.args.args if a.arg not in {"self", "cls"}]
+            defaults = args[len(args) - len(node.args.defaults):] if node.args.defaults else []
+            annotations: dict[str, str] = {}
+            for a in node.args.args:
+                if a.annotation is not None:
+                    annotations[a.arg] = ast.unparse(a.annotation) if hasattr(ast, "unparse") else ""
+            functions.append({"name": node.name, "args": args, "defaults": defaults, "annotations": annotations})
+        return functions
+
+    def _annotation_to_input_type(self, annotation: Any) -> str:
+        text = str(annotation or "").casefold()
+        if "list" in text or text.startswith("sequence") or text.startswith("tuple"):
+            return "list"
+        if "int" in text:
+            return "number"
+        if "float" in text or "decimal" in text:
+            return "number"
+        if "bool" in text:
+            return "checkbox"
+        return "text"
 
     def _collect_parameter_schema(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen: set[str] = set()
