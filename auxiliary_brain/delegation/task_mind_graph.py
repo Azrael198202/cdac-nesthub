@@ -18,9 +18,8 @@ class TaskMindGraphBuilder:
     """Builds a coordination mind-map for multi-agent task execution.
 
     This builder is intentionally domain-neutral. It does not hard-code business
-    capabilities. It only reasons over task/participant structure, explicit
-    dependency fields, and clear textual references to another participant's
-    *result*. The primary runtime may later replace or refine this graph with an
+    capabilities. It only reasons over task/participant structure and explicit
+    dependency fields provided by the runtime workflow graph. The primary runtime may later replace or refine this graph with an
     LLM-generated version; the graph shape and contracts remain the same.
     """
 
@@ -149,16 +148,8 @@ class TaskMindGraphBuilder:
                 if dep_id != pid and dep_id not in deps:
                     deps.append(dep_id)
 
-            # Only infer from clear result-reference language. Merely appearing
-            # in the same user task does not create a dependency.
-            dependency_markers = [" result", " output", " answer", " previous", " upstream", " after ", " based on"]
-            if any(marker in f" {objective} " for marker in dependency_markers):
-                for other_id, other in identities.items():
-                    if other_id == pid:
-                        continue
-                    other_name = self._participant_name(other).lower()
-                    if other_name and other_name in objective and other_id not in deps:
-                        deps.append(other_id)
+            # Dependencies must come from explicit graph fields.  This builder
+            # intentionally does not infer dataflow from vocabulary markers.
 
             plan["participants"][pid] = {
                 "participant_id": pid,

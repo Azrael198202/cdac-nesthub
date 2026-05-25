@@ -93,6 +93,74 @@ class PrimaryBrainDelegationClient:
         )
 
 
+
+    async def execute_intermediate_step(self, request: AgentExecutionRequest, progress_callback: Callable[[dict[str, Any]], Any] | None = None) -> AgentExecutionResult:
+        """Execute a generated workflow step directly from its declared inputs.
+
+        This is a generic dataflow step executor.  It does not know operation
+        names or business domains.  The upstream semantic planner already
+        supplied the step objective and dependency edges; this method only asks
+        the model to apply that objective to the safe upstream results and return
+        a user-facing step result.
+        """
+        core_run_id = uuid.uuid4().hex[:12]
+        if progress_callback:
+            progress_callback({"type": "NODE_STARTED", "run_id": core_run_id, "node_id": "dataflow_step"})
+            progress_callback({"type": "NODE_EXECUTING", "run_id": core_run_id, "node_id": "dataflow_step"})
+        payload = {
+            "step_name": request.participant_name,
+            "step_objective": request.participant_instruction,
+            "task_name": request.task_name,
+            "task_instruction": request.task_instruction,
+            "declared_inputs": (request.shared_context or {}).get("available_peer_results") or [],
+            "constraints": {
+                "use_only_declared_inputs": True,
+                "return_user_facing_step_result_only": True,
+            },
+        }
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "final_answer": {"type": "string"}
+            },
+            "required": ["final_answer"],
+        }
+        try:
+            result = await self.router.generate_json(
+                run_id=core_run_id,
+                node_id="dataflow_step",
+                adapter={
+                    "adapter_id": "delegated_dataflow_step",
+                    "runtime_role": "intermediate_dataflow_step",
+                    "route_name": "stable_synthesis",
+                    "model_route_name": "stable_synthesis",
+                    "provider_timeout_seconds": 90,
+                    "max_provider_attempts": 1,
+                    "provider_options": {"temperature": 0},
+                },
+                prompt={"id": "delegated_dataflow_step", "system": "Return valid JSON only with key final_answer."},
+                rendered_user_prompt=json.dumps(payload, ensure_ascii=False),
+                schema=schema,
+            )
+            answer = result.get("final_answer") if isinstance(result, dict) else ""
+            status = "completed" if isinstance(answer, str) and self._answer_has_result_material(answer) else "failed"
+            final_answer = answer.strip() if isinstance(answer, str) and answer.strip() else "Generated workflow step did not produce verified result material."
+        except Exception as exc:
+            status = "failed"
+            final_answer = str(exc)
+        if progress_callback:
+            progress_callback({"type": "NODE_RESULT", "run_id": core_run_id, "node_id": "dataflow_step"})
+            progress_callback({"type": "RUN_COMPLETED", "run_id": core_run_id})
+        return AgentExecutionResult(
+            participant_id=request.participant_id,
+            participant_name=request.participant_name,
+            core_run_id=core_run_id,
+            status=status,
+            final_answer=final_answer,
+            workflow_results={"dataflow_step": {"status": status, "final_answer": final_answer}},
+        )
+
     async def resume_agent_request(self, result_payload: dict[str, Any], progress_callback: Callable[[dict[str, Any]], Any] | None = None, provided_inputs: dict[str, Any] | None = None) -> AgentExecutionResult:
         """Resume a paused primary-runtime participant run from its saved checkpoint.
 
@@ -441,6 +509,7 @@ class PrimaryBrainDelegationClient:
         """
         core_run_id = uuid.uuid4().hex[:12]
         usable_results = self._usable_agent_results(agent_results)
+        failed_results = [r for r in agent_results if str(r.status or "").lower() != "completed"]
         synthesis_input = usable_results if usable_results else agent_results
         final_answer = await self._compose_or_escalate_delegated_final_answer(
             core_run_id=core_run_id,
@@ -452,7 +521,7 @@ class PrimaryBrainDelegationClient:
         return {
             "origin": "ai_core",
             "core_run_id": core_run_id,
-            "status": "completed" if usable_results else "failed",
+            "status": "partial_failed" if failed_results else ("completed" if usable_results else "failed"),
             "final_answer": final_answer,
             "workflow_results": {
                 "delegated_synthesis": {
@@ -460,6 +529,7 @@ class PrimaryBrainDelegationClient:
                     "participant_count": len(agent_results),
                     "used_participant_count": len(usable_results),
                     "omitted_participant_count": max(0, len(agent_results) - len(usable_results)),
+                    "failed_participant_count": len(failed_results),
                 }
             },
         }

@@ -44,10 +44,14 @@ class InstructionWorkflowPlanner:
         if semantic_steps:
             for step in semantic_steps:
                 step_id = str(step.get("id") or f"semantic_step_{len(tasks) + 1}").strip()
+                if step.get("executable") is False:
+                    aliases[step_id] = ""
+                    covered.append({"step_id": step_id, "type": "non_executable_metadata"})
+                    continue
                 route = step.get("route") if isinstance(step.get("route"), dict) else {}
                 route_ref = str(route.get("participant_id") or route.get("participant_name") or step.get("participant_id") or "").strip()
                 participant = self._find_participant(route_ref, candidates) if route_ref else None
-                depends_on = [aliases.get(str(dep), str(dep)) for dep in (step.get("depends_on") or []) if str(dep).strip()]
+                depends_on = [aliases.get(str(dep), str(dep)) for dep in (step.get("depends_on") or []) if str(dep).strip() and aliases.get(str(dep), str(dep))]
                 if participant:
                     pid = self._participant_id(participant)
                     if not pid:
@@ -95,6 +99,7 @@ class InstructionWorkflowPlanner:
                     "depends_on": depends_on,
                     "input_from": depends_on,
                     "workflow_step_type": "semantic_intermediate_step",
+                    "source_step_id": step_id,
                 }
                 generated.append(virtual)
                 tasks.append({

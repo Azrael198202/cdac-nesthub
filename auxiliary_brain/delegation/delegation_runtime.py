@@ -114,14 +114,24 @@ class AgentDelegationRuntime:
                 f"Primary runtime executing participant: {participant_name}",
                 "running",
             )
-            result = await self._execute_agent_request_with_progress(
-                request,
-                self._build_primary_runtime_progress_bridge(
-                    run_payload,
-                    participant_index=index + 1,
-                    participant_name=participant_name,
-                ),
-            )
+            if self._is_generated_dataflow_step(participant, task_graph):
+                result = await self._execute_intermediate_step_with_progress(
+                    request,
+                    self._build_primary_runtime_progress_bridge(
+                        run_payload,
+                        participant_index=index + 1,
+                        participant_name=participant_name,
+                    ),
+                )
+            else:
+                result = await self._execute_agent_request_with_progress(
+                    request,
+                    self._build_primary_runtime_progress_bridge(
+                        run_payload,
+                        participant_index=index + 1,
+                        participant_name=participant_name,
+                    ),
+                )
             result_payload = self._sanitize_result_payload(result.__dict__)
             agent_results.append(result)
             run_payload["agent_results"].append(result_payload)
@@ -358,14 +368,24 @@ class AgentDelegationRuntime:
                     for_input_parsing=True,
                 ),
             )
-            result = await self._execute_agent_request_with_progress(
-                request,
-                self._build_primary_runtime_progress_bridge(
-                    run_payload,
-                    participant_index=index + 1,
-                    participant_name=participant_name,
-                ),
-            )
+            if self._is_generated_dataflow_step(participant, task_graph):
+                result = await self._execute_intermediate_step_with_progress(
+                    request,
+                    self._build_primary_runtime_progress_bridge(
+                        run_payload,
+                        participant_index=index + 1,
+                        participant_name=participant_name,
+                    ),
+                )
+            else:
+                result = await self._execute_agent_request_with_progress(
+                    request,
+                    self._build_primary_runtime_progress_bridge(
+                        run_payload,
+                        participant_index=index + 1,
+                        participant_name=participant_name,
+                    ),
+                )
             payload = self._sanitize_result_payload(result.__dict__)
             existing_results.append(payload)
             agent_results.append(result)
@@ -516,16 +536,8 @@ class AgentDelegationRuntime:
                 dep_id = dep if dep in identities else name_to_id.get(dep.lower(), dep)
                 if dep_id != pid and dep_id not in deps:
                     deps.append(dep_id)
-            # Clear textual references only. Do not infer dependencies merely
-            # because two participants appear in the same task instruction.
-            dependency_markers = ["result", "output", "answer", "previous", "upstream", "after", "based on"]
-            if any(marker in objective for marker in dependency_markers):
-                for other_id, other in identities.items():
-                    if other_id == pid:
-                        continue
-                    other_name = self._participant_name(other).lower()
-                    if other_name and other_name in objective and other_id not in deps:
-                        deps.append(other_id)
+            # Dependencies must come from the task graph or participant metadata.
+            # Source code must not infer semantic dataflow from vocabulary lists.
             relationship = "dependent" if deps else "independent"
             plan["participants"][pid] = {
                 "participant_id": pid,
@@ -559,7 +571,7 @@ class AgentDelegationRuntime:
         # in the delegation run and are used by final synthesis / dependent-agent
         # later stages only.
         if for_input_parsing:
-            return {
+            input_context = {
                 "task_graph_id": task_graph.get("graph_id"),
                 "participant_count": len(selected),
                 "relationship": participant_plan.get("relationship") or own_node.get("relation") or "independent",
@@ -577,6 +589,10 @@ class AgentDelegationRuntime:
                     "preferred_action_type": "use_uploaded_file",
                 },
             }
+            peer_results = self._peer_results_for_participant(participant, completed_results, dependency_plan)
+            if peer_results:
+                input_context["available_peer_results"] = peer_results
+            return input_context
 
         shared_context: dict[str, Any] = {
             "task_graph_id": task_graph.get("graph_id"),
@@ -797,6 +813,32 @@ class AgentDelegationRuntime:
             payload["missing_inputs"] = []
         return payload
 
+
+    def _is_generated_dataflow_step(self, participant: dict[str, Any], task_graph: dict[str, Any]) -> bool:
+        pid = self._participant_identity(participant)
+        if str(participant.get("workflow_step_type") or "") == "semantic_intermediate_step":
+            return True
+        for task in task_graph.get("tasks") or []:
+            if not isinstance(task, dict):
+                continue
+            if str(task.get("participant_id") or "") == pid and str(task.get("step_type") or "") == "semantic_intermediate_step":
+                return True
+        return False
+
+
+    async def _execute_intermediate_step_with_progress(self, request, progress_callback):
+        try:
+            return await self.primary_client.execute_intermediate_step(
+                request,
+                progress_callback=progress_callback,
+            )
+        except AttributeError:
+            return await self._execute_agent_request_with_progress(request, progress_callback)
+        except TypeError as exc:
+            if "progress_callback" not in str(exc):
+                raise
+            return await self.primary_client.execute_intermediate_step(request)
+
     async def _execute_agent_request_with_progress(self, request, progress_callback):
         try:
             return await self.primary_client.execute_agent_request(
@@ -969,6 +1011,17 @@ class AgentDelegationRuntime:
     def _select_participants(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not participants:
             return []
+        declared_ids = {str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()}
+        if declared_ids:
+            selected = [
+                participant
+                for participant in participants
+                if str(participant.get("participant_id") or participant.get("id") or "").strip() in declared_ids
+            ]
+            # The task graph is the source of truth.  Do not re-filter the
+            # selected graph nodes by instruction text; generated intermediate
+            # nodes may not be named verbatim in the user instruction.
+            return self._dedupe_participants_for_execution(selected or participants)
         text = (str(task_graph.get("instruction") or "") + " " + str(task_graph.get("task_name") or "")).casefold()
         selected = []
         for participant in participants:

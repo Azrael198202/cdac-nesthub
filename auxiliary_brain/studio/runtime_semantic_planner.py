@@ -51,6 +51,7 @@ class RuntimeSemanticPlanner:
                             "label": {"type": "string"},
                             "objective": {"type": "string"},
                             "instruction_fragment": {"type": "string"},
+                            "executable": {"type": "boolean"},
                             "depends_on": {"type": "array", "items": {"type": "string"}},
                             "route": {
                                 "type": "object",
@@ -71,10 +72,12 @@ class RuntimeSemanticPlanner:
         }
         prompt = {
             "system": (
-                "Return only JSON. Decompose the user instruction into a complete executable semantic graph. "
-                "Every user-requested action, modifier, post-process, and dependency must be represented as a step. "
+                "Return only JSON. Decompose the user instruction into the work graph that should run after the task exists. "
+                "Represent every requested executable action, modifier, post-process, and dependency as a step. "
+                "Do not create executable steps for the command wrapper that only names, registers, or initializes the task itself. "
+                "If a parsed fragment is only task-management metadata, include it only when needed with executable=false. "
                 "Use a participant route only when the step should be executed by one of the declared participants. "
-                "For any step not owned by a declared participant, set route.requires_generated_step=true. "
+                "For any executable step not owned by a declared participant, set route.requires_generated_step=true. "
                 "Do not omit independent parallel steps or dependent follow-up steps."
             )
         }
