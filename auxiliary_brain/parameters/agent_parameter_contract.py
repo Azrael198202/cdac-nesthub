@@ -358,7 +358,7 @@ class AgentParameterContractService:
             name = str(param.get("name") or "").strip()
             if not name:
                 continue
-            fields.append({
+            field = {
                 "kind": "agent_parameter_required",
                 "field": f"{pid}.{name}",
                 "name": f"{pid}.{name}",
@@ -370,7 +370,11 @@ class AgentParameterContractService:
                 "input_type": "list",
                 "required": True,
                 "collection_mode": "repeat_until_done",
-            })
+            }
+            for marker in ("blocking", "runtime_required", "requires_user_input", "user_supplied"):
+                if marker in param:
+                    field[marker] = param.get(marker)
+            fields.append(field)
         return fields
 
     def _load_config(self) -> dict[str, Any]:

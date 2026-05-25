@@ -48,7 +48,7 @@ function esc(s){return String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&l
 function statusClass(s){s=String(s||'pending'); return ['running','completed','failed','skipped','reused','repair','metadata_only'].includes(s)?s:'pending';}
 async function loadState(manual=false){
   try{
-    const res=await fetch('/api/graph-runtime/state',{cache:'no-store'}); const data=await res.json(); latest=data; render(data);
+    const params=new URLSearchParams(window.location.search); const q=params.get('graph_id')||params.get('task_name')||''; const url='/api/graph-runtime/state'+(q?'?graph_id='+encodeURIComponent(q):''); const res=await fetch(url,{cache:'no-store'}); const data=await res.json(); latest=data; render(data);
   }catch(e){document.getElementById('subtitle').textContent='Load failed: '+e;}
   if(manual && !auto){ schedule(); }
 }

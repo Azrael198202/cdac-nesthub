@@ -692,7 +692,15 @@ class PrimaryBrainDelegationClient:
         context = request.shared_context or {}
         local_context = {}
         if isinstance(context, dict):
-            for key in ("relationship", "depends_on", "agent_parameters", "available_peer_results"):
+            for key in (
+                "relationship",
+                "depends_on",
+                "agent_parameters",
+                "uploaded_artifacts",
+                "available_artifacts",
+                "artifact_binding",
+                "available_peer_results",
+            ):
                 value = context.get(key)
                 if value not in (None, "", [], {}):
                     local_context[key] = value
@@ -827,9 +835,10 @@ class PrimaryBrainDelegationClient:
             "classified intent is",
             "initial capability needs",
             "no missing required parameters",
-            "agent actions and substeps planned",
+            "actions and substeps planned",
             "locked fixed execution options",
-            "workflow is blocked and did not execute",
+            "workflow is blocked",
+            "did not execute a tool yet",
         ]
         if any(fragment in lower for fragment in placeholder_fragments):
             return False
@@ -964,8 +973,6 @@ class PrimaryBrainDelegationClient:
             if "intermediate node data was intentionally not exposed" in lowered:
                 return ""
             if any(marker in text for marker in self.INTERNAL_OUTPUT_MARKERS):
-                return ""
-            if not self._answer_has_result_material(text):
                 return ""
             return text
 

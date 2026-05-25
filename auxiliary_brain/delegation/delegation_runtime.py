@@ -604,11 +604,11 @@ class AgentDelegationRuntime:
                     "values": self._merged_runtime_parameters(task_graph, participant),
                     "missing": [] if self._uses_uploaded_artifact_runtime_for_task(participant, task_graph) else self.parameter_contract_service.missing_parameters(participant),
                 },
-                "uploaded_artifacts": self._node_uploaded_artifacts(task_graph, participant),
-                "available_artifacts": self._node_uploaded_artifacts(task_graph, participant),
+                "uploaded_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
+                "available_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
                 "artifact_policy": participant.get("artifact_policy") or {},
                 "artifact_binding": {
-                    "available": bool(self._node_uploaded_artifacts(task_graph, participant)),
+                    "available": bool(participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts")),
                     "resolution_key": "artifact_id_or_filename",
                     "preferred_action_type": "use_uploaded_file",
                 },
@@ -633,11 +633,11 @@ class AgentDelegationRuntime:
                 "values": self._merged_runtime_parameters(task_graph, participant),
                 "contract": {} if self._uses_uploaded_artifact_runtime_for_task(participant, task_graph) else self._compact_parameter_contract(participant.get("parameter_contract") or {}),
             },
-            "uploaded_artifacts": self._node_uploaded_artifacts(task_graph, participant),
-            "available_artifacts": self._node_uploaded_artifacts(task_graph, participant),
+            "uploaded_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
+            "available_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
             "artifact_policy": participant.get("artifact_policy") or {},
             "artifact_binding": {
-                "available": bool(self._node_uploaded_artifacts(task_graph, participant)),
+                "available": bool(participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts")),
                 "resolution_key": "artifact_id_or_filename",
                 "preferred_action_type": "use_uploaded_file",
             },
@@ -676,9 +676,9 @@ class AgentDelegationRuntime:
     def _merged_runtime_parameters(self, task_graph: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
         """Return runtime inputs visible to this participant only.
 
-        Task-level values are not a global bag for every node.  A participant
+        Task-level values are not a global bag for every node. A participant
         sees task-run values only when they are bound to the participant's own
-        runtime schema.  Artifact-bound nodes may receive the current task-run
+        runtime schema. Artifact-bound nodes may receive the current task-run
         values because their executable signature is discovered at runtime and
         validated by the artifact contract layer.
         """
@@ -740,7 +740,7 @@ class AgentDelegationRuntime:
     def _apply_task_runtime_parameters_to_selected(self, participants: list[dict[str, Any]], runtime_parameters: Any) -> None:
         """Apply current task-run parameters to participant copies only.
 
-        Values are scoped by each participant contract.  This prevents a value
+        Values are scoped by each participant contract. This prevents a value
         collected for one node from satisfying or polluting an unrelated node.
         """
         if not isinstance(runtime_parameters, dict) or not runtime_parameters:
@@ -764,17 +764,17 @@ class AgentDelegationRuntime:
         fields: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
         for participant in participants:
-            # If the agent is explicitly bound to uploaded artifacts, the real
-            # executable parameter contract is owned by artifact introspection
-            # in execution_preparation, not by the durable agent profile.
-            # This avoids asking stale or inferred agent-level fields before the
-            # uploaded file has been inspected. The UI will receive the concrete
-            # runtime fields produced from the artifact callable/signature.
+            # Durable agent-profile fields generated during definition are
+            # advisory by default. They describe an agent; they are not
+            # automatically runtime-blocking inputs. Runtime-blocking fields
+            # must be explicitly marked by a schema/source that owns execution.
             if self._uses_uploaded_artifact_runtime(participant):
                 continue
             owner = self._participant_identity(participant) or self._participant_name(participant)
             for field in self.parameter_contract_service.to_missing_input_fields(participant):
                 if not isinstance(field, dict):
+                    continue
+                if not self._is_runtime_blocking_field(field):
                     continue
                 field_name = str(field.get("parameter_name") or field.get("name") or field.get("field") or field.get("key") or "").strip()
                 normalized_name = self._normalize_field_name(field_name)
@@ -790,6 +790,17 @@ class AgentDelegationRuntime:
                 fields.append(tagged)
         return fields
 
+    def _is_runtime_blocking_field(self, field: dict[str, Any]) -> bool:
+        if not isinstance(field, dict):
+            return False
+        markers = (
+            field.get("blocking"),
+            field.get("runtime_required"),
+            field.get("requires_user_input"),
+            field.get("user_supplied"),
+        )
+        return any(value is True or str(value).strip().lower() == "true" for value in markers)
+
     def _uses_uploaded_artifact_runtime(self, participant: dict[str, Any]) -> bool:
         if not isinstance(participant, dict):
             return False
@@ -800,7 +811,7 @@ class AgentDelegationRuntime:
         if policy.get("bind_uploaded_artifacts_to_agent") or str(policy.get("allowed_action") or "") == "use_uploaded_file":
             return True
         text = " ".join(str(participant.get(k) or "") for k in ("instruction", "execution_objective", "definition_instruction", "objective"))
-        return bool(re.search(r"\buse\s+file\b|\b[a-zA-Z0-9_.-]+\.[A-Za-z0-9]{1,8}\b", text, flags=re.I))
+        return bool(re.search(r"use\s+file|[a-zA-Z0-9_.-]+\.[A-Za-z0-9]{1,8}", text, flags=re.I))
 
     def _uses_uploaded_artifact_runtime_for_task(self, participant: dict[str, Any], task_graph: dict[str, Any]) -> bool:
         if self._uses_uploaded_artifact_runtime(participant):

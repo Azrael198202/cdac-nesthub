@@ -46,7 +46,7 @@ def test_runtime_parameters_are_filtered_by_participant_contract():
     assert runtime._merged_runtime_parameters(graph, participant) == {"alpha": "1"}
 
 
-def test_artifact_bound_node_can_see_task_runtime_values():
+def test_artifact_bound_node_can_see_task_runtime_values_when_unambiguous():
     runtime = AgentDelegationRuntime()
     participant = {"participant_id": "p_a"}
     graph = {
@@ -57,20 +57,31 @@ def test_artifact_bound_node_can_see_task_runtime_values():
     assert runtime._merged_runtime_parameters(graph, participant) == {"alpha": "1", "beta": "2"}
 
 
-def test_metadata_fields_are_not_user_missing_inputs():
+def test_agent_profile_advisory_fields_do_not_block_runtime():
     runtime = AgentDelegationRuntime()
     participant = {
         "participant_id": "p_a",
         "parameter_contract": {
             "parameters": [
-                {"name": "execution_objective", "required": True, "values": []},
-                {"name": "real_input", "required": True, "values": []},
+                {"name": "profile_only", "required": True, "values": []},
+            ]
+        },
+    }
+    assert runtime._collect_missing_agent_parameter_fields([participant]) == []
+
+
+def test_explicit_runtime_required_agent_field_can_block():
+    runtime = AgentDelegationRuntime()
+    participant = {
+        "participant_id": "p_a",
+        "parameter_contract": {
+            "parameters": [
+                {"name": "real_input", "required": True, "values": [], "runtime_required": True},
             ]
         },
     }
     fields = runtime._collect_missing_agent_parameter_fields([participant])
     names = {f.get("parameter_name") or f.get("name") or f.get("field") for f in fields}
-    assert "execution_objective" not in names
     assert "real_input" in names
 
 
@@ -107,7 +118,27 @@ def test_planning_message_is_not_usable_result_material():
     assert not client._answer_has_result_material("The workflow is blocked and did not execute a tool yet.")
 
 
-def test_graph_node_label_prefers_participant_name():
+def test_graph_viewer_selects_graph_and_run_by_task_name():
+    builder = GraphVisualStateBuilder()
+    state = builder.from_snapshot(
+        {
+            "task_graphs": [
+                {"graph_id": "g_a", "task_name": "task_a", "tasks": [{"participant_id": "a", "participant_name": "Agent A"}]},
+                {"graph_id": "g_b", "task_name": "task_b", "tasks": [{"participant_id": "b", "participant_name": "Agent B"}]},
+            ],
+            "task_runs": [
+                {"task_name": "task_a", "status": "completed", "agent_results": [{"participant_id": "a", "status": "completed"}]},
+                {"task_name": "task_b", "status": "failed", "agent_results": [{"participant_id": "b", "status": "failed"}]},
+            ],
+        },
+        graph_id="task_a",
+    )
+    assert state.graph_id == "g_a"
+    assert state.nodes[0]["id"] == "a"
+    assert state.nodes[0]["status"] == "completed"
+
+
+def test_graph_node_label_is_clean():
     state = GraphVisualStateBuilder().from_graph(
         graph={
             "graph_id": "g1",

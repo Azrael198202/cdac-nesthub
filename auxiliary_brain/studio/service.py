@@ -569,18 +569,6 @@ class AgentStudioService:
             if pid:
                 self.store.write_json(f"generated/agents/{pid}.json", generated_participant)
         selected_ids = [p.get("participant_id") for p in workflow_plan.selected_participants]
-        participant_labels = {
-            str(p.get("participant_id") or "").strip(): str(p.get("display_name") or p.get("agent_name") or p.get("name") or p.get("participant_id") or "").strip()
-            for p in workflow_plan.selected_participants
-            if isinstance(p, dict)
-        }
-        for task in workflow_plan.tasks:
-            if not isinstance(task, dict):
-                continue
-            pid = str(task.get("participant_id") or "").strip()
-            if pid and participant_labels.get(pid):
-                task.setdefault("participant_name", participant_labels[pid])
-                task.setdefault("label", participant_labels[pid])
         # Task graphs do not own durable parameter values.  Parameter schemas live
         # on participants, while uploaded artifact parameters are discovered from
         # the selected artifact during execution_preparation.  Keeping a blank
@@ -1083,13 +1071,13 @@ class AgentStudioService:
                     tagged.setdefault("participant_id", participant.get("participant_id"))
                     tagged.setdefault("participant_name", participant.get("display_name") or participant.get("agent_name") or participant.get("name"))
                     all_missing.append(tagged)
-        # Deduplicate fields by normalized name.
+        # Deduplicate fields by node owner and normalized field name.
         deduped: list[dict[str, Any]] = []
         seen: set[str] = set()
         for field in all_missing:
-            field_name = str(field.get("field") or field.get("name") or "").strip().casefold()
+            key_name = str(field.get("field") or field.get("name") or "").strip().casefold()
             owner = str(field.get("participant_id") or "").strip().casefold()
-            key = "|".join(part for part in (owner, field_name) if part)
+            key = "|".join(part for part in (owner, key_name) if part)
             if not key or key in seen:
                 continue
             seen.add(key)

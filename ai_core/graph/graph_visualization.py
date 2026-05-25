@@ -56,7 +56,7 @@ class GraphVisualStateBuilder:
         runs = self._as_list(snapshot.get("task_runs"))
         selected_graph = self._select_graph(graphs, graph_id)
         selected_id = self._graph_id(selected_graph) if selected_graph else str(graph_id or "runtime_graph")
-        selected_run = self._select_run(runs, selected_id)
+        selected_run = self._select_run(runs, selected_id, selected_graph)
         return self.from_graph(graph=selected_graph or {"graph_id": selected_id, "nodes": [], "edges": []}, run=selected_run or {})
 
     def from_graph(self, graph: dict[str, Any] | None, run: dict[str, Any] | None = None) -> GraphVisualState:
@@ -129,7 +129,7 @@ class GraphVisualStateBuilder:
 
     def _task_as_node(self, task: dict[str, Any], index: int) -> dict[str, Any]:
         node_id = str(task.get("participant_id") or task.get("node_id") or task.get("id") or task.get("task_id") or f"task_{index + 1}").strip()
-        label = str(
+        label = self._clean_node_label(
             task.get("label")
             or task.get("display_name")
             or task.get("participant_name")
@@ -144,6 +144,7 @@ class GraphVisualStateBuilder:
             "id": node_id,
             "label": label,
             "kind": task.get("step_type") or task.get("task_type") or "runtime_step",
+            "summary": task.get("summary") or task.get("description") or task.get("source_instruction_fragment") or "",
         }
 
     def _extract_edges(self, graph: dict[str, Any], run: dict[str, Any]) -> list[dict[str, Any]]:
@@ -365,15 +366,22 @@ class GraphVisualStateBuilder:
     def _select_graph(self, graphs: list[Any], graph_id: str | None) -> dict[str, Any] | None:
         dicts = [g for g in graphs if isinstance(g, dict)]
         if graph_id:
+            requested = str(graph_id).strip()
             for graph in dicts:
-                if self._graph_id(graph) == graph_id:
+                keys = {self._graph_id(graph), str(graph.get("task_name") or "").strip(), str(graph.get("id") or "").strip()}
+                if requested in keys:
                     return graph
         return dicts[-1] if dicts else None
 
-    def _select_run(self, runs: list[Any], graph_id: str) -> dict[str, Any] | None:
+    def _select_run(self, runs: list[Any], graph_id: str, graph: dict[str, Any] | None = None) -> dict[str, Any] | None:
         dicts = [r for r in runs if isinstance(r, dict)]
-        matched = [r for r in dicts if str(r.get("graph_id") or r.get("task_name") or r.get("run_id") or "") == graph_id]
-        candidates = matched or dicts
+        keys = {str(graph_id or "").strip()}
+        if isinstance(graph, dict):
+            for value in (graph.get("graph_id"), graph.get("task_name"), graph.get("id")):
+                if str(value or "").strip():
+                    keys.add(str(value).strip())
+        matched = [r for r in dicts if str(r.get("graph_id") or "").strip() in keys or str(r.get("task_name") or "").strip() in keys or str(r.get("run_id") or "").strip() in keys]
+        candidates = matched if graph_id else dicts
         candidates.sort(key=lambda item: str(item.get("completed_at") or item.get("started_at") or item.get("updated_at") or ""))
         return candidates[-1] if candidates else None
 
@@ -382,6 +390,23 @@ class GraphVisualStateBuilder:
 
     def _node_id(self, node: dict[str, Any], index: int) -> str:
         return str(node.get("node_id") or node.get("id") or node.get("task_id") or node.get("name") or f"node_{index + 1}").strip()
+
+
+    def _clean_node_label(self, value: Any) -> str:
+        text = " ".join(str(value or "").split())
+        if not text:
+            return "Runtime node"
+        # Keep concise node titles in the DAG. Detailed instructions remain in
+        # the node summary. The rule is structural and avoids domain keywords.
+        text = re.sub(r"^step[_\s-]*\d+[:：.]?\s*", "", text, flags=re.I).strip()
+        if len(text) <= 80:
+            return text
+        for sep in (". ", "。", "；", ";"):
+            if sep in text:
+                first = text.split(sep, 1)[0].strip()
+                if 6 <= len(first) <= 80:
+                    return first
+        return text[:77].rstrip() + "..."
 
     def _normalize_status(self, status: Any) -> str:
         value = str(status or "pending").strip().lower()
