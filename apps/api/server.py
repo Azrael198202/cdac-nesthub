@@ -454,7 +454,6 @@ async def chat(req: ChatRequest):
 @app.post("/api/conversation/feedback")
 async def conversation_feedback(req: ConversationFeedbackRequest):
     from ai_core.context.session_memory_store import SessionMemoryStore
-from ai_core.graph.graph_visualization import GraphVisualStateBuilder
     from ai_core.context.vector_memory_store import VectorMemoryStore
 
     store = SessionMemoryStore()
