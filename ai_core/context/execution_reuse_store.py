@@ -670,7 +670,19 @@ class ExecutionReuseStore:
         return self.compact_final_answer(str(run_payload.get("final_answer") or "")) if isinstance(run_payload, dict) else ""
 
     def compact_final_answer(self, text: str) -> str:
-        return self._normalize_process_output(str(text or ""), max_lines=8, max_chars=2400)
+        raw = str(text or "").strip()
+        if raw.startswith("{"):
+            try:
+                payload = json.loads(raw)
+                if isinstance(payload, dict):
+                    for key in ("final_answer", "answer", "result", "message", "text"):
+                        value = payload.get(key)
+                        if isinstance(value, str) and value.strip():
+                            raw = value.strip()
+                            break
+            except Exception:
+                pass
+        return self._normalize_process_output(raw, max_lines=40, max_chars=8000)
 
     def _mark_used(self, task_name: str) -> None:
         asset = self.get_asset(task_name)
