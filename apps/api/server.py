@@ -20,6 +20,7 @@ from auxiliary_brain.studio import AgentStudioService
 from ai_core.runtime.bootstrap import RuntimeBootstrapService
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 from ai_core.context.session_memory_store import SessionMemoryStore
+from ai_core.graph.graph_visualization import GraphVisualStateBuilder
 
 import traceback
 approval_learning = ApprovalLearningService()
@@ -29,6 +30,7 @@ studio_service = AgentStudioService()
 bootstrap_service = RuntimeBootstrapService()
 model_selection_store = UserModelSelectionStore()
 session_store = SessionMemoryStore()
+graph_visual_builder = GraphVisualStateBuilder()
 
 
 class ChatRequest(BaseModel):
@@ -148,6 +150,30 @@ async def home():
     )
 
 
+
+
+
+
+@app.get("/graph-runtime")
+async def graph_runtime_home():
+    html = open("apps/web/graph_runtime.html", "r", encoding="utf-8").read()
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@app.get("/api/graph-runtime/state")
+async def graph_runtime_state(graph_id: str | None = None):
+    snapshot = studio_service.snapshot()
+    visual_state = graph_visual_builder.from_snapshot(snapshot, graph_id=graph_id)
+    payload = graph_visual_builder.to_dict(visual_state)
+    payload["source"] = "agent_studio_snapshot"
+    return JSONResponse(payload)
 
 
 @app.get("/agent-studio")
@@ -428,6 +454,7 @@ async def chat(req: ChatRequest):
 @app.post("/api/conversation/feedback")
 async def conversation_feedback(req: ConversationFeedbackRequest):
     from ai_core.context.session_memory_store import SessionMemoryStore
+from ai_core.graph.graph_visualization import GraphVisualStateBuilder
     from ai_core.context.vector_memory_store import VectorMemoryStore
 
     store = SessionMemoryStore()

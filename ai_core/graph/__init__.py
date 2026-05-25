@@ -6,4 +6,7 @@ __all__ = [
     "GraphBoundaryNormalizer",
     "EdgeDrivenScheduler",
     "GraphSelfCheck",
+    "GraphVisualStateBuilder",
 ]
+
+from ai_core.graph.graph_visualization import GraphVisualStateBuilder
