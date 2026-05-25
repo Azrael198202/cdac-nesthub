@@ -40,3 +40,42 @@ def test_graph_visual_state_derives_edges_from_depends_on_without_domain_terms()
     payload = GraphVisualStateBuilder().to_dict(GraphVisualStateBuilder().from_graph(graph, {}))
     assert payload["edges"] == [{"id": "edge_1", "from": "first", "to": "second", "label": "runtime_json", "status": "pending"}]
     assert payload["lanes"] == [["first"], ["second"]]
+
+
+def test_graph_visual_state_overlays_live_run_status_from_agent_results_and_progress_events():
+    graph = {
+        "graph_id": "g_live",
+        "tasks": [
+            {"participant_id": "p1", "source_instruction_fragment": "First", "status": "pending"},
+            {"participant_id": "p2", "source_instruction_fragment": "Second", "status": "pending", "depends_on": ["p1"]},
+        ],
+    }
+    run = {
+        "task_name": "g_live",
+        "status": "running",
+        "agent_results": [{"participant_id": "p1", "status": "completed", "final_answer": "ok"}],
+        "progress_events": [{"stage": "participant_2_primary_runtime", "status": "running", "label": "running"}],
+    }
+    payload = GraphVisualStateBuilder().to_dict(GraphVisualStateBuilder().from_graph(graph, run))
+    status_by_id = {node["id"]: node["status"] for node in payload["nodes"]}
+    assert status_by_id["p1"] == "completed"
+    assert status_by_id["p2"] == "running"
+    assert payload["status"] == "running"
+    assert payload["summary"]["completed_count"] == 1
+    assert payload["summary"]["running_count"] == 1
+    assert payload["events"]
+
+
+def test_graph_visual_state_marks_downstream_skipped_when_upstream_failed():
+    graph = {
+        "graph_id": "g_fail",
+        "tasks": [
+            {"participant_id": "p1", "source_instruction_fragment": "First", "status": "pending"},
+            {"participant_id": "p2", "source_instruction_fragment": "Second", "status": "pending", "depends_on": ["p1"]},
+        ],
+    }
+    run = {"task_name": "g_fail", "agent_results": [{"participant_id": "p1", "status": "failed"}]}
+    payload = GraphVisualStateBuilder().to_dict(GraphVisualStateBuilder().from_graph(graph, run))
+    status_by_id = {node["id"]: node["status"] for node in payload["nodes"]}
+    assert status_by_id["p1"] == "failed"
+    assert status_by_id["p2"] == "skipped"

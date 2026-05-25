@@ -106,3 +106,64 @@ async def test_dataflow_step_missing_declared_upstream_does_not_call_model():
     )
     assert result.status == "failed"
     assert "upstream" in result.final_answer.lower()
+
+class InspectingPlainTextRouter:
+    def __init__(self):
+        self.kwargs = None
+
+    async def generate_json(self, **kwargs):
+        self.kwargs = kwargs
+        return {"final_answer": "Translated public result with complete upstream material."}
+
+
+@pytest.mark.asyncio
+async def test_dataflow_step_uses_plain_text_prompt_and_larger_completion_budget():
+    router = InspectingPlainTextRouter()
+    client = PrimaryBrainDelegationClient()
+    client.router = router
+    result = await client.execute_intermediate_step(
+        AgentExecutionRequest(
+            participant_id="p1",
+            participant_name="generic step",
+            participant_instruction="Transform both upstream results into the requested language.",
+            task_name="task",
+            task_instruction="task",
+            community_id="c",
+            shared_context={
+                "available_peer_results": [
+                    {"participant_name": "a", "final_answer": "first input"},
+                    {"participant_name": "b", "final_answer": "second input"},
+                ]
+            },
+        )
+    )
+    assert result.status == "completed"
+    assert result.final_answer == "Translated public result with complete upstream material."
+    assert router.kwargs["prompt"]["system"] == "Output only the requested result text. No JSON. No explanation."
+    assert router.kwargs["adapter"]["provider_options"]["num_predict"] >= 300
+    assert "final_answer" not in router.kwargs["rendered_user_prompt"]
+
+
+class TruncatedJsonRouter:
+    async def generate_json(self, **kwargs):
+        return {"final_answer": '{"final_answer":"Visible result without wrapper'}
+
+
+@pytest.mark.asyncio
+async def test_dataflow_step_unwraps_truncated_json_wrapper_from_lenient_router():
+    client = PrimaryBrainDelegationClient()
+    client.router = TruncatedJsonRouter()
+    result = await client.execute_intermediate_step(
+        AgentExecutionRequest(
+            participant_id="p1",
+            participant_name="generic step",
+            participant_instruction="Transform upstream result into final output.",
+            task_name="task",
+            task_instruction="task",
+            community_id="c",
+            shared_context={"available_peer_results": [{"participant_name": "upstream", "final_answer": "source text"}]},
+        )
+    )
+    assert result.status == "completed"
+    assert result.final_answer == "Visible result without wrapper"
+    assert not result.final_answer.startswith("{")

@@ -164,15 +164,16 @@ class PrimaryBrainDelegationClient:
                     "max_provider_attempts": 1,
                     "json_repair_retry": False,
                     "accept_raw_text_as_final_answer": True,
-                    "provider_options": {"temperature": 0, "num_predict": 96, "num_ctx": 1024, "think": False},
-                    "prompt_policy": {"max_context_tokens": 520},
-                    "max_prompt_chars": 1000,
+                    "provider_options": {"temperature": 0, "num_predict": 320, "num_ctx": 1536, "think": False},
+                    "prompt_policy": {"max_context_tokens": 720},
+                    "max_prompt_chars": 1400,
                 },
-                prompt={"id": "delegated_dataflow_step_lean", "system": "Return one short result. Prefer JSON: {\"final_answer\":\"text\"}."},
+                prompt={"id": "delegated_dataflow_step_lean", "system": "Output only the requested result text. No JSON. No explanation."},
                 rendered_user_prompt=user_prompt,
                 schema=schema,
             )
             answer = result.get("final_answer") if isinstance(result, dict) else ""
+            answer = self._normalize_public_step_answer(answer) if isinstance(answer, str) else ""
             status = "completed" if isinstance(answer, str) and self._answer_has_result_material(answer) else "failed"
             final_answer = answer.strip() if isinstance(answer, str) and answer.strip() else "Generated workflow step did not produce verified result material."
         except LLMJSONParseError as exc:
@@ -218,6 +219,25 @@ class PrimaryBrainDelegationClient:
         return self._recover_public_answer_from_text(text)
 
     def _recover_public_answer_from_text(self, raw: str) -> str:
+        text = self._normalize_public_step_answer(raw)
+        if not text:
+            return ""
+        try:
+            parsed = parse_json_content(text)
+            value = parsed.get("final_answer") or parsed.get("answer") or parsed.get("result")
+            if isinstance(value, str) and self._answer_has_result_material(value):
+                return self._compact_text(self._normalize_public_step_answer(value), 4000)
+        except Exception:
+            pass
+        # If the model returned plain text instead of the requested JSON wrapper,
+        # accept it as the step result only when it is public answer material.
+        cleaned = text
+        cleaned = re.sub(r"^.*?Last error:\s*", "", cleaned, flags=re.DOTALL).strip() if "Last error:" in cleaned else cleaned
+        if self._answer_has_result_material(cleaned):
+            return self._compact_text(self._normalize_public_step_answer(cleaned), 4000)
+        return ""
+
+    def _normalize_public_step_answer(self, raw: Any) -> str:
         text = str(raw or "").strip()
         if not text:
             return ""
@@ -226,18 +246,22 @@ class PrimaryBrainDelegationClient:
         text = re.sub(r"```$", "", text).strip()
         try:
             parsed = parse_json_content(text)
-            value = parsed.get("final_answer") or parsed.get("answer") or parsed.get("result")
-            if isinstance(value, str) and self._answer_has_result_material(value):
-                return self._compact_text(value, 1800)
+            for key in ("final_answer", "answer", "result", "message", "text"):
+                value = parsed.get(key) if isinstance(parsed, dict) else None
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
         except Exception:
             pass
-        # If the model returned plain text instead of the requested JSON wrapper,
-        # accept it as the step result only when it is public answer material.
-        cleaned = text
-        cleaned = re.sub(r"^.*?Last error:\s*", "", cleaned, flags=re.DOTALL).strip() if "Last error:" in cleaned else cleaned
-        if self._answer_has_result_material(cleaned):
-            return self._compact_text(cleaned, 1800)
-        return ""
+        match = re.search(r'^\s*\{\s*["\'](?:final_answer|answer|result|message|text)["\']\s*:\s*["\'](?P<value>.*)', text, flags=re.DOTALL)
+        if match:
+            value = match.group("value").strip()
+            # Remove only a real trailing JSON terminator.  Do not strip useful
+            # content after the last quote because lenient routers may return a
+            # truncated wrapper whose value is the actual public answer.
+            value = re.sub(r'["\']\s*\}\s*$', "", value, flags=re.DOTALL).strip()
+            if value:
+                return value
+        return text
 
     def _compact_declared_inputs(self, value: Any) -> list[dict[str, str]]:
         items = value if isinstance(value, list) else []
@@ -250,7 +274,7 @@ class PrimaryBrainDelegationClient:
                 continue
             compact.append({
                 "name": self._compact_text(item.get("participant_name") or item.get("participant_id") or "input", 80),
-                "text": self._compact_text(text, 700),
+                "text": self._compact_text(text, 1200),
             })
         return compact
 
@@ -263,11 +287,11 @@ class PrimaryBrainDelegationClient:
         return text[: max(0, max_chars - 3)].rstrip() + "..."
 
     def _build_lean_step_prompt(self, objective: str, upstream: list[dict[str, str]]) -> str:
-        lines = ["TASK:", self._compact_text(objective, 160), "INPUT:"]
+        lines = ["TASK:", self._compact_text(objective, 220), "INPUT:"]
         for idx, item in enumerate(upstream, 1):
             text = item.get("text") or ""
             lines.append(f"{idx}. {text}")
-        lines.append('Return only: {"final_answer":"..."}')
+        lines.append("Output only the final user-facing text.")
         return "\n".join(lines)
 
     def _project_single_upstream_result_if_possible(self, objective: str, upstream: list[dict[str, str]]) -> str | None:
