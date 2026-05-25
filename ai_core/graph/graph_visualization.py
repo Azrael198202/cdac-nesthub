@@ -109,6 +109,9 @@ class GraphVisualStateBuilder:
         }
 
     def _extract_nodes(self, graph: dict[str, Any], run: dict[str, Any]) -> list[dict[str, Any]]:
+        task_values = self._as_list(graph.get("tasks"))
+        if task_values:
+            return [self._task_as_node(task, index) for index, task in enumerate(task_values) if isinstance(task, dict)]
         candidates = [
             graph.get("nodes"),
             graph.get("steps"),
@@ -122,6 +125,25 @@ class GraphVisualStateBuilder:
             if values:
                 return [node for node in values if isinstance(node, dict)]
         return []
+
+    def _task_as_node(self, task: dict[str, Any], index: int) -> dict[str, Any]:
+        node_id = str(task.get("participant_id") or task.get("node_id") or task.get("id") or task.get("task_id") or f"task_{index + 1}").strip()
+        label = str(
+            task.get("label")
+            or task.get("display_name")
+            or task.get("participant_name")
+            or task.get("source_instruction_fragment")
+            or task.get("source_step_id")
+            or task.get("task_id")
+            or node_id
+        )
+        return {
+            **task,
+            "node_id": node_id,
+            "id": node_id,
+            "label": label,
+            "kind": task.get("step_type") or task.get("task_type") or "runtime_step",
+        }
 
     def _extract_edges(self, graph: dict[str, Any], run: dict[str, Any]) -> list[dict[str, Any]]:
         candidates = [
