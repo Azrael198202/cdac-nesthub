@@ -57,7 +57,9 @@ class GraphVisualStateBuilder:
         selected_graph = self._select_graph(graphs, graph_id)
         selected_id = self._graph_id(selected_graph) if selected_graph else str(graph_id or "runtime_graph")
         selected_run = self._select_run(runs, selected_id)
-        return self.from_graph(graph=selected_graph or {"graph_id": selected_id, "nodes": [], "edges": []}, run=selected_run or {})
+        graph_payload = dict(selected_graph or {"graph_id": selected_id, "nodes": [], "edges": []})
+        graph_payload["_participants"] = self._as_list(snapshot.get("participants"))
+        return self.from_graph(graph=graph_payload, run=selected_run or {})
 
     def from_graph(self, graph: dict[str, Any] | None, run: dict[str, Any] | None = None) -> GraphVisualState:
         graph = graph if isinstance(graph, dict) else {}
@@ -112,7 +114,15 @@ class GraphVisualStateBuilder:
     def _extract_nodes(self, graph: dict[str, Any], run: dict[str, Any]) -> list[dict[str, Any]]:
         task_values = self._as_list(graph.get("tasks"))
         if task_values:
-            return [self._task_as_node(task, index) for index, task in enumerate(task_values) if isinstance(task, dict)]
+            participants = self._as_list(graph.get("_participants"))
+            enriched = []
+            for index, task in enumerate(task_values):
+                if not isinstance(task, dict):
+                    continue
+                item = dict(task)
+                item["_participants"] = participants
+                enriched.append(self._task_as_node(item, index))
+            return enriched
         candidates = [
             graph.get("nodes"),
             graph.get("steps"),
@@ -129,7 +139,7 @@ class GraphVisualStateBuilder:
 
     def _task_as_node(self, task: dict[str, Any], index: int) -> dict[str, Any]:
         node_id = str(task.get("participant_id") or task.get("node_id") or task.get("id") or task.get("task_id") or f"task_{index + 1}").strip()
-        label = str(
+        raw_label = str(
             task.get("label")
             or task.get("display_name")
             or task.get("participant_name")
@@ -138,13 +148,45 @@ class GraphVisualStateBuilder:
             or task.get("task_id")
             or node_id
         )
+        participant_label = self._participant_label_for_node(task, node_id)
+        label = self._clean_node_label(raw_label, participant_label)
+        summary = raw_label if raw_label != label else str(task.get("summary") or task.get("notes") or task.get("description") or "")
         return {
             **task,
             "node_id": node_id,
             "id": node_id,
             "label": label,
+            "summary": summary,
             "kind": task.get("step_type") or task.get("task_type") or "runtime_step",
         }
+
+    def _participant_label_for_node(self, task: dict[str, Any], node_id: str) -> str:
+        participants = self._as_list(task.get("_participants"))
+        for participant in participants:
+            if not isinstance(participant, dict):
+                continue
+            pid = str(participant.get("participant_id") or participant.get("id") or "").strip()
+            if pid != node_id:
+                continue
+            return str(
+                participant.get("display_name")
+                or participant.get("agent_name")
+                or participant.get("name")
+                or participant.get("role_name")
+                or ""
+            ).strip()
+        return ""
+
+    def _clean_node_label(self, raw_label: str, participant_label: str = "") -> str:
+        label = " ".join(str(raw_label or "").split())
+        marker_count = len(re.findall(r"\bstep\s*\d+\s*:", label, flags=re.IGNORECASE))
+        if participant_label and (marker_count > 1 or len(label) > 90 or not label):
+            return participant_label
+        if marker_count > 1:
+            match = re.search(r"\bstep\s*\d+\s*:\s*(.*?)(?=\bstep\s*\d+\s*:|$)", label, flags=re.IGNORECASE)
+            if match:
+                label = match.group(1).strip()
+        return label or participant_label or "runtime node"
 
     def _extract_edges(self, graph: dict[str, Any], run: dict[str, Any]) -> list[dict[str, Any]]:
         candidates = [

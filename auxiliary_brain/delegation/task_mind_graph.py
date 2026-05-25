@@ -122,6 +122,18 @@ class TaskMindGraphBuilder:
         name_to_id = {self._participant_name(p).lower(): pid for pid, p in identities.items()}
         plan: dict[str, Any] = {"default_relationship": "independent", "participants": {}, "edges": []}
 
+        task_ref_to_participant: dict[str, str] = {}
+        for task in task_graph.get("tasks") or []:
+            if not isinstance(task, dict):
+                continue
+            target = str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
+            if not target:
+                continue
+            for key in ("participant_id", "participant", "agent_id", "task_id", "source_step_id", "id", "node_id"):
+                value = str(task.get(key) or "").strip()
+                if value:
+                    task_ref_to_participant[value] = target
+
         explicit_by_task: dict[str, list[str]] = {}
         for task in task_graph.get("tasks") or []:
             if not isinstance(task, dict):
@@ -130,7 +142,12 @@ class TaskMindGraphBuilder:
             raw_deps = task.get("depends_on") or task.get("requires") or task.get("input_from") or []
             if isinstance(raw_deps, str):
                 raw_deps = [raw_deps]
-            deps = [str(x).strip() for x in raw_deps if str(x).strip()]
+            deps = []
+            for item in raw_deps:
+                dep = str(item).strip()
+                if not dep:
+                    continue
+                deps.append(task_ref_to_participant.get(dep, dep))
             if target and deps:
                 explicit_by_task.setdefault(target, []).extend(deps)
 
@@ -144,7 +161,7 @@ class TaskMindGraphBuilder:
                 dep = str(item).strip()
                 if not dep:
                     continue
-                dep_id = dep if dep in identities else name_to_id.get(dep.lower(), dep)
+                dep_id = task_ref_to_participant.get(dep, dep if dep in identities else name_to_id.get(dep.lower(), dep))
                 if dep_id != pid and dep_id not in deps:
                     deps.append(dep_id)
 
@@ -188,7 +205,7 @@ class TaskMindGraphBuilder:
         return str(participant.get("participant_id") or participant.get("id") or participant.get("name") or "").strip()
 
     def _participant_name(self, participant: dict[str, Any]) -> str:
-        return str(participant.get("name") or participant.get("participant_id") or participant.get("id") or "participant").strip()
+        return str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant.get("participant_id") or participant.get("id") or "participant").strip()
 
     def _participant_objective(self, participant: dict[str, Any]) -> str:
         return str(participant.get("execution_objective") or participant.get("instruction") or participant.get("description") or "").strip()

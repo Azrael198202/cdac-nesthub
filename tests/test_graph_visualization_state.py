@@ -79,3 +79,21 @@ def test_graph_visual_state_marks_downstream_skipped_when_upstream_failed():
     status_by_id = {node["id"]: node["status"] for node in payload["nodes"]}
     assert status_by_id["p1"] == "failed"
     assert status_by_id["p2"] == "skipped"
+
+
+def test_graph_visual_state_prefers_participant_label_for_noisy_task_fragment():
+    snapshot = {
+        "participants": [{"participant_id": "p1", "display_name": "Readable Node"}],
+        "task_graphs": [{
+            "graph_id": "g_label",
+            "tasks": [{
+                "participant_id": "p1",
+                "step_type": "participant_execution",
+                "source_instruction_fragment": "Step 1: Do one thing. Step 2: Do another thing. Step 3: Return the result.",
+            }],
+        }],
+        "task_runs": [],
+    }
+    payload = GraphVisualStateBuilder().to_dict(GraphVisualStateBuilder().from_snapshot(snapshot, graph_id="g_label"))
+    assert payload["nodes"][0]["label"] == "Readable Node"
+    assert "Step 1" in payload["nodes"][0]["summary"]

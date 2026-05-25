@@ -818,6 +818,12 @@ class PrimaryBrainDelegationClient:
             "no verified result material",
             "could not produce a verified answer",
             "could not produce a verified final answer",
+            "workflow is blocked",
+            "did not execute a tool",
+            "waiting for runtime input",
+            "waiting for additional information",
+            "waiting for your confirmation",
+            "not completed yet",
             "not available in this environment",
             "cannot perform the requested action",
             "cannot perform the requested actions",
@@ -1074,20 +1080,32 @@ class PrimaryBrainDelegationClient:
         return scan(value)
 
     def _extract_status(self, state: dict[str, Any]) -> str:
-        if isinstance(state, dict) and str(state.get("status") or "") in {"failed", "completed", "timeout"}:
-            return "failed" if str(state.get("status")) == "timeout" else str(state.get("status"))
         pending = state.get("pending_action") if isinstance(state, dict) else None
         if isinstance(pending, dict):
             kind = str(pending.get("kind") or "pending")
             if kind in {"secret_input", "optional_credential_choice"}:
                 return "requires_key"
-            if kind in {"human_information_required", "collect_runtime_parameters", "runtime_parameter_input", "uploaded_artifact_parameters"}:
+            if kind in {"human_information_required", "collect_runtime_parameters", "runtime_parameter_input", "uploaded_artifact_parameters", "agent_node_parameter_collection"}:
                 return "requires_input"
             return "paused"
+
+        state_status = str(state.get("status") or "") if isinstance(state, dict) else ""
+        if state_status == "timeout":
+            return "failed"
+        if state_status == "failed":
+            return "failed"
+        if state_status == "completed":
+            final_answer = self._extract_final_answer(state)
+            return "completed" if self._answer_has_result_material(final_answer) else "failed"
+
         results = state.get("results", {}) if isinstance(state, dict) else {}
         output = results.get("output") if isinstance(results, dict) else None
         if isinstance(output, dict):
-            return str(output.get("status") or output.get("execution_status") or "completed")
+            status = str(output.get("status") or output.get("execution_status") or "completed")
+            if status == "completed":
+                final_answer = self._extract_final_answer(state)
+                return "completed" if self._answer_has_result_material(final_answer) else "failed"
+            return status
         if isinstance(results, dict) and results:
             return "incomplete"
         return "completed"

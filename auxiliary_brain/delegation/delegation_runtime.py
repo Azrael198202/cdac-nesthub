@@ -5,7 +5,7 @@ from typing import Any
 import copy
 import re
 
-from ai_core.agent_delegation import AgentExecutionRequest, PrimaryBrainDelegationClient
+from ai_core.agent_delegation import AgentExecutionRequest, AgentExecutionResult, PrimaryBrainDelegationClient
 from auxiliary_brain.storage import JsonStore
 from auxiliary_brain.runtime import new_id
 from auxiliary_brain.delegation.task_mind_graph import TaskMindGraphBuilder
@@ -66,6 +66,24 @@ class AgentDelegationRuntime:
         for index, participant in enumerate(execution_order):
             participant_name = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant.get("participant_id") or "participant")
             participant_id = str(participant.get("participant_id") or participant.get("id") or "")
+            dependency_blockers = self._dependency_blockers_for_participant(participant, agent_results, dependency_plan, task_graph)
+            if dependency_blockers:
+                result = self._make_skipped_result(
+                    participant=participant,
+                    participant_name=participant_name,
+                    reason="Required upstream result material is not available.",
+                    blockers=dependency_blockers,
+                )
+                result_payload = self._sanitize_result_payload(result.__dict__)
+                agent_results.append(result)
+                run_payload["agent_results"].append(result_payload)
+                self._record_progress(
+                    run_payload,
+                    f"participant_{index + 1}_skipped",
+                    f"Participant skipped because required upstream material is unavailable: {participant_name}",
+                    "skipped",
+                )
+                continue
             node_missing_fields = self._collect_node_parameter_fields(participant)
             if node_missing_fields:
                 return self._pause_for_node_parameters(
@@ -114,6 +132,7 @@ class AgentDelegationRuntime:
                         run_payload,
                         participant_index=index + 1,
                         participant_name=participant_name,
+                        participant_id=participant_id,
                     ),
                 )
             else:
@@ -123,8 +142,10 @@ class AgentDelegationRuntime:
                         run_payload,
                         participant_index=index + 1,
                         participant_name=participant_name,
+                        participant_id=participant_id,
                     ),
                 )
+            result = self._normalize_execution_result_for_graph(result)
             result_payload = self._sanitize_result_payload(result.__dict__)
             agent_results.append(result)
             run_payload["agent_results"].append(result_payload)
@@ -397,6 +418,7 @@ class AgentDelegationRuntime:
                         run_payload,
                         participant_index=index + 1,
                         participant_name=participant_name,
+                        participant_id=participant_id,
                     ),
                 )
             else:
@@ -406,6 +428,7 @@ class AgentDelegationRuntime:
                         run_payload,
                         participant_index=index + 1,
                         participant_name=participant_name,
+                        participant_id=participant_id,
                     ),
                 )
             payload = self._sanitize_result_payload(result.__dict__)
@@ -539,6 +562,18 @@ class AgentDelegationRuntime:
             "participants": {},
             "edges": [],
         }
+        task_ref_to_participant: dict[str, str] = {}
+        for task in task_graph.get("tasks") or []:
+            if not isinstance(task, dict):
+                continue
+            target = str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
+            if not target:
+                continue
+            for key in ("participant_id", "participant", "agent_id", "task_id", "source_step_id", "id", "node_id"):
+                value = str(task.get(key) or "").strip()
+                if value:
+                    task_ref_to_participant[value] = target
+
         explicit_by_task: dict[str, list[str]] = {}
         for task in task_graph.get("tasks") or []:
             if not isinstance(task, dict):
@@ -547,7 +582,11 @@ class AgentDelegationRuntime:
             raw_deps = task.get("depends_on") or task.get("requires") or task.get("input_from") or []
             if isinstance(raw_deps, str):
                 raw_deps = [raw_deps]
-            deps = [str(x).strip() for x in raw_deps if str(x).strip()]
+            deps = []
+            for item in raw_deps:
+                dep = str(item).strip()
+                if dep:
+                    deps.append(task_ref_to_participant.get(dep, dep))
             if target and deps:
                 explicit_by_task.setdefault(target, []).extend(deps)
 
@@ -561,7 +600,7 @@ class AgentDelegationRuntime:
                 dep = str(item).strip()
                 if not dep:
                     continue
-                dep_id = dep if dep in identities else name_to_id.get(dep.lower(), dep)
+                dep_id = task_ref_to_participant.get(dep, dep if dep in identities else name_to_id.get(dep.lower(), dep))
                 if dep_id != pid and dep_id not in deps:
                     deps.append(dep_id)
             # Dependencies must come from the task graph or participant metadata.
@@ -867,6 +906,149 @@ class AgentDelegationRuntime:
             if pid:
                 self.store.write_json(f"generated/agents/{pid}.json", updated)
 
+
+    def _declared_task_dependencies(self, task_graph: dict[str, Any], participant_id: str) -> list[str]:
+        if not isinstance(task_graph, dict) or not participant_id:
+            return []
+        ref_to_participant: dict[str, str] = {}
+        for task in task_graph.get("tasks") or []:
+            if not isinstance(task, dict):
+                continue
+            target = str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
+            if not target:
+                continue
+            for key in ("participant_id", "participant", "agent_id", "task_id", "source_step_id", "id", "node_id"):
+                value = str(task.get(key) or "").strip()
+                if value:
+                    ref_to_participant[value] = target
+        for task in task_graph.get("tasks") or []:
+            if not isinstance(task, dict):
+                continue
+            target = str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
+            if target != participant_id:
+                continue
+            raw_deps = task.get("depends_on") or task.get("requires") or task.get("input_from") or []
+            if isinstance(raw_deps, str):
+                raw_deps = [raw_deps]
+            deps: list[str] = []
+            for item in raw_deps:
+                dep = str(item).strip()
+                if dep:
+                    resolved = ref_to_participant.get(dep, dep)
+                    if resolved != participant_id and resolved not in deps:
+                        deps.append(resolved)
+            return deps
+        return []
+
+    def _dependency_blockers_for_participant(self, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any], task_graph: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        pid = self._participant_identity(participant)
+        participant_plan = (dependency_plan.get("participants") or {}).get(pid) or {}
+        deps = [str(x) for x in participant_plan.get("depends_on") or [] if str(x)]
+        for dep in self._declared_task_dependencies(task_graph or {}, pid):
+            if dep and dep not in deps:
+                deps.append(dep)
+        if not deps:
+            return []
+        by_id: dict[str, Any] = {}
+        by_name: dict[str, Any] = {}
+        for result in completed_results:
+            result_pid = str(getattr(result, "participant_id", "") or "")
+            result_name = str(getattr(result, "participant_name", "") or "")
+            if result_pid:
+                by_id[result_pid] = result
+            if result_name:
+                by_name[result_name] = result
+        blockers: list[dict[str, Any]] = []
+        for dep in deps:
+            result = by_id.get(dep) or by_name.get(dep)
+            if result is None:
+                blockers.append({"dependency": dep, "reason": "missing"})
+                continue
+            if not self._result_has_verified_material(result):
+                blockers.append({
+                    "dependency": dep,
+                    "reason": "invalid_or_incomplete",
+                    "status": str(getattr(result, "status", "") or ""),
+                    "summary": self._compact_text(getattr(result, "final_answer", "") or "", 240),
+                })
+        return blockers
+
+    def _normalize_execution_result_for_graph(self, result: Any) -> Any:
+        if not isinstance(result, AgentExecutionResult):
+            return result
+        status = str(result.status or "").lower()
+        if status == "completed" and not self._result_has_verified_material(result):
+            return AgentExecutionResult(
+                participant_id=result.participant_id,
+                participant_name=result.participant_name,
+                core_run_id=result.core_run_id,
+                status="failed",
+                final_answer=result.final_answer or "Completed node did not produce verified result material.",
+                workflow_results=result.workflow_results,
+                origin=result.origin,
+                pending_action=result.pending_action,
+                missing_inputs=result.missing_inputs,
+            )
+        return result
+
+    def _result_has_verified_material(self, result: Any) -> bool:
+        status = str(getattr(result, "status", "") or "").lower()
+        if status != "completed":
+            return False
+        answer = str(getattr(result, "final_answer", "") or "").strip()
+        return self._answer_text_has_verified_material(answer)
+
+    def _answer_text_has_verified_material(self, answer: str) -> bool:
+        text = str(answer or "").strip()
+        if not text:
+            return False
+        lower = " ".join(text.lower().split())
+        invalid_fragments = (
+            "workflow is blocked",
+            "did not execute a tool",
+            "waiting for runtime input",
+            "waiting for additional information",
+            "waiting for your confirmation",
+            "not completed yet",
+            "could not be completed with verified result material",
+            "no verified result material",
+            "did not produce verified result material",
+            "not available in this environment",
+            "cannot perform the requested action",
+            "cannot perform the requested actions",
+            "i cannot perform",
+            "unable to perform",
+        )
+        if any(fragment in lower for fragment in invalid_fragments):
+            return False
+        alpha = sum(1 for ch in text if ch.isalpha())
+        digit = sum(1 for ch in text if ch.isdigit())
+        return alpha + digit >= 8
+
+    def _make_skipped_result(self, *, participant: dict[str, Any], participant_name: str, reason: str, blockers: list[dict[str, Any]]) -> AgentExecutionResult:
+        participant_id = str(participant.get("participant_id") or participant.get("id") or "")
+        message = reason
+        if blockers:
+            details = "; ".join(
+                f"{item.get('dependency')}: {item.get('reason')}" for item in blockers if isinstance(item, dict)
+            )
+            if details:
+                message = f"{reason} Blocked dependencies: {details}."
+        return AgentExecutionResult(
+            participant_id=participant_id,
+            participant_name=participant_name,
+            core_run_id="",
+            status="skipped",
+            final_answer=message,
+            workflow_results={
+                "dependency_gate": {
+                    "status": "skipped",
+                    "reason": reason,
+                    "blockers": blockers,
+                }
+            },
+        )
+
     def _peer_results_for_participant(self, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> list[dict[str, Any]]:
         pid = self._participant_identity(participant)
         participant_plan = (dependency_plan.get("participants") or {}).get(pid) or {}
@@ -878,6 +1060,8 @@ class AgentDelegationRuntime:
             result_pid = str(getattr(result, "participant_id", "") or "")
             result_name = str(getattr(result, "participant_name", "") or "")
             if result_pid not in deps and result_name not in deps:
+                continue
+            if not self._result_has_verified_material(result):
                 continue
             safe_results.append(self._safe_peer_result(result))
         return safe_results
@@ -1027,6 +1211,7 @@ class AgentDelegationRuntime:
         *,
         participant_index: int,
         participant_name: str,
+        participant_id: str = "",
         resume: bool = False,
     ):
         """Mirror primary-runtime node telemetry into the delegation run.
@@ -1055,6 +1240,7 @@ class AgentDelegationRuntime:
             run_payload.setdefault("primary_runtime_events", []).append({
                 "participant_index": participant_index,
                 "participant_name": participant_name,
+                "participant_id": participant_id,
                 "core_run_id": event.get("run_id"),
                 "event_type": event.get("type"),
                 "node_id": event.get("node_id"),
