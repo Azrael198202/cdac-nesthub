@@ -55,9 +55,50 @@ class GraphVisualStateBuilder:
         graphs = self._as_list(snapshot.get("task_graphs"))
         runs = self._as_list(snapshot.get("task_runs"))
         selected_graph = self._select_graph(graphs, graph_id)
+        selected_graph = self._enrich_graph_with_participant_labels(selected_graph, self._as_list(snapshot.get("participants")))
         selected_id = self._graph_id(selected_graph) if selected_graph else str(graph_id or "runtime_graph")
         selected_run = self._select_run(runs, selected_id)
         return self.from_graph(graph=selected_graph or {"graph_id": selected_id, "nodes": [], "edges": []}, run=selected_run or {})
+
+    def _enrich_graph_with_participant_labels(self, graph: dict[str, Any] | None, participants: list[Any]) -> dict[str, Any] | None:
+        if not isinstance(graph, dict):
+            return graph
+        by_id: dict[str, dict[str, Any]] = {}
+        for participant in participants:
+            if not isinstance(participant, dict):
+                continue
+            pid = str(participant.get("participant_id") or participant.get("id") or "").strip()
+            if pid:
+                by_id[pid] = participant
+        if not by_id:
+            return graph
+        import copy
+        enriched = copy.deepcopy(graph)
+        tasks = enriched.get("tasks") if isinstance(enriched.get("tasks"), list) else []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            pid = str(task.get("participant_id") or "").strip()
+            participant = by_id.get(pid)
+            if not participant:
+                continue
+            name = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or "").strip()
+            objective = str(participant.get("execution_objective") or participant.get("instruction") or "").strip()
+            if name and not task.get("participant_name"):
+                task["participant_name"] = name
+            existing_label = str(task.get("label") or "").strip()
+            if name and str(task.get("step_type") or "") == "participant_execution" and (not existing_label or self._is_generic_step_label(existing_label)):
+                task["label"] = name
+            if objective and (not task.get("source_instruction_fragment") or self._is_generic_step_label(str(task.get("source_instruction_fragment") or ""))):
+                task["source_instruction_fragment"] = objective
+        return enriched
+
+
+    def _is_generic_step_label(self, value: str) -> bool:
+        text = str(value or "").strip().casefold()
+        if not text:
+            return True
+        return bool(re.fullmatch(r"(?:step|task|node)[_\s-]*\d+", text) or re.fullmatch(r"generated\s+(?:step|node)\s*\d*", text))
 
     def from_graph(self, graph: dict[str, Any] | None, run: dict[str, Any] | None = None) -> GraphVisualState:
         graph = graph if isinstance(graph, dict) else {}
@@ -129,13 +170,14 @@ class GraphVisualStateBuilder:
 
     def _task_as_node(self, task: dict[str, Any], index: int) -> dict[str, Any]:
         node_id = str(task.get("participant_id") or task.get("node_id") or task.get("id") or task.get("task_id") or f"task_{index + 1}").strip()
+        raw_label = str(task.get("label") or "").strip()
+        if self._is_generic_step_label(raw_label):
+            raw_label = ""
         label = str(
-            task.get("label")
+            raw_label
             or task.get("display_name")
             or task.get("participant_name")
             or task.get("source_instruction_fragment")
-            or task.get("source_step_id")
-            or task.get("task_id")
             or node_id
         )
         return {
@@ -175,7 +217,7 @@ class GraphVisualStateBuilder:
             "label": label[:120],
             "kind": kind,
             "status": status_by_node.get(node_id, self._normalize_status(node.get("status"))),
-            "summary": str(node.get("summary") or node.get("notes") or node.get("description") or "")[:240],
+            "summary": str(node.get("summary") or node.get("notes") or node.get("description") or node.get("source_instruction_fragment") or "")[:240],
             "has_output": bool(node.get("output") or node.get("result") or node.get("artifact_ref")),
         }
 
@@ -372,7 +414,9 @@ class GraphVisualStateBuilder:
 
     def _select_run(self, runs: list[Any], graph_id: str) -> dict[str, Any] | None:
         dicts = [r for r in runs if isinstance(r, dict)]
-        matched = [r for r in dicts if str(r.get("graph_id") or r.get("task_name") or r.get("run_id") or "") == graph_id]
+        matched = [r for r in dicts if str(r.get("graph_id") or r.get("task_graph_id") or "") == graph_id]
+        if not matched:
+            matched = [r for r in dicts if str(r.get("task_name") or r.get("run_id") or "") == graph_id]
         candidates = matched or dicts
         candidates.sort(key=lambda item: str(item.get("completed_at") or item.get("started_at") or item.get("updated_at") or ""))
         return candidates[-1] if candidates else None

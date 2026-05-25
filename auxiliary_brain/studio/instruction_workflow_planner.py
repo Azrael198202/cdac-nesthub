@@ -64,12 +64,14 @@ class InstructionWorkflowPlanner:
                     tasks.append({
                         "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
                         "participant_id": pid,
+                        "participant_name": self._participant_name(participant),
+                        "label": self._participant_name(participant),
                         "execution_owner": "ai_core",
                         "status": "pending",
                         "step_type": "participant_execution",
                         "depends_on": depends_on,
                         "source_step_id": step_id,
-                        "source_instruction_fragment": step.get("instruction_fragment") or "",
+                        "source_instruction_fragment": self._objective_from_step(step),
                     })
                     covered.append({"step_id": step_id, "type": "participant_execution", "participant_id": pid})
                     continue
@@ -79,10 +81,10 @@ class InstructionWorkflowPlanner:
                 objective = self._objective_from_step(step)
                 virtual = {
                     "participant_id": virtual_id,
-                    "name": step.get("label") or f"Generated Step {len(generated) + 1}",
-                    "agent_name": step.get("label") or f"Generated Step {len(generated) + 1}",
-                    "display_name": step.get("label") or f"Generated Step {len(generated) + 1}",
-                    "role_name": step.get("label") or f"Generated Step {len(generated) + 1}",
+                    "name": step.get("label") or objective,
+                    "agent_name": step.get("label") or objective,
+                    "display_name": step.get("label") or objective,
+                    "role_name": step.get("label") or objective,
                     "instruction": objective,
                     "execution_objective": objective,
                     "definition_instruction": step.get("instruction_fragment") or objective,
@@ -110,10 +112,11 @@ class InstructionWorkflowPlanner:
                     "execution_owner": "ai_core",
                     "status": "pending",
                     "step_type": "semantic_intermediate_step",
+                    "label": objective,
                     "depends_on": depends_on,
                     "input_from": depends_on,
                     "source_step_id": step_id,
-                    "source_instruction_fragment": step.get("instruction_fragment") or "",
+                    "source_instruction_fragment": objective,
                 })
                 covered.append({"step_id": step_id, "type": "semantic_intermediate_step", "participant_id": virtual_id})
         else:
@@ -139,12 +142,14 @@ class InstructionWorkflowPlanner:
                         tasks.append({
                             "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
                             "participant_id": pid,
+                            "participant_name": self._participant_name(participant),
+                            "label": self._participant_name(participant),
                             "execution_owner": "ai_core",
                             "status": "pending",
                             "step_type": "participant_execution",
                             "depends_on": depends_on,
                             "source_step_id": step_id,
-                            "source_instruction_fragment": step.get("instruction_fragment") or "",
+                            "source_instruction_fragment": self._objective_from_step(step),
                         })
                         covered.append({"step_id": step_id, "type": "participant_execution", "participant_id": pid})
                         continue
@@ -153,10 +158,10 @@ class InstructionWorkflowPlanner:
                     objective = self._objective_from_step(step)
                     virtual = {
                         "participant_id": virtual_id,
-                        "name": step.get("label") or f"Generated Step {len(generated) + 1}",
-                        "agent_name": step.get("label") or f"Generated Step {len(generated) + 1}",
-                        "display_name": step.get("label") or f"Generated Step {len(generated) + 1}",
-                        "role_name": step.get("label") or f"Generated Step {len(generated) + 1}",
+                        "name": step.get("label") or objective,
+                        "agent_name": step.get("label") or objective,
+                        "display_name": step.get("label") or objective,
+                        "role_name": step.get("label") or objective,
                         "instruction": objective,
                         "execution_objective": objective,
                         "definition_instruction": step.get("instruction_fragment") or objective,
@@ -184,10 +189,11 @@ class InstructionWorkflowPlanner:
                         "execution_owner": "ai_core",
                         "status": "pending",
                         "step_type": "semantic_intermediate_step",
+                        "label": objective,
                         "depends_on": depends_on,
                         "input_from": depends_on,
                         "source_step_id": step_id,
-                        "source_instruction_fragment": step.get("instruction_fragment") or "",
+                        "source_instruction_fragment": objective,
                     })
                     covered.append({"step_id": step_id, "type": "semantic_intermediate_step", "participant_id": virtual_id})
             else:
@@ -203,6 +209,8 @@ class InstructionWorkflowPlanner:
                     tasks.append({
                         "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
                         "participant_id": pid,
+                        "participant_name": self._participant_name(participant),
+                        "label": self._participant_name(participant),
                         "execution_owner": "ai_core",
                         "status": "pending",
                         "step_type": "participant_execution",

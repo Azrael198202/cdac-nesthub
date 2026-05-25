@@ -651,6 +651,7 @@ class AgentStudioService:
                 "origin": "auxiliary_brain",
                 "status": "requires_input",
                 "task_name": str(task_graph.get("task_name") or task_graph.get("graph_id") or task_name),
+                "graph_id": str(task_graph.get("graph_id") or task_graph.get("id") or task_name),
                 "current_stage": "waiting_for_runtime_parameters",
                 "pending_action": preflight.get("pending_action"),
                 "missing_inputs": preflight.get("missing_inputs") or [],
@@ -765,6 +766,7 @@ class AgentStudioService:
                     "pending_action": preflight.get("pending_action"),
                     "missing_inputs": preflight.get("missing_inputs") or [],
                     "runtime_parameters": runtime_parameters,
+                    "graph_id": str(task_graph.get("graph_id") or task_graph.get("id") or task_name),
                     "completed_at": self._now(),
                 })
                 self.store.write_json(f"generated/results/{run_id}.json", run_payload)
@@ -1025,8 +1027,11 @@ class AgentStudioService:
         """
         all_missing: list[dict[str, Any]] = []
         analyses: list[dict[str, Any]] = []
-        for participant in participants:
-            artifacts = participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or []
+        selected = self.delegation_runtime._fresh_task_participants(
+            self.delegation_runtime._select_participants(task_graph, participants)
+        )
+        for participant in selected:
+            artifacts = self.delegation_runtime._participant_artifacts_for_task(participant, task_graph, selected)
             if not artifacts:
                 continue
             step = {
@@ -1058,12 +1063,17 @@ class AgentStudioService:
                     }
                 },
             }
-            contract = self.uploaded_artifact_contract.build_contract(state=state, step=step, step_id="step_1")
+            scoped_step_id = str(participant.get("participant_id") or participant.get("id") or "node")
+            contract = self.uploaded_artifact_contract.build_contract(state=state, step=step, step_id=scoped_step_id)
             analyses.append(contract)
             for field in contract.get("missing_parameter_fields") or []:
                 if isinstance(field, dict):
                     tagged = dict(field)
+                    scoped_node_id = str(participant.get("participant_id") or participant.get("id") or "").strip()
                     tagged.setdefault("resolution_layer", "resource_binding")
+                    if scoped_node_id:
+                        tagged.setdefault("participant_id", scoped_node_id)
+                        tagged.setdefault("scope_id", scoped_node_id)
                     all_missing.append(tagged)
         # Deduplicate fields by normalized name.
         deduped: list[dict[str, Any]] = []
