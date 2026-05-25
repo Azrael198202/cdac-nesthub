@@ -57,3 +57,52 @@ async def test_dataflow_step_extracts_final_answer_from_raw_json_fragment():
     )
     assert result.status == "completed"
     assert result.final_answer == "Clean public answer"
+
+class RefusalRouter:
+    async def generate_json(self, **kwargs):
+        raise LLMJSONParseError(
+            "invalid JSON",
+            raw_content="The requested participants are not available in this environment. I cannot perform the requested actions.",
+        )
+
+
+@pytest.mark.asyncio
+async def test_dataflow_step_rejects_generic_refusal_as_result_material():
+    client = PrimaryBrainDelegationClient()
+    client.router = RefusalRouter()
+    result = await client.execute_intermediate_step(
+        AgentExecutionRequest(
+            participant_id="p1",
+            participant_name="generic step",
+            participant_instruction="Transform the upstream result into a user-facing answer.",
+            task_name="task",
+            task_instruction="task",
+            community_id="c",
+            shared_context={"available_peer_results": [{"participant_name": "upstream", "final_answer": "source text"}]},
+        )
+    )
+    assert result.status == "failed"
+    assert "not available in this environment" not in result.final_answer.lower()
+
+
+@pytest.mark.asyncio
+async def test_dataflow_step_missing_declared_upstream_does_not_call_model():
+    class ExplodingRouter:
+        async def generate_json(self, **kwargs):
+            raise AssertionError("model should not be called without upstream material")
+
+    client = PrimaryBrainDelegationClient()
+    client.router = ExplodingRouter()
+    result = await client.execute_intermediate_step(
+        AgentExecutionRequest(
+            participant_id="p1",
+            participant_name="generic step",
+            participant_instruction="Transform declared upstream results.",
+            task_name="task",
+            task_instruction="task",
+            community_id="c",
+            shared_context={"depends_on": ["upstream_id"], "available_peer_results": []},
+        )
+    )
+    assert result.status == "failed"
+    assert "upstream" in result.final_answer.lower()

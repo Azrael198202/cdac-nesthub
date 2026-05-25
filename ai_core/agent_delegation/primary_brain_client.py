@@ -110,7 +110,24 @@ class PrimaryBrainDelegationClient:
             progress_callback({"type": "NODE_STARTED", "run_id": core_run_id, "node_id": "dataflow_step"})
             progress_callback({"type": "NODE_EXECUTING", "run_id": core_run_id, "node_id": "dataflow_step"})
 
+        declared_dependencies = []
+        if isinstance(request.shared_context, dict):
+            raw_deps = request.shared_context.get("depends_on") or []
+            declared_dependencies = raw_deps if isinstance(raw_deps, list) else [raw_deps]
         upstream = self._compact_declared_inputs((request.shared_context or {}).get("available_peer_results") or [])
+        if declared_dependencies and not upstream:
+            final_answer = "The generated step did not receive required upstream result material."
+            if progress_callback:
+                progress_callback({"type": "NODE_RESULT", "run_id": core_run_id, "node_id": "dataflow_step"})
+                progress_callback({"type": "RUN_COMPLETED", "run_id": core_run_id})
+            return AgentExecutionResult(
+                participant_id=request.participant_id,
+                participant_name=request.participant_name,
+                core_run_id=core_run_id,
+                status="failed",
+                final_answer=final_answer,
+                workflow_results={"dataflow_step": {"status": "failed", "final_answer": final_answer, "execution_mode": "missing_upstream_guard"}},
+            )
         projection = self._project_single_upstream_result_if_possible(request.participant_instruction, upstream)
         if projection is not None:
             status = "completed" if self._answer_has_result_material(projection) else "failed"
@@ -145,11 +162,13 @@ class PrimaryBrainDelegationClient:
                     "model_route_name": "stable_synthesis",
                     "provider_timeout_seconds": 180,
                     "max_provider_attempts": 1,
-                    "provider_options": {"temperature": 0, "num_predict": 192, "num_ctx": 1536, "think": False},
-                    "prompt_policy": {"max_context_tokens": 900},
-                    "max_prompt_chars": 1800,
+                    "json_repair_retry": False,
+                    "accept_raw_text_as_final_answer": True,
+                    "provider_options": {"temperature": 0, "num_predict": 96, "num_ctx": 1024, "think": False},
+                    "prompt_policy": {"max_context_tokens": 520},
+                    "max_prompt_chars": 1000,
                 },
-                prompt={"id": "delegated_dataflow_step_lean", "system": "Output JSON only: {\"final_answer\":\"text\"}. No markdown."},
+                prompt={"id": "delegated_dataflow_step_lean", "system": "Return one short result. Prefer JSON: {\"final_answer\":\"text\"}."},
                 rendered_user_prompt=user_prompt,
                 schema=schema,
             )
@@ -244,12 +263,11 @@ class PrimaryBrainDelegationClient:
         return text[: max(0, max_chars - 3)].rstrip() + "..."
 
     def _build_lean_step_prompt(self, objective: str, upstream: list[dict[str, str]]) -> str:
-        lines = ["OBJECTIVE:", self._compact_text(objective, 220), "", "INPUT:"]
+        lines = ["TASK:", self._compact_text(objective, 160), "INPUT:"]
         for idx, item in enumerate(upstream, 1):
-            label = item.get("name") or f"input_{idx}"
             text = item.get("text") or ""
-            lines.append(f"[{idx}] {label}: {text}")
-        lines.extend(["", "RULES:", "Use only INPUT.", "Keep the answer short.", "JSON only: {\"final_answer\":\"text\"}"])
+            lines.append(f"{idx}. {text}")
+        lines.append('Return only: {"final_answer":"..."}')
         return "\n".join(lines)
 
     def _project_single_upstream_result_if_possible(self, objective: str, upstream: list[dict[str, str]]) -> str | None:
@@ -776,6 +794,11 @@ class PrimaryBrainDelegationClient:
             "no verified result material",
             "could not produce a verified answer",
             "could not produce a verified final answer",
+            "not available in this environment",
+            "cannot perform the requested action",
+            "cannot perform the requested actions",
+            "i cannot perform",
+            "unable to perform",
             "source only",
             "classified intent is",
             "initial capability needs",

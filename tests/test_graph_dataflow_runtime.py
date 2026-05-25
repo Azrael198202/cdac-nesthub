@@ -107,7 +107,7 @@ def test_lean_step_prompt_excludes_full_graph_metadata():
         "Apply the requested change.",
         [{"name": "source", "text": "abc"}],
     )
-    assert "OBJECTIVE:" in prompt
+    assert "TASK:" in prompt
     assert "INPUT:" in prompt
     assert "task_mind_graph" not in prompt
     assert "selected_participant_ids" not in prompt
