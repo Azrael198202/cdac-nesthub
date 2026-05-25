@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Graph Runtime Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{
+      --bg:#050914;--panel:#0b1220;--panel2:#101827;--panel3:#111c2e;--line:#26344f;
+      --text:#e5edff;--muted:#8ea3c7;--blue:#2563eb;--cyan:#38bdf8;--green:#22c55e;
+      --yellow:#f59e0b;--red:#ef4444;--purple:#a78bfa;--gray:#64748b;--radius:16px;
+      --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+      --sans:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    }
+    *{box-sizing:border-box} body{margin:0;background:radial-gradient(circle at top left,#10203a 0,#050914 42%,#030712 100%);color:var(--text);font-family:var(--sans);height:100vh;overflow:hidden}
+    .shell{display:grid;grid-template-rows:auto 1fr;height:100vh}.topbar{display:flex;gap:14px;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--line);background:rgba(5,9,20,.86);backdrop-filter:blur(10px)}
+    .brand{display:flex;gap:12px;align-items:center}.logo{width:34px;height:34px;border-radius:12px;background:linear-gradient(135deg,var(--cyan),var(--blue));box-shadow:0 0 30px rgba(56,189,248,.25)}
+    h1{font-size:16px;margin:0}.sub{font-size:12px;color:var(--muted);font-family:var(--mono)}.actions{display:flex;gap:8px;align-items:center}.btn{border:1px solid var(--line);background:var(--panel2);color:var(--text);padding:8px 12px;border-radius:11px;cursor:pointer;text-decoration:none;font-size:13px}.btn:hover{border-color:var(--cyan)}
+    .layout{display:grid;grid-template-columns:1fr 360px;min-height:0}.canvasWrap{position:relative;overflow:auto;padding:20px}.side{border-left:1px solid var(--line);background:rgba(11,18,32,.9);display:grid;grid-template-rows:auto 1fr 1fr;min-height:0}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:14px;border-bottom:1px solid var(--line)}
+    .stat{border:1px solid var(--line);background:var(--panel2);border-radius:12px;padding:10px}.stat b{display:block;font-size:18px}.stat span{font-size:11px;color:var(--muted);font-family:var(--mono)}
+    .panel{min-height:0;border-bottom:1px solid var(--line);display:flex;flex-direction:column}.panel h2{font-size:13px;margin:0;padding:12px 14px;border-bottom:1px solid var(--line)}.scroll{overflow:auto;padding:12px;min-height:0}.empty{color:var(--muted);font-family:var(--mono);font-size:12px;padding:10px}
+    .dag{position:relative;min-width:900px;min-height:580px}.edges{position:absolute;inset:0;overflow:visible;pointer-events:none}.lanes{position:relative;z-index:2;display:flex;gap:110px;align-items:flex-start;padding:36px 40px}.lane{display:flex;flex-direction:column;gap:30px;min-width:210px}.laneLabel{font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:-14px;text-align:center}.node{position:relative;border:1px solid var(--line);background:linear-gradient(180deg,#111c2e,#0b1220);border-radius:var(--radius);padding:13px;min-height:98px;box-shadow:0 20px 50px rgba(0,0,0,.25);transition:transform .28s ease,border-color .28s ease,box-shadow .28s ease;animation:nodeIn .45s ease both}.node:hover{transform:translateY(-3px);border-color:var(--cyan)}
+    .node.running{border-color:var(--cyan);box-shadow:0 0 0 1px rgba(56,189,248,.3),0 0 34px rgba(56,189,248,.18)}.node.completed{border-color:rgba(34,197,94,.72)}.node.failed{border-color:rgba(239,68,68,.75)}.node.skipped{opacity:.58}.node.reused{border-color:rgba(167,139,250,.75)}.node.repair{border-color:rgba(245,158,11,.8)}
+    .nodeTop{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}.nodeTitle{font-weight:700;font-size:13px;line-height:1.25}.kind{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:5px}.desc{font-size:11px;color:#bdd0ef;margin-top:8px;line-height:1.35;max-height:45px;overflow:hidden}.pill{font-family:var(--mono);font-size:10px;border-radius:999px;padding:3px 7px;border:1px solid var(--line);white-space:nowrap}.pending .pill{color:var(--muted)}.running .pill{color:var(--cyan);border-color:var(--cyan);animation:pulse 1.2s infinite}.completed .pill{color:var(--green);border-color:var(--green)}.failed .pill{color:var(--red);border-color:var(--red)}.skipped .pill{color:var(--gray);border-color:var(--gray)}.reused .pill{color:var(--purple);border-color:var(--purple)}.repair .pill{color:var(--yellow);border-color:var(--yellow)}
+    .edgePath{fill:none;stroke:#39506f;stroke-width:2;opacity:.75}.edgePath.transferred{stroke:var(--green);stroke-width:3;stroke-dasharray:7 7;animation:flow 1s linear infinite}.edgePath.active{stroke:var(--cyan);stroke-width:3;stroke-dasharray:7 7;animation:flow .75s linear infinite}.edgePath.failed{stroke:var(--red)}.edgePath.skipped{stroke:var(--gray);opacity:.4;stroke-dasharray:4 8}.edgeLabel{fill:var(--muted);font-family:var(--mono);font-size:10px}.event,.repairItem{border:1px solid var(--line);background:var(--panel2);border-radius:12px;padding:10px;margin-bottom:8px;font-family:var(--mono);font-size:11px;white-space:pre-wrap}.repairItem{border-color:rgba(245,158,11,.5)}
+    .legend{position:absolute;left:20px;bottom:18px;display:flex;gap:8px;flex-wrap:wrap}.legend span{font-family:var(--mono);font-size:11px;border:1px solid var(--line);background:rgba(11,18,32,.88);border-radius:999px;padding:5px 8px}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px}.d-running{background:var(--cyan)}.d-completed{background:var(--green)}.d-failed{background:var(--red)}.d-skipped{background:var(--gray)}.d-reused{background:var(--purple)}.d-repair{background:var(--yellow)}
+    @keyframes flow{to{stroke-dashoffset:-28}}@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(56,189,248,.35)}50%{box-shadow:0 0 0 5px rgba(56,189,248,0)}}@keyframes nodeIn{from{opacity:0;transform:translateY(12px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <header class="topbar">
+    <div class="brand"><div class="logo"></div><div><h1>Graph Runtime Viewer</h1><div id="subtitle" class="sub">Waiting for runtime graph...</div></div></div>
+    <div class="actions"><a class="btn" href="/agent-studio">Agent Studio</a><button class="btn" onclick="loadState(true)">Refresh</button><button id="autoBtn" class="btn" onclick="toggleAuto()">Auto: on</button></div>
+  </header>
+  <main class="layout">
+    <section class="canvasWrap"><div id="dag" class="dag"></div><div class="legend"><span><i class="dot d-running"></i>running</span><span><i class="dot d-completed"></i>completed</span><span><i class="dot d-failed"></i>failed</span><span><i class="dot d-skipped"></i>skipped</span><span><i class="dot d-reused"></i>reused</span><span><i class="dot d-repair"></i>repair</span></div></section>
+    <aside class="side">
+      <div class="stats" id="stats"></div>
+      <section class="panel"><h2>Runtime Events</h2><div id="events" class="scroll"></div></section>
+      <section class="panel"><h2>Repair Plan</h2><div id="repair" class="scroll"></div></section>
+    </aside>
+  </main>
+</div>
+<script>
+let auto=true; let timer=null; let latest=null;
+function esc(s){return String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));}
+function statusClass(s){s=String(s||'pending'); return ['running','completed','failed','skipped','reused','repair','metadata_only'].includes(s)?s:'pending';}
+async function loadState(manual=false){
+  try{
+    const res=await fetch('/api/graph-runtime/state',{cache:'no-store'}); const data=await res.json(); latest=data; render(data);
+  }catch(e){document.getElementById('subtitle').textContent='Load failed: '+e;}
+  if(manual && !auto){ schedule(); }
+}
+function toggleAuto(){auto=!auto; document.getElementById('autoBtn').textContent='Auto: '+(auto?'on':'off'); schedule();}
+function schedule(){if(timer)clearTimeout(timer); if(auto)timer=setTimeout(()=>loadState(),1800);}
+function render(data){
+  document.getElementById('subtitle').textContent=`${data.graph_id||'runtime_graph'} / ${data.status||'pending'}`;
+  renderStats(data.summary||{}); renderDag(data); renderEvents(data.events||[]); renderRepair(data.repair_plan||[]); schedule();
+}
+function renderStats(s){
+  const items=[['Nodes',s.node_count||0],['Edges',s.edge_count||0],['Done',s.completed_count||0],['Running',s.running_count||0],['Failed',s.failed_count||0],['Repair',s.repair_count||0]];
+  document.getElementById('stats').innerHTML=items.map(([k,v])=>`<div class="stat"><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join('');
+}
+function renderDag(data){
+  const nodesById=Object.fromEntries((data.nodes||[]).map(n=>[String(n.id),n]));
+  const lanes=data.lanes&&data.lanes.length?data.lanes:[(data.nodes||[]).map(n=>n.id)];
+  const laneHtml=lanes.map((lane,i)=>`<div class="lane"><div class="laneLabel">stage ${i+1}</div>${lane.map(id=>nodeHtml(nodesById[id])).join('')}</div>`).join('');
+  const dag=document.getElementById('dag');
+  dag.innerHTML=`<svg class="edges" id="edgeSvg"></svg><div class="lanes">${laneHtml||'<div class="empty">No graph nodes yet. Execute a task to see the dataflow DAG.</div>'}</div>`;
+  requestAnimationFrame(()=>drawEdges(data.edges||[]));
+}
+function nodeHtml(n){ if(!n)return ''; const cls=statusClass(n.status); return `<div class="node ${cls}" data-node-id="${esc(n.id)}"><div class="nodeTop"><div><div class="nodeTitle">${esc(n.label||n.id)}</div><div class="kind">${esc(n.kind||'runtime_node')}</div></div><span class="pill">${esc(n.status||'pending')}</span></div>${n.summary?`<div class="desc">${esc(n.summary)}</div>`:''}</div>`; }
+function drawEdges(edges){
+  const svg=document.getElementById('edgeSvg'); const dag=document.getElementById('dag'); if(!svg||!dag)return;
+  const box=dag.getBoundingClientRect(); const w=Math.max(dag.scrollWidth,box.width), h=Math.max(dag.scrollHeight,box.height); svg.setAttribute('width',w); svg.setAttribute('height',h); svg.setAttribute('viewBox',`0 0 ${w} ${h}`);
+  const defs='<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#8ea3c7"></path></marker></defs>';
+  const paths=edges.map(e=>{const a=document.querySelector(`[data-node-id="${CSS.escape(String(e.from))}"]`); const b=document.querySelector(`[data-node-id="${CSS.escape(String(e.to))}"]`); if(!a||!b)return ''; const ar=a.getBoundingClientRect(), br=b.getBoundingClientRect(); const x1=ar.right-box.left+dag.scrollLeft, y1=ar.top-box.top+ar.height/2+dag.scrollTop; const x2=br.left-box.left+dag.scrollLeft, y2=br.top-box.top+br.height/2+dag.scrollTop; const mid=Math.max(50,(x2-x1)/2); const d=`M ${x1} ${y1} C ${x1+mid} ${y1}, ${x2-mid} ${y2}, ${x2} ${y2}`; const lx=(x1+x2)/2, ly=(y1+y2)/2-8; return `<path class="edgePath ${statusClass(e.status)}" d="${d}" marker-end="url(#arrow)"></path><text class="edgeLabel" x="${lx}" y="${ly}">${esc(e.label||'')}</text>`;}).join('');
+  svg.innerHTML=defs+paths;
+}
+function renderEvents(events){document.getElementById('events').innerHTML=events.length?events.slice().reverse().map(e=>`<div class="event">${esc(JSON.stringify(e,null,2))}</div>`).join(''):'<div class="empty">No runtime events yet.</div>';}
+function renderRepair(items){document.getElementById('repair').innerHTML=items.length?items.map(e=>`<div class="repairItem">${esc(JSON.stringify(e,null,2))}</div>`).join(''):'<div class="empty">No repair plan.</div>';}
+window.addEventListener('resize',()=>latest&&drawEdges(latest.edges||[]));
+loadState();
+</script>
+</body>
+</html>

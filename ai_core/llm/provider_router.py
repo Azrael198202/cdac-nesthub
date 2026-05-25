@@ -153,6 +153,9 @@ class ProviderRouter:
                 updated["max_schema_chars"] = int(adapter.get("max_schema_chars"))
             except Exception:
                 pass
+        for key in ("json_repair_retry", "accept_raw_text_as_final_answer"):
+            if key in adapter:
+                updated[key] = adapter.get(key)
         return updated
 
     def _provider_is_local(self, *, provider_name: str, provider: dict) -> bool:

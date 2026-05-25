@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from auxiliary_brain.studio.structural_step_planner import StructuralStepPlanner
+
 
 @dataclass
 class PlannedWorkflow:
@@ -115,28 +117,99 @@ class InstructionWorkflowPlanner:
                 })
                 covered.append({"step_id": step_id, "type": "semantic_intermediate_step", "participant_id": virtual_id})
         else:
-            # No semantic graph was supplied.  The safe fallback is structural
-            # participant selection only.  It must not infer extra operations by
-            # vocabulary matching.
-            matched = self._match_participants_by_declared_names(str(instruction or ""), candidates)
-            if not matched and candidates:
-                matched = self._dedupe(candidates)
-                covered.append({"type": "implicit_participant_selection", "participant_count": len(matched)})
-            for participant in matched:
-                pid = self._participant_id(participant)
-                if not pid:
-                    continue
-                selected_by_graph.append(participant)
-                tasks.append({
-                    "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
-                    "participant_id": pid,
-                    "execution_owner": "ai_core",
-                    "status": "pending",
-                    "step_type": "participant_execution",
-                    "depends_on": [],
-                    "source_instruction_fragment": self._participant_name(participant),
-                })
-                covered.append({"type": "participant_execution", "participant_id": pid, "participant_name": self._participant_name(participant)})
+            # No semantic graph was supplied.  Use a domain-neutral structural
+            # fallback that only relies on declared participant names and generic
+            # sequencing configuration.  This prevents downstream dataflow
+            # fragments from being silently dropped when a semantic provider is
+            # unavailable.
+            structural_steps = StructuralStepPlanner().build_steps(str(instruction or ""), candidates)
+            if structural_steps:
+                for step in structural_steps:
+                    step_id = str(step.get("id") or f"structural_step_{len(tasks) + 1}").strip()
+                    route = step.get("route") if isinstance(step.get("route"), dict) else {}
+                    route_ref = str(route.get("participant_id") or route.get("participant_name") or step.get("participant_id") or "").strip()
+                    participant = self._find_participant(route_ref, candidates) if route_ref else None
+                    depends_on = [str(dep).strip() for dep in (step.get("depends_on") or []) if str(dep).strip()]
+                    if participant:
+                        pid = self._participant_id(participant)
+                        if not pid:
+                            uncovered.append({"step_id": step_id, "reason": "participant_without_id"})
+                            continue
+                        selected_by_graph.append(participant)
+                        tasks.append({
+                            "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
+                            "participant_id": pid,
+                            "execution_owner": "ai_core",
+                            "status": "pending",
+                            "step_type": "participant_execution",
+                            "depends_on": depends_on,
+                            "source_step_id": step_id,
+                            "source_instruction_fragment": step.get("instruction_fragment") or "",
+                        })
+                        covered.append({"step_id": step_id, "type": "participant_execution", "participant_id": pid})
+                        continue
+
+                    virtual_id = new_id_fn("participant")
+                    objective = self._objective_from_step(step)
+                    virtual = {
+                        "participant_id": virtual_id,
+                        "name": step.get("label") or f"Generated Step {len(generated) + 1}",
+                        "agent_name": step.get("label") or f"Generated Step {len(generated) + 1}",
+                        "display_name": step.get("label") or f"Generated Step {len(generated) + 1}",
+                        "role_name": step.get("label") or f"Generated Step {len(generated) + 1}",
+                        "instruction": objective,
+                        "execution_objective": objective,
+                        "definition_instruction": step.get("instruction_fragment") or objective,
+                        "parameter_contract": {
+                            "contract_type": "generated_intermediate_step_contract",
+                            "parameters": [],
+                            "missing_information": [],
+                            "runtime_scope": "task_run",
+                        },
+                        "runtime_parameters": {},
+                        "missing_information": [],
+                        "origin": "auxiliary_brain",
+                        "status": "created",
+                        "execution_policy": "delegate_to_ai_core",
+                        "generated_by": "structural_workflow_planning",
+                        "depends_on": depends_on,
+                        "input_from": depends_on,
+                        "workflow_step_type": "semantic_intermediate_step",
+                        "source_step_id": step_id,
+                    }
+                    generated.append(virtual)
+                    tasks.append({
+                        "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
+                        "participant_id": virtual_id,
+                        "execution_owner": "ai_core",
+                        "status": "pending",
+                        "step_type": "semantic_intermediate_step",
+                        "depends_on": depends_on,
+                        "input_from": depends_on,
+                        "source_step_id": step_id,
+                        "source_instruction_fragment": step.get("instruction_fragment") or "",
+                    })
+                    covered.append({"step_id": step_id, "type": "semantic_intermediate_step", "participant_id": virtual_id})
+            else:
+                matched = self._match_participants_by_declared_names(str(instruction or ""), candidates)
+                if not matched and candidates:
+                    matched = self._dedupe(candidates)
+                    covered.append({"type": "implicit_participant_selection", "participant_count": len(matched)})
+                for participant in matched:
+                    pid = self._participant_id(participant)
+                    if not pid:
+                        continue
+                    selected_by_graph.append(participant)
+                    tasks.append({
+                        "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
+                        "participant_id": pid,
+                        "execution_owner": "ai_core",
+                        "status": "pending",
+                        "step_type": "participant_execution",
+                        "depends_on": [],
+                        "source_instruction_fragment": self._participant_name(participant),
+                    })
+                    covered.append({"type": "participant_execution", "participant_id": pid, "participant_name": self._participant_name(participant)})
 
         selected = self._dedupe(selected_by_graph + generated)
         expected_count = len(semantic_steps) if semantic_steps else len(tasks)
@@ -146,7 +219,7 @@ class InstructionWorkflowPlanner:
             "uncovered_fragments": uncovered,
             "selected_participant_count": len(selected_by_graph),
             "generated_step_count": len(generated),
-            "planning_mode": "semantic_graph_mapping" if semantic_steps else "structural_participant_mapping",
+            "planning_mode": "semantic_graph_mapping" if semantic_steps else ("structural_graph_mapping" if tasks and any((t.get("depends_on") or []) for t in tasks) else "structural_participant_mapping"),
             "semantic_step_count": len(semantic_steps),
         }
         return PlannedWorkflow(selected_participants=selected, generated_participants=generated, tasks=tasks, coverage=coverage)
@@ -157,10 +230,14 @@ class InstructionWorkflowPlanner:
 
     def _objective_from_step(self, step: dict[str, Any]) -> str:
         parts = []
+        seen_values: set[str] = set()
         for field in ("objective", "instruction", "instruction_fragment", "description"):
             value = step.get(field)
             if value not in (None, ""):
-                parts.append(str(value))
+                normalized = " ".join(str(value).split())
+                if normalized and normalized not in seen_values:
+                    seen_values.add(normalized)
+                    parts.append(str(value))
         if not parts:
             parts.append("Complete the normalized workflow step using declared upstream inputs and return only the step result.")
         return "\n".join(parts)
