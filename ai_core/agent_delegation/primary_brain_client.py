@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import asyncio
+import re
 from collections.abc import Callable
 import uuid
 from typing import Any
@@ -95,52 +96,58 @@ class PrimaryBrainDelegationClient:
 
 
     async def execute_intermediate_step(self, request: AgentExecutionRequest, progress_callback: Callable[[dict[str, Any]], Any] | None = None) -> AgentExecutionResult:
-        """Execute a generated workflow step directly from its declared inputs.
+        """Execute a generated dataflow step with the smallest safe prompt.
 
-        This is a generic dataflow step executor.  It does not know operation
-        names or business domains.  The upstream semantic planner already
-        supplied the step objective and dependency edges; this method only asks
-        the model to apply that objective to the safe upstream results and return
-        a user-facing step result.
+        The step is generic: it receives an objective plus declared upstream
+        results and returns only the user-facing step output. It avoids sending
+        full task graphs or coordination metadata to the model. A pure final
+        projection step with one upstream result is completed deterministically
+        without using an LLM.
         """
         core_run_id = uuid.uuid4().hex[:12]
         if progress_callback:
             progress_callback({"type": "NODE_STARTED", "run_id": core_run_id, "node_id": "dataflow_step"})
             progress_callback({"type": "NODE_EXECUTING", "run_id": core_run_id, "node_id": "dataflow_step"})
-        payload = {
-            "step_name": request.participant_name,
-            "step_objective": request.participant_instruction,
-            "task_name": request.task_name,
-            "task_instruction": request.task_instruction,
-            "declared_inputs": (request.shared_context or {}).get("available_peer_results") or [],
-            "constraints": {
-                "use_only_declared_inputs": True,
-                "return_user_facing_step_result_only": True,
-            },
-        }
+
+        upstream = self._compact_declared_inputs((request.shared_context or {}).get("available_peer_results") or [])
+        projection = self._project_single_upstream_result_if_possible(request.participant_instruction, upstream)
+        if projection is not None:
+            status = "completed" if self._answer_has_result_material(projection) else "failed"
+            if progress_callback:
+                progress_callback({"type": "NODE_RESULT", "run_id": core_run_id, "node_id": "dataflow_step"})
+                progress_callback({"type": "RUN_COMPLETED", "run_id": core_run_id})
+            return AgentExecutionResult(
+                participant_id=request.participant_id,
+                participant_name=request.participant_name,
+                core_run_id=core_run_id,
+                status=status,
+                final_answer=projection,
+                workflow_results={"dataflow_step": {"status": status, "final_answer": projection, "execution_mode": "deterministic_projection"}},
+            )
+
         schema = {
             "type": "object",
             "additionalProperties": False,
-            "properties": {
-                "final_answer": {"type": "string"}
-            },
+            "properties": {"final_answer": {"type": "string"}},
             "required": ["final_answer"],
         }
+        user_prompt = self._build_lean_step_prompt(request.participant_instruction, upstream)
         try:
             result = await self.router.generate_json(
                 run_id=core_run_id,
                 node_id="dataflow_step",
                 adapter={
-                    "adapter_id": "delegated_dataflow_step",
+                    "adapter_id": "delegated_dataflow_step_lean",
                     "runtime_role": "intermediate_dataflow_step",
                     "route_name": "stable_synthesis",
                     "model_route_name": "stable_synthesis",
-                    "provider_timeout_seconds": 90,
+                    "provider_timeout_seconds": 180,
                     "max_provider_attempts": 1,
-                    "provider_options": {"temperature": 0},
+                    "provider_options": {"temperature": 0, "num_predict": 256},
+                    "prompt_policy": {"max_context_tokens": 1200},
                 },
-                prompt={"id": "delegated_dataflow_step", "system": "Return valid JSON only with key final_answer."},
-                rendered_user_prompt=json.dumps(payload, ensure_ascii=False),
+                prompt={"id": "delegated_dataflow_step_lean", "system": "Return only JSON: {\"final_answer\":\"...\"}."},
+                rendered_user_prompt=user_prompt,
                 schema=schema,
             )
             answer = result.get("final_answer") if isinstance(result, dict) else ""
@@ -158,8 +165,54 @@ class PrimaryBrainDelegationClient:
             core_run_id=core_run_id,
             status=status,
             final_answer=final_answer,
-            workflow_results={"dataflow_step": {"status": status, "final_answer": final_answer}},
+            workflow_results={"dataflow_step": {"status": status, "final_answer": final_answer, "execution_mode": "lean_llm"}},
         )
+
+    def _compact_declared_inputs(self, value: Any) -> list[dict[str, str]]:
+        items = value if isinstance(value, list) else []
+        compact: list[dict[str, str]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("final_answer_summary") or item.get("final_answer") or item.get("result") or "").strip()
+            if not text:
+                continue
+            compact.append({
+                "name": self._compact_text(item.get("participant_name") or item.get("participant_id") or "input", 80),
+                "text": self._compact_text(text, 700),
+            })
+        return compact
+
+
+    def _compact_text(self, value: Any, max_chars: int = 800) -> str:
+        text = str(value or "").strip()
+        text = re.sub(r"\s+", " ", text)
+        if len(text) <= max_chars:
+            return text
+        return text[: max(0, max_chars - 3)].rstrip() + "..."
+
+    def _build_lean_step_prompt(self, objective: str, upstream: list[dict[str, str]]) -> str:
+        lines = ["OBJECTIVE:", self._compact_text(objective, 220), "", "INPUT:"]
+        for idx, item in enumerate(upstream, 1):
+            label = item.get("name") or f"input_{idx}"
+            text = item.get("text") or ""
+            lines.append(f"[{idx}] {label}: {text}")
+        lines.extend(["", "RULES:", "Use only INPUT.", "Return JSON with final_answer only."])
+        return "\n".join(lines)
+
+    def _project_single_upstream_result_if_possible(self, objective: str, upstream: list[dict[str, str]]) -> str | None:
+        if len(upstream) != 1:
+            return None
+        text = str(objective or "").lower()
+        words = re.findall(r"[a-z]+", text)
+        word_set = set(words)
+        project_terms = {"return", "show", "provide", "output", "answer", "result", "final", "only"}
+        transform_terms = {"convert", "rewrite", "summarize", "summarise", "analyze", "analyse", "compare", "merge", "combine", "extract", "format"}
+        if word_set & transform_terms:
+            return None
+        if word_set & project_terms:
+            return upstream[0].get("text", "").strip()
+        return None
 
     async def resume_agent_request(self, result_payload: dict[str, Any], progress_callback: Callable[[dict[str, Any]], Any] | None = None, provided_inputs: dict[str, Any] | None = None) -> AgentExecutionResult:
         """Resume a paused primary-runtime participant run from its saved checkpoint.

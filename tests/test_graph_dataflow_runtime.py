@@ -89,3 +89,43 @@ def test_final_synthesis_keeps_all_independent_outputs():
     results = [Result("p1"), Result("p2")]
     terminal = runtime._terminal_results_for_synthesis(results, graph)
     assert [item.participant_id for item in terminal] == ["p1", "p2"]
+
+
+def test_single_terminal_projection_does_not_need_model():
+    from ai_core.agent_delegation.primary_brain_client import PrimaryBrainDelegationClient
+
+    client = PrimaryBrainDelegationClient()
+    upstream = [{"name": "previous", "text": "Already prepared final text."}]
+    assert client._project_single_upstream_result_if_possible("Return only the final result.", upstream) == "Already prepared final text."
+
+
+def test_lean_step_prompt_excludes_full_graph_metadata():
+    from ai_core.agent_delegation.primary_brain_client import PrimaryBrainDelegationClient
+
+    client = PrimaryBrainDelegationClient()
+    prompt = client._build_lean_step_prompt(
+        "Apply the requested change.",
+        [{"name": "source", "text": "abc"}],
+    )
+    assert "OBJECTIVE:" in prompt
+    assert "INPUT:" in prompt
+    assert "task_mind_graph" not in prompt
+    assert "selected_participant_ids" not in prompt
+
+
+def test_missing_parameter_fields_are_deduped_per_participant():
+    runtime = AgentDelegationRuntime()
+    participants = [{
+        "participant_id": "p1",
+        "name": "Generic Agent",
+        "parameter_contract": {
+            "parameters": [
+                {"name": "value", "required": True, "values": []},
+                {"name": "value", "required": True, "values": []},
+            ]
+        },
+        "runtime_parameters": {},
+    }]
+    fields = runtime._collect_missing_agent_parameter_fields(participants)
+    names = [f.get("name") for f in fields]
+    assert sum(1 for name in names if str(name).endswith("value")) == 1

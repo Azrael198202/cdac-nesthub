@@ -702,6 +702,7 @@ class AgentDelegationRuntime:
 
     def _collect_missing_agent_parameter_fields(self, participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         fields: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
         for participant in participants:
             # If the agent is explicitly bound to uploaded artifacts, the real
             # executable parameter contract is owned by artifact introspection
@@ -711,7 +712,16 @@ class AgentDelegationRuntime:
             # runtime fields produced from the artifact callable/signature.
             if self._uses_uploaded_artifact_runtime(participant):
                 continue
-            fields.extend(self.parameter_contract_service.to_missing_input_fields(participant))
+            owner = self._participant_identity(participant) or self._participant_name(participant)
+            for field in self.parameter_contract_service.to_missing_input_fields(participant):
+                if not isinstance(field, dict):
+                    continue
+                field_name = str(field.get("name") or field.get("field") or field.get("key") or "").strip()
+                key = (owner, field_name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                fields.append(field)
         return fields
 
     def _uses_uploaded_artifact_runtime(self, participant: dict[str, Any]) -> bool:
