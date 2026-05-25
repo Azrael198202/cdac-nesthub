@@ -208,4 +208,11 @@ class TaskMindGraphBuilder:
         return str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant.get("participant_id") or participant.get("id") or "participant").strip()
 
     def _participant_objective(self, participant: dict[str, Any]) -> str:
-        return str(participant.get("execution_objective") or participant.get("instruction") or participant.get("description") or "").strip()
+        return str(
+            participant.get("graph_display_objective")
+            or participant.get("task_step_instruction")
+            or participant.get("execution_objective")
+            or participant.get("instruction")
+            or participant.get("description")
+            or ""
+        ).strip()

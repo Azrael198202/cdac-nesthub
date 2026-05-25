@@ -59,7 +59,8 @@ class InstructionWorkflowPlanner:
                     if not pid:
                         uncovered.append({"step_id": step_id, "reason": "participant_without_id"})
                         continue
-                    selected_by_graph.append(participant)
+                    participant_for_step = self._participant_for_step(participant, step)
+                    selected_by_graph.append(participant_for_step)
                     aliases[step_id] = pid
                     tasks.append({
                         "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
@@ -135,7 +136,8 @@ class InstructionWorkflowPlanner:
                         if not pid:
                             uncovered.append({"step_id": step_id, "reason": "participant_without_id"})
                             continue
-                        selected_by_graph.append(participant)
+                        participant_for_step = self._participant_for_step(participant, step)
+                        selected_by_graph.append(participant_for_step)
                         tasks.append({
                             "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
                             "participant_id": pid,
@@ -199,7 +201,7 @@ class InstructionWorkflowPlanner:
                     pid = self._participant_id(participant)
                     if not pid:
                         continue
-                    selected_by_graph.append(participant)
+                    selected_by_graph.append(self._participant_for_step(participant, {"instruction_fragment": self._participant_name(participant), "label": self._participant_name(participant)}))
                     tasks.append({
                         "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
                         "participant_id": pid,
@@ -241,6 +243,15 @@ class InstructionWorkflowPlanner:
         if not parts:
             parts.append("Complete the normalized workflow step using declared upstream inputs and return only the step result.")
         return "\n".join(parts)
+
+    def _participant_for_step(self, participant: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
+        item = dict(participant)
+        fragment = str(step.get("instruction_fragment") or step.get("objective") or step.get("label") or "").strip()
+        label = str(step.get("label") or self._participant_name(participant)).strip()
+        if fragment:
+            item["task_step_instruction"] = fragment
+        item["graph_display_objective"] = label or self._participant_name(participant)
+        return item
 
     def _find_participant(self, ref: str, participants: list[dict[str, Any]]) -> dict[str, Any] | None:
         ref_clean = str(ref or "").strip().casefold()

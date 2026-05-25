@@ -24,6 +24,7 @@ class StructuralStepPlanner:
         "split_markers": [",finally ", ", finally ", ";finally ", "; finally ", ".finally ", ". finally ", " finally ", " then ", " and then ", " next ", " after that ", "，最后", "。最后", " 最后", " 然后", " 次に", " 最後に"],
         "wrapper_patterns": [r"^\s*create\s+a\s+task\s+named\s+[^,.;。]+\s*,?\s*", r"^\s*create\s+task\s+[^,.;。]+\s*,?\s*"],
         "minimum_generated_fragment_chars": 8,
+        "numbered_step_patterns": [r"(?:^|\s)(?:step|步骤|ステップ)\s*\d+\s*[:：]", r"(?:^|\s)\d+\s*[\.．、)]"],
         "participant_selection_residual_patterns": [r"^(which)?(calls?|uses?|runs?|executes?|invokes?|and|the|a|an|,|\s)+$"],
     }
 
@@ -39,43 +40,59 @@ class StructuralStepPlanner:
 
         selected_ids: list[str] = []
         steps: list[dict[str, Any]] = []
+        last_step_ids: list[str] = []
         for fragment in fragments:
-            refs = self._referenced_participants(fragment, participants)
+            fragment_text = fragment.strip()
+            refs = self._referenced_participants(fragment_text, participants)
+            added_ids: list[str] = []
+
             # A fragment may contain multiple existing participant references.
             # Each declared participant remains its own executable node so the
             # downstream graph can show parallel branches and bind outputs.
-            added_participant = False
             for participant in refs:
                 pid = self._participant_id(participant)
                 if not pid or pid in selected_ids:
                     continue
                 selected_ids.append(pid)
+                added_ids.append(pid)
                 steps.append({
                     "id": f"declared_step_{len(steps) + 1}",
                     "label": self._participant_name(participant),
-                    "objective": fragment.strip() or self._participant_name(participant),
-                    "instruction_fragment": fragment.strip(),
+                    "objective": self._participant_name(participant),
+                    "instruction_fragment": fragment_text,
                     "executable": True,
                     "depends_on": [],
                     "route": {"participant_id": pid},
                 })
-                added_participant = True
 
-            # If the fragment references already-selected upstream participants
-            # but is not just a participant call fragment, keep it as a generated
-            # dataflow step. Its objective remains runtime text, not source-code
-            # knowledge about a specific operation.
+            added_participant = bool(added_ids)
             deps = [self._participant_id(p) for p in refs if self._participant_id(p) in selected_ids]
-            if deps and self._should_keep_generated_fragment(fragment, refs, added_participant):
+            if deps and self._should_keep_generated_fragment(fragment_text, refs, added_participant):
+                generated_id = f"generated_step_{len(steps) + 1}"
                 steps.append({
-                    "id": f"generated_step_{len(steps) + 1}",
-                    "label": "Generated dataflow step",
-                    "objective": fragment.strip(),
-                    "instruction_fragment": fragment.strip(),
+                    "id": generated_id,
+                    "label": self._short_label(fragment_text),
+                    "objective": fragment_text,
+                    "instruction_fragment": fragment_text,
                     "executable": True,
                     "depends_on": deps,
                     "route": {"requires_generated_step": True},
                 })
+                last_step_ids = [generated_id]
+            elif added_ids:
+                last_step_ids = list(added_ids)
+            elif last_step_ids and self._should_keep_sequenced_fragment(fragment_text):
+                generated_id = f"generated_step_{len(steps) + 1}"
+                steps.append({
+                    "id": generated_id,
+                    "label": self._short_label(fragment_text),
+                    "objective": fragment_text,
+                    "instruction_fragment": fragment_text,
+                    "executable": True,
+                    "depends_on": list(last_step_ids),
+                    "route": {"requires_generated_step": True},
+                })
+                last_step_ids = [generated_id]
 
         return self._remove_redundant_generated_steps(steps)
 
@@ -102,6 +119,11 @@ class StructuralStepPlanner:
 
     def _split_fragments(self, text: str) -> list[str]:
         normalized = f" {text.strip()} "
+        for pattern in self.config.get("numbered_step_patterns") or []:
+            try:
+                normalized = re.sub(str(pattern), " || ", normalized, flags=re.I | re.UNICODE)
+            except re.error:
+                continue
         markers = sorted([str(m) for m in self.config.get("split_markers") or [] if str(m)], key=len, reverse=True)
         for idx, marker in enumerate(markers):
             normalized = normalized.replace(marker, f" ||__STEP_{idx}__|| ")
@@ -113,7 +135,8 @@ class StructuralStepPlanner:
         matched: list[dict[str, Any]] = []
         for participant in sorted([p for p in participants if isinstance(p, dict)], key=lambda p: len(self._participant_name(p)), reverse=True):
             aliases = [self._participant_name(participant), self._participant_id(participant)]
-            if any(alias and alias.casefold() in haystack for alias in aliases):
+            valid_aliases = [alias for alias in aliases if alias and len(str(alias).strip()) >= 3]
+            if any(alias.casefold() in haystack for alias in valid_aliases):
                 matched.append(participant)
         return self._dedupe(matched)
 
@@ -141,6 +164,21 @@ class StructuralStepPlanner:
         # there is meaningful residual text, it is a user-declared operation or
         # modifier and must not be silently discarded.
         return bool(residual) and (not added_participant or len(residual) >= minimum)
+
+    def _should_keep_sequenced_fragment(self, fragment: str) -> bool:
+        compact = " ".join(str(fragment or "").split())
+        minimum = int(self.config.get("minimum_generated_fragment_chars") or 8)
+        if len(compact) < minimum:
+            return False
+        residual = re.sub(r"[\W_]+", "", compact, flags=re.UNICODE)
+        return bool(residual)
+
+    def _short_label(self, text: str) -> str:
+        compact = " ".join(str(text or "").split())
+        max_len = 96
+        if len(compact) <= max_len:
+            return compact or "Generated Step"
+        return compact[: max_len - 1].rstrip() + "…"
 
     def _remove_redundant_generated_steps(self, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
