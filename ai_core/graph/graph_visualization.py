@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-import re
 
 
 @dataclass(frozen=True)
@@ -57,9 +56,7 @@ class GraphVisualStateBuilder:
         selected_graph = self._select_graph(graphs, graph_id)
         selected_id = self._graph_id(selected_graph) if selected_graph else str(graph_id or "runtime_graph")
         selected_run = self._select_run(runs, selected_id)
-        graph_payload = dict(selected_graph or {"graph_id": selected_id, "nodes": [], "edges": []})
-        graph_payload["_participants"] = self._as_list(snapshot.get("participants"))
-        return self.from_graph(graph=graph_payload, run=selected_run or {})
+        return self.from_graph(graph=selected_graph or {"graph_id": selected_id, "nodes": [], "edges": []}, run=selected_run or {})
 
     def from_graph(self, graph: dict[str, Any] | None, run: dict[str, Any] | None = None) -> GraphVisualState:
         graph = graph if isinstance(graph, dict) else {}
@@ -114,15 +111,7 @@ class GraphVisualStateBuilder:
     def _extract_nodes(self, graph: dict[str, Any], run: dict[str, Any]) -> list[dict[str, Any]]:
         task_values = self._as_list(graph.get("tasks"))
         if task_values:
-            participants = self._as_list(graph.get("_participants"))
-            enriched = []
-            for index, task in enumerate(task_values):
-                if not isinstance(task, dict):
-                    continue
-                item = dict(task)
-                item["_participants"] = participants
-                enriched.append(self._task_as_node(item, index))
-            return enriched
+            return [self._task_as_node(task, index) for index, task in enumerate(task_values) if isinstance(task, dict)]
         candidates = [
             graph.get("nodes"),
             graph.get("steps"),
@@ -139,7 +128,7 @@ class GraphVisualStateBuilder:
 
     def _task_as_node(self, task: dict[str, Any], index: int) -> dict[str, Any]:
         node_id = str(task.get("participant_id") or task.get("node_id") or task.get("id") or task.get("task_id") or f"task_{index + 1}").strip()
-        raw_label = str(
+        label = str(
             task.get("label")
             or task.get("display_name")
             or task.get("participant_name")
@@ -148,45 +137,13 @@ class GraphVisualStateBuilder:
             or task.get("task_id")
             or node_id
         )
-        participant_label = self._participant_label_for_node(task, node_id)
-        label = self._clean_node_label(raw_label, participant_label)
-        summary = raw_label if raw_label != label else str(task.get("summary") or task.get("notes") or task.get("description") or "")
         return {
             **task,
             "node_id": node_id,
             "id": node_id,
             "label": label,
-            "summary": summary,
             "kind": task.get("step_type") or task.get("task_type") or "runtime_step",
         }
-
-    def _participant_label_for_node(self, task: dict[str, Any], node_id: str) -> str:
-        participants = self._as_list(task.get("_participants"))
-        for participant in participants:
-            if not isinstance(participant, dict):
-                continue
-            pid = str(participant.get("participant_id") or participant.get("id") or "").strip()
-            if pid != node_id:
-                continue
-            return str(
-                participant.get("display_name")
-                or participant.get("agent_name")
-                or participant.get("name")
-                or participant.get("role_name")
-                or ""
-            ).strip()
-        return ""
-
-    def _clean_node_label(self, raw_label: str, participant_label: str = "") -> str:
-        label = " ".join(str(raw_label or "").split())
-        marker_count = len(re.findall(r"\bstep\s*\d+\s*:", label, flags=re.IGNORECASE))
-        if participant_label and (marker_count > 1 or len(label) > 90 or not label):
-            return participant_label
-        if marker_count > 1:
-            match = re.search(r"\bstep\s*\d+\s*:\s*(.*?)(?=\bstep\s*\d+\s*:|$)", label, flags=re.IGNORECASE)
-            if match:
-                label = match.group(1).strip()
-        return label or participant_label or "runtime node"
 
     def _extract_edges(self, graph: dict[str, Any], run: dict[str, Any]) -> list[dict[str, Any]]:
         candidates = [
@@ -244,18 +201,9 @@ class GraphVisualStateBuilder:
         }
 
     def _status_by_node(self, nodes: list[dict[str, Any]], summary: dict[str, Any], run: dict[str, Any]) -> dict[str, str]:
-        """Resolve node status from graph, scheduler summary, and live run payload.
-
-        The graph file is mostly static and often keeps every node as pending.
-        Runtime state is stored separately in the run payload.  The visualizer
-        therefore overlays live result and progress evidence on top of the
-        static graph definition.  This method only reads structural identifiers,
-        statuses, and telemetry events; it does not depend on task vocabulary.
-        """
         statuses: dict[str, str] = {}
         for node in nodes:
             statuses[self._node_id(node, len(statuses))] = self._normalize_status(node.get("status"))
-
         for name in self._as_list(summary.get("completed")):
             statuses[str(name)] = "completed"
         for name in self._as_list(summary.get("running")):
@@ -268,74 +216,7 @@ class GraphVisualStateBuilder:
             statuses.setdefault(str(name), "pending")
         for name in self._as_list(run.get("reused_nodes")) + self._as_list(summary.get("reused")):
             statuses[str(name)] = "reused"
-
-        # Overlay completed/failed participant results by participant_id.
-        for item in self._as_list(run.get("agent_results")):
-            if not isinstance(item, dict):
-                continue
-            node_id = str(item.get("participant_id") or item.get("id") or "").strip()
-            if not node_id:
-                continue
-            statuses[node_id] = self._normalize_status(item.get("status"))
-
-        # Overlay live progress events.  The static graph stores node ids as
-        # participant ids, while progress events are stage labels.  Map them
-        # through agent_results and the graph's task ordering when possible.
-        id_by_index = self._node_ids_by_participant_index(nodes)
-        for event in self._as_list(run.get("progress_events")) + self._as_list(run.get("primary_runtime_events")):
-            if not isinstance(event, dict):
-                continue
-            status = self._normalize_status(event.get("status"))
-            if status not in {"running", "completed", "failed", "skipped", "reused", "repair", "waiting"}:
-                continue
-            target_ids = self._event_target_node_ids(event, id_by_index)
-            for node_id in target_ids:
-                if not node_id:
-                    continue
-                previous = statuses.get(node_id, "pending")
-                # Preserve terminal failures; otherwise let newer telemetry win.
-                if previous == "failed" and status != "failed":
-                    continue
-                statuses[node_id] = "running" if status == "waiting" else status
-
-        # Once a run is terminal, static graph nodes that produced agent_results
-        # are already covered above.  Any remaining pending downstream nodes with
-        # failed upstreams should be visible as skipped instead of stale pending.
-        edge_list = self._extract_edges({"nodes": nodes}, run)
-        failed = {node_id for node_id, status in statuses.items() if status == "failed"}
-        if failed:
-            changed = True
-            while changed:
-                changed = False
-                for edge in edge_list:
-                    src = str(edge.get("from") or edge.get("source") or edge.get("source_id") or "").strip()
-                    dst = str(edge.get("to") or edge.get("target") or edge.get("target_id") or "").strip()
-                    if src in failed and statuses.get(dst, "pending") == "pending":
-                        statuses[dst] = "skipped"
-                        failed.add(dst)
-                        changed = True
         return statuses
-
-    def _node_ids_by_participant_index(self, nodes: list[dict[str, Any]]) -> dict[int, str]:
-        ids: dict[int, str] = {}
-        for index, node in enumerate(nodes, start=1):
-            node_id = self._node_id(node, index - 1)
-            ids[index] = node_id
-        return ids
-
-    def _event_target_node_ids(self, event: dict[str, Any], id_by_index: dict[int, str]) -> list[str]:
-        direct = str(event.get("participant_id") or event.get("node_id") or "").strip()
-        if direct and direct in set(id_by_index.values()):
-            return [direct]
-        stage = str(event.get("stage") or "")
-        candidates: list[str] = []
-        for pattern in (r"participant_(\d+)", r"node_(\d+)"):
-            match = re.search(pattern, stage)
-            if match:
-                node_id = id_by_index.get(int(match.group(1)))
-                if node_id:
-                    candidates.append(node_id)
-        return candidates
 
     def _topological_lanes(self, nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> list[list[str]]:
         ids = [str(node.get("id")) for node in nodes]
@@ -351,9 +232,9 @@ class GraphVisualStateBuilder:
         completed: set[str] = set()
         lanes: list[list[str]] = []
         while remaining:
-            ready = [node_id for node_id in ids if node_id in remaining and upstream[node_id].issubset(completed)]
+            ready = sorted([node_id for node_id in remaining if upstream[node_id].issubset(completed)])
             if not ready:
-                ready = [node_id for node_id in ids if node_id in remaining]
+                ready = sorted(remaining)
             lanes.append(ready)
             remaining.difference_update(ready)
             completed.update(ready)
@@ -374,12 +255,7 @@ class GraphVisualStateBuilder:
         return self._normalize_status(run.get("status") or summary.get("status") or "pending")
 
     def _events(self, summary: dict[str, Any], run: dict[str, Any], self_check: dict[str, Any]) -> list[dict[str, Any]]:
-        events = (
-            self._as_list(summary.get("history"))
-            + self._as_list(run.get("events"))
-            + self._as_list(run.get("progress_events"))
-            + self._as_list(run.get("primary_runtime_events"))
-        )
+        events = self._as_list(summary.get("history")) + self._as_list(run.get("events"))
         if self._repair_plan(self_check, run):
             events.append({"event": "repair_available", "count": len(self._repair_plan(self_check, run))})
         return [event for event in events if isinstance(event, dict)][-80:]

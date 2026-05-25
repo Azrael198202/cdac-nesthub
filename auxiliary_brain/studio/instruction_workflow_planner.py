@@ -36,10 +36,6 @@ class InstructionWorkflowPlanner:
         candidates = [p for p in participants if isinstance(p, dict)]
         semantic_plan = semantic_plan if isinstance(semantic_plan, dict) else {}
         semantic_steps = self._semantic_steps(semantic_plan)
-        structural_steps = StructuralStepPlanner().build_steps(str(instruction or ""), candidates)
-        use_structural_steps = self._prefer_structural_steps(semantic_steps, structural_steps)
-        if use_structural_steps:
-            semantic_steps = []
         selected_by_graph: list[dict[str, Any]] = []
         generated: list[dict[str, Any]] = []
         tasks: list[dict[str, Any]] = []
@@ -63,8 +59,7 @@ class InstructionWorkflowPlanner:
                     if not pid:
                         uncovered.append({"step_id": step_id, "reason": "participant_without_id"})
                         continue
-                    participant_for_step = self._participant_for_step(participant, step)
-                    selected_by_graph.append(participant_for_step)
+                    selected_by_graph.append(participant)
                     aliases[step_id] = pid
                     tasks.append({
                         "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
@@ -127,6 +122,7 @@ class InstructionWorkflowPlanner:
             # sequencing configuration.  This prevents downstream dataflow
             # fragments from being silently dropped when a semantic provider is
             # unavailable.
+            structural_steps = StructuralStepPlanner().build_steps(str(instruction or ""), candidates)
             if structural_steps:
                 for step in structural_steps:
                     step_id = str(step.get("id") or f"structural_step_{len(tasks) + 1}").strip()
@@ -139,8 +135,7 @@ class InstructionWorkflowPlanner:
                         if not pid:
                             uncovered.append({"step_id": step_id, "reason": "participant_without_id"})
                             continue
-                        participant_for_step = self._participant_for_step(participant, step)
-                        selected_by_graph.append(participant_for_step)
+                        selected_by_graph.append(participant)
                         tasks.append({
                             "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
                             "participant_id": pid,
@@ -204,7 +199,7 @@ class InstructionWorkflowPlanner:
                     pid = self._participant_id(participant)
                     if not pid:
                         continue
-                    selected_by_graph.append(self._participant_for_step(participant, {"instruction_fragment": self._participant_name(participant), "label": self._participant_name(participant)}))
+                    selected_by_graph.append(participant)
                     tasks.append({
                         "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
                         "participant_id": pid,
@@ -229,24 +224,6 @@ class InstructionWorkflowPlanner:
         }
         return PlannedWorkflow(selected_participants=selected, generated_participants=generated, tasks=tasks, coverage=coverage)
 
-    def _prefer_structural_steps(self, semantic_steps: list[dict[str, Any]], structural_steps: list[dict[str, Any]]) -> bool:
-        """Choose the deterministic structural graph when it preserves more executable edges.
-
-        The semantic provider is useful when it returns a complete graph, but a
-        weak local model may reorder steps or collapse multiple user-declared
-        stages into one node.  This comparison is vocabulary-free: it only
-        checks graph shape, generated-step presence, and executable step count.
-        """
-        if not structural_steps:
-            return False
-        if not semantic_steps:
-            return True
-        structural_generated = sum(1 for step in structural_steps if isinstance(step.get("route"), dict) and step.get("route", {}).get("requires_generated_step"))
-        semantic_generated = sum(1 for step in semantic_steps if isinstance(step.get("route"), dict) and step.get("route", {}).get("requires_generated_step"))
-        if structural_generated and structural_generated >= semantic_generated and len(structural_steps) >= len(semantic_steps):
-            return True
-        return False
-
     def _semantic_steps(self, semantic_plan: dict[str, Any]) -> list[dict[str, Any]]:
         steps = semantic_plan.get("steps") or semantic_plan.get("actions") or []
         return [s for s in steps if isinstance(s, dict)] if isinstance(steps, list) else []
@@ -264,15 +241,6 @@ class InstructionWorkflowPlanner:
         if not parts:
             parts.append("Complete the normalized workflow step using declared upstream inputs and return only the step result.")
         return "\n".join(parts)
-
-    def _participant_for_step(self, participant: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
-        item = dict(participant)
-        fragment = str(step.get("instruction_fragment") or step.get("objective") or step.get("label") or "").strip()
-        label = str(step.get("label") or self._participant_name(participant)).strip()
-        if fragment:
-            item["task_step_instruction"] = fragment
-        item["graph_display_objective"] = label or self._participant_name(participant)
-        return item
 
     def _find_participant(self, ref: str, participants: list[dict[str, Any]]) -> dict[str, Any] | None:
         ref_clean = str(ref or "").strip().casefold()

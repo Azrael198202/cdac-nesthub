@@ -17,7 +17,6 @@ from ai_core.artifacts.uploaded_artifact_contract import UploadedArtifactContrac
 from ai_core.artifacts.artifact_edit_service import ArtifactEditService
 from ai_core.commands import CommandSetService
 from ai_core.context.execution_reuse_store import ExecutionReuseStore
-from ai_core.execution.parameter_resolution import ParameterResolutionPipeline, PreflightResolutionContext
 from auxiliary_brain.studio.instruction_workflow_planner import InstructionWorkflowPlanner
 from auxiliary_brain.studio.runtime_semantic_planner import RuntimeSemanticPlanner
 
@@ -40,7 +39,6 @@ class AgentStudioService:
         self.artifact_edit_service = ArtifactEditService()
         self.command_set_service = CommandSetService()
         self.execution_reuse_store = ExecutionReuseStore()
-        self.parameter_resolution_pipeline = ParameterResolutionPipeline()
         self.instruction_workflow_planner = InstructionWorkflowPlanner()
         self.runtime_semantic_planner = RuntimeSemanticPlanner()
         self.store.ensure_workspace()
@@ -568,11 +566,7 @@ class AgentStudioService:
             pid = str(generated_participant.get("participant_id") or "").strip()
             if pid:
                 self.store.write_json(f"generated/agents/{pid}.json", generated_participant)
-        selected_ids = [
-            str(task.get("participant_id") or "").strip()
-            for task in workflow_plan.tasks
-            if str(task.get("participant_id") or "").strip()
-        ]
+        selected_ids = [p.get("participant_id") for p in workflow_plan.selected_participants]
         # Task graphs do not own durable parameter values.  Parameter schemas live
         # on participants, while uploaded artifact parameters are discovered from
         # the selected artifact during execution_preparation.  Keeping a blank
@@ -622,34 +616,6 @@ class AgentStudioService:
             "uploaded_artifacts": artifact_refs,
         }
 
-    def _participants_for_task_graph(self, task_graph: dict[str, Any], all_participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Return task participants in executable graph order.
-
-        The task graph is the source of truth.  This preserves generated
-        intermediate nodes and their order instead of selecting only durable
-        agent profiles by a set of ids.
-        """
-        by_id = {str(p.get("participant_id") or p.get("id") or "").strip(): p for p in all_participants if isinstance(p, dict)}
-        ordered: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for task in task_graph.get("tasks") or []:
-            if not isinstance(task, dict):
-                continue
-            pid = str(task.get("participant_id") or "").strip()
-            participant = by_id.get(pid)
-            if participant and pid not in seen:
-                ordered.append(participant)
-                seen.add(pid)
-        if ordered:
-            return ordered
-        selected_ids = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
-        for pid in selected_ids:
-            participant = by_id.get(pid)
-            if participant and pid not in seen:
-                ordered.append(participant)
-                seen.add(pid)
-        return ordered or all_participants
-
     async def execute_task(self, task_name: str | None, provided_inputs: dict[str, Any] | None = None, instruction: str | None = None) -> dict[str, Any]:
         if not task_name:
             return {
@@ -667,14 +633,18 @@ class AgentStudioService:
                 "task_name": task_name,
             }
         all_participants = self.store.list_json("generated/agents")
-        participants = self._participants_for_task_graph(task_graph, all_participants)
+        selected_ids = set(task_graph.get("selected_participant_ids") or [])
+        participants = [p for p in all_participants if p.get("participant_id") in selected_ids] or all_participants
         runtime_parameters = {}
         if isinstance(task_graph.get("runtime_parameters"), dict):
             runtime_parameters.update(task_graph.get("runtime_parameters") or {})
         runtime_parameters.update(self._extract_runtime_parameters_from_instruction(instruction or ""))
         if isinstance(provided_inputs, dict):
             runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
-        preflight = self._preflight_runtime_parameters(task_graph, participants, runtime_parameters)
+        reuse_response = await self._try_reused_task_execution(task_name, task_graph, participants, runtime_parameters)
+        if reuse_response is not None:
+            return reuse_response
+        preflight = self._preflight_uploaded_artifact_parameters(task_graph, participants, runtime_parameters)
         if preflight.get("status") == "requires_input":
             run_id = new_id("delegation_run")
             run_payload = {
@@ -682,7 +652,7 @@ class AgentStudioService:
                 "origin": "auxiliary_brain",
                 "status": "requires_input",
                 "task_name": str(task_graph.get("task_name") or task_graph.get("graph_id") or task_name),
-                "current_stage": "waiting_for_runtime_parameters",
+                "current_stage": "waiting_for_uploaded_artifact_parameters",
                 "pending_action": preflight.get("pending_action"),
                 "missing_inputs": preflight.get("missing_inputs") or [],
                 "runtime_parameters": runtime_parameters,
@@ -693,9 +663,6 @@ class AgentStudioService:
             status = "requires_input"
             result = run_payload
         else:
-            reuse_response = await self._try_reused_task_execution(task_name, task_graph, participants, runtime_parameters)
-            if reuse_response is not None:
-                return reuse_response
             task_graph = dict(task_graph)
             task_graph["runtime_parameters"] = runtime_parameters
             result = await self.delegation_runtime.execute_task(task_graph, participants)
@@ -763,7 +730,8 @@ class AgentStudioService:
                 "task_name": task_name,
             }
         all_participants = self.store.list_json("generated/agents")
-        participants = self._participants_for_task_graph(task_graph, all_participants)
+        selected_ids = set(task_graph.get("selected_participant_ids") or [])
+        participants = [p for p in all_participants if p.get("participant_id") in selected_ids] or all_participants
         pending = run_payload.get("pending_action") if isinstance(run_payload.get("pending_action"), dict) else {}
         if str(pending.get("source") or "") == "execution_reuse_asset":
             runtime_parameters = {}
@@ -779,7 +747,7 @@ class AgentStudioService:
             task_graph = dict(task_graph)
             task_graph["runtime_parameters"] = runtime_parameters
             result = await self.delegation_runtime.execute_task(task_graph, participants)
-        elif str(pending.get("kind") or "") in {"studio_pre_execution_uploaded_artifact_parameters", "studio_pre_execution_runtime_parameters"}:
+        elif str(pending.get("kind") or "") == "studio_pre_execution_uploaded_artifact_parameters":
             runtime_parameters = {}
             if isinstance(task_graph.get("runtime_parameters"), dict):
                 runtime_parameters.update(task_graph.get("runtime_parameters") or {})
@@ -787,11 +755,11 @@ class AgentStudioService:
                 runtime_parameters.update(run_payload.get("runtime_parameters") or {})
             if isinstance(provided_inputs, dict):
                 runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
-            preflight = self._preflight_runtime_parameters(task_graph, participants, runtime_parameters)
+            preflight = self._preflight_uploaded_artifact_parameters(task_graph, participants, runtime_parameters)
             if preflight.get("status") == "requires_input":
                 run_payload.update({
                     "status": "requires_input",
-                    "current_stage": "waiting_for_runtime_parameters",
+                    "current_stage": "waiting_for_uploaded_artifact_parameters",
                     "pending_action": preflight.get("pending_action"),
                     "missing_inputs": preflight.get("missing_inputs") or [],
                     "runtime_parameters": runtime_parameters,
@@ -947,98 +915,6 @@ class AgentStudioService:
                 out[key] = value
         return out
 
-    def _preflight_runtime_parameters(self, task_graph: dict[str, Any], participants: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> dict[str, Any]:
-        """Resolve pre-execution requirements through typed context layers.
-
-        The UI still receives one consolidated form, but internal state stays
-        separated as execution inputs, resource bindings, and execution
-        policies.  This prevents uploaded resources or reuse policy metadata
-        from being treated as callable parameters while keeping current task
-        execution behavior unchanged.
-        """
-        resolution_context = self._build_preflight_resolution_context(task_graph, participants, runtime_parameters)
-        if resolution_context.requires_input:
-            fields = resolution_context.missing_input_fields
-            return {
-                "status": "requires_input",
-                "missing_inputs": fields,
-                "analysis": resolution_context.to_analysis(),
-                "pending_action": {
-                    "kind": "studio_pre_execution_runtime_parameters",
-                    "message": "Runtime parameter values are required before task execution.",
-                    "request": {
-                        "input_mode": "form",
-                        "fields": fields,
-                        "resolution_layers": ["input_resolution", "resource_binding", "execution_policy_resolution"],
-                    },
-                },
-            }
-        return {"status": "ready", "analysis": resolution_context.to_analysis()}
-
-    def _build_preflight_resolution_context(self, task_graph: dict[str, Any], participants: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> PreflightResolutionContext:
-        artifact_preflight = self._preflight_uploaded_artifact_parameters(task_graph, participants, runtime_parameters)
-        resource_reports: list[dict[str, Any]] = []
-        if isinstance(artifact_preflight.get("analysis"), list):
-            resource_reports.extend([x for x in artifact_preflight.get("analysis") or [] if isinstance(x, dict)])
-
-        resource_missing: list[dict[str, Any]] = []
-        if artifact_preflight.get("status") == "requires_input":
-            for field in artifact_preflight.get("missing_inputs") or []:
-                if isinstance(field, dict):
-                    tagged = dict(field)
-                    tagged.setdefault("resolution_layer", "resource_binding")
-                    resource_missing.append(tagged)
-        if resource_missing or resource_reports:
-            resource_reports.append({
-                "source": "uploaded_artifact_contract",
-                "missing_inputs": resource_missing,
-                "bound_resources": self._collect_bound_resource_refs(task_graph, participants),
-                "execution_policies": {},
-            })
-
-        # Participant-profile inputs are intentionally not collected here. They
-        # are resolved when each participant node becomes ready, so the UI can
-        # show the exact node that is waiting and avoid blocking unrelated DAG
-        # branches during preflight. Resource bindings and execution policies
-        # remain preflight-scoped.
-        return self.parameter_resolution_pipeline.build_context(
-            runtime_inputs=runtime_parameters,
-            resource_reports=resource_reports,
-            agent_fields=[],
-            policy_values=self._collect_execution_policy_values(task_graph),
-            bound_resources=self._collect_bound_resource_refs(task_graph, participants),
-        )
-
-    def _collect_bound_resource_refs(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
-        resources: dict[str, Any] = {}
-        task_artifacts = task_graph.get("uploaded_artifacts") if isinstance(task_graph.get("uploaded_artifacts"), list) else []
-        if task_artifacts:
-            resources["task_uploaded_artifacts"] = task_artifacts
-        participant_resources = []
-        for participant in participants or []:
-            if not isinstance(participant, dict):
-                continue
-            refs = participant.get("uploaded_artifacts") if isinstance(participant.get("uploaded_artifacts"), list) else []
-            if refs:
-                participant_resources.append({
-                    "participant_id": participant.get("participant_id"),
-                    "resources": refs,
-                })
-        if participant_resources:
-            resources["participant_uploaded_artifacts"] = participant_resources
-        return resources
-
-    def _collect_execution_policy_values(self, task_graph: dict[str, Any]) -> dict[str, Any]:
-        policy: dict[str, Any] = {}
-        for key in ("execution_policy", "final_synthesis_owner"):
-            value = task_graph.get(key) if isinstance(task_graph, dict) else None
-            if value not in (None, "", [], {}):
-                policy[key] = value
-        return policy
-
-    def _runtime_field_key(self, field: dict[str, Any]) -> str:
-        return self.parameter_resolution_pipeline.field_key(field)
-
     def _preflight_uploaded_artifact_parameters(self, task_graph: dict[str, Any], participants: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> dict[str, Any]:
         """Inspect uploaded artifacts before delegating execution.
 
@@ -1086,9 +962,7 @@ class AgentStudioService:
             analyses.append(contract)
             for field in contract.get("missing_parameter_fields") or []:
                 if isinstance(field, dict):
-                    tagged = dict(field)
-                    tagged.setdefault("resolution_layer", "resource_binding")
-                    all_missing.append(tagged)
+                    all_missing.append(field)
         # Deduplicate fields by normalized name.
         deduped: list[dict[str, Any]] = []
         seen: set[str] = set()

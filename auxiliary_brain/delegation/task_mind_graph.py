@@ -122,18 +122,6 @@ class TaskMindGraphBuilder:
         name_to_id = {self._participant_name(p).lower(): pid for pid, p in identities.items()}
         plan: dict[str, Any] = {"default_relationship": "independent", "participants": {}, "edges": []}
 
-        task_ref_to_participant: dict[str, str] = {}
-        for task in task_graph.get("tasks") or []:
-            if not isinstance(task, dict):
-                continue
-            target = str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
-            if not target:
-                continue
-            for key in ("participant_id", "participant", "agent_id", "task_id", "source_step_id", "id", "node_id"):
-                value = str(task.get(key) or "").strip()
-                if value:
-                    task_ref_to_participant[value] = target
-
         explicit_by_task: dict[str, list[str]] = {}
         for task in task_graph.get("tasks") or []:
             if not isinstance(task, dict):
@@ -142,12 +130,7 @@ class TaskMindGraphBuilder:
             raw_deps = task.get("depends_on") or task.get("requires") or task.get("input_from") or []
             if isinstance(raw_deps, str):
                 raw_deps = [raw_deps]
-            deps = []
-            for item in raw_deps:
-                dep = str(item).strip()
-                if not dep:
-                    continue
-                deps.append(task_ref_to_participant.get(dep, dep))
+            deps = [str(x).strip() for x in raw_deps if str(x).strip()]
             if target and deps:
                 explicit_by_task.setdefault(target, []).extend(deps)
 
@@ -161,7 +144,7 @@ class TaskMindGraphBuilder:
                 dep = str(item).strip()
                 if not dep:
                     continue
-                dep_id = task_ref_to_participant.get(dep, dep if dep in identities else name_to_id.get(dep.lower(), dep))
+                dep_id = dep if dep in identities else name_to_id.get(dep.lower(), dep)
                 if dep_id != pid and dep_id not in deps:
                     deps.append(dep_id)
 
@@ -190,11 +173,11 @@ class TaskMindGraphBuilder:
         completed: set[str] = set()
         groups: list[list[str]] = []
         while remaining:
-            ready = [pid for pid in participant_ids if pid in remaining and deps.get(pid, set()).issubset(completed)]
+            ready = sorted(pid for pid in remaining if deps.get(pid, set()).issubset(completed))
             if not ready:
-                # Cycle or invalid reference. Keep a stable terminal group using
-                # the original task-node order so the UI remains predictable.
-                groups.append([pid for pid in participant_ids if pid in remaining])
+                # Cycle or invalid reference. Keep a stable terminal group so the
+                # runtime can fail or execute conservatively without hanging.
+                groups.append(sorted(remaining))
                 break
             groups.append(ready)
             completed.update(ready)
@@ -205,14 +188,7 @@ class TaskMindGraphBuilder:
         return str(participant.get("participant_id") or participant.get("id") or participant.get("name") or "").strip()
 
     def _participant_name(self, participant: dict[str, Any]) -> str:
-        return str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant.get("participant_id") or participant.get("id") or "participant").strip()
+        return str(participant.get("name") or participant.get("participant_id") or participant.get("id") or "participant").strip()
 
     def _participant_objective(self, participant: dict[str, Any]) -> str:
-        return str(
-            participant.get("graph_display_objective")
-            or participant.get("task_step_instruction")
-            or participant.get("execution_objective")
-            or participant.get("instruction")
-            or participant.get("description")
-            or ""
-        ).strip()
+        return str(participant.get("execution_objective") or participant.get("instruction") or participant.get("description") or "").strip()

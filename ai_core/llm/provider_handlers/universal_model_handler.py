@@ -542,8 +542,6 @@ class UniversalModelProviderHandler:
             # object even with format=json. Retry once with an ultra-minimal,
             # schema-bound correction prompt. This preserves the LLM stage while
             # avoiding deterministic bypass of input_parsing/intent/planning.
-            if provider.get("accept_raw_text_as_final_answer") and str(exc.raw_content or "").strip():
-                return {"final_answer": str(exc.raw_content or "").strip()}
             if provider.get("json_repair_retry", True):
                 repaired = await self._retry_json_repair(
                     run_id=run_id,
