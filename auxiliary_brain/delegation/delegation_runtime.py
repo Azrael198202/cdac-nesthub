@@ -55,35 +55,28 @@ class AgentDelegationRuntime:
         self._record_progress(run_payload, "prepare", "Preparing delegation run", "running")
         self._record_global_mind_graph_progress(run_payload, task_mind_graph)
 
-        # Apply task-scoped parameters before checking missing agent values.
-        # Values supplied in the task instruction or resume form belong only to
-        # this in-memory run and are not written back to durable agent profiles.
+        # Apply task-scoped parameters before participant execution. Missing
+        # participant-profile values are resolved when the specific participant
+        # node becomes ready, not as a global preflight. This keeps the DAG
+        # observable and avoids blocking unrelated ready nodes.
         self._apply_task_runtime_parameters_to_selected(selected, task_graph.get("runtime_parameters") if isinstance(task_graph, dict) else {})
-        missing_parameter_fields = self._collect_missing_agent_parameter_fields(selected)
-        if missing_parameter_fields:
-            pending_action = {
-                "kind": "agent_parameter_collection",
-                "message": "Agent execution requires parameter values before runtime can continue.",
-                "request": {
-                    "input_mode": "multi_value_list",
-                    "fields": missing_parameter_fields,
-                },
-            }
-            run_payload.update({
-                "status": "requires_input",
-                "current_stage": "waiting_for_agent_parameters",
-                "pending_action": pending_action,
-                "missing_inputs": missing_parameter_fields,
-                "completed_at": self._now(),
-            })
-            self._record_progress(run_payload, "waiting_agent_parameters", "Waiting for agent parameter values", "waiting")
-            self.store.write_json(f"generated/results/{run_id}.json", run_payload)
-            return run_payload
 
         agent_results = []
         execution_order = self._participants_in_mind_graph_order(selected, task_mind_graph)
         for index, participant in enumerate(execution_order):
             participant_name = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant.get("participant_id") or "participant")
+            participant_id = str(participant.get("participant_id") or participant.get("id") or "")
+            node_missing_fields = self._collect_node_parameter_fields(participant)
+            if node_missing_fields:
+                return self._pause_for_node_parameters(
+                    run_payload=run_payload,
+                    run_id=run_id,
+                    participant=participant,
+                    participant_index=index + 1,
+                    participant_name=participant_name,
+                    missing_fields=node_missing_fields,
+                    runtime_parameters=task_graph.get("runtime_parameters") if isinstance(task_graph, dict) else {},
+                )
             self._record_progress(
                 run_payload,
                 f"participant_{index + 1}_prepare",
@@ -279,10 +272,22 @@ class AgentDelegationRuntime:
         community_id = str(task_graph.get("community_id") or run_payload.get("community_id") or "default")
         selected = self._select_participants(task_graph, participants)
         pending = run_payload.get("pending_action") if isinstance(run_payload.get("pending_action"), dict) else {}
-        if str(pending.get("kind") or "") == "agent_parameter_collection":
+        pending_kind = str(pending.get("kind") or "")
+        node_parameter_resume = pending_kind == "agent_node_parameter_collection"
+        if pending_kind in {"agent_parameter_collection", "agent_node_parameter_collection"}:
+            runtime_parameters: dict[str, Any] = {}
+            if isinstance(task_graph.get("runtime_parameters"), dict):
+                runtime_parameters.update(task_graph.get("runtime_parameters") or {})
+            if isinstance(run_payload.get("runtime_parameters"), dict):
+                runtime_parameters.update(run_payload.get("runtime_parameters") or {})
+            if isinstance(provided_inputs, dict):
+                runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+            task_graph = dict(task_graph)
+            task_graph["runtime_parameters"] = runtime_parameters
             selected = self._fresh_task_participants(selected)
-            self._apply_agent_parameter_values(selected, provided_inputs or {})
-            return await self._execute_task_with_selected(task_graph, selected)
+            self._apply_task_runtime_parameters_to_selected(selected, runtime_parameters)
+            if pending_kind == "agent_parameter_collection":
+                return await self._execute_task_with_selected(task_graph, selected)
         task_mind_graph = self._build_task_mind_graph(task_graph, selected)
         dependency_plan = task_mind_graph.get("agent_relation_analysis") or self._build_participant_dependency_plan(task_graph, selected)
         run_payload["participant_dependency_plan"] = dependency_plan
@@ -343,7 +348,7 @@ class AgentDelegationRuntime:
                 except Exception:
                     pass
 
-        if resumed_index is None:
+        if resumed_index is None and not node_parameter_resume:
             run_payload["status"] = "failed"
             run_payload["message"] = "No paused participant checkpoint was found for durable resume."
             self.store.write_json(f"generated/results/{run_id}.json", run_payload)
@@ -356,6 +361,17 @@ class AgentDelegationRuntime:
             if participant_id in completed_ids:
                 continue
             participant_name = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant_id or "participant")
+            node_missing_fields = self._collect_node_parameter_fields(participant)
+            if node_missing_fields:
+                return self._pause_for_node_parameters(
+                    run_payload=run_payload,
+                    run_id=run_id,
+                    participant=participant,
+                    participant_index=index + 1,
+                    participant_name=participant_name,
+                    missing_fields=node_missing_fields,
+                    runtime_parameters=task_graph.get("runtime_parameters") if isinstance(task_graph, dict) else {},
+                )
             self._record_progress(run_payload, f"participant_{index + 1}_primary_runtime", f"Primary runtime executing participant: {participant_name}", "running")
             request = AgentExecutionRequest(
                 participant_id=participant_id,
@@ -590,7 +606,7 @@ class AgentDelegationRuntime:
                 "depends_on": participant_plan.get("depends_on") or own_node.get("depends_on") or [],
                 "agent_parameters": {
                     "values": self._merged_runtime_parameters(task_graph, participant),
-                    "missing": [] if self._uses_uploaded_artifact_runtime_for_task(participant, task_graph) else self.parameter_contract_service.missing_parameters(participant),
+                    "missing": [] if self._uses_uploaded_artifact_runtime_for_task(participant, task_graph) else self._blocking_missing_parameters(participant),
                 },
                 "uploaded_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
                 "available_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
@@ -700,7 +716,7 @@ class AgentDelegationRuntime:
                 continue
             self.parameter_contract_service.apply_values(participant, runtime_parameters)
 
-    def _collect_missing_agent_parameter_fields(self, participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _collect_missing_agent_parameter_fields(self, participants: list[dict[str, Any]], *, blocking_only: bool = False) -> list[dict[str, Any]]:
         fields: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
         for participant in participants:
@@ -716,6 +732,8 @@ class AgentDelegationRuntime:
             for field in self.parameter_contract_service.to_missing_input_fields(participant):
                 if not isinstance(field, dict):
                     continue
+                if blocking_only and not self._is_blocking_agent_parameter(participant, field):
+                    continue
                 field_name = str(field.get("name") or field.get("field") or field.get("key") or "").strip()
                 key = (owner, field_name)
                 if key in seen:
@@ -723,6 +741,101 @@ class AgentDelegationRuntime:
                 seen.add(key)
                 fields.append(field)
         return fields
+
+    def _blocking_missing_parameters(self, participant: dict[str, Any]) -> list[dict[str, Any]]:
+        if not isinstance(participant, dict):
+            return []
+        if self._uses_uploaded_artifact_runtime(participant):
+            return []
+        out: list[dict[str, Any]] = []
+        for field in self.parameter_contract_service.to_missing_input_fields(participant):
+            if isinstance(field, dict) and self._is_blocking_agent_parameter(participant, field):
+                out.append(field)
+        return out
+
+    def _collect_node_parameter_fields(self, participant: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return missing fields for the participant that is about to run.
+
+        This is intentionally node-scoped. It uses the participant contract only
+        when the node becomes ready, so unrelated DAG branches can keep their
+        own lifecycle. Uploaded-artifact callable inputs are handled by the
+        artifact/resource path and are not mixed with agent profile fields.
+        """
+        if not isinstance(participant, dict):
+            return []
+        if self._uses_uploaded_artifact_runtime(participant):
+            return []
+        return [field for field in self.parameter_contract_service.to_missing_input_fields(participant) if isinstance(field, dict)]
+
+    def _pause_for_node_parameters(
+        self,
+        *,
+        run_payload: dict[str, Any],
+        run_id: str,
+        participant: dict[str, Any],
+        participant_index: int,
+        participant_name: str,
+        missing_fields: list[dict[str, Any]],
+        runtime_parameters: Any,
+    ) -> dict[str, Any]:
+        participant_id = str(participant.get("participant_id") or participant.get("id") or "")
+        pending_action = {
+            "kind": "agent_node_parameter_collection",
+            "message": "The ready participant node requires input before it can execute.",
+            "participant_id": participant_id,
+            "participant_name": participant_name,
+            "participant_index": participant_index,
+            "request": {
+                "input_mode": "multi_value_list",
+                "fields": missing_fields,
+            },
+        }
+        run_payload.update({
+            "status": "requires_input",
+            "current_stage": "waiting_for_node_parameters",
+            "pending_action": pending_action,
+            "missing_inputs": missing_fields,
+            "runtime_parameters": runtime_parameters if isinstance(runtime_parameters, dict) else {},
+            "completed_at": self._now(),
+        })
+        self._record_progress(
+            run_payload,
+            f"participant_{participant_index}_waiting_parameters",
+            f"Waiting for participant input: {participant_name}",
+            "waiting",
+        )
+        self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+        return run_payload
+
+    def _is_blocking_agent_parameter(self, participant: dict[str, Any], field: dict[str, Any]) -> bool:
+        """Return whether a durable agent-profile parameter should pause a run.
+
+        LLM-generated participant profiles are capability schemas, not always
+        task-run requirements.  Unless a parameter is explicitly marked as
+        blocking, runtime-created profile fields are treated as advisory so an
+        executable agent can run with the current task context.  Uploaded
+        artifact callable signatures are still resolved by the separate
+        resource-binding preflight path.
+        """
+        if not isinstance(participant, dict) or not isinstance(field, dict):
+            return False
+        contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}
+        source = str(contract.get("source") or "").strip().casefold()
+        parameter_name = str(field.get("parameter_name") or field.get("name") or field.get("field") or "").split(".")[-1].strip()
+        params = contract.get("parameters") if isinstance(contract.get("parameters"), list) else []
+        matched = None
+        for param in params:
+            if isinstance(param, dict) and str(param.get("name") or "").strip() == parameter_name:
+                matched = param
+                break
+        if isinstance(matched, dict):
+            if matched.get("blocking") is True or matched.get("runtime_required") is True:
+                return True
+            if str(matched.get("requirement_level") or "").strip().casefold() in {"blocking", "must_collect"}:
+                return True
+        if source in {"runtime_llm", "llm", "generated", "runtime_generated"}:
+            return False
+        return True
 
     def _uses_uploaded_artifact_runtime(self, participant: dict[str, Any]) -> bool:
         if not isinstance(participant, dict):

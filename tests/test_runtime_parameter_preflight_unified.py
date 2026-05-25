@@ -10,10 +10,10 @@ def test_runtime_parameter_preflight_runs_before_reuse_and_uses_unified_pending_
     assert 'Runtime parameter values are required before task execution.' in source
 
 
-def test_runtime_parameter_preflight_aggregates_artifact_and_agent_fields():
+def test_runtime_parameter_preflight_aggregates_artifact_fields_and_leaves_agent_fields_to_node_runtime():
     source = Path('auxiliary_brain/studio/service.py').read_text(encoding='utf-8')
     helper_start = source.index('def _preflight_runtime_parameters')
     helper_body = source[helper_start:source.index('def _preflight_uploaded_artifact_parameters', helper_start)]
     assert '_preflight_uploaded_artifact_parameters' in helper_body
-    assert '_collect_missing_agent_parameter_fields' in helper_body
+    assert '_collect_missing_agent_parameter_fields' not in helper_body
     assert '_runtime_field_key' in helper_body

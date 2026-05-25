@@ -966,21 +966,15 @@ class AgentStudioService:
                 "execution_policies": {},
             })
 
-        selected = self.delegation_runtime._fresh_task_participants(
-            self.delegation_runtime._select_participants(task_graph, participants)
-        )
-        self.delegation_runtime._apply_task_runtime_parameters_to_selected(selected, runtime_parameters)
-        agent_fields: list[dict[str, Any]] = []
-        for field in self.delegation_runtime._collect_missing_agent_parameter_fields(selected):
-            if isinstance(field, dict):
-                tagged = dict(field)
-                tagged.setdefault("resolution_layer", "execution_input")
-                agent_fields.append(tagged)
-
+        # Participant-profile inputs are intentionally not collected here. They
+        # are resolved when each participant node becomes ready, so the UI can
+        # show the exact node that is waiting and avoid blocking unrelated DAG
+        # branches during preflight. Resource bindings and execution policies
+        # remain preflight-scoped.
         return self.parameter_resolution_pipeline.build_context(
             runtime_inputs=runtime_parameters,
             resource_reports=resource_reports,
-            agent_fields=agent_fields,
+            agent_fields=[],
             policy_values=self._collect_execution_policy_values(task_graph),
             bound_resources=self._collect_bound_resource_refs(task_graph, participants),
         )
