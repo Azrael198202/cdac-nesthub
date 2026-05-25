@@ -508,3 +508,11 @@ auxiliary_brain/studio/__pycache__/instruction_workflow_planner.cpython-313.pyc
 auxiliary_brain/studio/__pycache__/runtime_semantic_planner.cpython-313.pyc
 auxiliary_brain/studio/__pycache__/service.cpython-313.pyc
 auxiliary_brain/studio/__pycache__/structural_step_planner.cpython-313.pyc
+ai_core/execution/__pycache__/parameter_resolution.cpython-311.pyc
+ai_core/graph/__pycache__/__init__.cpython-311.pyc
+ai_core/graph/__pycache__/edge_scheduler.cpython-311.pyc
+ai_core/graph/__pycache__/graph_contract.cpython-311.pyc
+ai_core/graph/__pycache__/graph_self_check.cpython-311.pyc
+ai_core/graph/__pycache__/graph_visualization.cpython-311.pyc
+auxiliary_brain/studio/__pycache__/structural_step_planner.cpython-311.pyc
+runtime/uploads/files/__pycache__/artifact_f3ad9158c7ba.cpython-311.pyc
