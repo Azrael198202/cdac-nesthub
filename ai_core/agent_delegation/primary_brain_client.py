@@ -82,8 +82,6 @@ class PrimaryBrainDelegationClient:
                 self.runtime.remove_event_listener(core_run_id, progress_callback)
         final_answer = self._extract_final_answer(state)
         status = self._extract_status(state)
-        if status == "completed" and not self._answer_has_result_material(final_answer):
-            status = "failed"
         pending_action = state.get("pending_action") if isinstance(state, dict) else None
         return AgentExecutionResult(
             participant_id=request.participant_id,
@@ -829,9 +827,9 @@ class PrimaryBrainDelegationClient:
             "classified intent is",
             "initial capability needs",
             "no missing required parameters",
-            "actions and substeps planned",
+            "agent actions and substeps planned",
             "locked fixed execution options",
-            "ready_for_agent_action_planning",
+            "workflow is blocked and did not execute",
         ]
         if any(fragment in lower for fragment in placeholder_fragments):
             return False
@@ -966,6 +964,8 @@ class PrimaryBrainDelegationClient:
             if "intermediate node data was intentionally not exposed" in lowered:
                 return ""
             if any(marker in text for marker in self.INTERNAL_OUTPUT_MARKERS):
+                return ""
+            if not self._answer_has_result_material(text):
                 return ""
             return text
 

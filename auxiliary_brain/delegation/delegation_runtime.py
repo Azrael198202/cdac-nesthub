@@ -21,6 +21,18 @@ class AgentDelegationRuntime:
     runtime.
     """
 
+    INTERNAL_METADATA_FIELD_NAMES = {
+        "execution_objective",
+        "definition_instruction",
+        "instruction",
+        "objective",
+        "task_name",
+        "participant_id",
+        "agent_name",
+        "display_name",
+        "role_name",
+    }
+
     def __init__(self, store: JsonStore | None = None, primary_client: PrimaryBrainDelegationClient | None = None) -> None:
         self.store = store or JsonStore()
         self.primary_client = primary_client or PrimaryBrainDelegationClient()
@@ -43,7 +55,6 @@ class AgentDelegationRuntime:
             "origin": "auxiliary_brain",
             "status": "running",
             "task_name": task_name,
-            "graph_id": str(task_graph.get("graph_id") or task_graph.get("id") or task_name),
             "community_id": community_id,
             "started_at": self._now(),
             "current_stage": "preparing_delegation",
@@ -593,11 +604,11 @@ class AgentDelegationRuntime:
                     "values": self._merged_runtime_parameters(task_graph, participant),
                     "missing": [] if self._uses_uploaded_artifact_runtime_for_task(participant, task_graph) else self.parameter_contract_service.missing_parameters(participant),
                 },
-                "uploaded_artifacts": self._participant_artifacts_for_task(participant, task_graph, selected),
-                "available_artifacts": self._participant_artifacts_for_task(participant, task_graph, selected),
+                "uploaded_artifacts": self._node_uploaded_artifacts(task_graph, participant),
+                "available_artifacts": self._node_uploaded_artifacts(task_graph, participant),
                 "artifact_policy": participant.get("artifact_policy") or {},
                 "artifact_binding": {
-                    "available": bool(self._participant_artifacts_for_task(participant, task_graph, selected)),
+                    "available": bool(self._node_uploaded_artifacts(task_graph, participant)),
                     "resolution_key": "artifact_id_or_filename",
                     "preferred_action_type": "use_uploaded_file",
                 },
@@ -622,11 +633,11 @@ class AgentDelegationRuntime:
                 "values": self._merged_runtime_parameters(task_graph, participant),
                 "contract": {} if self._uses_uploaded_artifact_runtime_for_task(participant, task_graph) else self._compact_parameter_contract(participant.get("parameter_contract") or {}),
             },
-            "uploaded_artifacts": self._participant_artifacts_for_task(participant, task_graph, selected),
-            "available_artifacts": self._participant_artifacts_for_task(participant, task_graph, selected),
+            "uploaded_artifacts": self._node_uploaded_artifacts(task_graph, participant),
+            "available_artifacts": self._node_uploaded_artifacts(task_graph, participant),
             "artifact_policy": participant.get("artifact_policy") or {},
             "artifact_binding": {
-                "available": bool(self._participant_artifacts_for_task(participant, task_graph, selected)),
+                "available": bool(self._node_uploaded_artifacts(task_graph, participant)),
                 "resolution_key": "artifact_id_or_filename",
                 "preferred_action_type": "use_uploaded_file",
             },
@@ -663,35 +674,51 @@ class AgentDelegationRuntime:
         return terminal or agent_results
 
     def _merged_runtime_parameters(self, task_graph: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
-        """Return parameters scoped to one participant execution.
+        """Return runtime inputs visible to this participant only.
 
-        Task-level form values may contain inputs for resources, other nodes, or
-        execution policy.  They must not be blindly injected into every
-        participant prompt.  Uploaded-resource participants keep task-level
-        callable inputs because the artifact contract owns those fields.  Other
-        participants receive only explicit participant-scoped values and values
-        that satisfy a blocking parameter declared by that participant.
+        Task-level values are not a global bag for every node.  A participant
+        sees task-run values only when they are bound to the participant's own
+        runtime schema.  Artifact-bound nodes may receive the current task-run
+        values because their executable signature is discovered at runtime and
+        validated by the artifact contract layer.
         """
         values: dict[str, Any] = {}
-        runtime_parameters = task_graph.get("runtime_parameters") if isinstance(task_graph, dict) else {}
-        runtime_parameters = runtime_parameters if isinstance(runtime_parameters, dict) else {}
-        participant_runtime = participant.get("runtime_parameters") if isinstance(participant, dict) else {}
-        if isinstance(participant_runtime, dict):
-            values.update(participant_runtime)
-        if self._uses_uploaded_artifact_runtime_for_task(participant, task_graph):
-            values.update(runtime_parameters)
-            return values
-        pid = self._participant_identity(participant)
-        blocking_names = self._blocking_parameter_names(participant)
-        for raw_key, value in runtime_parameters.items():
-            key = str(raw_key or "").strip()
-            if not key:
-                continue
-            if pid and key.startswith(f"{pid}."):
-                values[key.split(".", 1)[1]] = value
-            elif key in blocking_names:
-                values[key] = value
+        if isinstance(participant.get("runtime_parameters"), dict):
+            values.update(participant.get("runtime_parameters") or {})
+        values.update(self._task_runtime_values_for_participant(task_graph, participant))
         return values
+
+    def _task_runtime_values_for_participant(self, task_graph: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
+        runtime_values = task_graph.get("runtime_parameters") if isinstance(task_graph, dict) else None
+        if not isinstance(runtime_values, dict) or not runtime_values:
+            return {}
+        if self._uses_uploaded_artifact_runtime_for_task(participant, task_graph):
+            return dict(runtime_values)
+        allowed = self._contract_field_names(participant)
+        if not allowed:
+            return {}
+        return {str(k): v for k, v in runtime_values.items() if self._normalize_field_name(k) in allowed}
+
+    def _contract_field_names(self, participant: dict[str, Any]) -> set[str]:
+        contract = participant.get("parameter_contract") if isinstance(participant, dict) else None
+        params = contract.get("parameters") if isinstance(contract, dict) and isinstance(contract.get("parameters"), list) else []
+        names: set[str] = set()
+        for param in params:
+            if not isinstance(param, dict):
+                continue
+            for key in ("name", "field", "parameter_name"):
+                name = self._normalize_field_name(param.get(key))
+                if name and name not in self.INTERNAL_METADATA_FIELD_NAMES:
+                    names.add(name)
+            aliases = param.get("aliases") if isinstance(param.get("aliases"), list) else []
+            for alias in aliases:
+                name = self._normalize_field_name(alias)
+                if name and name not in self.INTERNAL_METADATA_FIELD_NAMES:
+                    names.add(name)
+        return names
+
+    def _normalize_field_name(self, value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().casefold()).strip("_")
 
     def _compact_parameter_contract(self, contract: Any) -> dict[str, Any]:
         if not isinstance(contract, dict):
@@ -711,69 +738,27 @@ class AgentDelegationRuntime:
 
 
     def _apply_task_runtime_parameters_to_selected(self, participants: list[dict[str, Any]], runtime_parameters: Any) -> None:
-        """Apply only participant-owned execution inputs to participant copies.
+        """Apply current task-run parameters to participant copies only.
 
-        A task form may contain values for resources, policies, and multiple
-        graph nodes.  This method prevents values collected for one node from
-        satisfying or polluting another node's profile contract.
+        Values are scoped by each participant contract.  This prevents a value
+        collected for one node from satisfying or polluting an unrelated node.
         """
         if not isinstance(runtime_parameters, dict) or not runtime_parameters:
             return
         for participant in participants:
             if not isinstance(participant, dict):
                 continue
-            if self._uses_uploaded_artifact_runtime(participant):
-                continue
-            scoped = self._scoped_runtime_values_for_contract(participant, runtime_parameters)
+            scoped = self._filter_runtime_parameters_for_agent_contract(participant, runtime_parameters)
             if scoped:
                 self.parameter_contract_service.apply_values(participant, scoped)
 
-    def _scoped_runtime_values_for_contract(self, participant: dict[str, Any], runtime_parameters: dict[str, Any]) -> dict[str, Any]:
-        scoped: dict[str, Any] = {}
-        pid = self._participant_identity(participant)
-        blocking_names = self._blocking_parameter_names(participant)
-        for raw_key, value in runtime_parameters.items():
-            key = str(raw_key or "").strip()
-            if not key:
-                continue
-            if pid and key.startswith(f"{pid}."):
-                short_key = key.split(".", 1)[1]
-                if short_key in blocking_names:
-                    scoped[key] = value
-            elif key in blocking_names:
-                scoped[key] = value
-        return scoped
-
-    def _blocking_parameter_names(self, participant: dict[str, Any]) -> set[str]:
-        contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}
-        params = contract.get("parameters") if isinstance(contract.get("parameters"), list) else []
-        names: set[str] = set()
-        for param in params:
-            if not isinstance(param, dict):
-                continue
-            if not self._is_blocking_agent_parameter(param, contract):
-                continue
-            name = str(param.get("name") or "").strip()
-            if name:
-                names.add(name)
-        return names
-
-    def _is_blocking_agent_parameter(self, param: dict[str, Any], contract: dict[str, Any]) -> bool:
-        """Return True only for explicit runtime-blocking profile slots.
-
-        Runtime-LLM profile fields describe a reusable agent.  They are advisory
-        unless the schema explicitly marks them as runtime blocking.  Uploaded
-        artifact callable parameters are collected by the resource-binding
-        preflight path, not by this profile-parameter path.
-        """
-        if not isinstance(param, dict):
-            return False
-        if param.get("blocking") is True or param.get("runtime_required") is True:
-            return True
-        if str(param.get("collection_scope") or "").strip().lower() in {"runtime", "execution"}:
-            return True
-        source = str((contract or {}).get("source") or "").strip().lower()
-        return source in {"configured_template", "runtime_required"}
+    def _filter_runtime_parameters_for_agent_contract(self, participant: dict[str, Any], runtime_parameters: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(runtime_parameters, dict) or not runtime_parameters:
+            return {}
+        allowed = self._contract_field_names(participant)
+        if not allowed:
+            return {}
+        return {str(k): v for k, v in runtime_parameters.items() if self._normalize_field_name(k) in allowed}
 
     def _collect_missing_agent_parameter_fields(self, participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         fields: list[dict[str, Any]] = []
@@ -788,22 +773,21 @@ class AgentDelegationRuntime:
             if self._uses_uploaded_artifact_runtime(participant):
                 continue
             owner = self._participant_identity(participant) or self._participant_name(participant)
-            contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}
-            blocking_names = self._blocking_parameter_names(participant)
-            if not blocking_names:
-                continue
             for field in self.parameter_contract_service.to_missing_input_fields(participant):
                 if not isinstance(field, dict):
                     continue
-                parameter_name = str(field.get("parameter_name") or field.get("name") or field.get("field") or "").split(".")[-1].strip()
-                if parameter_name not in blocking_names:
+                field_name = str(field.get("parameter_name") or field.get("name") or field.get("field") or field.get("key") or "").strip()
+                normalized_name = self._normalize_field_name(field_name)
+                if not normalized_name or normalized_name in self.INTERNAL_METADATA_FIELD_NAMES:
                     continue
-                field_name = str(field.get("name") or field.get("field") or field.get("key") or "").strip()
-                key = (owner, field_name)
+                key = (owner, normalized_name)
                 if key in seen:
                     continue
                 seen.add(key)
-                fields.append(field)
+                tagged = dict(field)
+                tagged.setdefault("participant_id", owner)
+                tagged.setdefault("participant_name", self._participant_name(participant))
+                fields.append(tagged)
         return fields
 
     def _uses_uploaded_artifact_runtime(self, participant: dict[str, Any]) -> bool:
@@ -819,87 +803,52 @@ class AgentDelegationRuntime:
         return bool(re.search(r"\buse\s+file\b|\b[a-zA-Z0-9_.-]+\.[A-Za-z0-9]{1,8}\b", text, flags=re.I))
 
     def _uses_uploaded_artifact_runtime_for_task(self, participant: dict[str, Any], task_graph: dict[str, Any]) -> bool:
-        return bool(self._participant_artifacts_for_task(participant, task_graph, []))
+        if self._uses_uploaded_artifact_runtime(participant):
+            return True
+        return bool(self._node_uploaded_artifacts(task_graph, participant))
 
-    def _participant_artifacts_for_task(self, participant: dict[str, Any], task_graph: dict[str, Any], selected: list[dict[str, Any]] | None = None) -> list[Any]:
-        """Return resources explicitly scoped to one participant.
+    def _node_uploaded_artifacts(self, task_graph: dict[str, Any], participant: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return uploaded artifacts bound to this participant node only.
 
-        Task-level resources are not global execution inputs.  They may be
-        used only when the graph explicitly binds them to the participant, or
-        when the task contains exactly one selected participant.  This keeps
-        resource-derived callable schemas out of unrelated nodes.
+        Task-level artifacts are not automatically visible to every participant.
+        They are visible only when the task graph explicitly binds them to the
+        node, when the participant owns them, or when the graph has a single
+        participant and therefore no ambiguity exists.
         """
-        if not isinstance(participant, dict):
-            return []
-        direct = participant.get("uploaded_artifacts")
-        if isinstance(direct, list) and direct:
-            return list(direct)
+        participant_artifacts = participant.get("uploaded_artifacts") if isinstance(participant, dict) else None
+        if isinstance(participant_artifacts, list) and participant_artifacts:
+            return participant_artifacts
+
+        node = self._task_node_for_participant(task_graph, participant)
+        for key in ("uploaded_artifacts", "bound_artifacts", "artifacts", "available_artifacts"):
+            values = node.get(key) if isinstance(node, dict) else None
+            if isinstance(values, list) and values:
+                return values
+
+        bindings = task_graph.get("execution_bindings") if isinstance(task_graph, dict) else None
         pid = self._participant_identity(participant)
-        pname = self._participant_name(participant)
-        bound = self._artifacts_bound_to_node(task_graph, node_id=pid, node_name=pname)
-        if bound:
-            return bound
-        selected = [p for p in (selected or []) if isinstance(p, dict)]
-        task_level = task_graph.get("uploaded_artifacts") if isinstance(task_graph, dict) else None
-        if isinstance(task_level, list) and task_level and len(selected) == 1:
-            only_id = self._participant_identity(selected[0])
-            if only_id == pid:
-                return list(task_level)
+        if isinstance(bindings, dict):
+            node_binding = bindings.get(pid) if pid else None
+            if isinstance(node_binding, dict):
+                for key in ("uploaded_artifacts", "bound_artifacts", "artifacts"):
+                    values = node_binding.get(key)
+                    if isinstance(values, list) and values:
+                        return values
+
+        selected_ids = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()] if isinstance(task_graph, dict) else []
+        task_artifacts = task_graph.get("uploaded_artifacts") if isinstance(task_graph, dict) else None
+        if isinstance(task_artifacts, list) and task_artifacts and len(selected_ids) == 1 and (not pid or pid in selected_ids):
+            return task_artifacts
         return []
 
-    def _artifacts_bound_to_node(self, task_graph: dict[str, Any], *, node_id: str, node_name: str = "") -> list[Any]:
-        if not isinstance(task_graph, dict) or not node_id:
-            return []
-        out: list[Any] = []
-        def add_many(value: Any) -> None:
-            if isinstance(value, list):
-                out.extend(value)
-            elif value not in (None, "", {}, []):
-                out.append(value)
-
-        for task in task_graph.get("tasks") or []:
-            if not isinstance(task, dict):
-                continue
-            refs = {
-                str(task.get("participant_id") or "").strip(),
-                str(task.get("node_id") or "").strip(),
-                str(task.get("id") or "").strip(),
-                str(task.get("task_id") or "").strip(),
-                str(task.get("participant_name") or "").strip(),
-            }
-            if node_id in refs or (node_name and node_name in refs):
-                for key in ("uploaded_artifacts", "available_artifacts", "artifact_refs", "bound_artifacts", "resources"):
-                    add_many(task.get(key))
-
-        binding_sources = []
-        for key in ("artifact_bindings", "resource_bindings", "execution_bindings", "node_bindings"):
-            value = task_graph.get(key)
-            if isinstance(value, list):
-                binding_sources.extend(value)
-            elif isinstance(value, dict):
-                specific = value.get(node_id) or (value.get(node_name) if node_name else None)
-                add_many(specific)
-                binding_sources.extend(v for v in value.values() if isinstance(v, dict))
-        for binding in binding_sources:
-            if not isinstance(binding, dict):
-                continue
-            target = str(binding.get("participant_id") or binding.get("node_id") or binding.get("target") or binding.get("to") or "").strip()
-            if target and target not in {node_id, node_name}:
-                continue
-            for key in ("uploaded_artifacts", "artifacts", "artifact_refs", "resources"):
-                add_many(binding.get(key))
-        deduped: list[Any] = []
-        seen: set[str] = set()
-        for item in out:
-            marker = ""
-            if isinstance(item, dict):
-                marker = str(item.get("artifact_id") or item.get("path") or item.get("name") or item)
-            else:
-                marker = str(item)
-            if marker and marker not in seen:
-                seen.add(marker)
-                deduped.append(item)
-        return deduped
+    def _task_node_for_participant(self, task_graph: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
+        pid = self._participant_identity(participant)
+        if not pid or not isinstance(task_graph, dict):
+            return {}
+        for node in task_graph.get("tasks") or []:
+            if isinstance(node, dict) and str(node.get("participant_id") or node.get("node_id") or node.get("agent_id") or "").strip() == pid:
+                return node
+        return {}
 
     def _apply_agent_parameter_values(self, participants: list[dict[str, Any]], provided_inputs: dict[str, Any]) -> None:
         if not isinstance(provided_inputs, dict):
@@ -1202,15 +1151,9 @@ class AgentDelegationRuntime:
                 item["parameter_contract"] = contract
                 item["missing_information"] = []
             elif isinstance(contract, dict):
-                missing = self.parameter_contract_service.missing_parameters({"parameter_contract": contract, "runtime_parameters": {}})
-                blocking = self._blocking_parameter_names(item)
-                if blocking:
-                    missing = [m for m in missing if str(m.get("name") or "").strip() in blocking]
-                else:
-                    missing = []
-                contract["missing_information"] = missing
+                contract["missing_information"] = self.parameter_contract_service.missing_parameters({"parameter_contract": contract, "runtime_parameters": {}})
                 item["parameter_contract"] = contract
-                item["missing_information"] = missing
+                item["missing_information"] = item.get("parameter_contract", {}).get("missing_information", []) if isinstance(item.get("parameter_contract"), dict) else []
             else:
                 item["missing_information"] = []
             fresh.append(item)

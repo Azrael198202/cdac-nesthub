@@ -569,6 +569,18 @@ class AgentStudioService:
             if pid:
                 self.store.write_json(f"generated/agents/{pid}.json", generated_participant)
         selected_ids = [p.get("participant_id") for p in workflow_plan.selected_participants]
+        participant_labels = {
+            str(p.get("participant_id") or "").strip(): str(p.get("display_name") or p.get("agent_name") or p.get("name") or p.get("participant_id") or "").strip()
+            for p in workflow_plan.selected_participants
+            if isinstance(p, dict)
+        }
+        for task in workflow_plan.tasks:
+            if not isinstance(task, dict):
+                continue
+            pid = str(task.get("participant_id") or "").strip()
+            if pid and participant_labels.get(pid):
+                task.setdefault("participant_name", participant_labels[pid])
+                task.setdefault("label", participant_labels[pid])
         # Task graphs do not own durable parameter values.  Parameter schemas live
         # on participants, while uploaded artifact parameters are discovered from
         # the selected artifact during execution_preparation.  Keeping a blank
@@ -651,7 +663,6 @@ class AgentStudioService:
                 "origin": "auxiliary_brain",
                 "status": "requires_input",
                 "task_name": str(task_graph.get("task_name") or task_graph.get("graph_id") or task_name),
-                "graph_id": str(task_graph.get("graph_id") or task_graph.get("id") or task_name),
                 "current_stage": "waiting_for_runtime_parameters",
                 "pending_action": preflight.get("pending_action"),
                 "missing_inputs": preflight.get("missing_inputs") or [],
@@ -766,7 +777,6 @@ class AgentStudioService:
                     "pending_action": preflight.get("pending_action"),
                     "missing_inputs": preflight.get("missing_inputs") or [],
                     "runtime_parameters": runtime_parameters,
-                    "graph_id": str(task_graph.get("graph_id") or task_graph.get("id") or task_name),
                     "completed_at": self._now(),
                 })
                 self.store.write_json(f"generated/results/{run_id}.json", run_payload)
@@ -1027,11 +1037,8 @@ class AgentStudioService:
         """
         all_missing: list[dict[str, Any]] = []
         analyses: list[dict[str, Any]] = []
-        selected = self.delegation_runtime._fresh_task_participants(
-            self.delegation_runtime._select_participants(task_graph, participants)
-        )
-        for participant in selected:
-            artifacts = self.delegation_runtime._participant_artifacts_for_task(participant, task_graph, selected)
+        for participant in participants:
+            artifacts = self.delegation_runtime._node_uploaded_artifacts(task_graph, participant)
             if not artifacts:
                 continue
             step = {
@@ -1063,23 +1070,26 @@ class AgentStudioService:
                     }
                 },
             }
-            scoped_step_id = str(participant.get("participant_id") or participant.get("id") or "node")
-            contract = self.uploaded_artifact_contract.build_contract(state=state, step=step, step_id=scoped_step_id)
+            contract = self.uploaded_artifact_contract.build_contract(state=state, step=step, step_id="step_1")
             analyses.append(contract)
             for field in contract.get("missing_parameter_fields") or []:
                 if isinstance(field, dict):
+                    field_name = str(field.get("field") or field.get("name") or field.get("parameter_name") or "").strip()
+                    normalized_name = self.delegation_runtime._normalize_field_name(field_name)
+                    if not normalized_name or normalized_name in self.delegation_runtime.INTERNAL_METADATA_FIELD_NAMES:
+                        continue
                     tagged = dict(field)
-                    scoped_node_id = str(participant.get("participant_id") or participant.get("id") or "").strip()
                     tagged.setdefault("resolution_layer", "resource_binding")
-                    if scoped_node_id:
-                        tagged.setdefault("participant_id", scoped_node_id)
-                        tagged.setdefault("scope_id", scoped_node_id)
+                    tagged.setdefault("participant_id", participant.get("participant_id"))
+                    tagged.setdefault("participant_name", participant.get("display_name") or participant.get("agent_name") or participant.get("name"))
                     all_missing.append(tagged)
         # Deduplicate fields by normalized name.
         deduped: list[dict[str, Any]] = []
         seen: set[str] = set()
         for field in all_missing:
-            key = str(field.get("field") or field.get("name") or "").strip().casefold()
+            field_name = str(field.get("field") or field.get("name") or "").strip().casefold()
+            owner = str(field.get("participant_id") or "").strip().casefold()
+            key = "|".join(part for part in (owner, field_name) if part)
             if not key or key in seen:
                 continue
             seen.add(key)
