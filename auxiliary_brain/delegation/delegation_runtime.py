@@ -159,11 +159,17 @@ class AgentDelegationRuntime:
 
         run_payload["agent_results"] = self._dedupe_result_payloads(run_payload.get("agent_results") or [])
         agent_results = self._to_agent_results(run_payload["agent_results"])
+        synthesis_results = self._terminal_results_for_synthesis(agent_results, task_mind_graph)
+        run_payload["synthesis_input_policy"] = {
+            "mode": "terminal_graph_outputs",
+            "source_result_count": len(agent_results),
+            "synthesis_result_count": len(synthesis_results),
+        }
         self._record_progress(run_payload, "final_synthesis", "Primary runtime synthesizing delegated results", "running")
         synthesis = await self.primary_client.synthesize_delegated_results(
             task_name=task_name,
             task_instruction=task_instruction,
-            agent_results=agent_results,
+            agent_results=synthesis_results,
             shared_context={"community_id": community_id, "task_mind_graph": task_mind_graph},
         )
         self._record_progress(run_payload, "final_synthesis_complete", "Final synthesis completed", "completed")
@@ -411,11 +417,17 @@ class AgentDelegationRuntime:
         run_payload["agent_results"] = existing_results
         self._clear_waiting_fields(run_payload)
         agent_results = self._to_agent_results(existing_results)
+        synthesis_results = self._terminal_results_for_synthesis(agent_results, task_mind_graph)
+        run_payload["synthesis_input_policy"] = {
+            "mode": "terminal_graph_outputs",
+            "source_result_count": len(agent_results),
+            "synthesis_result_count": len(synthesis_results),
+        }
         self._record_progress(run_payload, "final_synthesis", "Primary runtime synthesizing delegated results", "running")
         synthesis = await self.primary_client.synthesize_delegated_results(
             task_name=task_name,
             task_instruction=task_instruction,
-            agent_results=agent_results,
+            agent_results=synthesis_results,
             shared_context={"community_id": community_id, "task_mind_graph": task_mind_graph},
         )
         self._record_progress(run_payload, "final_synthesis_complete", "Final synthesis completed", "completed")
@@ -624,6 +636,30 @@ class AgentDelegationRuntime:
         return shared_context
 
 
+
+
+    def _terminal_results_for_synthesis(self, agent_results: list[Any], task_mind_graph: dict[str, Any]) -> list[Any]:
+        """Return only terminal graph outputs for final answer synthesis.
+
+        In a dataflow graph, upstream participant outputs are inputs to a later
+        node, not final answers.  The final synthesis should consume terminal
+        nodes so post-processing steps are not bypassed.  For independent graphs
+        with no participant-to-participant edges, every participant remains a
+        terminal output.
+        """
+        if not isinstance(task_mind_graph, dict) or not agent_results:
+            return agent_results
+        result_ids = {str(getattr(result, "participant_id", "") or "") for result in agent_results}
+        outgoing: set[str] = set()
+        for edge in task_mind_graph.get("edges") or []:
+            if not isinstance(edge, dict):
+                continue
+            src = str(edge.get("from") or "").strip()
+            dst = str(edge.get("to") or "").strip()
+            if src in result_ids and dst in result_ids:
+                outgoing.add(src)
+        terminal = [result for result in agent_results if str(getattr(result, "participant_id", "") or "") not in outgoing]
+        return terminal or agent_results
 
     def _merged_runtime_parameters(self, task_graph: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
         values: dict[str, Any] = {}

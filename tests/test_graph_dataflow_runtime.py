@@ -57,3 +57,35 @@ def test_delegation_coordination_source_has_no_semantic_marker_tables():
     source = "\n".join(p.read_text() for p in root.glob("*.py"))
     forbidden = ["dependency" + "_markers", "result" + "-reference language"]
     assert all(token not in source for token in forbidden)
+
+
+def test_final_synthesis_uses_terminal_graph_outputs_only():
+    class Result:
+        def __init__(self, participant_id):
+            self.participant_id = participant_id
+            self.participant_name = participant_id
+
+    runtime = AgentDelegationRuntime()
+    graph = {
+        "edges": [
+            {"from": "p1", "to": "p3"},
+            {"from": "p2", "to": "p3"},
+            {"from": "p3", "to": "final_synthesis"},
+        ]
+    }
+    results = [Result("p1"), Result("p2"), Result("p3")]
+    terminal = runtime._terminal_results_for_synthesis(results, graph)
+    assert [item.participant_id for item in terminal] == ["p3"]
+
+
+def test_final_synthesis_keeps_all_independent_outputs():
+    class Result:
+        def __init__(self, participant_id):
+            self.participant_id = participant_id
+            self.participant_name = participant_id
+
+    runtime = AgentDelegationRuntime()
+    graph = {"edges": [{"from": "p1", "to": "final_synthesis"}, {"from": "p2", "to": "final_synthesis"}]}
+    results = [Result("p1"), Result("p2")]
+    terminal = runtime._terminal_results_for_synthesis(results, graph)
+    assert [item.participant_id for item in terminal] == ["p1", "p2"]

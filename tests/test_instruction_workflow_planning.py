@@ -61,3 +61,27 @@ def test_planner_source_does_not_contain_vocab_tables():
     source = Path("auxiliary_brain/studio/instruction_workflow_planner.py").read_text()
     forbidden = ["TRANSFORM" + "_VERBS", "DEPENDENCY" + "_MARKERS"]
     assert all(token not in source for token in forbidden)
+
+
+def test_structural_fallback_preserves_declared_followup_dataflow_when_semantic_unavailable():
+    local_counter = {"n": 0}
+    def local_id(prefix):
+        local_counter["n"] += 1
+        return f"{prefix}_{local_counter['n']}"
+
+    participants = [
+        {"participant_id": "p1", "name": "Alpha Agent"},
+        {"participant_id": "p2", "name": "Beta Agent"},
+    ]
+    plan = InstructionWorkflowPlanner().plan(
+        instruction="Create a task named sample, which calls the Alpha Agent and the Beta Agent ,finally apply the requested follow-up to the Alpha Agent and the Beta Agent outputs",
+        participants=participants,
+        graph_id="graph_z",
+        new_id_fn=local_id,
+        semantic_plan={"steps": [], "coverage_notes": ["semantic_provider_unavailable"]},
+    )
+    assert plan.coverage["status"] == "passed"
+    assert plan.coverage["planning_mode"] == "structural_graph_mapping"
+    assert [task["step_type"] for task in plan.tasks] == ["participant_execution", "participant_execution", "semantic_intermediate_step"]
+    assert plan.tasks[-1]["depends_on"] == ["p1", "p2"]
+    assert len(plan.generated_participants) == 1
