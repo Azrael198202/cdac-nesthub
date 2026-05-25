@@ -619,3 +619,5 @@ tests/__pycache__/test_dependency_result_validity_gate.cpython-313-pytest-9.0.2.
 tests/__pycache__/test_node_scoped_parameter_resolution.cpython-313-pytest-9.0.2.pyc
 tests/__pycache__/test_parameter_resolution_layers.cpython-313-pytest-9.0.2.pyc
 tests/__pycache__/test_runtime_parameter_preflight_unified.cpython-313-pytest-9.0.2.pyc
+tests/__pycache__/test_stage_planner_regression.cpython-313-pytest-9.0.2.pyc
+tests/__pycache__/test_step_planner_stage_boundaries.cpython-313-pytest-9.0.2.pyc

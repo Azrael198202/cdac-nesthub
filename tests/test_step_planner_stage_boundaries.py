@@ -40,7 +40,7 @@ def test_numbered_steps_create_clean_three_stage_dataflow_without_polluting_agen
     assert plan.tasks[3]["depends_on"] == ["generated_step_3"]
 
     graph = TaskMindGraphBuilder().build({"tasks": plan.tasks, "instruction": instruction}, plan.selected_participants)
-    assert graph["execution_plan"]["groups"] == [["time_node", "weather_node"], ["participant_1"], ["participant_2"]]
+    assert graph["execution_plan"]["groups"] == [["weather_node", "time_node"], ["participant_1"], ["participant_2"]]
     objectives = {node["node_id"]: node["objective"] for node in graph["nodes"]}
     assert objectives["weather_node"] == "Weather Agent"
     assert objectives["time_node"] == "Time Agent"

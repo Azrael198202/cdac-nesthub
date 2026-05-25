@@ -190,11 +190,11 @@ class TaskMindGraphBuilder:
         completed: set[str] = set()
         groups: list[list[str]] = []
         while remaining:
-            ready = sorted(pid for pid in remaining if deps.get(pid, set()).issubset(completed))
+            ready = [pid for pid in participant_ids if pid in remaining and deps.get(pid, set()).issubset(completed)]
             if not ready:
-                # Cycle or invalid reference. Keep a stable terminal group so the
-                # runtime can fail or execute conservatively without hanging.
-                groups.append(sorted(remaining))
+                # Cycle or invalid reference. Keep a stable terminal group using
+                # the original task-node order so the UI remains predictable.
+                groups.append([pid for pid in participant_ids if pid in remaining])
                 break
             groups.append(ready)
             completed.update(ready)

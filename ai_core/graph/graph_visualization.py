@@ -351,9 +351,9 @@ class GraphVisualStateBuilder:
         completed: set[str] = set()
         lanes: list[list[str]] = []
         while remaining:
-            ready = sorted([node_id for node_id in remaining if upstream[node_id].issubset(completed)])
+            ready = [node_id for node_id in ids if node_id in remaining and upstream[node_id].issubset(completed)]
             if not ready:
-                ready = sorted(remaining)
+                ready = [node_id for node_id in ids if node_id in remaining]
             lanes.append(ready)
             remaining.difference_update(ready)
             completed.update(ready)

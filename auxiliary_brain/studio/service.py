@@ -568,7 +568,11 @@ class AgentStudioService:
             pid = str(generated_participant.get("participant_id") or "").strip()
             if pid:
                 self.store.write_json(f"generated/agents/{pid}.json", generated_participant)
-        selected_ids = [p.get("participant_id") for p in workflow_plan.selected_participants]
+        selected_ids = [
+            str(task.get("participant_id") or "").strip()
+            for task in workflow_plan.tasks
+            if str(task.get("participant_id") or "").strip()
+        ]
         # Task graphs do not own durable parameter values.  Parameter schemas live
         # on participants, while uploaded artifact parameters are discovered from
         # the selected artifact during execution_preparation.  Keeping a blank
@@ -618,6 +622,34 @@ class AgentStudioService:
             "uploaded_artifacts": artifact_refs,
         }
 
+    def _participants_for_task_graph(self, task_graph: dict[str, Any], all_participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return task participants in executable graph order.
+
+        The task graph is the source of truth.  This preserves generated
+        intermediate nodes and their order instead of selecting only durable
+        agent profiles by a set of ids.
+        """
+        by_id = {str(p.get("participant_id") or p.get("id") or "").strip(): p for p in all_participants if isinstance(p, dict)}
+        ordered: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for task in task_graph.get("tasks") or []:
+            if not isinstance(task, dict):
+                continue
+            pid = str(task.get("participant_id") or "").strip()
+            participant = by_id.get(pid)
+            if participant and pid not in seen:
+                ordered.append(participant)
+                seen.add(pid)
+        if ordered:
+            return ordered
+        selected_ids = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
+        for pid in selected_ids:
+            participant = by_id.get(pid)
+            if participant and pid not in seen:
+                ordered.append(participant)
+                seen.add(pid)
+        return ordered or all_participants
+
     async def execute_task(self, task_name: str | None, provided_inputs: dict[str, Any] | None = None, instruction: str | None = None) -> dict[str, Any]:
         if not task_name:
             return {
@@ -635,8 +667,7 @@ class AgentStudioService:
                 "task_name": task_name,
             }
         all_participants = self.store.list_json("generated/agents")
-        selected_ids = set(task_graph.get("selected_participant_ids") or [])
-        participants = [p for p in all_participants if p.get("participant_id") in selected_ids] or all_participants
+        participants = self._participants_for_task_graph(task_graph, all_participants)
         runtime_parameters = {}
         if isinstance(task_graph.get("runtime_parameters"), dict):
             runtime_parameters.update(task_graph.get("runtime_parameters") or {})
@@ -732,8 +763,7 @@ class AgentStudioService:
                 "task_name": task_name,
             }
         all_participants = self.store.list_json("generated/agents")
-        selected_ids = set(task_graph.get("selected_participant_ids") or [])
-        participants = [p for p in all_participants if p.get("participant_id") in selected_ids] or all_participants
+        participants = self._participants_for_task_graph(task_graph, all_participants)
         pending = run_payload.get("pending_action") if isinstance(run_payload.get("pending_action"), dict) else {}
         if str(pending.get("source") or "") == "execution_reuse_asset":
             runtime_parameters = {}
