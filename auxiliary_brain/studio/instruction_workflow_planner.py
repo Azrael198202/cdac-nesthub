@@ -64,6 +64,7 @@ class InstructionWorkflowPlanner:
                     tasks.append({
                         "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
                         "participant_id": pid,
+                        "participant_display_name": self._participant_name(participant),
                         "execution_owner": "ai_core",
                         "status": "pending",
                         "step_type": "participant_execution",
@@ -107,6 +108,7 @@ class InstructionWorkflowPlanner:
                 tasks.append({
                     "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
                     "participant_id": virtual_id,
+                    "participant_display_name": virtual.get("display_name") or virtual.get("name"),
                     "execution_owner": "ai_core",
                     "status": "pending",
                     "step_type": "semantic_intermediate_step",
@@ -139,6 +141,7 @@ class InstructionWorkflowPlanner:
                         tasks.append({
                             "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
                             "participant_id": pid,
+                            "participant_display_name": self._participant_name(participant),
                             "execution_owner": "ai_core",
                             "status": "pending",
                             "step_type": "participant_execution",
@@ -181,6 +184,7 @@ class InstructionWorkflowPlanner:
                     tasks.append({
                         "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
                         "participant_id": virtual_id,
+                        "participant_display_name": virtual.get("display_name") or virtual.get("name"),
                         "execution_owner": "ai_core",
                         "status": "pending",
                         "step_type": "semantic_intermediate_step",
@@ -203,6 +207,7 @@ class InstructionWorkflowPlanner:
                     tasks.append({
                         "task_id": f"{graph_id}_delegate_{len(tasks) + 1}",
                         "participant_id": pid,
+                        "participant_display_name": self._participant_name(participant),
                         "execution_owner": "ai_core",
                         "status": "pending",
                         "step_type": "participant_execution",

@@ -171,6 +171,21 @@ async def graph_runtime_home():
 async def graph_runtime_state(graph_id: str | None = None):
     try:
         snapshot = studio_service.snapshot()
+        graphs = [item for item in snapshot.get("task_graphs", []) if isinstance(item, dict)] if isinstance(snapshot, dict) else []
+        if not graphs and not graph_id:
+            return JSONResponse({
+                "ok": True,
+                "status": "idle",
+                "graph_id": "runtime_graph",
+                "nodes": [],
+                "edges": [],
+                "lanes": [],
+                "events": [],
+                "summary": {"node_count": 0, "edge_count": 0, "completed_count": 0, "running_count": 0, "failed_count": 0, "skipped_count": 0, "reused_count": 0, "repair_count": 0},
+                "repair_plan": [],
+                "available_graphs": [],
+                "source": "agent_studio_snapshot",
+            })
         visual_state = graph_visual_builder.from_snapshot(snapshot, graph_id=graph_id)
         payload = graph_visual_builder.to_dict(visual_state)
         payload["source"] = "agent_studio_snapshot"

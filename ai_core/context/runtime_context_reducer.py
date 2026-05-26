@@ -15,25 +15,16 @@ class RuntimeContextReducer:
 
     DEFAULT_MAX_TEXT = 1600
     DEFAULT_MAX_ITEMS = 8
-    STAGE_MAX_TEXT = {
-        "input_parsing": 500,
-        "intent_recognition": 700,
-        "agent_action_planning": 900,
-        "workflow_planning": 1100,
-        "execution_preparation": 900,
-        "result_verification": 1000,
-        "final_synthesis": 1400,
-    }
 
-    def reduce_results(self, results: dict[str, Any], *, max_text: int | None = None, stage_id: str | None = None) -> dict[str, Any]:
-        max_text = max_text or self.STAGE_MAX_TEXT.get(str(stage_id or ""), self.DEFAULT_MAX_TEXT)
+    def reduce_results(self, results: dict[str, Any], *, max_text: int | None = None) -> dict[str, Any]:
+        max_text = max_text or self.DEFAULT_MAX_TEXT
         compact: dict[str, Any] = {}
         for node_id, value in (results or {}).items():
             compact[node_id] = self._reduce_value(value, depth=0, max_text=max_text)
         return compact
 
-    def reduce_capability_result(self, value: Any, *, max_text: int | None = None, stage_id: str | None = None) -> Any:
-        return self._reduce_value(value, depth=0, max_text=max_text or self.STAGE_MAX_TEXT.get(str(stage_id or ""), self.DEFAULT_MAX_TEXT))
+    def reduce_capability_result(self, value: Any, *, max_text: int | None = None) -> Any:
+        return self._reduce_value(value, depth=0, max_text=max_text or self.DEFAULT_MAX_TEXT)
 
     def _reduce_value(self, value: Any, *, depth: int, max_text: int) -> Any:
         if value is None or isinstance(value, (bool, int, float)):

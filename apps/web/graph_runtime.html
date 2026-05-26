@@ -48,8 +48,14 @@ function esc(s){return String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&l
 function statusClass(s){s=String(s||'pending'); return ['running','completed','failed','skipped','reused','repair','metadata_only'].includes(s)?s:'pending';}
 async function loadState(manual=false){
   try{
-    const url='/api/graph-runtime/state'+(selectedGraph?'?graph_id='+encodeURIComponent(selectedGraph):''); const res=await fetch(url,{cache:'no-store'}); const data=await res.json(); latest=data; render(data);
-  }catch(e){document.getElementById('subtitle').textContent='Load failed: '+e;}
+    const url='/api/graph-runtime/state'+(selectedGraph?'?graph_id='+encodeURIComponent(selectedGraph):'');
+    const res=await fetch(url,{cache:'no-store'});
+    if(!res.ok){throw new Error('HTTP '+res.status);}
+    const data=await res.json(); latest=data; render(data);
+  }catch(e){
+    latest={ok:false,status:'idle',graph_id:selectedGraph||'runtime_graph',nodes:[],edges:[],lanes:[],events:[{event:'graph_fetch_failed',error:String(e)}],summary:{node_count:0,edge_count:0,completed_count:0,running_count:0,failed_count:0},repair_plan:[],available_graphs:[]};
+    render(latest);
+  }
   if(manual && !auto){ schedule(); }
 }
 function toggleAuto(){auto=!auto; document.getElementById('autoBtn').textContent='Auto: '+(auto?'on':'off'); schedule();}

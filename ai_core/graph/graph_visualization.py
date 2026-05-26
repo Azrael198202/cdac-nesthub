@@ -129,15 +129,7 @@ class GraphVisualStateBuilder:
 
     def _task_as_node(self, task: dict[str, Any], index: int) -> dict[str, Any]:
         node_id = str(task.get("participant_id") or task.get("node_id") or task.get("id") or task.get("task_id") or f"task_{index + 1}").strip()
-        label = str(
-            task.get("label")
-            or task.get("display_name")
-            or task.get("participant_name")
-            or task.get("source_instruction_fragment")
-            or task.get("source_step_id")
-            or task.get("task_id")
-            or node_id
-        )
+        label = self._display_label(task, fallback=node_id)
         return {
             **task,
             "node_id": node_id,
@@ -168,7 +160,7 @@ class GraphVisualStateBuilder:
 
     def _visual_node(self, node: dict[str, Any], index: int, status_by_node: dict[str, str]) -> dict[str, Any]:
         node_id = self._node_id(node, index)
-        label = str(node.get("label") or node.get("name") or node.get("title") or node.get("objective") or node_id)
+        label = self._display_label(node, fallback=node_id)
         kind = str(node.get("node_type") or node.get("kind") or node.get("task_type") or "runtime_node")
         return {
             "id": node_id,
@@ -178,6 +170,40 @@ class GraphVisualStateBuilder:
             "summary": str(node.get("summary") or node.get("notes") or node.get("description") or "")[:240],
             "has_output": bool(node.get("output") or node.get("result") or node.get("artifact_ref")),
         }
+
+
+    def _display_label(self, item: dict[str, Any], *, fallback: str) -> str:
+        """Return a short UI label without leaking long instruction text.
+
+        Graph nodes should be recognizable runtime actors or generated step
+        titles.  Full user instructions remain available as summaries/details.
+        """
+        priority = (
+            "participant_display_name",
+            "display_name",
+            "participant_name",
+            "agent_name",
+            "role_name",
+            "label",
+            "name",
+            "title",
+            "source_step_id",
+            "task_id",
+        )
+        for key in priority:
+            value = str(item.get(key) or "").strip()
+            if value:
+                return self._compact_label(value)
+        return self._compact_label(fallback)
+
+    def _compact_label(self, value: str) -> str:
+        text = re.sub(r"\s+", " ", str(value or "").strip())
+        if not text:
+            return "runtime_node"
+        words = text.split(" ")
+        if len(words) > 8:
+            text = " ".join(words[:8]) + " …"
+        return text[:80]
 
     def _visual_edge(self, edge: dict[str, Any], index: int, status_by_node: dict[str, str]) -> dict[str, Any]:
         source = str(edge.get("from") or edge.get("source") or edge.get("source_id") or "").strip()

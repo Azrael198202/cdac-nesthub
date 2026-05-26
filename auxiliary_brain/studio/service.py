@@ -109,13 +109,16 @@ class AgentStudioService:
 
     def _direct_ephemeral_answer(self, message: str) -> str | None:
         text = str(message or "").strip()
-        if not text or len(text) > 120:
+        if not text or len(text) > 160:
             return None
         compact = " ".join(text.casefold().rstrip("?.!。？！").split())
         # Generic language-capability style questions can be answered without
-        # workflow planning or long-term memory promotion.
-        if re.fullmatch(r"(can|could) you (speak|use|understand|reply in|respond in) [a-z][a-z ._-]{1,40}", compact):
-            target = compact.split()[-1]
+        # workflow planning or long-term memory promotion.  A leading greeting
+        # fragment is ignored so casual chat does not enter graph execution.
+        capability_text = re.sub(r"^(hello|hi|hey)[,，。!！\s]+", "", compact).strip()
+        match = re.fullmatch(r"(can|could) you (speak|use|understand|reply in|respond in) ([a-z][a-z ._-]{1,40})", capability_text)
+        if match:
+            target = match.group(3).strip(" ._-")
             return f"Yes, I can respond in {target}."
         if compact in {"hello", "hi", "hey"}:
             return "Hello. How can I help?"

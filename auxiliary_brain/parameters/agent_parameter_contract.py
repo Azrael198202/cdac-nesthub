@@ -180,7 +180,12 @@ class AgentParameterContractService:
         task_input field. Other open capabilities keep the generic field.
         """
         if self._looks_like_content_output_capability(text):
-            contract = {"contract_type": "agent_parameter_contract", "source": source, "parameters": self._content_output_parameters()}
+            contract = {
+                "contract_type": "agent_parameter_contract",
+                "source": source,
+                "parameters": self._content_output_parameters(),
+                "collection_policy": {"blocking": True, "scope": "task_run"},
+            }
             contract["missing_information"] = self.missing_parameters({"parameter_contract": contract})
             return contract
         return self._open_capability_fallback_contract(source=source)
@@ -191,9 +196,11 @@ class AgentParameterContractService:
 
         These slots describe output constraints, not any business domain. They
         keep open-ended content agents from collapsing to one opaque input and
-        give the UI enough fields for repeatable execution.
+        give the UI enough fields for repeatable execution.  They are execution
+        blocking because a content producer cannot create the requested output
+        without task-run constraints.
         """
-        return [
+        records = [
             self._parameter_record(name="subject", label="Subject", description="Main subject or request to produce.", required=True, values=[]),
             self._parameter_record(name="size_constraint", label="Size constraint", description="Required size, amount, or length constraint.", required=True, values=[]),
             self._parameter_record(name="style_constraint", label="Style constraint", description="Requested tone, style, or output format.", required=True, values=[]),
@@ -201,6 +208,12 @@ class AgentParameterContractService:
             self._parameter_record(name="output_language", label="Output language", description="Language for the final output.", required=False, values=[]),
             self._parameter_record(name="source_policy", label="Source policy", description="Whether references, evidence, or citations are required.", required=True, values=[]),
         ]
+        for record in records:
+            if record.get("required"):
+                record["runtime_required"] = True
+                record["blocking"] = True
+                record["execution_required"] = True
+        return records
 
     def _ensure_content_output_contract_shape(self, contract: dict[str, Any], *, source: str) -> dict[str, Any]:
         """Enrich sparse model-inferred contracts for content output agents.
@@ -240,6 +253,7 @@ class AgentParameterContractService:
         enriched = dict(contract)
         enriched["source"] = source
         enriched["parameters"] = merged
+        enriched["collection_policy"] = {"blocking": True, "scope": "task_run"}
         enriched["missing_information"] = self.missing_parameters({"parameter_contract": enriched})
         return enriched
 

@@ -69,7 +69,7 @@ class StructuralStepPlanner:
             if deps and self._should_keep_generated_fragment(fragment, refs, added_participant):
                 steps.append({
                     "id": f"generated_step_{len(steps) + 1}",
-                    "label": "Generated dataflow step",
+                    "label": self._compact_fragment_label(fragment),
                     "objective": fragment.strip(),
                     "instruction_fragment": fragment.strip(),
                     "executable": True,
@@ -141,6 +141,16 @@ class StructuralStepPlanner:
         # there is meaningful residual text, it is a user-declared operation or
         # modifier and must not be silently discarded.
         return bool(residual) and (not added_participant or len(residual) >= minimum)
+
+
+    def _compact_fragment_label(self, fragment: str) -> str:
+        text = " ".join(str(fragment or "").strip().split())
+        if not text:
+            return "Runtime Step"
+        words = text.split(" ")
+        if len(words) > 6:
+            text = " ".join(words[:6]) + " …"
+        return text[:72]
 
     def _remove_redundant_generated_steps(self, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []

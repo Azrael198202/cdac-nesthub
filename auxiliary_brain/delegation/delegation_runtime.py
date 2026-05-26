@@ -747,7 +747,7 @@ class AgentDelegationRuntime:
     def _apply_task_runtime_parameters_to_selected(self, participants: list[dict[str, Any]], runtime_parameters: Any) -> None:
         """Apply current task-run parameters to participant copies only.
 
-        This lets command-provided or UI-provided values satisfy
+        This lets commands such as `topic=fukuoka` or UI-provided values satisfy
         agent parameter contracts for the current run without persisting those
         values to the agent profile.
         """
@@ -804,7 +804,22 @@ class AgentDelegationRuntime:
             or field.get("execution_required") is True
             or policy.get("blocking") is True
         )
-        return bool(explicit)
+        if explicit:
+            return True
+
+        # Backward compatibility for older runtime-generated participant records:
+        # if a contract describes a user-facing content deliverable but was
+        # generated before blocking metadata existed, keep the task safely
+        # paused until its task-run constraints are provided.  This check uses
+        # generic contract shape/objective semantics only; it does not depend on
+        # any participant name or domain vocabulary.
+        objective = " ".join(str(participant.get(k) or "") for k in ("execution_objective", "instruction", "definition_instruction", "objective"))
+        if self.parameter_contract_service._looks_like_content_output_capability(objective):
+            names = {str(p.get("name") or "").strip().casefold() for p in (contract.get("parameters") or []) if isinstance(p, dict)}
+            generic_shape = {"subject", "size_constraint", "style_constraint", "audience_context", "source_policy"}
+            if generic_shape.intersection(names):
+                return True
+        return False
 
     def _uses_uploaded_artifact_runtime(self, participant: dict[str, Any]) -> bool:
         if not isinstance(participant, dict):

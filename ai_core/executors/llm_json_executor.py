@@ -246,7 +246,6 @@ class LLMJsonExecutor:
         runtime_options = state.get("runtime_options", {}) if isinstance(state.get("runtime_options", {}), dict) else {}
         adapter = {
             **adapter,
-            "stage_id": self.stage_policy.stage_for(node_id=node_id, adapter=adapter),
             "runtime_role": role_profile.get("role_id"),
             "required_model_capabilities": role_profile.get("required_skills", []),
             "preferred_local_model": runtime_options.get("local_model"),
