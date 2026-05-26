@@ -764,11 +764,10 @@ class AgentDelegationRuntime:
         fields: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
         for participant in participants:
-            # Agent parameter contracts describe node-scoped runtime inputs.
-            # They must be collected for the specific participant that owns the
-            # contract, unless the field is known runtime metadata. Artifact
-            # callable inputs are still collected by the artifact preflight path
-            # and are not mixed into unrelated agent contracts.
+            # Uploaded artifact schemas are handled by the artifact execution
+            # path for the node that owns them. They must not be injected into
+            # every participant. Regular agent parameter contracts remain
+            # runtime inputs unless they are internal profile metadata.
             if self._uses_uploaded_artifact_runtime(participant):
                 continue
             owner = self._participant_identity(participant) or self._participant_name(participant)
@@ -778,8 +777,6 @@ class AgentDelegationRuntime:
                 field_name = str(field.get("parameter_name") or field.get("name") or field.get("field") or field.get("key") or "").strip()
                 normalized_name = self._normalize_field_name(field_name)
                 if not normalized_name or normalized_name in self.INTERNAL_METADATA_FIELD_NAMES:
-                    continue
-                if not self._should_collect_agent_parameter_field(field):
                     continue
                 key = (owner, normalized_name)
                 if key in seen:
@@ -792,19 +789,15 @@ class AgentDelegationRuntime:
                 fields.append(tagged)
         return fields
 
-    def _should_collect_agent_parameter_field(self, field: dict[str, Any]) -> bool:
+    def _is_runtime_blocking_field(self, field: dict[str, Any]) -> bool:
         if not isinstance(field, dict):
             return False
-        if field.get("required") is False or str(field.get("required") or "").strip().lower() == "false":
+        name = self._normalize_field_name(field.get("parameter_name") or field.get("name") or field.get("field") or field.get("key") or "")
+        if not name or name in self.INTERNAL_METADATA_FIELD_NAMES:
             return False
-        if field.get("advisory") is True or str(field.get("advisory") or "").strip().lower() == "true":
-            return False
-        if field.get("blocking") is False or str(field.get("blocking") or "").strip().lower() == "false":
+        if field.get("required") is False or str(field.get("required")).strip().lower() == "false":
             return False
         return True
-
-    def _is_runtime_blocking_field(self, field: dict[str, Any]) -> bool:
-        return self._should_collect_agent_parameter_field(field)
 
     def _uses_uploaded_artifact_runtime(self, participant: dict[str, Any]) -> bool:
         if not isinstance(participant, dict):
@@ -870,10 +863,10 @@ class AgentDelegationRuntime:
         if not isinstance(provided_inputs, dict):
             return
         for participant in participants:
-            updated = self.parameter_contract_service.apply_values(participant, provided_inputs)
-            pid = str(updated.get("participant_id") or "").strip()
-            if pid:
-                self.store.write_json(f"generated/agents/{pid}.json", updated)
+            # Apply values only to the in-memory participant copies for this
+            # execution. Durable agent profiles keep schema only, so one task's
+            # values cannot leak into another task or future run.
+            self.parameter_contract_service.apply_values(participant, provided_inputs)
 
     def _peer_results_for_participant(self, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> list[dict[str, Any]]:
         pid = self._participant_identity(participant)
