@@ -43,7 +43,6 @@ class AgentDelegationRuntime:
         return await self._execute_task_with_selected(task_graph, selected)
 
     async def _execute_task_with_selected(self, task_graph: dict[str, Any], selected: list[dict[str, Any]]) -> dict[str, Any]:
-        selected = self._task_execution_nodes(task_graph, selected)
         run_id = new_id("delegation_run")
         task_name = str(task_graph.get("task_name") or task_graph.get("graph_id") or "task")
         task_instruction = str(task_graph.get("instruction") or task_graph.get("objective") or "")
@@ -97,13 +96,6 @@ class AgentDelegationRuntime:
         execution_order = self._participants_in_mind_graph_order(selected, task_mind_graph)
         for index, participant in enumerate(execution_order):
             participant_name = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant.get("participant_id") or "participant")
-            if not self._dependencies_satisfied(participant, agent_results, dependency_plan):
-                skipped = self._skipped_dependency_result(participant, task_name)
-                result_payload = self._sanitize_result_payload(skipped.__dict__)
-                agent_results.append(skipped)
-                run_payload["agent_results"].append(result_payload)
-                self._record_progress(run_payload, f"participant_{index + 1}_skipped", f"Participant skipped because required upstream result material was unavailable: {participant_name}", "skipped")
-                continue
             self._record_progress(
                 run_payload,
                 f"participant_{index + 1}_prepare",
@@ -152,7 +144,6 @@ class AgentDelegationRuntime:
                         participant_name=participant_name,
                     ),
                 )
-            result = self._normalize_execution_result(result)
             result_payload = self._sanitize_result_payload(result.__dict__)
             agent_results.append(result)
             run_payload["agent_results"].append(result_payload)
@@ -301,9 +292,9 @@ class AgentDelegationRuntime:
         selected = self._select_participants(task_graph, participants)
         pending = run_payload.get("pending_action") if isinstance(run_payload.get("pending_action"), dict) else {}
         if str(pending.get("kind") or "") == "agent_parameter_collection":
+            selected = self._fresh_task_participants(selected)
             self._apply_agent_parameter_values(selected, provided_inputs or {})
             return await self._execute_task_with_selected(task_graph, selected)
-        selected = self._task_execution_nodes(task_graph, selected)
         task_mind_graph = self._build_task_mind_graph(task_graph, selected)
         dependency_plan = task_mind_graph.get("agent_relation_analysis") or self._build_participant_dependency_plan(task_graph, selected)
         run_payload["participant_dependency_plan"] = dependency_plan
@@ -370,20 +361,11 @@ class AgentDelegationRuntime:
             self.store.write_json(f"generated/results/{run_id}.json", run_payload)
             return run_payload
 
-        # Continue remaining nodes in the graph scheduler order, not in registry
-        # order. Resume must preserve the same DAG semantics as a fresh run.
+        # Continue any selected participants that have not produced a result yet.
         completed_ids = {str(r.get("participant_id") or "") for r in existing_results}
-        execution_order = self._participants_in_mind_graph_order(selected, task_mind_graph)
-        for index, participant in enumerate(execution_order):
+        for index, participant in enumerate(selected):
             participant_id = str(participant.get("participant_id") or participant.get("id") or "")
             if participant_id in completed_ids:
-                continue
-            if not self._dependencies_satisfied(participant, agent_results, dependency_plan):
-                skipped = self._skipped_dependency_result(participant, task_name)
-                payload = self._sanitize_result_payload(skipped.__dict__)
-                existing_results.append(payload)
-                agent_results.append(skipped)
-                self._record_progress(run_payload, f"participant_{index + 1}_skipped", f"Participant skipped because required upstream result material was unavailable: {skipped.participant_name}", "skipped")
                 continue
             participant_name = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant_id or "participant")
             self._record_progress(run_payload, f"participant_{index + 1}_primary_runtime", f"Primary runtime executing participant: {participant_name}", "running")
@@ -422,7 +404,6 @@ class AgentDelegationRuntime:
                         participant_name=participant_name,
                     ),
                 )
-            result = self._normalize_execution_result(result)
             payload = self._sanitize_result_payload(result.__dict__)
             existing_results.append(payload)
             agent_results.append(result)
@@ -495,102 +476,6 @@ class AgentDelegationRuntime:
 
     def _participant_objective(self, participant: dict[str, Any]) -> str:
         return str(participant.get("execution_objective") or participant.get("instruction") or participant.get("description") or "").strip()
-
-
-    def _task_execution_nodes(self, task_graph: dict[str, Any], selected: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Return workflow-node scoped participant copies.
-
-        A workflow step is the executable node.  A participant is only the
-        executor profile used by that node.  This prevents two steps that use the
-        same participant from overwriting each other and prevents a generated
-        dataflow/projection node from inheriting an unrelated agent contract.
-        """
-        if not isinstance(task_graph, dict):
-            return self._fresh_task_participants(selected)
-        task_nodes = [n for n in (task_graph.get("tasks") or []) if isinstance(n, dict)]
-        if not task_nodes:
-            return self._fresh_task_participants(selected)
-
-        base_by_id: dict[str, dict[str, Any]] = {}
-        for participant in selected:
-            if not isinstance(participant, dict):
-                continue
-            pid = self._participant_identity(participant)
-            if pid:
-                base_by_id[pid] = participant
-
-        execution_nodes: list[dict[str, Any]] = []
-        source_to_node: dict[str, str] = {}
-        executor_latest_node: dict[str, str] = {}
-        node_ids: set[str] = set()
-
-        for index, node in enumerate(task_nodes, start=1):
-            task_node_id = str(node.get("task_id") or node.get("node_id") or f"{task_graph.get('graph_id') or 'task'}_delegate_{index}").strip()
-            executor_ref = str(node.get("executor_ref") or node.get("participant_id") or node.get("agent_id") or "").strip()
-            base = copy.deepcopy(base_by_id.get(executor_ref) or {})
-            if not base:
-                base = {
-                    "participant_id": executor_ref or task_node_id,
-                    "name": str(node.get("label") or task_node_id),
-                    "agent_name": str(node.get("label") or task_node_id),
-                    "display_name": str(node.get("label") or task_node_id),
-                    "instruction": str(node.get("source_instruction_fragment") or node.get("label") or ""),
-                    "execution_objective": str(node.get("source_instruction_fragment") or node.get("label") or ""),
-                    "parameter_contract": {"contract_type": "generated_step_contract", "parameters": [], "missing_information": [], "runtime_scope": "task_run"},
-                    "runtime_parameters": {},
-                }
-            item = copy.deepcopy(base)
-            original_executor = str(item.get("participant_id") or executor_ref or task_node_id).strip()
-            label = str(node.get("label") or item.get("display_name") or item.get("agent_name") or item.get("name") or task_node_id).strip()
-            objective = str(node.get("source_instruction_fragment") or item.get("execution_objective") or item.get("instruction") or label).strip()
-
-            item["participant_id"] = task_node_id
-            item["workflow_node_id"] = task_node_id
-            item["executor_ref"] = executor_ref or original_executor
-            item["original_participant_id"] = original_executor
-            item["name"] = label
-            item["agent_name"] = label
-            item["display_name"] = label
-            item["role_name"] = label
-            item["instruction"] = objective
-            item["execution_objective"] = objective
-            item["definition_instruction"] = objective
-            item["workflow_step_type"] = node.get("step_type") or item.get("workflow_step_type") or "participant_execution"
-            item["source_step_id"] = node.get("source_step_id") or item.get("source_step_id") or task_node_id
-            item["task_node"] = copy.deepcopy(node)
-
-            # Generated dataflow/projection nodes must not inherit the executor
-            # contract of a reusable agent chosen by an unstable semantic route.
-            if str(node.get("step_type") or "").startswith("semantic_") or item.get("workflow_step_type") == "semantic_intermediate_step":
-                item["parameter_contract"] = {"contract_type": "generated_step_contract", "parameters": [], "missing_information": [], "runtime_scope": "task_run"}
-                item["runtime_parameters"] = {}
-                item["missing_information"] = []
-
-            raw_deps = node.get("depends_on") or node.get("input_from") or []
-            if isinstance(raw_deps, str):
-                raw_deps = [raw_deps]
-            resolved_deps: list[str] = []
-            for dep in raw_deps:
-                dep_key = str(dep or "").strip()
-                if not dep_key:
-                    continue
-                resolved = source_to_node.get(dep_key) or (dep_key if dep_key in node_ids else None) or executor_latest_node.get(dep_key) or dep_key
-                if resolved != task_node_id and resolved not in resolved_deps:
-                    resolved_deps.append(resolved)
-            item["depends_on"] = resolved_deps
-            item["input_from"] = list(resolved_deps)
-
-            execution_nodes.append(item)
-            node_ids.add(task_node_id)
-            source_id = str(node.get("source_step_id") or "").strip()
-            if source_id:
-                source_to_node[source_id] = task_node_id
-            if executor_ref:
-                executor_latest_node[executor_ref] = task_node_id
-            if original_executor:
-                executor_latest_node[original_executor] = task_node_id
-
-        return self._fresh_task_participants(execution_nodes)
 
     def _build_task_mind_graph(self, task_graph: dict[str, Any], selected: list[dict[str, Any]]) -> dict[str, Any]:
         """Create the top-level task mind graph before executing agents.
@@ -709,7 +594,6 @@ class AgentDelegationRuntime:
         # plan, policy blocks, or peer results. Those coordination artifacts stay
         # in the delegation run and are used by final synthesis / dependent-agent
         # later stages only.
-        node_artifacts = self._node_uploaded_artifacts(task_graph, participant)
         if for_input_parsing:
             input_context = {
                 "task_graph_id": task_graph.get("graph_id"),
@@ -720,11 +604,11 @@ class AgentDelegationRuntime:
                     "values": self._merged_runtime_parameters(task_graph, participant),
                     "missing": [] if self._uses_uploaded_artifact_runtime_for_task(participant, task_graph) else self.parameter_contract_service.missing_parameters(participant),
                 },
-                "uploaded_artifacts": node_artifacts,
-                "available_artifacts": node_artifacts,
+                "uploaded_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
+                "available_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
                 "artifact_policy": participant.get("artifact_policy") or {},
                 "artifact_binding": {
-                    "available": bool(node_artifacts),
+                    "available": bool(participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts")),
                     "resolution_key": "artifact_id_or_filename",
                     "preferred_action_type": "use_uploaded_file",
                 },
@@ -749,11 +633,11 @@ class AgentDelegationRuntime:
                 "values": self._merged_runtime_parameters(task_graph, participant),
                 "contract": {} if self._uses_uploaded_artifact_runtime_for_task(participant, task_graph) else self._compact_parameter_contract(participant.get("parameter_contract") or {}),
             },
-            "uploaded_artifacts": node_artifacts,
-            "available_artifacts": node_artifacts,
+            "uploaded_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
+            "available_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
             "artifact_policy": participant.get("artifact_policy") or {},
             "artifact_binding": {
-                "available": bool(node_artifacts),
+                "available": bool(participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts")),
                 "resolution_key": "artifact_id_or_filename",
                 "preferred_action_type": "use_uploaded_file",
             },
@@ -786,11 +670,8 @@ class AgentDelegationRuntime:
             dst = str(edge.get("to") or "").strip()
             if src in result_ids and dst in result_ids:
                 outgoing.add(src)
-        terminal = [result for result in agent_results if str(getattr(result, "participant_id", "") or "") not in outgoing and self._agent_result_has_verified_material(result)]
-        if terminal:
-            return terminal
-        usable = [result for result in agent_results if self._agent_result_has_verified_material(result)]
-        return usable or agent_results
+        terminal = [result for result in agent_results if str(getattr(result, "participant_id", "") or "") not in outgoing]
+        return terminal or agent_results
 
     def _merged_runtime_parameters(self, task_graph: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
         """Return runtime inputs visible to this participant only.
@@ -883,15 +764,17 @@ class AgentDelegationRuntime:
         fields: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
         for participant in participants:
-            # Uploaded artifact schemas are handled by the artifact execution
-            # path for the node that owns them. They must not be injected into
-            # every participant. Regular agent parameter contracts remain
-            # runtime inputs unless they are internal profile metadata.
+            # Durable agent-profile fields generated during definition are
+            # advisory by default. They describe an agent; they are not
+            # automatically runtime-blocking inputs. Runtime-blocking fields
+            # must be explicitly marked by a schema/source that owns execution.
             if self._uses_uploaded_artifact_runtime(participant):
                 continue
             owner = self._participant_identity(participant) or self._participant_name(participant)
             for field in self.parameter_contract_service.to_missing_input_fields(participant):
                 if not isinstance(field, dict):
+                    continue
+                if not self._is_runtime_blocking_field(field):
                     continue
                 field_name = str(field.get("parameter_name") or field.get("name") or field.get("field") or field.get("key") or "").strip()
                 normalized_name = self._normalize_field_name(field_name)
@@ -904,19 +787,19 @@ class AgentDelegationRuntime:
                 tagged = dict(field)
                 tagged.setdefault("participant_id", owner)
                 tagged.setdefault("participant_name", self._participant_name(participant))
-                tagged.setdefault("runtime_required", True)
                 fields.append(tagged)
         return fields
 
     def _is_runtime_blocking_field(self, field: dict[str, Any]) -> bool:
         if not isinstance(field, dict):
             return False
-        name = self._normalize_field_name(field.get("parameter_name") or field.get("name") or field.get("field") or field.get("key") or "")
-        if not name or name in self.INTERNAL_METADATA_FIELD_NAMES:
-            return False
-        if field.get("required") is False or str(field.get("required")).strip().lower() == "false":
-            return False
-        return True
+        markers = (
+            field.get("blocking"),
+            field.get("runtime_required"),
+            field.get("requires_user_input"),
+            field.get("user_supplied"),
+        )
+        return any(value is True or str(value).strip().lower() == "true" for value in markers)
 
     def _uses_uploaded_artifact_runtime(self, participant: dict[str, Any]) -> bool:
         if not isinstance(participant, dict):
@@ -974,16 +857,7 @@ class AgentDelegationRuntime:
         if not pid or not isinstance(task_graph, dict):
             return {}
         for node in task_graph.get("tasks") or []:
-            if not isinstance(node, dict):
-                continue
-            candidates = {
-                str(node.get("task_id") or "").strip(),
-                str(node.get("node_id") or "").strip(),
-                str(node.get("participant_id") or "").strip(),
-                str(node.get("executor_ref") or "").strip(),
-                str(node.get("agent_id") or "").strip(),
-            }
-            if pid in candidates:
+            if isinstance(node, dict) and str(node.get("participant_id") or node.get("node_id") or node.get("agent_id") or "").strip() == pid:
                 return node
         return {}
 
@@ -991,73 +865,10 @@ class AgentDelegationRuntime:
         if not isinstance(provided_inputs, dict):
             return
         for participant in participants:
-            # Apply values only to the in-memory participant copies for this
-            # execution. Durable agent profiles keep schema only, so one task's
-            # values cannot leak into another task or future run.
-            self.parameter_contract_service.apply_values(participant, provided_inputs)
-
-    def _dependency_ids_for_participant(self, participant: dict[str, Any], dependency_plan: dict[str, Any]) -> set[str]:
-        pid = self._participant_identity(participant)
-        participant_plan = (dependency_plan.get("participants") or {}).get(pid) or {}
-        return {str(x) for x in participant_plan.get("depends_on") or [] if str(x)}
-
-    def _agent_result_has_verified_material(self, result: Any) -> bool:
-        status = str(getattr(result, "status", "") or "").lower()
-        if status != "completed":
-            return False
-        answer = str(getattr(result, "final_answer", "") or "").strip()
-        if not answer:
-            return False
-        lower = " ".join(answer.lower().split())
-        invalid_fragments = (
-            "workflow is blocked",
-            "did not execute a tool yet",
-            "actions and substeps planned",
-            "locked fixed execution options",
-            "no verified result material",
-            "did not receive required upstream result material",
-            "not available in this environment",
-            "cannot perform the requested action",
-            "cannot perform the requested actions",
-        )
-        if any(fragment in lower for fragment in invalid_fragments):
-            return False
-        meaningful = sum(1 for ch in answer if ch.isalpha() or ch.isdigit())
-        return meaningful >= 8
-
-    def _dependencies_satisfied(self, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> bool:
-        deps = self._dependency_ids_for_participant(participant, dependency_plan)
-        if not deps:
-            return True
-        usable: set[str] = set()
-        for result in completed_results:
-            result_ids = {str(getattr(result, "participant_id", "") or ""), str(getattr(result, "participant_name", "") or "")}
-            if result_ids & deps and self._agent_result_has_verified_material(result):
-                usable.update(result_ids & deps)
-        return deps.issubset(usable)
-
-    def _skipped_dependency_result(self, participant: dict[str, Any], task_name: str):
-        from ai_core.agent_delegation import AgentExecutionResult
-        participant_id = self._participant_identity(participant)
-        participant_name = self._participant_name(participant)
-        message = "The step was skipped because required upstream result material was unavailable."
-        return AgentExecutionResult(
-            participant_id=participant_id,
-            participant_name=participant_name,
-            core_run_id=new_id("skipped"),
-            status="skipped",
-            final_answer=message,
-            workflow_results={"dependency_guard": {"status": "skipped", "task_name": task_name, "message": message}},
-            missing_inputs=[],
-        )
-
-    def _normalize_execution_result(self, result: Any):
-        if str(getattr(result, "status", "") or "").lower() == "completed" and not self._agent_result_has_verified_material(result):
-            try:
-                result.status = "failed"
-            except Exception:
-                pass
-        return result
+            updated = self.parameter_contract_service.apply_values(participant, provided_inputs)
+            pid = str(updated.get("participant_id") or "").strip()
+            if pid:
+                self.store.write_json(f"generated/agents/{pid}.json", updated)
 
     def _peer_results_for_participant(self, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> list[dict[str, Any]]:
         pid = self._participant_identity(participant)
@@ -1070,8 +881,6 @@ class AgentDelegationRuntime:
             result_pid = str(getattr(result, "participant_id", "") or "")
             result_name = str(getattr(result, "participant_name", "") or "")
             if result_pid not in deps and result_name not in deps:
-                continue
-            if not self._agent_result_has_verified_material(result):
                 continue
             safe_results.append(self._safe_peer_result(result))
         return safe_results
@@ -1364,13 +1173,16 @@ class AgentDelegationRuntime:
     def _select_participants(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not participants:
             return []
-        declared_order = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
-        if declared_order:
-            by_id = {str(participant.get("participant_id") or participant.get("id") or "").strip(): participant for participant in participants if isinstance(participant, dict)}
-            selected = [by_id[pid] for pid in declared_order if pid in by_id]
-            # The task graph is the source of truth. Preserve graph order exactly.
-            # Do not iterate the global agent registry here, because registry order
-            # can make one task execute another task's generated nodes first.
+        declared_ids = {str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()}
+        if declared_ids:
+            selected = [
+                participant
+                for participant in participants
+                if str(participant.get("participant_id") or participant.get("id") or "").strip() in declared_ids
+            ]
+            # The task graph is the source of truth.  Do not re-filter the
+            # selected graph nodes by instruction text; generated intermediate
+            # nodes may not be named verbatim in the user instruction.
             return self._dedupe_participants_for_execution(selected or participants)
         text = (str(task_graph.get("instruction") or "") + " " + str(task_graph.get("task_name") or "")).casefold()
         selected = []

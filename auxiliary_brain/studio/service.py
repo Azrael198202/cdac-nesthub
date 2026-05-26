@@ -643,16 +643,31 @@ class AgentStudioService:
         runtime_parameters.update(self._extract_runtime_parameters_from_instruction(instruction or ""))
         if isinstance(provided_inputs, dict):
             runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
-        # Parameter collection is owned by Delegation Runtime. Studio Service
-        # only merges already supplied values, renders interaction requests, and
-        # resumes the same run. Keeping a single owner prevents duplicate input
-        # modals from task-level and node-level preflight checks.
-        reuse_response = await self._try_reused_task_execution(task_name, task_graph, participants, runtime_parameters)
-        if reuse_response is not None:
-            return reuse_response
-        task_graph = dict(task_graph)
-        task_graph["runtime_parameters"] = runtime_parameters
-        result = await self.delegation_runtime.execute_task(task_graph, participants)
+        preflight = self._preflight_runtime_parameters(task_graph, participants, runtime_parameters)
+        if preflight.get("status") == "requires_input":
+            run_id = new_id("delegation_run")
+            run_payload = {
+                "run_id": run_id,
+                "origin": "auxiliary_brain",
+                "status": "requires_input",
+                "task_name": str(task_graph.get("task_name") or task_graph.get("graph_id") or task_name),
+                "current_stage": "waiting_for_runtime_parameters",
+                "pending_action": preflight.get("pending_action"),
+                "missing_inputs": preflight.get("missing_inputs") or [],
+                "runtime_parameters": runtime_parameters,
+                "pre_execution_parameter_analysis": preflight.get("analysis"),
+                "completed_at": self._now(),
+            }
+            self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+            status = "requires_input"
+            result = run_payload
+        else:
+            reuse_response = await self._try_reused_task_execution(task_name, task_graph, participants, runtime_parameters)
+            if reuse_response is not None:
+                return reuse_response
+            task_graph = dict(task_graph)
+            task_graph["runtime_parameters"] = runtime_parameters
+            result = await self.delegation_runtime.execute_task(task_graph, participants)
         status = result.get("status", "completed")
         if status == "completed":
             try:
@@ -735,9 +750,6 @@ class AgentStudioService:
             task_graph["runtime_parameters"] = runtime_parameters
             result = await self.delegation_runtime.execute_task(task_graph, participants)
         elif str(pending.get("kind") or "") in {"studio_pre_execution_uploaded_artifact_parameters", "studio_pre_execution_runtime_parameters"}:
-            # Backward compatibility for runs paused by older builds. New runs
-            # are paused only by Delegation Runtime; Studio simply merges values
-            # and starts/resumes execution without running another preflight.
             runtime_parameters = {}
             if isinstance(task_graph.get("runtime_parameters"), dict):
                 runtime_parameters.update(task_graph.get("runtime_parameters") or {})
@@ -745,9 +757,22 @@ class AgentStudioService:
                 runtime_parameters.update(run_payload.get("runtime_parameters") or {})
             if isinstance(provided_inputs, dict):
                 runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
-            task_graph = dict(task_graph)
-            task_graph["runtime_parameters"] = runtime_parameters
-            result = await self.delegation_runtime.execute_task(task_graph, participants)
+            preflight = self._preflight_runtime_parameters(task_graph, participants, runtime_parameters)
+            if preflight.get("status") == "requires_input":
+                run_payload.update({
+                    "status": "requires_input",
+                    "current_stage": "waiting_for_runtime_parameters",
+                    "pending_action": preflight.get("pending_action"),
+                    "missing_inputs": preflight.get("missing_inputs") or [],
+                    "runtime_parameters": runtime_parameters,
+                    "completed_at": self._now(),
+                })
+                self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+                result = run_payload
+            else:
+                task_graph = dict(task_graph)
+                task_graph["runtime_parameters"] = runtime_parameters
+                result = await self.delegation_runtime.execute_task(task_graph, participants)
         else:
             result = await self.delegation_runtime.resume_task(run_payload, task_graph, participants, provided_inputs=provided_inputs)
         status = result.get("status", "completed")

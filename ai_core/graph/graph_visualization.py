@@ -17,9 +17,6 @@ class GraphVisualState:
     events: list[dict[str, Any]]
     summary: dict[str, Any]
     repair_plan: list[dict[str, Any]]
-    task_catalog: list[dict[str, Any]] | None = None
-    participant_catalog: list[dict[str, Any]] | None = None
-    selected_task_name: str | None = None
 
 
 class GraphVisualStateBuilder:
@@ -57,31 +54,10 @@ class GraphVisualStateBuilder:
         snapshot = snapshot if isinstance(snapshot, dict) else {}
         graphs = self._as_list(snapshot.get("task_graphs"))
         runs = self._as_list(snapshot.get("task_runs"))
-        participants = self._as_list(snapshot.get("participants"))
         selected_graph = self._select_graph(graphs, graph_id)
-        # When the caller asks for a task/graph explicitly, never fall back to a
-        # different/latest graph.  Falling back makes one task appear to mutate
-        # another task in the UI.
-        if graph_id and not selected_graph:
-            selected_id = str(graph_id).strip()
-            state = self.from_graph(graph={"graph_id": selected_id, "task_name": selected_id, "nodes": [], "edges": []}, run={})
-        else:
-            selected_id = self._graph_id(selected_graph) if selected_graph else str(graph_id or "runtime_graph")
-            selected_run = self._select_run(runs, selected_id, selected_graph)
-            state = self.from_graph(graph=selected_graph or {"graph_id": selected_id, "nodes": [], "edges": []}, run=selected_run or {})
-        return GraphVisualState(
-            graph_id=state.graph_id,
-            status=state.status,
-            nodes=state.nodes,
-            edges=state.edges,
-            lanes=state.lanes,
-            events=state.events,
-            summary=state.summary,
-            repair_plan=state.repair_plan,
-            task_catalog=self._task_catalog(graphs, runs),
-            participant_catalog=self._participant_catalog(participants),
-            selected_task_name=str((selected_graph or {}).get("task_name") or selected_id or ""),
-        )
+        selected_id = self._graph_id(selected_graph) if selected_graph else str(graph_id or "runtime_graph")
+        selected_run = self._select_run(runs, selected_id, selected_graph)
+        return self.from_graph(graph=selected_graph or {"graph_id": selected_id, "nodes": [], "edges": []}, run=selected_run or {})
 
     def from_graph(self, graph: dict[str, Any] | None, run: dict[str, Any] | None = None) -> GraphVisualState:
         graph = graph if isinstance(graph, dict) else {}
@@ -131,9 +107,6 @@ class GraphVisualStateBuilder:
             "events": state.events,
             "summary": state.summary,
             "repair_plan": state.repair_plan,
-            "task_catalog": state.task_catalog or [],
-            "participant_catalog": state.participant_catalog or [],
-            "selected_task_name": state.selected_task_name or "",
         }
 
     def _extract_nodes(self, graph: dict[str, Any], run: dict[str, Any]) -> list[dict[str, Any]]:
@@ -155,7 +128,7 @@ class GraphVisualStateBuilder:
         return []
 
     def _task_as_node(self, task: dict[str, Any], index: int) -> dict[str, Any]:
-        node_id = str(task.get("node_id") or task.get("task_id") or task.get("id") or task.get("participant_id") or f"task_{index + 1}").strip()
+        node_id = str(task.get("participant_id") or task.get("node_id") or task.get("id") or task.get("task_id") or f"task_{index + 1}").strip()
         label = self._clean_node_label(
             task.get("label")
             or task.get("display_name")
@@ -189,7 +162,7 @@ class GraphVisualStateBuilder:
         generated: list[dict[str, Any]] = []
         for node in nodes:
             target = self._node_id(node, len(generated))
-            for upstream in self._as_list(node.get("graph_depends_on") or node.get("depends_on")):
+            for upstream in self._as_list(node.get("depends_on")):
                 if isinstance(upstream, str) and upstream.strip():
                     generated.append({"from": upstream.strip(), "to": target, "data_contract": "runtime_json"})
         return generated
@@ -255,24 +228,14 @@ class GraphVisualStateBuilder:
         for name in self._as_list(run.get("reused_nodes")) + self._as_list(summary.get("reused")):
             statuses[str(name)] = "reused"
 
-        # Overlay completed/failed participant results on workflow node ids.
-        # A workflow node is not the same thing as a participant profile: the
-        # same participant can execute multiple graph nodes.  Match result
-        # participant ids back to task node ids without replacing node identity.
-        task_ids_by_participant: dict[str, list[str]] = {}
-        for node in nodes:
-            participant_id = str(node.get("participant_id") or node.get("executor_ref") or "").strip()
-            node_id = self._node_id(node, len(task_ids_by_participant))
-            if participant_id:
-                task_ids_by_participant.setdefault(participant_id, []).append(node_id)
+        # Overlay completed/failed participant results by participant_id.
         for item in self._as_list(run.get("agent_results")):
             if not isinstance(item, dict):
                 continue
-            participant_id = str(item.get("participant_id") or item.get("id") or "").strip()
-            if not participant_id:
+            node_id = str(item.get("participant_id") or item.get("id") or "").strip()
+            if not node_id:
                 continue
-            for node_id in task_ids_by_participant.get(participant_id, [participant_id]):
-                statuses[node_id] = self._normalize_status(item.get("status"))
+            statuses[node_id] = self._normalize_status(item.get("status"))
 
         # Overlay live progress events.  The static graph stores node ids as
         # participant ids, while progress events are stage labels.  Map them
@@ -400,43 +363,6 @@ class GraphVisualStateBuilder:
                 return value
         return {}
 
-
-    def _task_catalog(self, graphs: list[Any], runs: list[Any]) -> list[dict[str, Any]]:
-        latest_run_by_task: dict[str, dict[str, Any]] = {}
-        for run in [r for r in runs if isinstance(r, dict)]:
-            name = str(run.get("task_name") or run.get("graph_id") or "").strip()
-            if not name:
-                continue
-            current = latest_run_by_task.get(name)
-            if current is None or str(run.get("completed_at") or run.get("started_at") or "") >= str(current.get("completed_at") or current.get("started_at") or ""):
-                latest_run_by_task[name] = run
-        out: list[dict[str, Any]] = []
-        for graph in [g for g in graphs if isinstance(g, dict)]:
-            task_name = str(graph.get("task_name") or self._graph_id(graph)).strip()
-            run = latest_run_by_task.get(task_name) or latest_run_by_task.get(self._graph_id(graph)) or {}
-            out.append({
-                "task_name": task_name,
-                "graph_id": self._graph_id(graph),
-                "status": self._normalize_status(run.get("status") or graph.get("status") or "created"),
-                "selected_participant_ids": [str(x) for x in self._as_list(graph.get("selected_participant_ids"))],
-                "node_count": len(self._extract_nodes(graph, run)),
-                "updated_at": str(run.get("completed_at") or run.get("started_at") or graph.get("created_at") or ""),
-            })
-        out.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
-        return out
-
-    def _participant_catalog(self, participants: list[Any]) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        for item in participants:
-            if not isinstance(item, dict):
-                continue
-            out.append({
-                "participant_id": str(item.get("participant_id") or item.get("id") or ""),
-                "name": str(item.get("display_name") or item.get("agent_name") or item.get("name") or item.get("participant_id") or "Runtime participant"),
-                "status": self._normalize_status(item.get("status") or "created"),
-            })
-        return out
-
     def _select_graph(self, graphs: list[Any], graph_id: str | None) -> dict[str, Any] | None:
         dicts = [g for g in graphs if isinstance(g, dict)]
         if graph_id:
@@ -445,7 +371,6 @@ class GraphVisualStateBuilder:
                 keys = {self._graph_id(graph), str(graph.get("task_name") or "").strip(), str(graph.get("id") or "").strip()}
                 if requested in keys:
                     return graph
-            return None
         return dicts[-1] if dicts else None
 
     def _select_run(self, runs: list[Any], graph_id: str, graph: dict[str, Any] | None = None) -> dict[str, Any] | None:
