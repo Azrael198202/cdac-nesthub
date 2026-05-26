@@ -1026,7 +1026,7 @@ class AgentStudioService:
         all_missing: list[dict[str, Any]] = []
         analyses: list[dict[str, Any]] = []
         for participant in participants:
-            artifacts = self.delegation_runtime._node_uploaded_artifacts(task_graph, participant)
+            artifacts = participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or []
             if not artifacts:
                 continue
             step = {
@@ -1062,22 +1062,14 @@ class AgentStudioService:
             analyses.append(contract)
             for field in contract.get("missing_parameter_fields") or []:
                 if isinstance(field, dict):
-                    field_name = str(field.get("field") or field.get("name") or field.get("parameter_name") or "").strip()
-                    normalized_name = self.delegation_runtime._normalize_field_name(field_name)
-                    if not normalized_name or normalized_name in self.delegation_runtime.INTERNAL_METADATA_FIELD_NAMES:
-                        continue
                     tagged = dict(field)
                     tagged.setdefault("resolution_layer", "resource_binding")
-                    tagged.setdefault("participant_id", participant.get("participant_id"))
-                    tagged.setdefault("participant_name", participant.get("display_name") or participant.get("agent_name") or participant.get("name"))
                     all_missing.append(tagged)
-        # Deduplicate fields by node owner and normalized field name.
+        # Deduplicate fields by normalized name.
         deduped: list[dict[str, Any]] = []
         seen: set[str] = set()
         for field in all_missing:
-            key_name = str(field.get("field") or field.get("name") or "").strip().casefold()
-            owner = str(field.get("participant_id") or "").strip().casefold()
-            key = "|".join(part for part in (owner, key_name) if part)
+            key = str(field.get("field") or field.get("name") or "").strip().casefold()
             if not key or key in seen:
                 continue
             seen.add(key)

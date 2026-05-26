@@ -83,13 +83,32 @@ class PrimaryBrainDelegationClient:
         final_answer = self._extract_final_answer(state)
         status = self._extract_status(state)
         pending_action = state.get("pending_action") if isinstance(state, dict) else None
+        results = state.get("results", {}) if isinstance(state.get("results"), dict) else {}
+        if self._should_attempt_direct_public_answer(
+            request=request,
+            status=status,
+            final_answer=final_answer,
+            pending_action=pending_action,
+        ):
+            fallback_answer = await self._direct_public_answer_fallback(request=request, core_run_id=core_run_id)
+            if self._answer_has_result_material(fallback_answer):
+                final_answer = fallback_answer
+                status = "completed"
+                results = dict(results)
+                results["direct_public_answer_fallback"] = {
+                    "status": "completed",
+                    "final_answer": final_answer,
+                    "execution_mode": "minimal_direct_answer",
+                }
+            else:
+                status = "incomplete" if status == "completed" else status
         return AgentExecutionResult(
             participant_id=request.participant_id,
             participant_name=request.participant_name,
             core_run_id=core_run_id,
             status=status,
             final_answer=final_answer,
-            workflow_results=state.get("results", {}),
+            workflow_results=results,
             pending_action=pending_action if isinstance(pending_action, dict) else None,
             missing_inputs=self._extract_missing_inputs(state),
         )
@@ -681,6 +700,88 @@ class PrimaryBrainDelegationClient:
             },
         }
 
+    def _should_attempt_direct_public_answer(
+        self,
+        *,
+        request: AgentExecutionRequest,
+        status: str,
+        final_answer: str,
+        pending_action: Any,
+    ) -> bool:
+        """Use a small direct-answer fallback only for non-artifact participants.
+
+        This does not hard-code any domain. It handles the generic failure mode
+        where the primary runtime stops at an internal planning message instead
+        of producing public answer material.
+        """
+        if isinstance(pending_action, dict):
+            return False
+        context = request.shared_context if isinstance(request.shared_context, dict) else {}
+        artifact_binding = context.get("artifact_binding") if isinstance(context.get("artifact_binding"), dict) else {}
+        if artifact_binding.get("available"):
+            return False
+        if str(status or "").lower() in {"requires_input", "requires_key", "paused", "failed", "timeout"}:
+            return False
+        return not self._answer_has_result_material(final_answer)
+
+    async def _direct_public_answer_fallback(self, *, request: AgentExecutionRequest, core_run_id: str) -> str:
+        """Ask the configured model for one concise public answer.
+
+        The prompt is intentionally small so local models can run it. It receives
+        only the participant objective, the task instruction, explicit runtime
+        parameters, dependency summaries, and a current timestamp. The model is
+        not asked to plan or choose tools.
+        """
+        try:
+            from datetime import datetime, timezone
+            payload: dict[str, Any] = {
+                "participant_name": request.participant_name,
+                "participant_objective": request.participant_instruction,
+                "task_instruction": request.task_instruction,
+                "current_timestamp": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+            }
+            context = request.shared_context if isinstance(request.shared_context, dict) else {}
+            params = context.get("agent_parameters") if isinstance(context.get("agent_parameters"), dict) else {}
+            values = params.get("values") if isinstance(params.get("values"), dict) else {}
+            if values:
+                payload["runtime_inputs"] = values
+            peers = context.get("available_peer_results")
+            if isinstance(peers, list) and peers:
+                payload["upstream_results"] = peers[:8]
+            schema = {
+                "type": "object",
+                "properties": {"final_answer": {"type": "string"}},
+                "required": ["final_answer"],
+                "additionalProperties": True,
+            }
+            result = await self.router.generate_json(
+                run_id=core_run_id,
+                node_id="direct_public_answer_fallback",
+                adapter={
+                    "adapter_id": "direct_public_answer_fallback",
+                    "route_name": "stable_synthesis",
+                    "provider_route": ["ollama", "openai"],
+                    "provider_timeout_seconds": 120,
+                    "max_provider_attempts": 1,
+                    "max_prompt_tokens": 900,
+                    "provider_options": {"temperature": 0, "num_predict": 160, "num_ctx": 2048, "think": False},
+                },
+                prompt={
+                    "system": (
+                        "Return JSON only with final_answer. "
+                        "Answer the participant objective directly. "
+                        "Do not describe planning, tools, routing, or execution steps. "
+                        "Use only the provided input and timestamp."
+                    )
+                },
+                rendered_user_prompt=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                schema=schema,
+            )
+            answer = result.get("final_answer") if isinstance(result, dict) else ""
+            return str(answer or "").strip()
+        except Exception:
+            return ""
+
     def _build_agent_message(self, request: AgentExecutionRequest) -> str:
         import json
 
@@ -692,15 +793,7 @@ class PrimaryBrainDelegationClient:
         context = request.shared_context or {}
         local_context = {}
         if isinstance(context, dict):
-            for key in (
-                "relationship",
-                "depends_on",
-                "agent_parameters",
-                "uploaded_artifacts",
-                "available_artifacts",
-                "artifact_binding",
-                "available_peer_results",
-            ):
+            for key in ("relationship", "depends_on", "agent_parameters", "available_peer_results"):
                 value = context.get(key)
                 if value not in (None, "", [], {}):
                     local_context[key] = value
@@ -835,10 +928,10 @@ class PrimaryBrainDelegationClient:
             "classified intent is",
             "initial capability needs",
             "no missing required parameters",
-            "actions and substeps planned",
+            "agent actions and substeps planned",
             "locked fixed execution options",
-            "workflow is blocked",
-            "did not execute a tool yet",
+            "workflow is blocked and did not execute",
+            "please review the blocked step details",
         ]
         if any(fragment in lower for fragment in placeholder_fragments):
             return False

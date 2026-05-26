@@ -932,17 +932,6 @@ function progressLine(label, status){
 
 function taskGraphCard(g){
   const el=compactJsonCard(g.task_name||g.graph_id, g);
-  const key=String(g.task_name||g.graph_id||'');
-  const header=el.querySelector('.cardHeader');
-  if(header && key){
-    const a=document.createElement('a');
-    a.className='btn';
-    a.href='/graph-runtime?graph_id='+encodeURIComponent(key);
-    a.target='_blank';
-    a.rel='noopener';
-    a.textContent='Open DAG';
-    header.appendChild(a);
-  }
   const selected=Array.isArray(g.selected_participant_ids)?g.selected_participant_ids:[];
   if(selected.length){
     const info=document.createElement('div');
