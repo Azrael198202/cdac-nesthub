@@ -246,6 +246,7 @@ class LLMJsonExecutor:
         runtime_options = state.get("runtime_options", {}) if isinstance(state.get("runtime_options", {}), dict) else {}
         adapter = {
             **adapter,
+            "stage_id": self.stage_policy.stage_for(node_id=node_id, adapter=adapter),
             "runtime_role": role_profile.get("role_id"),
             "required_model_capabilities": role_profile.get("required_skills", []),
             "preferred_local_model": runtime_options.get("local_model"),
@@ -913,6 +914,8 @@ class LLMJsonExecutor:
             return self._recover_intent_recognition(state=state, slim_user_input=slim_user_input, slim_previous_results=slim_previous_results, error=error)
         if node == "workflow_planning":
             return self._recover_main_workflow_planning(state=state, slim_user_input=slim_user_input, slim_previous_results=slim_previous_results, error=error)
+        if node == "agent_action_planning":
+            return self._recover_agent_action_planning(state=state, slim_user_input=slim_user_input, slim_previous_results=slim_previous_results, error=error)
         return None
 
     def _deterministic_intent_for_clear_runtime_reference(self, *, state: dict, slim_user_input: str, slim_previous_results: dict) -> dict | None:
@@ -1033,7 +1036,11 @@ class LLMJsonExecutor:
                         known[str(k)] = v
         objective = str(payload.get("objective") or intent.get("intent_summary") or parsed.get("original_input") or state.get("input") or "execute requested task")[:500]
         capability = str(intent.get("intent_type") or intent.get("classified_intent") or "generic_content_generation")[:120]
-        selected_action = self._selected_action_type(intent) or "ask_user"
+        selected_action = self._selected_action_type(intent)
+        if not selected_action:
+            normalized_intent = intent.get("normalized_intent") if isinstance(intent.get("normalized_intent"), dict) else {}
+            selected_action = self._action_type_from_text(normalized_intent.get("action_hint") or normalized_intent.get("preferred_action_type"))
+        selected_action = selected_action or "ask_user"
         selected_method = self._method_from_action_type(selected_action)
         step = {
             "step_id": "step_1",
@@ -1067,6 +1074,22 @@ class LLMJsonExecutor:
             "human_interaction": {},
             "recovery": {"status": "provider_error_recovered", "reason": error[:500]},
         }
+
+
+    def _recover_agent_action_planning(self, *, state: dict, slim_user_input: str, slim_previous_results: dict, error: str) -> dict:
+        """Recover action selection from already-normalized upstream contracts.
+
+        This path is used only after the planner model fails. It does not infer
+        a domain result. It locks the execution method from upstream intent and
+        artifact references so execution can run the concrete resource instead
+        of surfacing a provider timeout as user output.
+        """
+        return self._recover_workflow_planning(
+            state=state,
+            slim_user_input=slim_user_input,
+            slim_previous_results=slim_previous_results,
+            error=error,
+        )
 
     def _loads_json_obj(self, text: str) -> dict:
         try:

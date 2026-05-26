@@ -38,6 +38,15 @@ class AgentParameterContractService:
         parameter uses list values so a UI can collect one or many values with
         Continue / Done semantics.
         """
+        objective_text = execution_objective or definition_instruction
+        if self._looks_like_self_contained_runtime_observation(objective_text):
+            return {
+                "contract_type": "agent_parameter_contract",
+                "source": "self_contained_runtime_observation",
+                "parameters": [],
+                "missing_information": [],
+            }
+
         prompt_payload = {
             "participant_name": participant_name,
             "definition_instruction": definition_instruction,
@@ -123,6 +132,21 @@ class AgentParameterContractService:
                 "missing_information": [],
                 "contract_generation_error": str(exc),
             }
+
+
+    def _looks_like_self_contained_runtime_observation(self, text: str) -> bool:
+        """Detect requests that can be answered from runtime state alone.
+
+        This is a generic temporal/runtime-state guard. It prevents the UI from
+        asking for unrelated reminder/message parameters when the agent profile
+        itself already asks for the current runtime value.
+        """
+        normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if not normalized:
+            return False
+        current_markers = ("current", "now", "present", "現在", "今", "当前", "现在")
+        temporal_markers = ("time", "datetime", "timestamp", "時刻", "時間", "日時", "时间")
+        return any(marker in normalized for marker in current_markers) and any(marker in normalized for marker in temporal_markers)
 
 
     def _looks_like_open_capability(self, text: str) -> bool:

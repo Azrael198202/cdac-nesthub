@@ -64,23 +64,38 @@ class UploadedArtifactContractBuilder:
         selected = next((item for item in contracts if item.get("exists")), contracts[0] if contracts else {})
         known = self._known_values(state=state, step=step)
         missing = self._missing_inputs(selected, known)
+        input_contract = selected.get("input_contract") or {"type": "object", "additionalProperties": True, "required": []}
+        required_names = [str(x) for x in input_contract.get("required", [])] if isinstance(input_contract, dict) else []
+        optional_names = [str(x) for x in input_contract.get("optional", [])] if isinstance(input_contract, dict) else []
+        default_values = input_contract.get("defaults", {}) if isinstance(input_contract, dict) and isinstance(input_contract.get("defaults"), dict) else {}
         return {
+            "contract_kind": "runtime_generated_artifact_contract",
+            "contract_version": "1.0",
             "required": True,
             "step_id": step_id,
             "artifact_refs": [asdict(ref) for ref in refs],
             "selected_artifact": selected,
-            "input_contract": selected.get("input_contract") or {"type": "object", "additionalProperties": True},
+            "input_contract": input_contract,
+            "required_parameters": required_names,
+            "optional_parameters": optional_names,
+            "default_parameter_values": default_values,
             "known_parameter_values": known,
             "missing_parameter_fields": missing,
             "ui_parameter_request": {
                 "type": "collect_runtime_parameters",
                 "fields": missing,
-                "reason": "The selected uploaded artifact requires runtime parameter values before execution.",
+                "reason": "The selected runtime artifact requires concrete parameter values before execution.",
             } if missing else None,
             "execution_policy": {
                 "sandbox_required": True,
-                "use_uploaded_artifact_as_method": True,
+                "use_selected_artifact_as_method": True,
                 "preserve_artifact_path_as_evidence": True,
+                "decision_basis": "artifact_contract",
+            },
+            "execution_readiness": {
+                "artifact_exists": bool(selected.get("exists")),
+                "parameters_satisfied": not bool(missing),
+                "decision_basis": "manifest_or_signature_or_schema",
             },
             "approved_in_preparation": bool(selected.get("exists")) and not missing,
             "status": "missing_parameters" if missing else ("prepared" if selected.get("exists") else "missing_artifact"),
@@ -125,10 +140,17 @@ class UploadedArtifactContractBuilder:
         return base
 
     def write_manifest(self, *, state: dict[str, Any], step_id: str, contract: dict[str, Any]) -> str:
+        """Persist the runtime-generated contract outside source code.
+
+        ai_core owns the generic contract builder only. The concrete contract
+        belongs to the current run and is therefore written under
+        runtime/generated/contracts. This keeps source packages free from
+        runtime outputs while still making each execution decision auditable.
+        """
         run_id = str(state.get("run_id") or "unknown_run")
-        out_dir = RUNTIME_DIR / "sessions" / run_id / "uploaded_artifacts"
+        out_dir = RUNTIME_DIR / "generated" / "contracts" / run_id
         out_dir.mkdir(parents=True, exist_ok=True)
-        path = out_dir / f"{self._safe_name(step_id)}_artifact_contract.json"
+        path = out_dir / f"{self._safe_name(step_id)}.artifact_contract.json"
         path.write_text(json.dumps(contract, ensure_ascii=False, indent=2), encoding="utf-8")
         return str(path.relative_to(PROJECT_ROOT))
 
@@ -242,36 +264,94 @@ class UploadedArtifactContractBuilder:
         selected = next((fn for fn in functions if fn.name == "run"), functions[0] if functions else None)
         required: list[str] = []
         properties: dict[str, Any] = {}
+        defaults_map: dict[str, Any] = {}
+        optional: list[str] = []
         entrypoint = {"type": "python_module", "function": selected.name if selected else ""}
+        accepts_arbitrary_keywords = False
         if selected:
-            args = list(selected.args.args)
-            defaults = list(selected.args.defaults)
-            default_offset = len(args) - len(defaults)
-            for idx, arg in enumerate(args):
+            positional_args = list(getattr(selected.args, "posonlyargs", [])) + list(selected.args.args)
+            positional_defaults = list(selected.args.defaults)
+            default_offset = len(positional_args) - len(positional_defaults)
+            for idx, arg in enumerate(positional_args):
                 if arg.arg in {"self", "cls"}:
                     continue
-                properties[arg.arg] = self._schema_from_annotation(arg.annotation)
-                if idx < default_offset:
+                schema = self._schema_from_annotation(arg.annotation)
+                has_default = idx >= default_offset
+                if has_default:
+                    default_node = positional_defaults[idx - default_offset]
+                    default_value = self._literal_default(default_node)
+                    schema = {**schema, "default": default_value}
+                    defaults_map[arg.arg] = default_value
+                    optional.append(arg.arg)
+                else:
                     required.append(arg.arg)
-            if len(args) == 1 and args[0].arg in {"payload", "input", "data", "params"}:
+                properties[arg.arg] = schema
+            for arg, default_node in zip(selected.args.kwonlyargs, selected.args.kw_defaults):
+                if arg.arg in {"self", "cls"}:
+                    continue
+                schema = self._schema_from_annotation(arg.annotation)
+                if default_node is None:
+                    required.append(arg.arg)
+                else:
+                    default_value = self._literal_default(default_node)
+                    schema = {**schema, "default": default_value}
+                    defaults_map[arg.arg] = default_value
+                    optional.append(arg.arg)
+                properties[arg.arg] = schema
+            accepts_arbitrary_keywords = selected.args.kwarg is not None
+            if len(positional_args) == 1 and not selected.args.kwonlyargs and positional_args[0].arg in {"payload", "input", "data", "params"}:
                 required = []
+                optional = []
                 properties = {}
+                defaults_map = {}
                 entrypoint["payload_style"] = "single_object"
         argparse_required = self._extract_argparse_required(tree)
         for name in argparse_required:
             properties.setdefault(name, {"type": "string"})
             if name not in required:
                 required.append(name)
+            if name in optional:
+                optional.remove(name)
+        required = self._dedupe(required)
+        optional = [name for name in self._dedupe(optional) if name not in required]
         return {
-            "inspection": {"status": "parsed", "language": "python", "function_count": len(functions)},
+            "inspection": {
+                "status": "parsed",
+                "language": "python",
+                "function_count": len(functions),
+                "contract_source": "python_signature",
+            },
             "execution_entrypoint": entrypoint,
             "input_contract": {
                 "type": "object",
                 "properties": properties,
                 "required": required,
-                "additionalProperties": True,
+                "optional": optional,
+                "defaults": defaults_map,
+                "additionalProperties": bool(accepts_arbitrary_keywords),
             },
         }
+
+
+    def _literal_default(self, node: ast.AST) -> Any:
+        try:
+            return ast.literal_eval(node)
+        except Exception:
+            try:
+                return ast.unparse(node)
+            except Exception:
+                return None
+
+    def _dedupe(self, values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+        return result
 
     def _schema_from_annotation(self, annotation: ast.AST | None) -> dict[str, Any]:
         """Map Python type annotations to a small JSON-schema shape.

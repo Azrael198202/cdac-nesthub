@@ -747,7 +747,7 @@ class AgentDelegationRuntime:
     def _apply_task_runtime_parameters_to_selected(self, participants: list[dict[str, Any]], runtime_parameters: Any) -> None:
         """Apply current task-run parameters to participant copies only.
 
-        This lets commands such as `topic=fukuoka` or UI-provided values satisfy
+        This lets command-provided or UI-provided values satisfy
         agent parameter contracts for the current run without persisting those
         values to the agent profile.
         """

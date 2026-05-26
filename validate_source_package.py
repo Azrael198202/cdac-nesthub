@@ -24,8 +24,9 @@ if pycache or pyc:
     errors.append('package contains Python cache files')
 
 mds = [p.relative_to(root).as_posix() for p in root.rglob('*.md')]
-if mds != ['README.md']:
-    errors.append(f'expected only README.md markdown file, got {mds}')
+allowed_mds = ['README.md', 'docs/RUNTIME_GENERATED_COGNITIVE_OS_PLAN.md']
+if mds != allowed_mds:
+    errors.append(f'expected markdown files {allowed_mds}, got {mds}')
 
 sys.path.insert(0, str(root))
 try:
