@@ -172,12 +172,15 @@ class TaskMindGraphBuilder:
         remaining = set(participant_ids)
         completed: set[str] = set()
         groups: list[list[str]] = []
+        # Preserve the declared workflow order inside each ready group.  Sorting
+        # by generated identifiers makes the visual graph and actual execution
+        # disagree when independent nodes are ready at the same time.
         while remaining:
-            ready = sorted(pid for pid in remaining if deps.get(pid, set()).issubset(completed))
+            ready = [pid for pid in participant_ids if pid in remaining and deps.get(pid, set()).issubset(completed)]
             if not ready:
-                # Cycle or invalid reference. Keep a stable terminal group so the
-                # runtime can fail or execute conservatively without hanging.
-                groups.append(sorted(remaining))
+                # Cycle or invalid reference. Keep a stable terminal group using
+                # the declared order so diagnostics remain understandable.
+                groups.append([pid for pid in participant_ids if pid in remaining])
                 break
             groups.append(ready)
             completed.update(ready)

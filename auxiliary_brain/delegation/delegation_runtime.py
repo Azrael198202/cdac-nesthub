@@ -43,6 +43,7 @@ class AgentDelegationRuntime:
         return await self._execute_task_with_selected(task_graph, selected)
 
     async def _execute_task_with_selected(self, task_graph: dict[str, Any], selected: list[dict[str, Any]]) -> dict[str, Any]:
+        selected = self._task_execution_nodes(task_graph, selected)
         run_id = new_id("delegation_run")
         task_name = str(task_graph.get("task_name") or task_graph.get("graph_id") or "task")
         task_instruction = str(task_graph.get("instruction") or task_graph.get("objective") or "")
@@ -300,9 +301,9 @@ class AgentDelegationRuntime:
         selected = self._select_participants(task_graph, participants)
         pending = run_payload.get("pending_action") if isinstance(run_payload.get("pending_action"), dict) else {}
         if str(pending.get("kind") or "") == "agent_parameter_collection":
-            selected = self._fresh_task_participants(selected)
             self._apply_agent_parameter_values(selected, provided_inputs or {})
             return await self._execute_task_with_selected(task_graph, selected)
+        selected = self._task_execution_nodes(task_graph, selected)
         task_mind_graph = self._build_task_mind_graph(task_graph, selected)
         dependency_plan = task_mind_graph.get("agent_relation_analysis") or self._build_participant_dependency_plan(task_graph, selected)
         run_payload["participant_dependency_plan"] = dependency_plan
@@ -494,6 +495,102 @@ class AgentDelegationRuntime:
 
     def _participant_objective(self, participant: dict[str, Any]) -> str:
         return str(participant.get("execution_objective") or participant.get("instruction") or participant.get("description") or "").strip()
+
+
+    def _task_execution_nodes(self, task_graph: dict[str, Any], selected: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return workflow-node scoped participant copies.
+
+        A workflow step is the executable node.  A participant is only the
+        executor profile used by that node.  This prevents two steps that use the
+        same participant from overwriting each other and prevents a generated
+        dataflow/projection node from inheriting an unrelated agent contract.
+        """
+        if not isinstance(task_graph, dict):
+            return self._fresh_task_participants(selected)
+        task_nodes = [n for n in (task_graph.get("tasks") or []) if isinstance(n, dict)]
+        if not task_nodes:
+            return self._fresh_task_participants(selected)
+
+        base_by_id: dict[str, dict[str, Any]] = {}
+        for participant in selected:
+            if not isinstance(participant, dict):
+                continue
+            pid = self._participant_identity(participant)
+            if pid:
+                base_by_id[pid] = participant
+
+        execution_nodes: list[dict[str, Any]] = []
+        source_to_node: dict[str, str] = {}
+        executor_latest_node: dict[str, str] = {}
+        node_ids: set[str] = set()
+
+        for index, node in enumerate(task_nodes, start=1):
+            task_node_id = str(node.get("task_id") or node.get("node_id") or f"{task_graph.get('graph_id') or 'task'}_delegate_{index}").strip()
+            executor_ref = str(node.get("executor_ref") or node.get("participant_id") or node.get("agent_id") or "").strip()
+            base = copy.deepcopy(base_by_id.get(executor_ref) or {})
+            if not base:
+                base = {
+                    "participant_id": executor_ref or task_node_id,
+                    "name": str(node.get("label") or task_node_id),
+                    "agent_name": str(node.get("label") or task_node_id),
+                    "display_name": str(node.get("label") or task_node_id),
+                    "instruction": str(node.get("source_instruction_fragment") or node.get("label") or ""),
+                    "execution_objective": str(node.get("source_instruction_fragment") or node.get("label") or ""),
+                    "parameter_contract": {"contract_type": "generated_step_contract", "parameters": [], "missing_information": [], "runtime_scope": "task_run"},
+                    "runtime_parameters": {},
+                }
+            item = copy.deepcopy(base)
+            original_executor = str(item.get("participant_id") or executor_ref or task_node_id).strip()
+            label = str(node.get("label") or item.get("display_name") or item.get("agent_name") or item.get("name") or task_node_id).strip()
+            objective = str(node.get("source_instruction_fragment") or item.get("execution_objective") or item.get("instruction") or label).strip()
+
+            item["participant_id"] = task_node_id
+            item["workflow_node_id"] = task_node_id
+            item["executor_ref"] = executor_ref or original_executor
+            item["original_participant_id"] = original_executor
+            item["name"] = label
+            item["agent_name"] = label
+            item["display_name"] = label
+            item["role_name"] = label
+            item["instruction"] = objective
+            item["execution_objective"] = objective
+            item["definition_instruction"] = objective
+            item["workflow_step_type"] = node.get("step_type") or item.get("workflow_step_type") or "participant_execution"
+            item["source_step_id"] = node.get("source_step_id") or item.get("source_step_id") or task_node_id
+            item["task_node"] = copy.deepcopy(node)
+
+            # Generated dataflow/projection nodes must not inherit the executor
+            # contract of a reusable agent chosen by an unstable semantic route.
+            if str(node.get("step_type") or "").startswith("semantic_") or item.get("workflow_step_type") == "semantic_intermediate_step":
+                item["parameter_contract"] = {"contract_type": "generated_step_contract", "parameters": [], "missing_information": [], "runtime_scope": "task_run"}
+                item["runtime_parameters"] = {}
+                item["missing_information"] = []
+
+            raw_deps = node.get("depends_on") or node.get("input_from") or []
+            if isinstance(raw_deps, str):
+                raw_deps = [raw_deps]
+            resolved_deps: list[str] = []
+            for dep in raw_deps:
+                dep_key = str(dep or "").strip()
+                if not dep_key:
+                    continue
+                resolved = source_to_node.get(dep_key) or (dep_key if dep_key in node_ids else None) or executor_latest_node.get(dep_key) or dep_key
+                if resolved != task_node_id and resolved not in resolved_deps:
+                    resolved_deps.append(resolved)
+            item["depends_on"] = resolved_deps
+            item["input_from"] = list(resolved_deps)
+
+            execution_nodes.append(item)
+            node_ids.add(task_node_id)
+            source_id = str(node.get("source_step_id") or "").strip()
+            if source_id:
+                source_to_node[source_id] = task_node_id
+            if executor_ref:
+                executor_latest_node[executor_ref] = task_node_id
+            if original_executor:
+                executor_latest_node[original_executor] = task_node_id
+
+        return self._fresh_task_participants(execution_nodes)
 
     def _build_task_mind_graph(self, task_graph: dict[str, Any], selected: list[dict[str, Any]]) -> dict[str, Any]:
         """Create the top-level task mind graph before executing agents.
@@ -877,7 +974,16 @@ class AgentDelegationRuntime:
         if not pid or not isinstance(task_graph, dict):
             return {}
         for node in task_graph.get("tasks") or []:
-            if isinstance(node, dict) and str(node.get("participant_id") or node.get("node_id") or node.get("agent_id") or "").strip() == pid:
+            if not isinstance(node, dict):
+                continue
+            candidates = {
+                str(node.get("task_id") or "").strip(),
+                str(node.get("node_id") or "").strip(),
+                str(node.get("participant_id") or "").strip(),
+                str(node.get("executor_ref") or "").strip(),
+                str(node.get("agent_id") or "").strip(),
+            }
+            if pid in candidates:
                 return node
         return {}
 

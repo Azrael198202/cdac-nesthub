@@ -205,16 +205,18 @@ class InstructionWorkflowPlanner:
         return text[:80]
 
     def _participant_is_explicit_for_step(self, participant: dict[str, Any], step: dict[str, Any]) -> bool:
-        """Return True only when a routed participant is explicitly named by the step.
+        """Return True only when this step is an actual participant call.
 
-        The semantic planner may occasionally route a post-processing step to an
-        unrelated reusable participant.  A workflow step should use a reusable
-        participant only when the step text explicitly references that
-        participant identity.  Otherwise the step remains a generated workflow
-        node.  This keeps participant profiles from becoming workflow nodes and
-        prevents unrelated parameter contracts from leaking into generated
-        dataflow steps.
+        The semantic planner is allowed to suggest a route, but a reusable
+        participant must not be treated as the workflow node for arbitrary
+        post-processing.  A routed participant is accepted only when the step
+        text explicitly names that participant and the step does not declare
+        upstream dependencies.  Dependent steps are dataflow/projection nodes
+        and must remain generated nodes so they do not inherit unrelated agent
+        parameter contracts.
         """
+        if step.get("depends_on"):
+            return False
         haystack = " ".join(
             str(step.get(field) or "")
             for field in ("instruction_fragment", "instruction", "objective", "description", "label")
