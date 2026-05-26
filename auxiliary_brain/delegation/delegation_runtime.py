@@ -96,6 +96,13 @@ class AgentDelegationRuntime:
         execution_order = self._participants_in_mind_graph_order(selected, task_mind_graph)
         for index, participant in enumerate(execution_order):
             participant_name = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant.get("participant_id") or "participant")
+            if not self._dependencies_satisfied(participant, agent_results, dependency_plan):
+                skipped = self._skipped_dependency_result(participant, task_name)
+                result_payload = self._sanitize_result_payload(skipped.__dict__)
+                agent_results.append(skipped)
+                run_payload["agent_results"].append(result_payload)
+                self._record_progress(run_payload, f"participant_{index + 1}_skipped", f"Participant skipped because required upstream result material was unavailable: {participant_name}", "skipped")
+                continue
             self._record_progress(
                 run_payload,
                 f"participant_{index + 1}_prepare",
@@ -144,6 +151,7 @@ class AgentDelegationRuntime:
                         participant_name=participant_name,
                     ),
                 )
+            result = self._normalize_execution_result(result)
             result_payload = self._sanitize_result_payload(result.__dict__)
             agent_results.append(result)
             run_payload["agent_results"].append(result_payload)
@@ -361,11 +369,20 @@ class AgentDelegationRuntime:
             self.store.write_json(f"generated/results/{run_id}.json", run_payload)
             return run_payload
 
-        # Continue any selected participants that have not produced a result yet.
+        # Continue remaining nodes in the graph scheduler order, not in registry
+        # order. Resume must preserve the same DAG semantics as a fresh run.
         completed_ids = {str(r.get("participant_id") or "") for r in existing_results}
-        for index, participant in enumerate(selected):
+        execution_order = self._participants_in_mind_graph_order(selected, task_mind_graph)
+        for index, participant in enumerate(execution_order):
             participant_id = str(participant.get("participant_id") or participant.get("id") or "")
             if participant_id in completed_ids:
+                continue
+            if not self._dependencies_satisfied(participant, agent_results, dependency_plan):
+                skipped = self._skipped_dependency_result(participant, task_name)
+                payload = self._sanitize_result_payload(skipped.__dict__)
+                existing_results.append(payload)
+                agent_results.append(skipped)
+                self._record_progress(run_payload, f"participant_{index + 1}_skipped", f"Participant skipped because required upstream result material was unavailable: {skipped.participant_name}", "skipped")
                 continue
             participant_name = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant_id or "participant")
             self._record_progress(run_payload, f"participant_{index + 1}_primary_runtime", f"Primary runtime executing participant: {participant_name}", "running")
@@ -404,6 +421,7 @@ class AgentDelegationRuntime:
                         participant_name=participant_name,
                     ),
                 )
+            result = self._normalize_execution_result(result)
             payload = self._sanitize_result_payload(result.__dict__)
             existing_results.append(payload)
             agent_results.append(result)
@@ -671,8 +689,11 @@ class AgentDelegationRuntime:
             dst = str(edge.get("to") or "").strip()
             if src in result_ids and dst in result_ids:
                 outgoing.add(src)
-        terminal = [result for result in agent_results if str(getattr(result, "participant_id", "") or "") not in outgoing]
-        return terminal or agent_results
+        terminal = [result for result in agent_results if str(getattr(result, "participant_id", "") or "") not in outgoing and self._agent_result_has_verified_material(result)]
+        if terminal:
+            return terminal
+        usable = [result for result in agent_results if self._agent_result_has_verified_material(result)]
+        return usable or agent_results
 
     def _merged_runtime_parameters(self, task_graph: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
         """Return runtime inputs visible to this participant only.
@@ -869,6 +890,69 @@ class AgentDelegationRuntime:
             # values cannot leak into another task or future run.
             self.parameter_contract_service.apply_values(participant, provided_inputs)
 
+    def _dependency_ids_for_participant(self, participant: dict[str, Any], dependency_plan: dict[str, Any]) -> set[str]:
+        pid = self._participant_identity(participant)
+        participant_plan = (dependency_plan.get("participants") or {}).get(pid) or {}
+        return {str(x) for x in participant_plan.get("depends_on") or [] if str(x)}
+
+    def _agent_result_has_verified_material(self, result: Any) -> bool:
+        status = str(getattr(result, "status", "") or "").lower()
+        if status != "completed":
+            return False
+        answer = str(getattr(result, "final_answer", "") or "").strip()
+        if not answer:
+            return False
+        lower = " ".join(answer.lower().split())
+        invalid_fragments = (
+            "workflow is blocked",
+            "did not execute a tool yet",
+            "actions and substeps planned",
+            "locked fixed execution options",
+            "no verified result material",
+            "did not receive required upstream result material",
+            "not available in this environment",
+            "cannot perform the requested action",
+            "cannot perform the requested actions",
+        )
+        if any(fragment in lower for fragment in invalid_fragments):
+            return False
+        meaningful = sum(1 for ch in answer if ch.isalpha() or ch.isdigit())
+        return meaningful >= 8
+
+    def _dependencies_satisfied(self, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> bool:
+        deps = self._dependency_ids_for_participant(participant, dependency_plan)
+        if not deps:
+            return True
+        usable: set[str] = set()
+        for result in completed_results:
+            result_ids = {str(getattr(result, "participant_id", "") or ""), str(getattr(result, "participant_name", "") or "")}
+            if result_ids & deps and self._agent_result_has_verified_material(result):
+                usable.update(result_ids & deps)
+        return deps.issubset(usable)
+
+    def _skipped_dependency_result(self, participant: dict[str, Any], task_name: str):
+        from ai_core.agent_delegation import AgentExecutionResult
+        participant_id = self._participant_identity(participant)
+        participant_name = self._participant_name(participant)
+        message = "The step was skipped because required upstream result material was unavailable."
+        return AgentExecutionResult(
+            participant_id=participant_id,
+            participant_name=participant_name,
+            core_run_id=new_id("skipped"),
+            status="skipped",
+            final_answer=message,
+            workflow_results={"dependency_guard": {"status": "skipped", "task_name": task_name, "message": message}},
+            missing_inputs=[],
+        )
+
+    def _normalize_execution_result(self, result: Any):
+        if str(getattr(result, "status", "") or "").lower() == "completed" and not self._agent_result_has_verified_material(result):
+            try:
+                result.status = "failed"
+            except Exception:
+                pass
+        return result
+
     def _peer_results_for_participant(self, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> list[dict[str, Any]]:
         pid = self._participant_identity(participant)
         participant_plan = (dependency_plan.get("participants") or {}).get(pid) or {}
@@ -880,6 +964,8 @@ class AgentDelegationRuntime:
             result_pid = str(getattr(result, "participant_id", "") or "")
             result_name = str(getattr(result, "participant_name", "") or "")
             if result_pid not in deps and result_name not in deps:
+                continue
+            if not self._agent_result_has_verified_material(result):
                 continue
             safe_results.append(self._safe_peer_result(result))
         return safe_results
@@ -1172,16 +1258,13 @@ class AgentDelegationRuntime:
     def _select_participants(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not participants:
             return []
-        declared_ids = {str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()}
-        if declared_ids:
-            selected = [
-                participant
-                for participant in participants
-                if str(participant.get("participant_id") or participant.get("id") or "").strip() in declared_ids
-            ]
-            # The task graph is the source of truth.  Do not re-filter the
-            # selected graph nodes by instruction text; generated intermediate
-            # nodes may not be named verbatim in the user instruction.
+        declared_order = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
+        if declared_order:
+            by_id = {str(participant.get("participant_id") or participant.get("id") or "").strip(): participant for participant in participants if isinstance(participant, dict)}
+            selected = [by_id[pid] for pid in declared_order if pid in by_id]
+            # The task graph is the source of truth. Preserve graph order exactly.
+            # Do not iterate the global agent registry here, because registry order
+            # can make one task execute another task's generated nodes first.
             return self._dedupe_participants_for_execution(selected or participants)
         text = (str(task_graph.get("instruction") or "") + " " + str(task_graph.get("task_name") or "")).casefold()
         selected = []
