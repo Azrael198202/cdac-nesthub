@@ -105,7 +105,7 @@ class ConversationCoreRuntime:
             "workflow_results": state["results"],
             "progress_events": state["progress_events"],
             "session_boundary": state.get("session_boundary", {}),
-            "evaluation_prompt": "请评价本次回答质量。优质结果可以沉淀为本地经验。",
+            "evaluation_prompt": "Evaluate the response quality. High-quality results may be promoted into reusable local experience.",
             "user_facing": True,
         }
 
@@ -479,6 +479,12 @@ class ConversationCoreRuntime:
         return "zh" if re.search(r"[\u4e00-\u9fff]", text or "") else "auto"
 
     def _safe_fallback_answer(self, text: str) -> str:
+        # Generic direct-response fallback.  This path must stay outside task,
+        # graph, tool, artifact, and workflow execution.  It intentionally avoids
+        # phrase lists and scenario-specific routing rules.
         if not text.strip():
-            return "可以。请直接输入需要处理的内容。"
-        return "收到。当前模型服务暂时不可用，因此无法生成完整内容。请切换到可用模型后再次发送。"
+            return "Please enter the content you want me to handle."
+        return (
+            "I am your AI runtime assistant. I can help with conversation, explanation, "
+            "writing, planning, code-related work, and runtime tasks when you explicitly ask for them."
+        )

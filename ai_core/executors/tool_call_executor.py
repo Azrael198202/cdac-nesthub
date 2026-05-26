@@ -2472,23 +2472,28 @@ class ToolCallExecutor:
             "\nCONFIRMED_PARAMETERS=" + json.dumps(make_json_safe(known), ensure_ascii=False, separators=(",", ":"))[:1600] +
             "\nReturn one JSON object where answer_material contains only the completed final deliverable, not a requirements summary."
         )
-        try:
-            generated = await self.provider_router.generate_json(
+        adapter = {
+            "adapter_id": "content_generation_execution_adapter",
+            "provider_route": ["ollama", "openai"],
+            "provider_timeout_seconds": 90,
+            "max_provider_attempts": 1,
+            "max_prompt_tokens": 900,
+            "max_schema_chars": 600,
+            "provider_options": {"temperature": 0.4, "num_predict": 900, "num_ctx": 2048, "think": False},
+        }
+
+        async def _generate_once(user_prompt: str) -> dict[str, Any]:
+            return await self.provider_router.generate_json(
                 run_id=run_id,
                 node_id="content_generation_execution",
-                adapter={
-                    "adapter_id": "content_generation_execution_adapter",
-                    "provider_route": ["ollama", "openai"],
-                    "provider_timeout_seconds": 90,
-                    "max_provider_attempts": 1,
-                    "max_prompt_tokens": 900,
-                    "max_schema_chars": 600,
-                    "provider_options": {"temperature": 0.4, "num_predict": 900, "num_ctx": 2048, "think": False},
-                },
+                adapter=adapter,
                 prompt=prompt,
-                rendered_user_prompt=rendered,
+                rendered_user_prompt=user_prompt,
                 schema=schema,
             )
+
+        try:
+            generated = await _generate_once(rendered)
         except Exception as exc:
             return {
                 "input": tool_input,
@@ -2502,10 +2507,25 @@ class ToolCallExecutor:
             }
 
         answer = str(generated.get("answer_material") or generated.get("final_answer") or generated.get("content") or "").strip()
-        if not answer:
-            return None
-        quality = self._generated_answer_quality(answer=answer, step=step, known=known)
+        quality = self._generated_answer_quality(answer=answer, step=step, known=known) if answer else {"passed": False, "reason": "empty_answer_material", "source_type": "model_generated"}
         if not quality.get("passed"):
+            repair_rendered = (
+                rendered
+                + "\nPREVIOUS_OUTPUT_REJECTED_REASON="
+                + str(quality.get("reason") or "quality gate failed")
+                + "\nGenerate the completed final deliverable now. The answer_material field must contain the deliverable itself. Do not state that the agent was tasked, asked, ready, able, or will produce something."
+            )
+            try:
+                repaired = await _generate_once(repair_rendered)
+                repaired_answer = str(repaired.get("answer_material") or repaired.get("final_answer") or repaired.get("content") or "").strip()
+                repaired_quality = self._generated_answer_quality(answer=repaired_answer, step=step, known=known) if repaired_answer else {"passed": False, "reason": "empty_answer_material", "source_type": "model_generated"}
+                if repaired_quality.get("passed"):
+                    generated = repaired
+                    answer = repaired_answer
+                    quality = repaired_quality
+            except Exception:
+                pass
+        if not answer or not quality.get("passed"):
             return {
                 "input": tool_input,
                 "result": {
@@ -2542,17 +2562,30 @@ class ToolCallExecutor:
         """Generic guard against returning planning/request summaries as final content."""
         text = " ".join(str(answer or "").split())
         lower = text.casefold()
+        word_count = len(text.split())
         if not text:
             return {"passed": False, "reason": "empty_answer_material", "source_type": "model_generated"}
         summary_markers = (
             " can ", " capable of ", " is able to ", "the request is", "requirements",
             "parameters", "based on the provided", "will generate", "next step",
+            " has been tasked ", " tasked with ", " was tasked ", " asked to ",
+            " ready to ", " will produce ", " will write ", " should write ",
+            " is requested ", " has been asked ", " has been instructed ",
         )
-        if len(text.split()) < 30 and any(marker in f" {lower} " for marker in summary_markers):
-            return {"passed": False, "reason": "answer_looks_like_request_summary", "source_type": "model_generated"}
+        padded = f" {lower} "
+        if any(marker in padded for marker in summary_markers) and word_count < 80:
+            return {"passed": False, "reason": "answer_looks_like_request_summary", "source_type": "model_generated", "actual_words": word_count}
         requested_counts: list[int] = []
-        import re
-        for value in known.values():
+        count_sources: list[Any] = list(known.values())
+        for key in ("execution_instruction", "executor_instruction", "objective", "content", "instruction", "request"):
+            value = step.get(key) if isinstance(step, dict) else None
+            if isinstance(value, (str, int, float)):
+                count_sources.append(value)
+        prompt_contract = step.get("prompt_contract") if isinstance(step.get("prompt_contract"), dict) else {}
+        for value in prompt_contract.values():
+            if isinstance(value, (str, int, float)):
+                count_sources.append(value)
+        for value in count_sources:
             for match in re.findall(r"(?<!\d)(\d{2,5})(?!\d)", str(value)):
                 try:
                     requested_counts.append(int(match))
@@ -2560,9 +2593,9 @@ class ToolCallExecutor:
                     pass
         if requested_counts:
             target = max(requested_counts)
-            if target >= 50 and len(text.split()) < max(30, int(target * 0.4)):
-                return {"passed": False, "reason": "answer_too_short_for_requested_size", "source_type": "model_generated", "requested_size_hint": target, "actual_words": len(text.split())}
-        return {"passed": True, "reason": "model_generated_content_contract", "source_type": "model_generated"}
+            if target >= 50 and word_count < max(30, int(target * 0.4)):
+                return {"passed": False, "reason": "answer_too_short_for_requested_size", "source_type": "model_generated", "requested_size_hint": target, "actual_words": word_count}
+        return {"passed": True, "reason": "model_generated_content_contract", "source_type": "model_generated", "actual_words": word_count}
 
     async def _try_local_knowledge_execution(
         self,

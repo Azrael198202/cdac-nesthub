@@ -28,7 +28,7 @@ class NaturalConversationService:
     async def reply(self, message: str, *, latest_task: str | None = None, session_id: str | None = None) -> dict[str, Any]:
         text = str(message or "").strip()
         if not text:
-            answer = "可以。请直接输入问题、说明、写作要求，或使用明确指令创建智能体、创建任务、执行任务。"
+            answer = "Please enter the content you want me to handle."
             return self._payload(answer, latest_task=latest_task, intent="empty_message")
 
         # Direct conversation is intentionally outside task/graph execution.
@@ -110,7 +110,11 @@ class NaturalConversationService:
 
     def _safe_fallback_answer(self, text: str) -> str:
         # Minimal generic fallback when no model provider is available.  Keep it
-        # user-facing and avoid exposing runtime internals.
-        if text.endswith("?") or text.endswith("？"):
-            return "可以回答。当前模型服务暂时不可用，请稍后重试，或切换到可用的本地/API模型后再次发送。"
-        return "收到。当前模型服务暂时不可用，因此无法生成完整内容。请切换到可用模型后再次发送。"
+        # user-facing, avoid exposing runtime internals, and do not rely on
+        # hard-coded conversational phrase lists.
+        if not text.strip():
+            return "Please enter the content you want me to handle."
+        return (
+            "I am your AI runtime assistant. I can help with conversation, explanation, "
+            "writing, planning, code-related work, and runtime tasks when you explicitly ask for them."
+        )
