@@ -155,7 +155,7 @@ class GraphVisualStateBuilder:
         return []
 
     def _task_as_node(self, task: dict[str, Any], index: int) -> dict[str, Any]:
-        node_id = str(task.get("participant_id") or task.get("node_id") or task.get("id") or task.get("task_id") or f"task_{index + 1}").strip()
+        node_id = str(task.get("node_id") or task.get("task_id") or task.get("id") or task.get("participant_id") or f"task_{index + 1}").strip()
         label = self._clean_node_label(
             task.get("label")
             or task.get("display_name")
@@ -189,7 +189,7 @@ class GraphVisualStateBuilder:
         generated: list[dict[str, Any]] = []
         for node in nodes:
             target = self._node_id(node, len(generated))
-            for upstream in self._as_list(node.get("depends_on")):
+            for upstream in self._as_list(node.get("graph_depends_on") or node.get("depends_on")):
                 if isinstance(upstream, str) and upstream.strip():
                     generated.append({"from": upstream.strip(), "to": target, "data_contract": "runtime_json"})
         return generated
@@ -255,14 +255,24 @@ class GraphVisualStateBuilder:
         for name in self._as_list(run.get("reused_nodes")) + self._as_list(summary.get("reused")):
             statuses[str(name)] = "reused"
 
-        # Overlay completed/failed participant results by participant_id.
+        # Overlay completed/failed participant results on workflow node ids.
+        # A workflow node is not the same thing as a participant profile: the
+        # same participant can execute multiple graph nodes.  Match result
+        # participant ids back to task node ids without replacing node identity.
+        task_ids_by_participant: dict[str, list[str]] = {}
+        for node in nodes:
+            participant_id = str(node.get("participant_id") or node.get("executor_ref") or "").strip()
+            node_id = self._node_id(node, len(task_ids_by_participant))
+            if participant_id:
+                task_ids_by_participant.setdefault(participant_id, []).append(node_id)
         for item in self._as_list(run.get("agent_results")):
             if not isinstance(item, dict):
                 continue
-            node_id = str(item.get("participant_id") or item.get("id") or "").strip()
-            if not node_id:
+            participant_id = str(item.get("participant_id") or item.get("id") or "").strip()
+            if not participant_id:
                 continue
-            statuses[node_id] = self._normalize_status(item.get("status"))
+            for node_id in task_ids_by_participant.get(participant_id, [participant_id]):
+                statuses[node_id] = self._normalize_status(item.get("status"))
 
         # Overlay live progress events.  The static graph stores node ids as
         # participant ids, while progress events are stage labels.  Map them

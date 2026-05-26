@@ -594,6 +594,7 @@ class AgentDelegationRuntime:
         # plan, policy blocks, or peer results. Those coordination artifacts stay
         # in the delegation run and are used by final synthesis / dependent-agent
         # later stages only.
+        node_artifacts = self._node_uploaded_artifacts(task_graph, participant)
         if for_input_parsing:
             input_context = {
                 "task_graph_id": task_graph.get("graph_id"),
@@ -604,11 +605,11 @@ class AgentDelegationRuntime:
                     "values": self._merged_runtime_parameters(task_graph, participant),
                     "missing": [] if self._uses_uploaded_artifact_runtime_for_task(participant, task_graph) else self.parameter_contract_service.missing_parameters(participant),
                 },
-                "uploaded_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
-                "available_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
+                "uploaded_artifacts": node_artifacts,
+                "available_artifacts": node_artifacts,
                 "artifact_policy": participant.get("artifact_policy") or {},
                 "artifact_binding": {
-                    "available": bool(participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts")),
+                    "available": bool(node_artifacts),
                     "resolution_key": "artifact_id_or_filename",
                     "preferred_action_type": "use_uploaded_file",
                 },
@@ -633,11 +634,11 @@ class AgentDelegationRuntime:
                 "values": self._merged_runtime_parameters(task_graph, participant),
                 "contract": {} if self._uses_uploaded_artifact_runtime_for_task(participant, task_graph) else self._compact_parameter_contract(participant.get("parameter_contract") or {}),
             },
-            "uploaded_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
-            "available_artifacts": participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or [],
+            "uploaded_artifacts": node_artifacts,
+            "available_artifacts": node_artifacts,
             "artifact_policy": participant.get("artifact_policy") or {},
             "artifact_binding": {
-                "available": bool(participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts")),
+                "available": bool(node_artifacts),
                 "resolution_key": "artifact_id_or_filename",
                 "preferred_action_type": "use_uploaded_file",
             },
