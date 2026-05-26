@@ -16,7 +16,7 @@
     .shell{display:grid;grid-template-rows:auto 1fr;height:100vh}.topbar{display:flex;gap:14px;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--line);background:rgba(5,9,20,.86);backdrop-filter:blur(10px)}
     .brand{display:flex;gap:12px;align-items:center}.logo{width:34px;height:34px;border-radius:12px;background:linear-gradient(135deg,var(--cyan),var(--blue));box-shadow:0 0 30px rgba(56,189,248,.25)}
     h1{font-size:16px;margin:0}.sub{font-size:12px;color:var(--muted);font-family:var(--mono)}.actions{display:flex;gap:8px;align-items:center}.btn{border:1px solid var(--line);background:var(--panel2);color:var(--text);padding:8px 12px;border-radius:11px;cursor:pointer;text-decoration:none;font-size:13px}.btn:hover{border-color:var(--cyan)}
-    .layout{display:grid;grid-template-columns:1fr 360px;min-height:0}.canvasWrap{position:relative;overflow:auto;padding:20px}.side{border-left:1px solid var(--line);background:rgba(11,18,32,.9);display:grid;grid-template-rows:auto 1fr 1fr;min-height:0}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:14px;border-bottom:1px solid var(--line)}
+    .layout{display:grid;grid-template-columns:280px 1fr 360px;min-height:0}.taskRail{border-right:1px solid var(--line);background:rgba(11,18,32,.86);overflow:auto;padding:12px}.taskRail h2,.side h2{font-size:13px;margin:0 0 10px}.taskItem,.agentItem{border:1px solid var(--line);background:var(--panel2);border-radius:12px;padding:10px;margin-bottom:8px;cursor:pointer;text-decoration:none;color:var(--text);display:block}.taskItem:hover{border-color:var(--cyan)}.taskItem.active{border-color:var(--cyan);box-shadow:0 0 0 1px rgba(56,189,248,.22)}.taskItem .meta,.agentItem .meta{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:5px}.canvasWrap{position:relative;overflow:auto;padding:20px}.side{border-left:1px solid var(--line);background:rgba(11,18,32,.9);display:grid;grid-template-rows:auto auto 1fr 1fr;min-height:0}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:14px;border-bottom:1px solid var(--line)}
     .stat{border:1px solid var(--line);background:var(--panel2);border-radius:12px;padding:10px}.stat b{display:block;font-size:18px}.stat span{font-size:11px;color:var(--muted);font-family:var(--mono)}
     .panel{min-height:0;border-bottom:1px solid var(--line);display:flex;flex-direction:column}.panel h2{font-size:13px;margin:0;padding:12px 14px;border-bottom:1px solid var(--line)}.scroll{overflow:auto;padding:12px;min-height:0}.empty{color:var(--muted);font-family:var(--mono);font-size:12px;padding:10px}
     .dag{position:relative;min-width:900px;min-height:580px}.edges{position:absolute;inset:0;overflow:visible;pointer-events:none}.lanes{position:relative;z-index:2;display:flex;gap:110px;align-items:flex-start;padding:36px 40px}.lane{display:flex;flex-direction:column;gap:30px;min-width:210px}.laneLabel{font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:-14px;text-align:center}.node{position:relative;border:1px solid var(--line);background:linear-gradient(180deg,#111c2e,#0b1220);border-radius:var(--radius);padding:13px;min-height:98px;box-shadow:0 20px 50px rgba(0,0,0,.25);transition:transform .28s ease,border-color .28s ease,box-shadow .28s ease;animation:nodeIn .45s ease both}.node:hover{transform:translateY(-3px);border-color:var(--cyan)}
@@ -34,9 +34,11 @@
     <div class="actions"><a class="btn" href="/agent-studio">Agent Studio</a><button class="btn" onclick="loadState(true)">Refresh</button><button id="autoBtn" class="btn" onclick="toggleAuto()">Auto: on</button></div>
   </header>
   <main class="layout">
+    <aside class="taskRail"><h2>Tasks</h2><div id="tasks"></div></aside>
     <section class="canvasWrap"><div id="dag" class="dag"></div><div class="legend"><span><i class="dot d-running"></i>running</span><span><i class="dot d-completed"></i>completed</span><span><i class="dot d-failed"></i>failed</span><span><i class="dot d-skipped"></i>skipped</span><span><i class="dot d-reused"></i>reused</span><span><i class="dot d-repair"></i>repair</span></div></section>
     <aside class="side">
       <div class="stats" id="stats"></div>
+      <section class="panel"><h2>Agents</h2><div id="agents" class="scroll"></div></section>
       <section class="panel"><h2>Runtime Events</h2><div id="events" class="scroll"></div></section>
       <section class="panel"><h2>Repair Plan</h2><div id="repair" class="scroll"></div></section>
     </aside>
@@ -56,8 +58,24 @@ function toggleAuto(){auto=!auto; document.getElementById('autoBtn').textContent
 function schedule(){if(timer)clearTimeout(timer); if(auto)timer=setTimeout(()=>loadState(),1800);}
 function render(data){
   document.getElementById('subtitle').textContent=`${data.graph_id||'runtime_graph'} / ${data.status||'pending'}`;
-  renderStats(data.summary||{}); renderDag(data); renderEvents(data.events||[]); renderRepair(data.repair_plan||[]); schedule();
+  renderTasks(data.task_catalog||[], data.selected_task_name||data.graph_id); renderAgents(data.participant_catalog||[], data.nodes||[]); renderStats(data.summary||{}); renderDag(data); renderEvents(data.events||[]); renderRepair(data.repair_plan||[]); schedule();
 }
+
+function currentTaskKey(){const p=new URLSearchParams(window.location.search); return p.get('graph_id')||p.get('task_name')||'';}
+function renderTasks(tasks, selected){
+  const el=document.getElementById('tasks'); if(!el)return;
+  if(!tasks.length){el.innerHTML='<div class="empty">No tasks yet.</div>';return;}
+  const active=String(selected||currentTaskKey()||'');
+  el.innerHTML=tasks.map(t=>{const key=String(t.task_name||t.graph_id||''); const cls=(key===active||String(t.graph_id||'')===active)?'taskItem active':'taskItem'; return `<a class="${cls}" href="/graph-runtime?graph_id=${encodeURIComponent(key)}"><b>${esc(key||'Runtime task')}</b><div class="meta">${esc(t.status||'created')} · ${esc(t.node_count||0)} nodes</div></a>`;}).join('');
+}
+function renderAgents(agents, nodes){
+  const el=document.getElementById('agents'); if(!el)return;
+  const selectedIds=new Set((nodes||[]).filter(n=>String(n.kind||'').includes('participant')).map(n=>String(n.id||'')));
+  const rows=(agents||[]).filter(a=>!selectedIds.size || selectedIds.has(String(a.participant_id||'')));
+  if(!rows.length){el.innerHTML='<div class="empty">No agents for selected task.</div>';return;}
+  el.innerHTML=rows.map(a=>`<div class="agentItem"><b>${esc(a.name||a.participant_id)}</b><div class="meta">${esc(a.participant_id||'')} · ${esc(a.status||'created')}</div></div>`).join('');
+}
+
 function renderStats(s){
   const items=[['Nodes',s.node_count||0],['Edges',s.edge_count||0],['Done',s.completed_count||0],['Running',s.running_count||0],['Failed',s.failed_count||0],['Repair',s.repair_count||0]];
   document.getElementById('stats').innerHTML=items.map(([k,v])=>`<div class="stat"><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join('');

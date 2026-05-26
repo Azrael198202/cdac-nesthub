@@ -764,21 +764,22 @@ class AgentDelegationRuntime:
         fields: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
         for participant in participants:
-            # Durable agent-profile fields generated during definition are
-            # advisory by default. They describe an agent; they are not
-            # automatically runtime-blocking inputs. Runtime-blocking fields
-            # must be explicitly marked by a schema/source that owns execution.
+            # Agent parameter contracts describe node-scoped runtime inputs.
+            # They must be collected for the specific participant that owns the
+            # contract, unless the field is known runtime metadata. Artifact
+            # callable inputs are still collected by the artifact preflight path
+            # and are not mixed into unrelated agent contracts.
             if self._uses_uploaded_artifact_runtime(participant):
                 continue
             owner = self._participant_identity(participant) or self._participant_name(participant)
             for field in self.parameter_contract_service.to_missing_input_fields(participant):
                 if not isinstance(field, dict):
                     continue
-                if not self._is_runtime_blocking_field(field):
-                    continue
                 field_name = str(field.get("parameter_name") or field.get("name") or field.get("field") or field.get("key") or "").strip()
                 normalized_name = self._normalize_field_name(field_name)
                 if not normalized_name or normalized_name in self.INTERNAL_METADATA_FIELD_NAMES:
+                    continue
+                if not self._should_collect_agent_parameter_field(field):
                     continue
                 key = (owner, normalized_name)
                 if key in seen:
@@ -787,19 +788,23 @@ class AgentDelegationRuntime:
                 tagged = dict(field)
                 tagged.setdefault("participant_id", owner)
                 tagged.setdefault("participant_name", self._participant_name(participant))
+                tagged.setdefault("runtime_required", True)
                 fields.append(tagged)
         return fields
 
-    def _is_runtime_blocking_field(self, field: dict[str, Any]) -> bool:
+    def _should_collect_agent_parameter_field(self, field: dict[str, Any]) -> bool:
         if not isinstance(field, dict):
             return False
-        markers = (
-            field.get("blocking"),
-            field.get("runtime_required"),
-            field.get("requires_user_input"),
-            field.get("user_supplied"),
-        )
-        return any(value is True or str(value).strip().lower() == "true" for value in markers)
+        if field.get("required") is False or str(field.get("required") or "").strip().lower() == "false":
+            return False
+        if field.get("advisory") is True or str(field.get("advisory") or "").strip().lower() == "true":
+            return False
+        if field.get("blocking") is False or str(field.get("blocking") or "").strip().lower() == "false":
+            return False
+        return True
+
+    def _is_runtime_blocking_field(self, field: dict[str, Any]) -> bool:
+        return self._should_collect_agent_parameter_field(field)
 
     def _uses_uploaded_artifact_runtime(self, participant: dict[str, Any]) -> bool:
         if not isinstance(participant, dict):

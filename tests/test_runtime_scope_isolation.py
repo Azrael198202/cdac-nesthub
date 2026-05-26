@@ -57,17 +57,22 @@ def test_artifact_bound_node_can_see_task_runtime_values_when_unambiguous():
     assert runtime._merged_runtime_parameters(graph, participant) == {"alpha": "1", "beta": "2"}
 
 
-def test_agent_profile_advisory_fields_do_not_block_runtime():
+def test_agent_runtime_parameters_block_by_default_except_metadata():
     runtime = AgentDelegationRuntime()
     participant = {
         "participant_id": "p_a",
         "parameter_contract": {
             "parameters": [
-                {"name": "profile_only", "required": True, "values": []},
+                {"name": "task_input", "required": True, "values": []},
+                {"name": "execution_objective", "required": True, "values": []},
+                {"name": "definition_instruction", "required": True, "values": []},
+                {"name": "participant_id", "required": True, "values": []},
             ]
         },
     }
-    assert runtime._collect_missing_agent_parameter_fields([participant]) == []
+    fields = runtime._collect_missing_agent_parameter_fields([participant])
+    names = {f.get("parameter_name") or f.get("name") or f.get("field") for f in fields}
+    assert names == {"task_input"}
 
 
 def test_explicit_runtime_required_agent_field_can_block():
