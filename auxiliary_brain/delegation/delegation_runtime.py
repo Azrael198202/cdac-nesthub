@@ -815,10 +815,12 @@ class AgentDelegationRuntime:
         # any participant name or domain vocabulary.
         objective = " ".join(str(participant.get(k) or "") for k in ("execution_objective", "instruction", "definition_instruction", "objective"))
         if self.parameter_contract_service._looks_like_content_output_capability(objective):
-            names = {str(p.get("name") or "").strip().casefold() for p in (contract.get("parameters") or []) if isinstance(p, dict)}
-            generic_shape = {"subject", "size_constraint", "style_constraint", "audience_context", "source_policy"}
-            if generic_shape.intersection(names):
-                return True
+            # Runtime-generated contracts may use task-specific names instead of
+            # the generic fallback names.  For a user-facing content capability,
+            # any required missing contract field is blocking for that run.  This
+            # keeps the decision based on contract shape and objective semantics,
+            # not on participant names or fixed example phrases.
+            return bool(field.get("required", True))
         return False
 
     def _uses_uploaded_artifact_runtime(self, participant: dict[str, Any]) -> bool:

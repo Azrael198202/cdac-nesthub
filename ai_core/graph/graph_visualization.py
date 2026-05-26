@@ -30,7 +30,7 @@ class GraphVisualStateBuilder:
     TERMINAL_SUCCESS = {"completed", "passed", "succeeded", "ok", "done"}
     TERMINAL_FAILURE = {"failed", "error", "blocked"}
     ACTIVE = {"running", "executing", "in_progress"}
-    PASSIVE = {"pending", "ready", "waiting", "metadata_only"}
+    PASSIVE = {"pending", "ready", "waiting", "waiting_input", "metadata_only"}
 
     def from_partition(
         self,
@@ -270,7 +270,7 @@ class GraphVisualStateBuilder:
             if not isinstance(event, dict):
                 continue
             status = self._normalize_status(event.get("status"))
-            if status not in {"running", "completed", "failed", "skipped", "reused", "repair", "waiting"}:
+            if status not in {"running", "completed", "failed", "skipped", "reused", "repair", "waiting", "waiting_input"}:
                 continue
             target_ids = self._event_target_node_ids(event, id_by_index)
             for node_id in target_ids:
@@ -280,7 +280,13 @@ class GraphVisualStateBuilder:
                 # Preserve terminal failures; otherwise let newer telemetry win.
                 if previous == "failed" and status != "failed":
                     continue
-                statuses[node_id] = "running" if status == "waiting" else status
+                statuses[node_id] = "waiting_input" if status in {"waiting", "waiting_input"} else status
+
+        run_status = self._normalize_status(run.get("status"))
+        if run_status == "waiting_input":
+            unresolved = [node_id for node_id, status in statuses.items() if status in {"pending", "ready"}]
+            if len(unresolved) == 1:
+                statuses[unresolved[0]] = "waiting_input"
 
         # Once a run is terminal, static graph nodes that produced agent_results
         # are already covered above.  Any remaining pending downstream nodes with
@@ -419,6 +425,8 @@ class GraphVisualStateBuilder:
             return "running"
         if value in {"skip", "skipped", "cancelled"}:
             return "skipped"
+        if value in {"requires_input", "requires_key", "paused", "waiting_for_input", "waiting_input", "human_input_required"}:
+            return "waiting_input"
         if value in {"reused", "cached", "reuse"}:
             return "reused"
         if value in self.PASSIVE:

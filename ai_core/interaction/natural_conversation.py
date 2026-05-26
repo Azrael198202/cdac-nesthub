@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+import asyncio
 
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.llm.provider_router import ProviderRouter
@@ -30,16 +31,9 @@ class NaturalConversationService:
             answer = "可以。请直接输入问题、说明、写作要求，或使用明确指令创建智能体、创建任务、执行任务。"
             return self._payload(answer, latest_task=latest_task, intent="empty_message")
 
-        # Ordinary conversation still enters the AI-core pipeline.  It is not
-        # delegated as an agent/task, but it is parsed, classified, planned,
-        # executed, and finalized through generic runtime stages.
-        try:
-            result = await self.core_runtime.run(text, latest_task=latest_task, session_id=session_id)
-            if isinstance(result, dict) and (result.get("final_answer") or result.get("message")):
-                return result
-        except Exception:
-            pass
-
+        # Direct conversation is intentionally outside task/graph execution.
+        # It may use a small model for user-facing wording, but it must not
+        # create workflow graphs or run the full cognitive pipeline.
         answer = await self._model_answer(text)
         if not answer:
             answer = self._safe_fallback_answer(text)
@@ -88,18 +82,26 @@ class NaturalConversationService:
         rendered = "User message:\n" + text
         adapter = self.model_selection.initial_adapter_overrides({
             "adapter_id": "agent_studio_conversation_adapter",
+            "route_name": "stable_synthesis",
+            "model_route_name": "stable_synthesis",
             "provider_route": [],
-            "max_prompt_tokens": 3000,
+            "max_prompt_tokens": 600,
+            "provider_timeout_seconds": 18,
+            "max_provider_attempts": 1,
+            "provider_options": {"temperature": 0, "num_predict": 120, "num_ctx": 1024, "think": False},
         })
         run_id = "conversation_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
         try:
-            result = await self.router.generate_json(
-                run_id=run_id,
-                node_id="conversation_response",
-                adapter=adapter,
-                prompt=prompt,
-                rendered_user_prompt=rendered,
-                schema=schema,
+            result = await asyncio.wait_for(
+                self.router.generate_json(
+                    run_id=run_id,
+                    node_id="conversation_response",
+                    adapter=adapter,
+                    prompt=prompt,
+                    rendered_user_prompt=rendered,
+                    schema=schema,
+                ),
+                timeout=18,
             )
         except Exception:
             return ""

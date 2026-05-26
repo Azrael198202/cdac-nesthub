@@ -779,9 +779,34 @@ class PrimaryBrainDelegationClient:
         artifact_binding = context.get("artifact_binding") if isinstance(context.get("artifact_binding"), dict) else {}
         if artifact_binding.get("available"):
             return False
-        if str(status or "").lower() in {"requires_input", "requires_key", "paused", "failed", "timeout"}:
+        if self._shared_context_has_missing_required_inputs(context):
+            return False
+        if str(status or "").lower() in {"requires_input", "requires_key", "paused", "failed", "timeout", "blocked", "waiting_for_input"}:
             return False
         return not self._answer_has_result_material(final_answer)
+
+    def _shared_context_has_missing_required_inputs(self, context: dict[str, Any]) -> bool:
+        """Return True when the selected execution context still needs user input.
+
+        This guard is structural.  It prevents a public-answer fallback from
+        converting a paused/blocked run into a successful answer, without
+        relying on any domain or example phrase.
+        """
+        if not isinstance(context, dict):
+            return False
+        containers = [context]
+        for key in ("agent_parameters", "parameter_contract", "execution_contract", "input_contract"):
+            value = context.get(key)
+            if isinstance(value, dict):
+                containers.append(value)
+        for container in containers:
+            for key in ("missing_inputs", "missing_information", "blocking_missing_information", "missing_required"):
+                value = container.get(key) if isinstance(container, dict) else None
+                if isinstance(value, list) and value:
+                    return True
+                if isinstance(value, dict) and any(v not in (None, "", [], {}) for v in value.values()):
+                    return True
+        return False
 
     async def _direct_public_answer_fallback(self, *, request: AgentExecutionRequest, core_run_id: str) -> str:
         """Ask the configured model for one concise public answer.

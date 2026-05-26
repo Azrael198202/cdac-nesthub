@@ -108,20 +108,10 @@ class AgentStudioService:
         return await self.natural_conversation.reply(message, latest_task=self._latest_task_name(), session_id=session_id)
 
     def _direct_ephemeral_answer(self, message: str) -> str | None:
-        text = str(message or "").strip()
-        if not text or len(text) > 160:
-            return None
-        compact = " ".join(text.casefold().rstrip("?.!。？！").split())
-        # Generic language-capability style questions can be answered without
-        # workflow planning or long-term memory promotion.  A leading greeting
-        # fragment is ignored so casual chat does not enter graph execution.
-        capability_text = re.sub(r"^(hello|hi|hey)[,，。!！\s]+", "", compact).strip()
-        match = re.fullmatch(r"(can|could) you (speak|use|understand|reply in|respond in) ([a-z][a-z ._-]{1,40})", capability_text)
-        if match:
-            target = match.group(3).strip(" ._-")
-            return f"Yes, I can respond in {target}."
-        if compact in {"hello", "hi", "hey"}:
-            return "Hello. How can I help?"
+        # No fixed phrase list is used here.  Ordinary conversation is routed by
+        # the command router as chat and answered by NaturalConversationService
+        # outside task/graph execution.  This hook remains only for future
+        # deployment-provided deterministic policies.
         return None
 
     def _compact_final_answer(self, value: Any) -> str:
