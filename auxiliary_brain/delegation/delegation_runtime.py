@@ -83,7 +83,30 @@ class AgentDelegationRuntime:
         agent_results = []
         execution_order = self._participants_in_mind_graph_order(selected, task_mind_graph)
         for index, participant in enumerate(execution_order):
+            participant_id = str(participant.get("participant_id") or participant.get("id") or "").strip()
             participant_name = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant.get("participant_id") or "participant")
+            blocked_by = self._blocked_dependency_ids(
+                participant_id=participant_id,
+                completed_results=agent_results,
+                dependency_plan=dependency_plan,
+            )
+            if blocked_by:
+                result = self._dependency_blocked_result(
+                    participant_id=participant_id,
+                    participant_name=participant_name,
+                    blocked_by=blocked_by,
+                )
+                result_payload = self._sanitize_result_payload(result.__dict__)
+                agent_results.append(result)
+                run_payload["agent_results"].append(result_payload)
+                self._record_progress(
+                    run_payload,
+                    f"participant_{index + 1}_blocked",
+                    f"Participant blocked by failed dependency: {participant_name}",
+                    "failed",
+                )
+                continue
+
             self._record_progress(
                 run_payload,
                 f"participant_{index + 1}_prepare",
@@ -198,6 +221,41 @@ class AgentDelegationRuntime:
         self.store.write_json(f"generated/results/{run_id}.json", run_payload)
         return run_payload
 
+
+
+    def _blocked_dependency_ids(self, *, participant_id: str, completed_results: list[Any], dependency_plan: dict[str, Any]) -> list[str]:
+        participants = dependency_plan.get("participants") if isinstance(dependency_plan, dict) else {}
+        plan = participants.get(participant_id) if isinstance(participants, dict) else {}
+        dependencies = [str(item).strip() for item in (plan.get("depends_on") if isinstance(plan, dict) else []) or [] if str(item).strip()]
+        if not dependencies:
+            return []
+        result_by_id = {str(getattr(result, "participant_id", "") or ""): result for result in completed_results}
+        blocked: list[str] = []
+        for dependency_id in dependencies:
+            result = result_by_id.get(dependency_id)
+            if result is None:
+                blocked.append(dependency_id)
+                continue
+            if str(getattr(result, "status", "") or "").lower() != "completed":
+                blocked.append(dependency_id)
+        return blocked
+
+    def _dependency_blocked_result(self, *, participant_id: str, participant_name: str, blocked_by: list[str]) -> AgentExecutionResult:
+        return AgentExecutionResult(
+            participant_id=participant_id,
+            participant_name=participant_name,
+            core_run_id="dependency_blocked",
+            status="failed",
+            final_answer="This step was not executed because required upstream results were unavailable.",
+            workflow_results={
+                "dependency_gate": {
+                    "status": "failed",
+                    "blocked_by": blocked_by,
+                    "reason": "required_upstream_result_unavailable",
+                }
+            },
+            origin="auxiliary_brain",
+        )
 
     async def reoptimize_result(
         self,

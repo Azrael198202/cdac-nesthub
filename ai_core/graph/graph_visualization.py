@@ -268,8 +268,8 @@ class GraphVisualStateBuilder:
                 for edge in edge_list:
                     src = str(edge.get("from") or edge.get("source") or edge.get("source_id") or "").strip()
                     dst = str(edge.get("to") or edge.get("target") or edge.get("target_id") or "").strip()
-                    if src in failed and statuses.get(dst, "pending") == "pending":
-                        statuses[dst] = "skipped"
+                    if src in failed and dst and statuses.get(dst) != "failed":
+                        statuses[dst] = "failed"
                         failed.add(dst)
                         changed = True
         return statuses

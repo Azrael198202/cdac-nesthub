@@ -31,7 +31,7 @@
 <div class="shell">
   <header class="topbar">
     <div class="brand"><div class="logo"></div><div><h1>Graph Runtime Viewer</h1><div id="subtitle" class="sub">Waiting for runtime graph...</div></div></div>
-    <div class="actions"><a class="btn" href="/agent-studio">Agent Studio</a><button class="btn" onclick="loadState(true)">Refresh</button><button id="autoBtn" class="btn" onclick="toggleAuto()">Auto: on</button></div>
+    <div class="actions"><select id="graphSelect" class="btn" onchange="selectGraph(this.value)"></select><a class="btn" href="/agent-studio">Agent Studio</a><button class="btn" onclick="loadState(true)">Refresh</button><button id="autoBtn" class="btn" onclick="toggleAuto()">Auto: on</button></div>
   </header>
   <main class="layout">
     <section class="canvasWrap"><div id="dag" class="dag"></div><div class="legend"><span><i class="dot d-running"></i>running</span><span><i class="dot d-completed"></i>completed</span><span><i class="dot d-failed"></i>failed</span><span><i class="dot d-skipped"></i>skipped</span><span><i class="dot d-reused"></i>reused</span><span><i class="dot d-repair"></i>repair</span></div></section>
@@ -43,20 +43,30 @@
   </main>
 </div>
 <script>
-let auto=true; let timer=null; let latest=null;
+let auto=true; let timer=null; let latest=null; let selectedGraph=new URLSearchParams(location.search).get("graph_id") || "";
 function esc(s){return String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));}
 function statusClass(s){s=String(s||'pending'); return ['running','completed','failed','skipped','reused','repair','metadata_only'].includes(s)?s:'pending';}
 async function loadState(manual=false){
   try{
-    const res=await fetch('/api/graph-runtime/state',{cache:'no-store'}); const data=await res.json(); latest=data; render(data);
+    const url='/api/graph-runtime/state'+(selectedGraph?'?graph_id='+encodeURIComponent(selectedGraph):''); const res=await fetch(url,{cache:'no-store'}); const data=await res.json(); latest=data; render(data);
   }catch(e){document.getElementById('subtitle').textContent='Load failed: '+e;}
   if(manual && !auto){ schedule(); }
 }
 function toggleAuto(){auto=!auto; document.getElementById('autoBtn').textContent='Auto: '+(auto?'on':'off'); schedule();}
+function selectGraph(id){selectedGraph=id||''; const q=selectedGraph?'?graph_id='+encodeURIComponent(selectedGraph):location.pathname; history.replaceState(null,'',selectedGraph?q:location.pathname); loadState(true);}
+function renderGraphSelector(graphs,current){
+  const sel=document.getElementById('graphSelect'); if(!sel)return;
+  const seen=new Set();
+  const items=(graphs||[]).filter(g=>{const id=String(g.graph_id||''); if(!id||seen.has(id))return false; seen.add(id); return true;});
+  if(!items.length){sel.innerHTML='<option value="">No task graph</option>'; return;}
+  if(!selectedGraph && current) selectedGraph=current;
+  sel.innerHTML=items.map(g=>`<option value="${esc(g.graph_id)}" ${String(g.graph_id)===String(selectedGraph||current)?'selected':''}>${esc(g.task_name||g.graph_id)}</option>`).join('');
+}
+
 function schedule(){if(timer)clearTimeout(timer); if(auto)timer=setTimeout(()=>loadState(),1800);}
 function render(data){
   document.getElementById('subtitle').textContent=`${data.graph_id||'runtime_graph'} / ${data.status||'pending'}`;
-  renderStats(data.summary||{}); renderDag(data); renderEvents(data.events||[]); renderRepair(data.repair_plan||[]); schedule();
+  renderGraphSelector(data.available_graphs||[], data.graph_id||""); renderStats(data.summary||{}); renderDag(data); renderEvents(data.events||[]); renderRepair(data.repair_plan||[]); schedule();
 }
 function renderStats(s){
   const items=[['Nodes',s.node_count||0],['Edges',s.edge_count||0],['Done',s.completed_count||0],['Running',s.running_count||0],['Failed',s.failed_count||0],['Repair',s.repair_count||0]];

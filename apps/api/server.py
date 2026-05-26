@@ -169,11 +169,37 @@ async def graph_runtime_home():
 
 @app.get("/api/graph-runtime/state")
 async def graph_runtime_state(graph_id: str | None = None):
-    snapshot = studio_service.snapshot()
-    visual_state = graph_visual_builder.from_snapshot(snapshot, graph_id=graph_id)
-    payload = graph_visual_builder.to_dict(visual_state)
-    payload["source"] = "agent_studio_snapshot"
-    return JSONResponse(payload)
+    try:
+        snapshot = studio_service.snapshot()
+        visual_state = graph_visual_builder.from_snapshot(snapshot, graph_id=graph_id)
+        payload = graph_visual_builder.to_dict(visual_state)
+        payload["source"] = "agent_studio_snapshot"
+        payload["available_graphs"] = [
+            {
+                "graph_id": str(item.get("graph_id") or item.get("task_name") or item.get("id") or "runtime_graph"),
+                "task_name": str(item.get("task_name") or item.get("graph_id") or item.get("id") or "runtime_graph"),
+                "status": str(item.get("status") or "pending"),
+            }
+            for item in snapshot.get("task_graphs", [])
+            if isinstance(item, dict)
+        ]
+        return JSONResponse(payload)
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "status": "failed",
+                "graph_id": graph_id or "runtime_graph",
+                "nodes": [],
+                "edges": [],
+                "lanes": [],
+                "events": [{"event": "graph_state_load_failed", "error": str(exc)}],
+                "summary": {"node_count": 0, "edge_count": 0, "completed_count": 0, "running_count": 0, "failed_count": 1},
+                "repair_plan": [{"action": "check_runtime_snapshot", "error": str(exc)}],
+                "source": "agent_studio_snapshot",
+            },
+            status_code=200,
+        )
 
 
 @app.get("/agent-studio")
