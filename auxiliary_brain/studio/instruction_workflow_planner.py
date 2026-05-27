@@ -80,6 +80,13 @@ class InstructionWorkflowPlanner:
                 virtual_id = new_id_fn("participant")
                 aliases[step_id] = virtual_id
                 objective = self._objective_from_step(step)
+                parameter_contract = self._generated_parameter_contract_from_step(step)
+                capability_profile = step.get("capability_profile") if isinstance(step.get("capability_profile"), dict) else {}
+                if not capability_profile:
+                    structural = StructuralStepPlanner()
+                    if not parameter_contract.get("parameters"):
+                        parameter_contract = structural._parameter_contract_from_fragment(objective)
+                    capability_profile = structural._capability_profile_from_fragment(objective, parameter_contract)
                 virtual = {
                     "participant_id": virtual_id,
                     "name": step.get("label") or f"Generated Step {len(generated) + 1}",
@@ -89,8 +96,8 @@ class InstructionWorkflowPlanner:
                     "instruction": objective,
                     "execution_objective": objective,
                     "definition_instruction": step.get("instruction_fragment") or objective,
-                    "parameter_contract": self._generated_parameter_contract_from_step(step),
-                    "capability_profile": step.get("capability_profile") if isinstance(step.get("capability_profile"), dict) else {},
+                    "parameter_contract": parameter_contract,
+                    "capability_profile": capability_profile,
                     "runtime_parameters": {},
                     "missing_information": [],
                     "origin": "auxiliary_brain",
@@ -114,7 +121,8 @@ class InstructionWorkflowPlanner:
                     "input_from": depends_on,
                     "source_step_id": step_id,
                     "source_instruction_fragment": step.get("instruction_fragment") or "",
-                    "capability_profile": step.get("capability_profile") if isinstance(step.get("capability_profile"), dict) else {},
+                    "capability_profile": capability_profile,
+                    "parameter_contract": parameter_contract,
                     **self._task_contracts_from_step(step, depends_on),
                 })
                 covered.append({"step_id": step_id, "type": "semantic_intermediate_step", "participant_id": virtual_id})
@@ -150,6 +158,8 @@ class InstructionWorkflowPlanner:
                             "depends_on": depends_on,
                             "source_step_id": step_id,
                             "source_instruction_fragment": step.get("instruction_fragment") or "",
+                            "parameter_contract": self._generated_parameter_contract_from_step(step),
+                            "capability_profile": step.get("capability_profile") if isinstance(step.get("capability_profile"), dict) else {},
                             **self._task_contracts_from_step(step, depends_on),
                         })
                         covered.append({"step_id": step_id, "type": "participant_execution", "participant_id": pid})

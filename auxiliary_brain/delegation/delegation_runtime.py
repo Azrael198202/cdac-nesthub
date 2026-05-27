@@ -914,7 +914,9 @@ class AgentDelegationRuntime:
             if self._uses_uploaded_artifact_runtime(participant):
                 continue
             owner = self._participant_identity(participant) or self._participant_name(participant)
-            for field in self.parameter_contract_service.to_missing_input_fields(participant):
+            participant_fields = list(self.parameter_contract_service.to_missing_input_fields(participant))
+            participant_fields.extend(self._capability_required_fields(participant))
+            for field in participant_fields:
                 if not isinstance(field, dict):
                     continue
                 if not self._is_blocking_agent_parameter_field(participant, field):
@@ -928,6 +930,43 @@ class AgentDelegationRuntime:
                 seen.add(key)
                 fields.append(field)
         return fields
+
+    def _capability_required_fields(self, participant: dict[str, Any]) -> list[dict[str, Any]]:
+        """Build missing input fields from runtime capability metadata.
+
+        This is capability-contract based. It does not inspect participant names
+        and it does not use example phrases. It only reads fields produced by
+        the runtime planner, such as a declared query parameter for a generated
+        retrieval step.
+        """
+        profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+        if not profile:
+            return []
+        values = participant.get("runtime_parameters") if isinstance(participant.get("runtime_parameters"), dict) else {}
+        out: list[dict[str, Any]] = []
+        query_name = str(profile.get("query_parameter") or "").strip()
+        if profile.get("requires_user_query") is True and query_name:
+            if not self._first_scalar(values.get(query_name)):
+                pid = self._participant_identity(participant)
+                pname = self._participant_name(participant)
+                out.append({
+                    "kind": "agent_parameter_required",
+                    "field": f"{pid}.{query_name}" if pid else query_name,
+                    "name": f"{pid}.{query_name}" if pid else query_name,
+                    "parameter_name": query_name,
+                    "participant_id": pid,
+                    "participant_name": pname,
+                    "label": " ".join(part.capitalize() for part in query_name.replace("_", " ").split()),
+                    "message": "Runtime input is required before this step can continue.",
+                    "input_type": "text",
+                    "required": True,
+                    "runtime_required": True,
+                    "blocking": True,
+                    "execution_required": True,
+                    "resolution_layer": "execution_input",
+                    "input_role": "query",
+                })
+        return out
 
     def _is_blocking_agent_parameter_field(self, participant: dict[str, Any], field: dict[str, Any]) -> bool:
         """Return True only for explicitly blocking runtime parameters.
