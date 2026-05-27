@@ -961,13 +961,20 @@ class AgentDelegationRuntime:
             return
         values = dict(participant.get("runtime_parameters") or {}) if isinstance(participant.get("runtime_parameters"), dict) else {}
         changed = False
+        has_declared_dependencies = bool(self._participant_dependency_ids(participant, dependency_plan))
         for field in self._contract_fields(participant):
             name = self._field_name(field)
-            if not name or values.get(name) not in (None, "", [], {}):
+            if not name or not self._field_accepts_upstream_material(field):
                 continue
-            if self._field_accepts_upstream_material(field):
-                values[name] = material
-                changed = True
+            current = values.get(name)
+            # For declared dataflow edges, upstream verified material is the
+            # source of truth for generic content/material input fields.  This
+            # prevents a placeholder typed during parameter collection from
+            # replacing the actual upstream result.
+            if has_declared_dependencies or current in (None, "", [], {}):
+                if current != material:
+                    values[name] = material
+                    changed = True
         if changed:
             participant["runtime_parameters"] = values
             self.parameter_contract_service.apply_values(participant, values)

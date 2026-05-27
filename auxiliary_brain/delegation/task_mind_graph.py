@@ -148,8 +148,19 @@ class TaskMindGraphBuilder:
                 if dep_id != pid and dep_id not in deps:
                     deps.append(dep_id)
 
-            # Dependencies must come from explicit graph fields.  This builder
-            # intentionally does not infer dataflow from vocabulary markers.
+            # When a participant definition explicitly references another
+            # participant identity, treat that as a structural data dependency.
+            # This is not a domain rule: it only uses runtime participant
+            # identities and the generated task/participant structure.
+            reference_text = " ".join([
+                objective,
+                str(task_graph.get("instruction") or task_graph.get("objective") or "").lower(),
+            ])
+            for peer_name, peer_id in name_to_id.items():
+                if peer_id == pid or peer_id in deps:
+                    continue
+                if peer_name and peer_name in reference_text:
+                    deps.append(peer_id)
 
             plan["participants"][pid] = {
                 "participant_id": pid,
