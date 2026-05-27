@@ -785,8 +785,9 @@ class PrimaryBrainDelegationClient:
             return False
         if self._results_contain_blocking_execution_failure(results):
             return False
-        if self._results_show_runtime_execution_path(results):
-            return False
+        # A planned runtime path may still finish with an internal planning
+        # summary instead of public material.  If there is no blocking failure
+        # and the final answer is not usable, allow one small material fallback.
         if str(status or "").lower() in {"requires_input", "requires_key", "paused", "failed", "timeout", "blocked", "waiting_for_input"}:
             return False
         return not self._answer_has_result_material(final_answer)
@@ -865,6 +866,40 @@ class PrimaryBrainDelegationClient:
                     return True
         return False
 
+    def _public_runtime_inputs(self, values: dict[str, Any]) -> dict[str, Any]:
+        """Keep only user-confirmed scalar/list/dict inputs for direct material fallback.
+
+        The runtime input map may contain participant identifiers, planner state,
+        graph metadata, and values intended for other participants.  This generic
+        filter keeps the fallback prompt focused on confirmed public inputs
+        without depending on any task name, domain, or example phrase.
+        """
+        if not isinstance(values, dict):
+            return {}
+        excluded_exact = {
+            "participant_name", "participant_id", "agent_name", "agent_id",
+            "objective", "capability", "intent", "task_name", "community_id",
+            "run_id", "node_id", "step_id", "timestamp", "system_clock",
+            "timezone", "t",
+        }
+        excluded_fragments = (
+            "trace", "runtime", "planner", "execution", "workflow",
+            "graph", "status", "message", "source_step", "substep",
+        )
+        out: dict[str, Any] = {}
+        for raw_key, value in values.items():
+            key = str(raw_key or "").strip()
+            if not key or key in excluded_exact:
+                continue
+            low = key.lower()
+            if any(fragment in low for fragment in excluded_fragments):
+                continue
+            if value in (None, "", [], {}):
+                continue
+            if isinstance(value, (str, int, float, bool, list, dict)):
+                out[key] = value
+        return out
+
     async def _direct_public_answer_fallback(self, *, request: AgentExecutionRequest, core_run_id: str) -> str:
         """Ask the configured model for one concise public answer.
 
@@ -884,8 +919,9 @@ class PrimaryBrainDelegationClient:
             context = request.shared_context if isinstance(request.shared_context, dict) else {}
             params = context.get("agent_parameters") if isinstance(context.get("agent_parameters"), dict) else {}
             values = params.get("values") if isinstance(params.get("values"), dict) else {}
-            if values:
-                payload["runtime_inputs"] = values
+            public_values = self._public_runtime_inputs(values) if isinstance(values, dict) else {}
+            if public_values:
+                payload["runtime_inputs"] = public_values
             peers = context.get("available_peer_results")
             if isinstance(peers, list) and peers:
                 payload["upstream_results"] = peers[:8]
@@ -905,13 +941,14 @@ class PrimaryBrainDelegationClient:
                     "provider_timeout_seconds": 120,
                     "max_provider_attempts": 1,
                     "max_prompt_tokens": 900,
-                    "provider_options": {"temperature": 0, "num_predict": 160, "num_ctx": 2048, "think": False},
+                    "provider_options": {"temperature": 0.25, "num_predict": 900, "num_ctx": 2048, "think": False},
                 },
                 prompt={
                     "system": (
                         "Return JSON only with final_answer. "
-                        "Answer the participant objective directly. "
-                        "Do not describe planning, tools, routing, or execution steps. "
+                        "Produce the user-facing final deliverable directly. "
+                        "Use runtime_inputs as confirmed constraints when present. "
+                        "Do not describe planning, tools, routing, readiness, or execution steps. "
                         "Use only the provided input and timestamp."
                     )
                 },

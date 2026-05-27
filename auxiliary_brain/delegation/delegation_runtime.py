@@ -885,6 +885,8 @@ class AgentDelegationRuntime:
         if explicit:
             return True
         if self._looks_like_file_material_contract(participant):
+            if self._field_is_runtime_default_output_location(field):
+                return False
             return bool(field.get("required", True))
 
         # Backward compatibility for older runtime-generated participant records:
@@ -917,10 +919,31 @@ class AgentDelegationRuntime:
         text = self._field_text(field)
         return bool(re.search(r"\b(content|body|text|payload|data|material|input)\b", text, flags=re.I))
 
+    def _field_is_runtime_default_output_location(self, field: dict[str, Any]) -> bool:
+        text = self._field_text(field)
+        return bool(re.search(r"\b(path|directory|folder|location|output path|save path)\b", text, flags=re.I))
+
     def _can_defer_field_to_dependency_output(self, participant: dict[str, Any], field: dict[str, Any], dependency_plan: dict[str, Any]) -> bool:
+        if self._field_is_runtime_default_output_location(field):
+            return self._looks_like_file_material_contract(participant)
         if not self._field_accepts_upstream_material(field):
             return False
-        return bool(self._participant_dependency_ids(participant, dependency_plan))
+        if bool(self._participant_dependency_ids(participant, dependency_plan)):
+            return True
+        # Some fallback graph records store only edge objects.  Use those edges as
+        # a secondary generic dataflow signal without relying on participant names
+        # or domain-specific parameter labels.
+        pid = self._participant_identity(participant)
+        pname = self._participant_name(participant)
+        edges = dependency_plan.get("edges") if isinstance(dependency_plan, dict) else []
+        if isinstance(edges, list):
+            for edge in edges:
+                if not isinstance(edge, dict):
+                    continue
+                target = str(edge.get("to") or edge.get("target") or edge.get("target_id") or "")
+                if target and target in {pid, pname}:
+                    return True
+        return False
 
     def _contract_fields(self, participant: dict[str, Any]) -> list[dict[str, Any]]:
         contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}

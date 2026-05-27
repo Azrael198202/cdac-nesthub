@@ -49,11 +49,14 @@ const messages = document.getElementById('messages');
 function renderJson(obj){ return JSON.stringify(obj, null, 2); }
 function linkifyAnswerLine(line){
   const escaped=escapeHtml(line.trim());
-  return escaped.replace(/\[([^\]]+)\]\((\/api\/downloads\/[^)]+)\)/g, '<a href="$2" download>$1</a>');
+  return escaped
+    .replace(/\[([^\]]+)\]\((\/api\/downloads\/[^)]+)\)/g, '<a href="$2" download>$1</a>')
+    .replace(/(^|\s)(\/api\/downloads\/[^\s<]+)/g, '$1<a href="$2" download>$2</a>');
 }
 function formatAnswerHtml(text){
-  const raw=String(text||'').trim();
+  let raw=String(text||'').trim();
   if(!raw){ return '<div class="message">(no answer)</div>'; }
+  raw = raw.replace(/\[([^\]]+)\]\s*\n\s*\((\/api\/downloads\/[^)]+)\)/g, '[$1]($2)');
   return '<div class="answerText">'+raw.split(/\n+/).map(line=>'<span class="answerLine">'+linkifyAnswerLine(line)+'</span>').join('')+'</div>';
 }
 function addMessage(text, cls='item', options={}) {
