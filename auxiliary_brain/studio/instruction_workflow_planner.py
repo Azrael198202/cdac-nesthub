@@ -71,6 +71,7 @@ class InstructionWorkflowPlanner:
                         "depends_on": depends_on,
                         "source_step_id": step_id,
                         "source_instruction_fragment": step.get("instruction_fragment") or "",
+                        **self._task_contracts_from_step(step, depends_on),
                     })
                     covered.append({"step_id": step_id, "type": "participant_execution", "participant_id": pid})
                     continue
@@ -116,6 +117,7 @@ class InstructionWorkflowPlanner:
                     "input_from": depends_on,
                     "source_step_id": step_id,
                     "source_instruction_fragment": step.get("instruction_fragment") or "",
+                    **self._task_contracts_from_step(step, depends_on),
                 })
                 covered.append({"step_id": step_id, "type": "semantic_intermediate_step", "participant_id": virtual_id})
         else:
@@ -148,6 +150,7 @@ class InstructionWorkflowPlanner:
                             "depends_on": depends_on,
                             "source_step_id": step_id,
                             "source_instruction_fragment": step.get("instruction_fragment") or "",
+                            **self._task_contracts_from_step(step, depends_on),
                         })
                         covered.append({"step_id": step_id, "type": "participant_execution", "participant_id": pid})
                         continue
@@ -192,6 +195,7 @@ class InstructionWorkflowPlanner:
                         "input_from": depends_on,
                         "source_step_id": step_id,
                         "source_instruction_fragment": step.get("instruction_fragment") or "",
+                        **self._task_contracts_from_step(step, depends_on),
                     })
                     covered.append({"step_id": step_id, "type": "semantic_intermediate_step", "participant_id": virtual_id})
             else:
@@ -213,6 +217,17 @@ class InstructionWorkflowPlanner:
                         "step_type": "participant_execution",
                         "depends_on": [],
                         "source_instruction_fragment": self._participant_name(participant),
+                        "input_contract": {
+                            "contract_type": "runtime_step_input_contract",
+                            "bound_from_upstream": [],
+                            "accepts_verified_material": False,
+                            "user_input_required_for_bound_material": False,
+                        },
+                        "output_contract": {
+                            "contract_type": "runtime_step_output_contract",
+                            "produces_verified_material": True,
+                            "planner_metadata_is_not_result_material": True,
+                        },
                     })
                     covered.append({"type": "participant_execution", "participant_id": pid, "participant_name": self._participant_name(participant)})
 
@@ -228,6 +243,25 @@ class InstructionWorkflowPlanner:
             "semantic_step_count": len(semantic_steps),
         }
         return PlannedWorkflow(selected_participants=selected, generated_participants=generated, tasks=tasks, coverage=coverage)
+
+
+    def _task_contracts_from_step(self, step: dict[str, Any], depends_on: list[str]) -> dict[str, Any]:
+        input_contract = step.get("input_contract") if isinstance(step.get("input_contract"), dict) else {}
+        output_contract = step.get("output_contract") if isinstance(step.get("output_contract"), dict) else {}
+        if not input_contract:
+            input_contract = {
+                "contract_type": "runtime_step_input_contract",
+                "bound_from_upstream": [str(x) for x in depends_on or [] if str(x)],
+                "accepts_verified_material": bool(depends_on),
+                "user_input_required_for_bound_material": False,
+            }
+        if not output_contract:
+            output_contract = {
+                "contract_type": "runtime_step_output_contract",
+                "produces_verified_material": True,
+                "planner_metadata_is_not_result_material": True,
+            }
+        return {"input_contract": input_contract, "output_contract": output_contract}
 
     def _semantic_steps(self, semantic_plan: dict[str, Any]) -> list[dict[str, Any]]:
         steps = semantic_plan.get("steps") or semantic_plan.get("actions") or []

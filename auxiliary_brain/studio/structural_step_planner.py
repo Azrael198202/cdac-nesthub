@@ -46,12 +46,19 @@ class StructuralStepPlanner:
             source_step_id = explicit_fragments[idx]["id"] if explicit_fragments and idx < len(explicit_fragments) else ""
             declared_deps = self._declared_step_dependencies(fragment, step_aliases)
             refs = self._referenced_participants(fragment, participants)
+            prior_ref_deps = [self._participant_id(p) for p in refs if self._participant_id(p) in selected_ids]
+            for dep in prior_ref_deps:
+                if dep and dep not in declared_deps:
+                    declared_deps.append(dep)
             if explicit_fragments and not declared_deps and not refs and last_outputs:
                 declared_deps = list(last_outputs)
             current_outputs: list[str] = []
             # A fragment may contain multiple existing participant references.
             # Each declared participant remains its own executable node so the
             # downstream graph can show parallel branches and bind outputs.
+            # If a later fragment mentions an already-selected participant, that
+            # mention is treated as a structural upstream material reference, not
+            # as a request to execute the upstream participant again.
             added_participant = False
             for participant in refs:
                 pid = self._participant_id(participant)
@@ -66,6 +73,8 @@ class StructuralStepPlanner:
                     "instruction_fragment": fragment.strip(),
                     "executable": True,
                     "depends_on": list(declared_deps),
+                    "input_contract": self._input_contract(declared_deps),
+                    "output_contract": self._output_contract(),
                     "route": {"participant_id": pid},
                 })
                 if source_step_id:
@@ -92,6 +101,8 @@ class StructuralStepPlanner:
                     "instruction_fragment": fragment.strip(),
                     "executable": True,
                     "depends_on": deps,
+                    "input_contract": self._input_contract(deps),
+                    "output_contract": self._output_contract(),
                     "route": {"requires_generated_step": True},
                 })
                 if source_step_id:
@@ -102,6 +113,23 @@ class StructuralStepPlanner:
                 last_outputs = list(current_outputs)
 
         return self._remove_redundant_generated_steps(steps)
+
+
+    def _input_contract(self, depends_on: list[str]) -> dict[str, Any]:
+        deps = [str(x) for x in depends_on or [] if str(x)]
+        return {
+            "contract_type": "runtime_step_input_contract",
+            "bound_from_upstream": deps,
+            "accepts_verified_material": bool(deps),
+            "user_input_required_for_bound_material": False,
+        }
+
+    def _output_contract(self) -> dict[str, Any]:
+        return {
+            "contract_type": "runtime_step_output_contract",
+            "produces_verified_material": True,
+            "planner_metadata_is_not_result_material": True,
+        }
 
     def _numbered_step_fragments(self, text: str) -> list[dict[str, str]]:
         """Extract explicitly numbered instruction fragments.
@@ -185,8 +213,14 @@ class StructuralStepPlanner:
         matched: list[dict[str, Any]] = []
         for participant in sorted([p for p in participants if isinstance(p, dict)], key=lambda p: len(self._participant_name(p)), reverse=True):
             aliases = [self._participant_name(participant), self._participant_id(participant)]
-            if any(alias and alias.casefold() in haystack for alias in aliases):
-                matched.append(participant)
+            for alias in aliases:
+                alias_text = str(alias or "").strip()
+                if len(alias_text) < 3:
+                    continue
+                pattern = r"(?<![\w-])" + re.escape(alias_text.casefold()) + r"(?![\w-])"
+                if re.search(pattern, haystack, flags=re.UNICODE):
+                    matched.append(participant)
+                    break
         return self._dedupe(matched)
 
     def _should_keep_generated_fragment(self, fragment: str, refs: list[dict[str, Any]], added_participant: bool) -> bool:

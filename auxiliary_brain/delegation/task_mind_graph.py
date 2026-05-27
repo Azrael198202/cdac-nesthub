@@ -67,14 +67,16 @@ class TaskMindGraphBuilder:
                 ],
                 "depends_on": deps,
                 "relation": "dependent" if deps else "independent",
-                "input_contract": {
-                    "own_objective_is_primary": True,
-                    "peer_results_allowed": bool(deps),
-                    "peer_results_format": "strict_json_safe_summary",
+                "input_contract": plan.get("input_contract") or {
+                    "contract_type": "runtime_step_input_contract",
+                    "bound_from_upstream": deps,
+                    "accepts_verified_material": bool(deps),
+                    "user_input_required_for_bound_material": False,
                 },
-                "output_contract": {
-                    "result_is_collected_for_final_synthesis": True,
-                    "raw_intermediate_json_is_not_final_answer": True,
+                "output_contract": plan.get("output_contract") or {
+                    "contract_type": "runtime_step_output_contract",
+                    "produces_verified_material": True,
+                    "planner_metadata_is_not_result_material": True,
                 },
             })
 
@@ -120,23 +122,24 @@ class TaskMindGraphBuilder:
     def _relation_plan(self, task_graph: dict[str, Any], selected: list[dict[str, Any]]) -> dict[str, Any]:
         identities = {self._participant_id(p): p for p in selected if self._participant_id(p)}
         name_to_id = {self._participant_name(p).lower(): pid for pid, p in identities.items()}
-        plan: dict[str, Any] = {"default_relationship": "independent", "participants": {}, "edges": []}
+        task_order = self._task_participant_order(task_graph, identities)
+        plan: dict[str, Any] = {
+            "default_relationship": "independent",
+            "participants": {},
+            "edges": [],
+            "dataflow_contracts": {},
+            "self_check": {"status": "pending"},
+        }
 
         explicit_by_task: dict[str, list[str]] = {}
+        contract_by_task: dict[str, dict[str, Any]] = {}
         for task in task_graph.get("tasks") or []:
             if not isinstance(task, dict):
                 continue
             target = str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
+            if target and target not in identities:
+                target = name_to_id.get(target.lower(), target)
             raw_deps = task.get("depends_on") or task.get("requires") or task.get("input_from") or []
-            if isinstance(raw_deps, str):
-                raw_deps = [raw_deps]
-            deps = [str(x).strip() for x in raw_deps if str(x).strip()]
-            if target and deps:
-                explicit_by_task.setdefault(target, []).extend(deps)
-
-        for pid, participant in identities.items():
-            objective = self._participant_objective(participant).lower()
-            raw_deps = participant.get("depends_on") or participant.get("requires") or participant.get("input_from") or explicit_by_task.get(pid) or []
             if isinstance(raw_deps, str):
                 raw_deps = [raw_deps]
             deps: list[str] = []
@@ -145,30 +148,145 @@ class TaskMindGraphBuilder:
                 if not dep:
                     continue
                 dep_id = dep if dep in identities else name_to_id.get(dep.lower(), dep)
-                if dep_id != pid and dep_id not in deps:
+                if dep_id != target and dep_id not in deps:
                     deps.append(dep_id)
+            if target:
+                explicit_by_task.setdefault(target, []).extend(deps)
+                contract_by_task[target] = {
+                    "input_contract": task.get("input_contract") if isinstance(task.get("input_contract"), dict) else {},
+                    "output_contract": task.get("output_contract") if isinstance(task.get("output_contract"), dict) else {},
+                    "source_step_id": task.get("source_step_id"),
+                    "source_instruction_fragment": task.get("source_instruction_fragment"),
+                }
 
-            # When a participant definition explicitly references another
-            # participant identity, treat that as a structural data dependency.
-            # This is not a domain rule: it only uses runtime participant
-            # identities and the generated task/participant structure.
-            reference_text = objective
-            for peer_name, peer_id in name_to_id.items():
-                if peer_id == pid or peer_id in deps:
-                    continue
-                if peer_name and peer_name in reference_text:
-                    deps.append(peer_id)
+        raw_plan: dict[str, list[str]] = {}
+        has_task_dependencies = any(explicit_by_task.values())
+        for pid, participant in identities.items():
+            raw: list[str] = []
+            raw.extend(explicit_by_task.get(pid) or [])
+            if not raw:
+                raw_deps = participant.get("depends_on") or participant.get("requires") or participant.get("input_from") or []
+                if isinstance(raw_deps, str):
+                    raw_deps = [raw_deps]
+                for item in raw_deps:
+                    dep = str(item).strip()
+                    if not dep:
+                        continue
+                    dep_id = dep if dep in identities else name_to_id.get(dep.lower(), dep)
+                    if dep_id != pid and dep_id not in raw:
+                        raw.append(dep_id)
 
+            # Textual references are a last-resort structural signal only when
+            # the task graph did not already declare dataflow.  This keeps the
+            # source code domain-neutral while preventing inferred references
+            # from overriding explicit step contracts.
+            if not has_task_dependencies and not raw:
+                objective = self._participant_objective(participant).lower()
+                for peer_name, peer_id in name_to_id.items():
+                    if peer_id == pid or peer_id in raw:
+                        continue
+                    if peer_name and peer_name in objective:
+                        raw.append(peer_id)
+            raw_plan[pid] = raw
+
+        normalized_plan, removed_edges = self._normalize_dependency_map(raw_plan, task_order)
+        for pid, participant in identities.items():
+            deps = normalized_plan.get(pid) or []
+            input_contract = (contract_by_task.get(pid) or {}).get("input_contract") or {
+                "contract_type": "runtime_step_input_contract",
+                "bound_from_upstream": deps,
+                "accepts_verified_material": bool(deps),
+                "user_input_required_for_bound_material": False,
+            }
+            output_contract = (contract_by_task.get(pid) or {}).get("output_contract") or {
+                "contract_type": "runtime_step_output_contract",
+                "produces_verified_material": True,
+                "planner_metadata_is_not_result_material": True,
+            }
             plan["participants"][pid] = {
                 "participant_id": pid,
                 "participant_name": self._participant_name(participant),
                 "relationship": "dependent" if deps else "independent",
                 "depends_on": deps,
                 "peer_results_injected": bool(deps),
+                "input_contract": input_contract,
+                "output_contract": output_contract,
             }
+            plan["dataflow_contracts"][pid] = {"input_contract": input_contract, "output_contract": output_contract}
             for dep_id in deps:
-                plan["edges"].append({"from": dep_id, "to": pid, "data_contract": "strict_json_safe_summary", "reason": "declared_or_clear_result_reference"})
+                plan["edges"].append({
+                    "from": dep_id,
+                    "to": pid,
+                    "data_contract": "verified_material",
+                    "reason": "declared_dataflow_contract",
+                })
+        plan["self_check"] = {
+            "status": "passed" if not removed_edges else "repaired",
+            "removed_edges": removed_edges,
+            "cycle_free": True,
+            "participant_order": task_order,
+        }
         return plan
+
+    def _task_participant_order(self, task_graph: dict[str, Any], identities: dict[str, dict[str, Any]]) -> list[str]:
+        order: list[str] = []
+        names = {self._participant_name(p).lower(): pid for pid, p in identities.items()}
+        for task in task_graph.get("tasks") or []:
+            if not isinstance(task, dict):
+                continue
+            target = str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
+            if target and target not in identities:
+                target = names.get(target.lower(), target)
+            if target in identities and target not in order:
+                order.append(target)
+        for pid in identities:
+            if pid not in order:
+                order.append(pid)
+        return order
+
+    def _normalize_dependency_map(self, raw: dict[str, list[str]], order: list[str]) -> tuple[dict[str, list[str]], list[dict[str, str]]]:
+        order_index = {pid: idx for idx, pid in enumerate(order)}
+        normalized: dict[str, list[str]] = {pid: [] for pid in order}
+        removed: list[dict[str, str]] = []
+        for target, deps in raw.items():
+            if target not in normalized:
+                normalized[target] = []
+            for dep in deps or []:
+                if dep == target:
+                    removed.append({"from": dep, "to": target, "reason": "self_dependency"})
+                    continue
+                if dep not in order_index or target not in order_index:
+                    removed.append({"from": dep, "to": target, "reason": "unknown_endpoint"})
+                    continue
+                # A downstream step may depend only on material that is produced
+                # earlier in the declared task order.  Backward edges create
+                # waits that cannot be satisfied and are removed before runtime.
+                if order_index[dep] >= order_index[target]:
+                    removed.append({"from": dep, "to": target, "reason": "backward_dependency"})
+                    continue
+                candidate = list(normalized[target]) + [dep]
+                normalized[target] = candidate
+                if self._has_cycle(normalized):
+                    normalized[target] = [x for x in normalized[target] if x != dep]
+                    removed.append({"from": dep, "to": target, "reason": "cycle_prevention"})
+        return normalized, removed
+
+    def _has_cycle(self, graph: dict[str, list[str]]) -> bool:
+        visiting: set[str] = set()
+        visited: set[str] = set()
+        def visit(node: str) -> bool:
+            if node in visiting:
+                return True
+            if node in visited:
+                return False
+            visiting.add(node)
+            for dep in graph.get(node) or []:
+                if visit(dep):
+                    return True
+            visiting.remove(node)
+            visited.add(node)
+            return False
+        return any(visit(node) for node in graph)
 
     def _execution_groups(self, participant_ids: list[str], edges: list[dict[str, Any]]) -> list[list[str]]:
         deps: dict[str, set[str]] = {pid: set() for pid in participant_ids}
