@@ -92,7 +92,11 @@ class StructuralStepPlanner:
             for dep in declared_deps:
                 if dep and dep not in deps:
                     deps.append(dep)
-            if deps and not added_participant and self._should_keep_generated_fragment(fragment, refs, added_participant):
+            if (
+                not added_participant
+                and self._should_keep_generated_fragment(fragment, refs, added_participant)
+                and (deps or explicit_fragments)
+            ):
                 step_id = f"generated_step_{len(steps) + 1}"
                 steps.append({
                     "id": step_id,
