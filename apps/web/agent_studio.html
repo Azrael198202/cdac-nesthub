@@ -50,13 +50,8 @@ function renderJson(obj){ return JSON.stringify(obj, null, 2); }
 function formatAnswerHtml(text){
   let raw=String(text||'').trim();
   if(!raw){ return '<div class="message">(no answer)</div>'; }
-  raw=raw.replace(/\s*(🌍\s*城市:)/g, '\n$1')
-         .replace(/\s*(📅\s*日期:)/g, '\n$1')
-         .replace(/\s*(🌡️\s*最高温:)/g, '\n$1')
-         .replace(/\s*(📉\s*最低温:)/g, '\n$1')
-         .replace(/\s*(☁️\s*天气:)/g, '\n$1')
-         .replace(/\s*\|\s*/g, '\n');
-  const blocks=raw.split(/\n(?=🌍\s*城市:)/).map(x=>x.trim()).filter(Boolean);
+  raw=raw.replace(/\s*\|\s*/g, '\n');
+  const blocks=raw.split(/\n{2,}/).map(x=>x.trim()).filter(Boolean);
   if(blocks.length>1){
     return '<div class="answerText">'+blocks.map(block=>'<div class="answerBlock">'+block.split(/\n+/).map(line=>'<span class="answerLine">'+escapeHtml(line.trim())+'</span>').join('')+'</div>').join('')+'</div>';
   }

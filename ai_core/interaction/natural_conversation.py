@@ -32,8 +32,25 @@ class NaturalConversationService:
             return self._payload(answer, latest_task=latest_task, intent="empty_message")
 
         # Direct conversation is intentionally outside task/graph execution.
-        # It may use a small model for user-facing wording, but it must not
-        # create workflow graphs or run the full cognitive pipeline.
+        # It may use local knowledge when the evidence gate finds relevant
+        # material, otherwise it falls back to model-backed conversation.
+        # The routing is score/contract based and does not rely on fixed phrase
+        # lists or domain keywords.
+        local_probe = self.knowledge.has_relevant_evidence(text, limit=5)
+        if local_probe.get("relevant"):
+            rag = await self.knowledge.rag_answer(text, limit=5, synthesize=True)
+            answer = str(rag.get("answer") or rag.get("answer_material") or "").strip()
+            if answer:
+                payload = self._payload(answer, latest_task=latest_task, intent="local_knowledge", knowledge_used=True)
+                payload["knowledge_status"] = self.knowledge.status()
+                payload["knowledge_result"] = {
+                    "status": rag.get("status"),
+                    "synthesis_status": rag.get("synthesis_status"),
+                    "citations": rag.get("citations") or [],
+                    "used_refs": rag.get("used_refs") or [],
+                }
+                return payload
+
         answer = await self._model_answer(text)
         if not answer:
             answer = self._safe_fallback_answer(text)
