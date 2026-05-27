@@ -12,6 +12,7 @@ from auxiliary_brain.storage import JsonStore
 from auxiliary_brain.runtime import new_id
 from auxiliary_brain.delegation.task_mind_graph import TaskMindGraphBuilder
 from ai_core.config.paths import RUNTIME_DOWNLOADS
+from ai_core.knowledge.knowledge_service import KnowledgeService
 from auxiliary_brain.parameters.agent_parameter_contract import AgentParameterContractService
 
 
@@ -28,6 +29,7 @@ class AgentDelegationRuntime:
         self.store = store or JsonStore()
         self.primary_client = primary_client or PrimaryBrainDelegationClient()
         self.parameter_contract_service = AgentParameterContractService()
+        self.knowledge_service = KnowledgeService()
 
     async def execute_task(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
         selected = self._fresh_task_participants(self._select_participants(task_graph, participants))
@@ -121,6 +123,62 @@ class AgentDelegationRuntime:
                 completed_results=agent_results,
                 dependency_plan=dependency_plan,
             )
+            capability_result = await self._try_execute_generated_capability(
+                participant=participant,
+                completed_results=agent_results,
+                dependency_plan=dependency_plan,
+                task_name=task_name,
+            )
+            if capability_result is not None:
+                result = capability_result
+                result_payload = self._sanitize_result_payload(result.__dict__)
+                agent_results.append(result)
+                run_payload["agent_results"].append(result_payload)
+                self._record_progress(
+                    run_payload,
+                    f"participant_{index + 1}_complete",
+                    f"Participant finished: {participant_name}",
+                    "completed" if result.status == "completed" else result.status,
+                )
+                if result.status in {"requires_key", "requires_input", "paused"}:
+                    run_payload.update({
+                        "status": result.status,
+                        "current_stage": "waiting_for_required_input",
+                        "pending_action": result.pending_action,
+                        "missing_inputs": result.missing_inputs or [],
+                    })
+                    self._record_progress(run_payload, "waiting_input", "Waiting for required input", "waiting")
+                    self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+                    return run_payload
+                continue
+            capability_result = await self._try_execute_generated_capability(
+                participant=participant,
+                completed_results=agent_results,
+                dependency_plan=dependency_plan,
+                task_name=task_name,
+            )
+            if capability_result is not None:
+                result = capability_result
+                result_payload = self._sanitize_result_payload(result.__dict__)
+                agent_results.append(result)
+                run_payload["agent_results"].append(result_payload)
+                self._record_progress(
+                    run_payload,
+                    f"participant_{index + 1}_complete",
+                    f"Participant finished: {participant_name}",
+                    "completed" if result.status == "completed" else result.status,
+                )
+                if result.status in {"requires_key", "requires_input", "paused"}:
+                    run_payload.update({
+                        "status": result.status,
+                        "current_stage": "waiting_for_required_input",
+                        "pending_action": result.pending_action,
+                        "missing_inputs": result.missing_inputs or [],
+                    })
+                    self._record_progress(run_payload, "waiting_input", "Waiting for required input", "waiting")
+                    self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+                    return run_payload
+                continue
             material_result = self._try_execute_file_material_generation(
                 participant=participant,
                 completed_results=agent_results,
@@ -375,7 +433,16 @@ class AgentDelegationRuntime:
         pending = run_payload.get("pending_action") if isinstance(run_payload.get("pending_action"), dict) else {}
         if str(pending.get("kind") or "") == "agent_parameter_collection":
             selected = self._fresh_task_participants(selected)
-            self._apply_agent_parameter_values(selected, provided_inputs or {})
+            runtime_parameters = {}
+            if isinstance(task_graph.get("runtime_parameters"), dict):
+                runtime_parameters.update(task_graph.get("runtime_parameters") or {})
+            if isinstance(run_payload.get("runtime_parameters"), dict):
+                runtime_parameters.update(run_payload.get("runtime_parameters") or {})
+            if isinstance(provided_inputs, dict):
+                runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+            self._apply_task_runtime_parameters_to_selected(selected, runtime_parameters)
+            task_graph = dict(task_graph)
+            task_graph["runtime_parameters"] = runtime_parameters
             return await self._execute_task_with_selected(task_graph, selected)
         task_mind_graph = self._build_task_mind_graph(task_graph, selected)
         dependency_plan = task_mind_graph.get("agent_relation_analysis") or self._build_participant_dependency_plan(task_graph, selected)
@@ -1024,6 +1091,9 @@ class AgentDelegationRuntime:
                 name = self._field_name(field)
                 if name and values.get(name) not in (None, "", [], {}):
                     return values.get(name)
+                field_values = field.get("values") if isinstance(field.get("values"), list) else []
+                if field_values:
+                    return field_values
         return None
 
     def _first_scalar(self, value: Any) -> str:
@@ -1051,8 +1121,65 @@ class AgentDelegationRuntime:
             base = f"{base}.{ext}"
         return re.sub(r"[^A-Za-z0-9._-]", "_", base) or f"generated_output.{ext}"
 
+    async def _try_execute_generated_capability(
+        self,
+        *,
+        participant: dict[str, Any],
+        completed_results: list[Any],
+        dependency_plan: dict[str, Any],
+        task_name: str,
+    ) -> AgentExecutionResult | None:
+        profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+        capability_type = str(profile.get("capability_type") or "").strip()
+        if capability_type != "local_knowledge_retrieval":
+            return None
+        values = participant.get("runtime_parameters") if isinstance(participant.get("runtime_parameters"), dict) else {}
+        query_name = str(profile.get("query_parameter") or "").strip()
+        query = self._first_scalar(values.get(query_name)) if query_name else ""
+        if not query:
+            for field in self._contract_fields(participant):
+                if str(field.get("input_role") or "") == "query":
+                    query = self._first_scalar(values.get(self._field_name(field)))
+                    if query:
+                        break
+        if not query:
+            return AgentExecutionResult(
+                participant_id=self._participant_identity(participant),
+                participant_name=self._participant_name(participant),
+                core_run_id=new_id("capability_missing_input"),
+                status="requires_input",
+                final_answer="",
+                workflow_results={"status": "requires_input", "capability_type": capability_type},
+                pending_action={
+                    "kind": "agent_parameter_collection",
+                    "message": "Runtime input is required before execution can continue.",
+                    "request": {"input_mode": "multi_value_list", "fields": self.parameter_contract_service.to_missing_input_fields(participant)},
+                },
+                missing_inputs=self.parameter_contract_service.to_missing_input_fields(participant),
+                origin="auxiliary_brain",
+            )
+        answer_payload = await self.knowledge_service.rag_answer(query=query, synthesize=True)
+        answer = str(answer_payload.get("answer") or answer_payload.get("answer_material") or "").strip()
+        status = "completed" if answer else "failed"
+        return AgentExecutionResult(
+            participant_id=self._participant_identity(participant),
+            participant_name=self._participant_name(participant),
+            core_run_id=new_id("knowledge_result"),
+            status=status,
+            final_answer=answer or "No verified local knowledge result was produced.",
+            workflow_results={
+                "status": status,
+                "capability_type": capability_type,
+                "query": query,
+                "rag_answer": answer_payload,
+                "verified_result_material": {"type": "text", "text": answer, "source": "local_knowledge"},
+            },
+            origin="auxiliary_brain",
+        )
+
     def _try_execute_file_material_generation(self, *, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any], task_name: str) -> AgentExecutionResult | None:
-        if not self._looks_like_file_material_contract(participant):
+        profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+        if not self._looks_like_file_material_contract(participant) and str(profile.get("capability_type") or "") != "file_generation":
             return None
         self._bind_dependency_outputs_to_participant(participant=participant, completed_results=completed_results, dependency_plan=dependency_plan)
         dependency_material = self._dependency_material_text(participant, completed_results, dependency_plan)

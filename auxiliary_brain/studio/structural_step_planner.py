@@ -92,12 +92,10 @@ class StructuralStepPlanner:
             for dep in declared_deps:
                 if dep and dep not in deps:
                     deps.append(dep)
-            if (
-                not added_participant
-                and self._should_keep_generated_fragment(fragment, refs, added_participant)
-                and (deps or explicit_fragments)
-            ):
+            if deps and not added_participant and self._should_keep_generated_fragment(fragment, refs, added_participant):
                 step_id = f"generated_step_{len(steps) + 1}"
+                parameter_contract = self._parameter_contract_from_fragment(fragment)
+                capability_profile = self._capability_profile_from_fragment(fragment, parameter_contract)
                 steps.append({
                     "id": step_id,
                     "label": self._compact_fragment_label(fragment),
@@ -107,7 +105,31 @@ class StructuralStepPlanner:
                     "depends_on": deps,
                     "input_contract": self._input_contract(deps),
                     "output_contract": self._output_contract(),
-                    "route": {"requires_generated_step": True},
+                    "parameter_contract": parameter_contract,
+                    "capability_profile": capability_profile,
+                    "route": {"requires_generated_step": True, "capability_profile": capability_profile},
+                })
+                if source_step_id:
+                    step_aliases[source_step_id] = step_id
+                    step_aliases[source_step_id.casefold()] = step_id
+                current_outputs.append(step_id)
+            if not current_outputs and explicit_fragments and self._should_keep_generated_fragment(fragment, refs, added_participant):
+                deps = list(declared_deps) if declared_deps else (list(last_outputs) if last_outputs else [])
+                step_id = f"generated_step_{len(steps) + 1}"
+                parameter_contract = self._parameter_contract_from_fragment(fragment)
+                capability_profile = self._capability_profile_from_fragment(fragment, parameter_contract)
+                steps.append({
+                    "id": step_id,
+                    "label": self._compact_fragment_label(fragment),
+                    "objective": fragment.strip(),
+                    "instruction_fragment": fragment.strip(),
+                    "executable": True,
+                    "depends_on": deps,
+                    "input_contract": self._input_contract(deps),
+                    "output_contract": self._output_contract(),
+                    "parameter_contract": parameter_contract,
+                    "capability_profile": capability_profile,
+                    "route": {"requires_generated_step": True, "capability_profile": capability_profile},
                 })
                 if source_step_id:
                     step_aliases[source_step_id] = step_id
@@ -118,6 +140,95 @@ class StructuralStepPlanner:
 
         return self._remove_redundant_generated_steps(steps)
 
+
+    def _parameter_contract_from_fragment(self, fragment: str) -> dict[str, Any]:
+        """Infer explicitly requested runtime inputs from generic prompt shape.
+
+        This parser is intentionally structural. It only recognizes the user
+        instruction pattern that a value should be asked for when missing and
+        turns that value into a runtime parameter contract. It does not encode
+        task domains, participant names, or example questions.
+        """
+        params: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        text = str(fragment or "")
+        patterns = [
+            r"(?is)ask\s+(?:the\s+)?user\s+for\s+(?:the\s+)?(?P<items>.+?)\s+if\s+missing",
+            r"(?is)(?:only\s+)?ask\s+for\s+(?:the\s+)?(?P<items>.+?)\s+if\s+missing",
+            r"(?is)provide\s+(?:the\s+)?(?P<items>.+?)\s+if\s+missing",
+        ]
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                items = str(match.group("items") or "")
+                for name in self._split_requested_input_names(items):
+                    field_name = self._normalize_parameter_name(name)
+                    if not field_name or field_name in seen:
+                        continue
+                    seen.add(field_name)
+                    params.append({
+                        "name": field_name,
+                        "label": " ".join(part.capitalize() for part in field_name.split("_")),
+                        "description": "Runtime value requested by the task instruction.",
+                        "type": "string",
+                        "input_type": "text",
+                        "required": True,
+                        "runtime_required": True,
+                        "blocking": True,
+                        "execution_required": True,
+                        "source": "task_instruction",
+                        "input_role": "query" if field_name in {"question", "query", "request"} else "runtime_input",
+                        "values": [],
+                    })
+        return {
+            "contract_type": "generated_intermediate_step_contract",
+            "parameters": params,
+            "missing_information": [dict(p) for p in params],
+            "runtime_scope": "task_run",
+        }
+
+    def _split_requested_input_names(self, text: str) -> list[str]:
+        cleaned = re.sub(r"(?is)\bonly\b.*$", "", str(text or ""))
+        cleaned = re.sub(r"(?is)\s+if\s+missing.*$", "", cleaned)
+        cleaned = cleaned.strip(" .,:;()[]{}\n\t")
+        if not cleaned:
+            return []
+        parts = re.split(r"\s*(?:,|/|\band\b|\bor\b|、|，)\s*", cleaned, flags=re.I)
+        return [p.strip(" .,:;()[]{}\n\t") for p in parts if p.strip(" .,:;()[]{}\n\t")]
+
+    def _normalize_parameter_name(self, name: str) -> str:
+        text = str(name or "").strip().lower()
+        text = re.sub(r"^(?:the|a|an)\s+", "", text)
+        text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+        return text[:80]
+
+    def _capability_profile_from_fragment(self, fragment: str, parameter_contract: dict[str, Any]) -> dict[str, Any]:
+        """Return a platform capability hint when the instruction names one.
+
+        The returned value is a generic runtime capability profile. It is not a
+        business/domain rule and does not select any participant by name.
+        """
+        text = str(fragment or "").casefold()
+        params = parameter_contract.get("parameters") if isinstance(parameter_contract, dict) else []
+        query_name = ""
+        if isinstance(params, list):
+            for item in params:
+                if isinstance(item, dict) and str(item.get("input_role") or "") == "query":
+                    query_name = str(item.get("name") or "")
+                    break
+        if "knowledge base" in text or "knowledge_base" in text or "local knowledge" in text:
+            return {
+                "capability_type": "local_knowledge_retrieval",
+                "query_parameter": query_name or "query",
+                "requires_user_query": True,
+                "produces_verified_material": True,
+            }
+        if "generate a file" in text:
+            return {
+                "capability_type": "file_generation",
+                "requires_verified_material": True,
+                "produces_verified_material": True,
+            }
+        return {}
 
     def _input_contract(self, depends_on: list[str]) -> dict[str, Any]:
         deps = [str(x) for x in depends_on or [] if str(x)]
