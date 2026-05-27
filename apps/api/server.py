@@ -62,6 +62,7 @@ class KnowledgeQueryRequest(BaseModel):
     knowledge_base_id: str | None = None
     limit: int = 5
     synthesize: bool = True
+    response_profile: dict[str, Any] | None = None
 
 class AgentStudioSecretRequest(BaseModel):
     key: str
@@ -285,6 +286,7 @@ async def knowledge_query(req: KnowledgeQueryRequest):
         knowledge_base_id=req.knowledge_base_id,
         limit=req.limit,
         synthesize=req.synthesize,
+        response_profile=req.response_profile,
     )
     return JSONResponse(payload)
 

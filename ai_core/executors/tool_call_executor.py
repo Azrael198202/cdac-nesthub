@@ -2378,28 +2378,24 @@ class ToolCallExecutor:
 
 
     def _executor_generation_instruction(self, *, step: dict[str, Any]) -> str:
-        """Build a generic final-deliverable instruction for content generation."""
+        """Build a generic final-deliverable instruction for content generation.
+
+        The instruction intentionally avoids planner/objective metadata because
+        those fields often describe how the runtime should execute a node rather
+        than what the final user-facing material must contain. Concrete
+        generation constraints must come from confirmed inputs and output
+        contracts.
+        """
         parts: list[str] = []
         for key in ("execution_instruction", "executor_instruction", "content", "instruction", "request"):
             value = step.get(key) if isinstance(step, dict) else None
             if isinstance(value, str) and value.strip():
                 parts.append(value.strip())
         prompt_contract = step.get("prompt_contract") if isinstance(step.get("prompt_contract"), dict) else {}
-        for key in ("executor_instruction", "objective", "request"):
+        for key in ("executor_instruction", "request"):
             value = prompt_contract.get(key)
             if isinstance(value, str) and value.strip():
                 parts.append(value.strip())
-        flow = step.get("agent_execution_flow") if isinstance(step.get("agent_execution_flow"), list) else []
-        for item in flow:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("phase_role") or "") == "executor_llm_generation":
-                purpose = item.get("purpose")
-                if isinstance(purpose, str) and purpose.strip():
-                    parts.append(purpose.strip())
-        objective = step.get("objective")
-        if isinstance(objective, str) and objective.strip():
-            parts.append(objective.strip())
         seen: set[str] = set()
         unique: list[str] = []
         for part in parts:
@@ -2407,7 +2403,27 @@ class ToolCallExecutor:
             if compact and compact not in seen:
                 seen.add(compact)
                 unique.append(compact)
-        return "\n".join(unique) or "Generate the requested final content."
+        return "\n".join(unique) or "Produce the final user-facing deliverable from the confirmed input brief and output contract."
+
+    def _generation_output_contract(self, *, step: dict[str, Any]) -> dict[str, Any]:
+        """Return a compact, domain-neutral output contract for generation."""
+        if not isinstance(step, dict):
+            return {}
+        contract: dict[str, Any] = {}
+        for key in ("output_schema", "validation_rule", "output_contract"):
+            value = step.get(key)
+            if isinstance(value, (dict, list, str, int, float, bool)) and value not in ({}, [], ""):
+                contract[key] = make_json_safe(value)
+        prompt_contract = step.get("prompt_contract") if isinstance(step.get("prompt_contract"), dict) else {}
+        allowed_prompt_keys = ("output_type", "format", "constraints", "style", "language", "length", "audience", "source_policy")
+        prompt_view = {
+            key: make_json_safe(prompt_contract.get(key))
+            for key in allowed_prompt_keys
+            if prompt_contract.get(key) not in (None, "", [], {})
+        }
+        if prompt_view:
+            contract["prompt_contract"] = prompt_view
+        return contract
 
     def _runtime_generation_public_brief(self, known: dict[str, Any]) -> dict[str, Any]:
         """Return the confirmed user-facing brief for model generation.
@@ -2447,6 +2463,12 @@ class ToolCallExecutor:
             "execution_decision",
             "prompt_contract",
             "source_step",
+            "substep",
+            "phase",
+            "workflow",
+            "graph",
+            "status",
+            "message",
         )
         public: dict[str, Any] = {}
         for raw_key, value in known.items():
@@ -2532,23 +2554,25 @@ class ToolCallExecutor:
         }
         prompt = {
             "system": (
-                "Return JSON only. Produce the final deliverable itself from the "
-                "executor instruction, objective, and confirmed parameters. Do not "
-                "summarize the request, do not describe what the agent can do, do not "
-                "return a plan, and do not echo parameters as the answer. Do not browse "
-                "the web, cite external sources, invent provenance, or return code unless "
-                "code itself is explicitly the requested final deliverable."
+                "Return JSON only. You are a final-output executor. Produce the completed "
+                "user-facing deliverable in answer_material from CONFIRMED_USER_BRIEF and "
+                "OUTPUT_CONTRACT only. Do not use planning, workflow, participant, routing, "
+                "or execution-state metadata as content. Do not summarize the assignment or "
+                "explain readiness. Do not browse, cite external sources, or invent provenance "
+                "unless the output contract explicitly requires that behavior."
             )
         }
         executor_instruction = self._executor_generation_instruction(step=step)
+        output_contract = self._generation_output_contract(step=step)
         public_brief = self._runtime_generation_public_brief(known)
         parameter_lines = self._render_generation_brief_payload(public_brief)
         rendered = (
-            "EXECUTION_ROLE=You are the final content executor, not a planner.\n"
+            "EXECUTION_ROLE=final_output_executor\n"
             "DELIVERABLE_INSTRUCTION=" + executor_instruction[:900] +
+            "\nOUTPUT_CONTRACT_JSON=" + json.dumps(make_json_safe(output_contract), ensure_ascii=False, separators=(",", ":"))[:1600] +
             "\nCONFIRMED_USER_BRIEF_JSON=" + json.dumps(make_json_safe(public_brief), ensure_ascii=False, separators=(",", ":"))[:1800] +
             "\nCONFIRMED_USER_BRIEF=\n" + parameter_lines[:1800] +
-            "\nEXECUTION_DIRECTIVE=Use CONFIRMED_USER_BRIEF as the concrete brief. Produce the completed final deliverable now in answer_material. The answer_material must contain only the deliverable content. Do not describe the task, agent, request, parameters, readiness, plan, or execution state."
+            "\nFINAL_OUTPUT_RULE=answer_material must contain the finished deliverable itself, not a plan, task summary, capability summary, parameter summary, or execution status."
         )
         try:
             generated = await self.provider_router.generate_json(

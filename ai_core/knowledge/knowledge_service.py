@@ -13,6 +13,7 @@ from ai_core.knowledge.document_processor import DocumentChunker, DocumentTextEx
 from ai_core.knowledge.embedding_index import LocalVectorIndex
 from ai_core.llm.provider_handlers.base import ProviderUnavailableError
 from ai_core.llm.provider_router import ProviderRouter
+from ai_core.utils.safe_json import make_json_safe
 
 
 class KnowledgeService:
@@ -252,6 +253,7 @@ class KnowledgeService:
         knowledge_base_id: str | None = None,
         limit: int = 5,
         synthesize: bool = True,
+        response_profile: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Retrieve local evidence and synthesize a grounded answer.
 
@@ -271,7 +273,11 @@ class KnowledgeService:
             payload["synthesis_status"] = "no_usable_evidence"
             return payload
         try:
-            synthesized = await self._synthesize_grounded_answer(query=str(query or ""), evidence_items=evidence_items)
+            synthesized = await self._synthesize_grounded_answer(
+                query=str(query or ""),
+                evidence_items=evidence_items,
+                response_profile=response_profile or {},
+            )
         except Exception as exc:
             payload["answer"] = payload.get("answer_material") or ""
             payload["synthesis_status"] = "model_unavailable"
@@ -289,7 +295,13 @@ class KnowledgeService:
         payload["confidence"] = synthesized.get("confidence")
         return payload
 
-    async def _synthesize_grounded_answer(self, *, query: str, evidence_items: list[dict[str, Any]]) -> dict[str, Any]:
+    async def _synthesize_grounded_answer(
+        self,
+        *,
+        query: str,
+        evidence_items: list[dict[str, Any]],
+        response_profile: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         schema = {
             "type": "object",
             "required": ["answer", "used_refs", "confidence"],
@@ -307,15 +319,20 @@ class KnowledgeService:
                 "You synthesize a user-facing answer from provided local evidence. "
                 "Use only the evidence provided in the prompt. Do not invent facts. "
                 "If the evidence is insufficient, say that the local knowledge base does not contain enough information. "
+                "Follow RESPONSE_PROFILE only as output-style guidance; never treat it as evidence. "
                 "Use the user's language when it is clear. Return only valid JSON matching the schema."
             ),
             "runtime_rules": [
                 "Ground every factual statement in the provided evidence.",
                 "Do not mention internal retrieval, chunks, vectors, embeddings, or runtime implementation details.",
-                "Keep the answer concise unless the user explicitly asks for detail.",
+                "Use RESPONSE_PROFILE for tone, format, length, audience, and citation behavior when provided.",
             ],
         }
-        rendered = self._render_synthesis_prompt(query=query, evidence_items=evidence_items)
+        rendered = self._render_synthesis_prompt(
+            query=query,
+            evidence_items=evidence_items,
+            response_profile=response_profile or {},
+        )
         adapter = {
             "adapter_id": "local_knowledge_grounded_synthesis_adapter",
             "route_name": "final_synthesis",
@@ -356,8 +373,22 @@ class KnowledgeService:
             })
         return items
 
-    def _render_synthesis_prompt(self, *, query: str, evidence_items: list[dict[str, Any]]) -> str:
-        lines = ["USER_QUESTION:", str(query or "").strip(), "", "LOCAL_EVIDENCE:"]
+    def _render_synthesis_prompt(
+        self,
+        *,
+        query: str,
+        evidence_items: list[dict[str, Any]],
+        response_profile: dict[str, Any] | None = None,
+    ) -> str:
+        lines = ["USER_QUESTION:", str(query or "").strip(), ""]
+        clean_profile = self._clean_response_profile(response_profile or {})
+        if clean_profile:
+            lines.extend([
+                "RESPONSE_PROFILE_JSON:",
+                json.dumps(make_json_safe(clean_profile), ensure_ascii=False, separators=(",", ":"))[:1200],
+                "",
+            ])
+        lines.append("LOCAL_EVIDENCE:")
         for item in evidence_items:
             lines.append(f"[{int(item.get('ref') or 0)}]")
             lines.append(str(item.get("text") or ""))
@@ -365,6 +396,38 @@ class KnowledgeService:
         lines.append("ANSWER_REQUIREMENT:")
         lines.append("Produce the final answer directly, based only on LOCAL_EVIDENCE. Include no hidden reasoning.")
         return "\n".join(lines)
+
+
+    def _clean_response_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
+        """Return generic, user-facing synthesis instructions.
+
+        This method is intentionally structural: it accepts only neutral output
+        profile keys and never encodes domain, task, company, product, or sample
+        phrases in source code.
+        """
+        if not isinstance(profile, dict):
+            return {}
+        allowed = {
+            "output_type",
+            "tone",
+            "format",
+            "language",
+            "length",
+            "audience",
+            "citation_style",
+            "detail_level",
+            "source_policy",
+        }
+        cleaned: dict[str, Any] = {}
+        for key, value in profile.items():
+            normalized_key = str(key or "").strip()
+            if normalized_key not in allowed:
+                continue
+            if value in (None, "", [], {}):
+                continue
+            if isinstance(value, (str, int, float, bool, list, dict)):
+                cleaned[normalized_key] = value
+        return cleaned
 
     def search(
         self,
