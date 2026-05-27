@@ -785,9 +785,24 @@ class PrimaryBrainDelegationClient:
             return False
         if self._results_contain_blocking_execution_failure(results):
             return False
+        if self._results_show_runtime_execution_path(results):
+            return False
         if str(status or "").lower() in {"requires_input", "requires_key", "paused", "failed", "timeout", "blocked", "waiting_for_input"}:
             return False
         return not self._answer_has_result_material(final_answer)
+
+    def _results_show_runtime_execution_path(self, results: dict[str, Any] | None) -> bool:
+        """Return True once the primary runtime has entered a planned execution path.
+
+        Direct public-answer fallback is only for requests that never produced a
+        runtime execution contract.  If planning/execution nodes exist, their
+        blocked/failed status must be surfaced or repaired instead of being
+        replaced by a minimal direct answer.
+        """
+        if not isinstance(results, dict):
+            return False
+        execution_node_keys = {"agent_action_planning", "execution_preparation", "pre_execution_validation", "execution", "result_verification", "feedback_repair", "final_synthesis"}
+        return any(key in results for key in execution_node_keys)
 
     def _results_contain_blocking_execution_failure(self, results: dict[str, Any] | None) -> bool:
         """Return True when primary execution explicitly rejected its material.
@@ -800,13 +815,16 @@ class PrimaryBrainDelegationClient:
         if not isinstance(results, dict):
             return False
 
-        blocking_statuses = {"failed_quality_gate", "requires_input", "waiting_for_input", "blocked", "failed_by_dependency"}
-        blocking_codes = {"generated_answer_quality_failed"}
+        blocking_statuses = {"failed_quality_gate", "requires_input", "waiting_for_input", "blocked", "failed_by_dependency", "content_generation_failed"}
+        blocking_codes = {"generated_answer_quality_failed", "content_generation_failed"}
 
         def walk(value: Any) -> bool:
             if isinstance(value, dict):
                 status = str(value.get("status") or value.get("_status") or "").casefold()
-                if status in blocking_statuses:
+                if status in blocking_statuses or status.endswith("_failed"):
+                    return True
+                blocked_steps = value.get("blocked_steps")
+                if isinstance(blocked_steps, list) and blocked_steps:
                     return True
                 error = value.get("error")
                 if isinstance(error, dict) and str(error.get("code") or "").casefold() in blocking_codes:

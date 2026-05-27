@@ -2409,6 +2409,74 @@ class ToolCallExecutor:
                 unique.append(compact)
         return "\n".join(unique) or "Generate the requested final content."
 
+    def _runtime_generation_public_brief(self, known: dict[str, Any]) -> dict[str, Any]:
+        """Return the confirmed user-facing brief for model generation.
+
+        The executor receives mixed runtime data: user-provided parameters,
+        participant identifiers, planner metadata, and execution bookkeeping.
+        Only user-facing scalar/list/dict values should drive the generation
+        prompt.  This filter is structural and generic; it does not rely on any
+        domain, agent name, or example phrase.
+        """
+        if not isinstance(known, dict):
+            return {}
+        excluded_exact = {
+            "participant_name",
+            "participant_id",
+            "agent_name",
+            "agent_id",
+            "objective",
+            "capability",
+            "intent",
+            "task_name",
+            "community_id",
+            "run_id",
+            "node_id",
+            "step_id",
+            "timestamp",
+            "system_clock",
+            "timezone",
+            "t",
+        }
+        excluded_fragments = (
+            "participant_",
+            "_id",
+            "trace",
+            "runtime",
+            "planner",
+            "execution_decision",
+            "prompt_contract",
+            "source_step",
+        )
+        public: dict[str, Any] = {}
+        for raw_key, value in known.items():
+            key = str(raw_key or "").strip()
+            if not key:
+                continue
+            low = key.casefold()
+            if low in excluded_exact:
+                continue
+            if any(fragment in low for fragment in excluded_fragments):
+                continue
+            if value in (None, "", [], {}):
+                continue
+            if isinstance(value, (str, int, float, bool, list, dict)):
+                public[key] = value
+        return public
+
+    def _render_generation_brief_payload(self, public_brief: dict[str, Any]) -> str:
+        lines: list[str] = []
+        for key in sorted(public_brief):
+            value = public_brief[key]
+            if isinstance(value, list) and len(value) == 1:
+                value = value[0]
+            if isinstance(value, (dict, list)):
+                rendered = json.dumps(make_json_safe(value), ensure_ascii=False, separators=(",", ":"))
+            else:
+                rendered = str(value)
+            lines.append(f"- {key}: {rendered}")
+        return "\n".join(lines)
+
     async def _try_model_generation_execution(
         self,
         *,
@@ -2473,13 +2541,14 @@ class ToolCallExecutor:
             )
         }
         executor_instruction = self._executor_generation_instruction(step=step)
-        parameter_lines = self._render_confirmed_parameters_for_generation(known)
+        public_brief = self._runtime_generation_public_brief(known)
+        parameter_lines = self._render_generation_brief_payload(public_brief)
         rendered = (
-            "FINAL_DELIVERABLE_REQUEST=" + executor_instruction[:1200] +
-            "\nOBJECTIVE=" + str(step.get("objective") or state.get("input") or "")[:600] +
-            "\nCONFIRMED_PARAMETERS_JSON=" + json.dumps(make_json_safe(known), ensure_ascii=False, separators=(",", ":"))[:1600] +
-            "\nCONFIRMED_PARAMETER_CONSTRAINTS=\n" + parameter_lines[:1800] +
-            "\nEXECUTION_DIRECTIVE=Use the confirmed parameter constraints as the concrete content brief. Produce the completed final deliverable now. The answer_material value must start directly with the deliverable content itself, not with an explanation of the task, agent, request, parameters, readiness, or plan."
+            "EXECUTION_ROLE=You are the final content executor, not a planner.\n"
+            "DELIVERABLE_INSTRUCTION=" + executor_instruction[:900] +
+            "\nCONFIRMED_USER_BRIEF_JSON=" + json.dumps(make_json_safe(public_brief), ensure_ascii=False, separators=(",", ":"))[:1800] +
+            "\nCONFIRMED_USER_BRIEF=\n" + parameter_lines[:1800] +
+            "\nEXECUTION_DIRECTIVE=Use CONFIRMED_USER_BRIEF as the concrete brief. Produce the completed final deliverable now in answer_material. The answer_material must contain only the deliverable content. Do not describe the task, agent, request, parameters, readiness, plan, or execution state."
         )
         try:
             generated = await self.provider_router.generate_json(
