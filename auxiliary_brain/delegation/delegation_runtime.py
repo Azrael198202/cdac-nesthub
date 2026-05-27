@@ -995,8 +995,13 @@ class AgentDelegationRuntime:
             # prevents a placeholder typed during parameter collection from
             # replacing the actual upstream result.
             if has_declared_dependencies or current in (None, "", [], {}):
-                if current != material:
-                    values[name] = material
+                # Store upstream material as a single list item so generic
+                # parameter normalization never splits long text on commas or
+                # newlines.  The dependency result remains the source of truth
+                # for this run and is not persisted to the durable participant.
+                normalized_material = [material]
+                if current != normalized_material:
+                    values[name] = normalized_material
                     changed = True
         if changed:
             participant["runtime_parameters"] = values
@@ -1050,7 +1055,8 @@ class AgentDelegationRuntime:
         if not self._looks_like_file_material_contract(participant):
             return None
         self._bind_dependency_outputs_to_participant(participant=participant, completed_results=completed_results, dependency_plan=dependency_plan)
-        content = self._first_scalar(self._value_for_field_role(participant, r"\b(content|body|text|payload|data|material|input)\b"))
+        dependency_material = self._dependency_material_text(participant, completed_results, dependency_plan)
+        content = dependency_material or self._first_scalar(self._value_for_field_role(participant, r"\b(content|body|text|payload|data|material|input)\b"))
         if not content:
             return None
         name = self._first_scalar(self._value_for_field_role(participant, r"\b(name|filename|file name)\b")) or "generated_output"

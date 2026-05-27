@@ -963,8 +963,12 @@ class AgentStudioService:
             self.delegation_runtime._select_participants(task_graph, participants)
         )
         self.delegation_runtime._apply_task_runtime_parameters_to_selected(selected, runtime_parameters)
+        task_mind_graph = self.delegation_runtime._build_task_mind_graph(task_graph, selected)
+        dependency_plan = (task_mind_graph.get("agent_relation_analysis") or {}) if isinstance(task_mind_graph, dict) else {}
+        if not dependency_plan:
+            dependency_plan = self.delegation_runtime._build_participant_dependency_plan(task_graph, selected)
         agent_fields: list[dict[str, Any]] = []
-        for field in self.delegation_runtime._collect_missing_agent_parameter_fields(selected):
+        for field in self.delegation_runtime._collect_missing_agent_parameter_fields(selected, dependency_plan=dependency_plan):
             if isinstance(field, dict):
                 tagged = dict(field)
                 tagged.setdefault("resolution_layer", "execution_input")

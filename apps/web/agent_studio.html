@@ -666,7 +666,7 @@ async function resumePendingRun(runId, providedInputs){
     addMessage(renderJson(data), data.status==='completed'?'item':'item error');
     const pendingItems = collectMissingInputs(data);
     if(pendingItems.length){ lastMissingInputs=pendingItems; lastPendingRunId=data.run_id||runId; addMissingInputs(pendingItems, lastPendingInstruction, lastPendingRunId); }
-    if(data.final_answer){ addMessage('Final Answer:\n'+data.final_answer,'item final'); }
+    if(data.final_answer){ addFinalAnswer(data.final_answer, data.status==='completed' ? 'item final' : 'item error'); }
     await refreshState();
   }catch(e){ addMessage('Resume failed: '+e,'item error'); }
   finally{
