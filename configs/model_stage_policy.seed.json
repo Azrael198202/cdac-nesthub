@@ -145,7 +145,8 @@
           "workflow_planning": 240,
           "execution": 300,
           "feedback_learning": 90,
-          "output": 120
+          "output": 120,
+          "semantic_task_graph_planning": 90
         },
         "method_timeout_seconds": {
           "api_call": 30,

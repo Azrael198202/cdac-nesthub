@@ -33,14 +33,22 @@ class StructuralStepPlanner:
 
     def build_steps(self, instruction: str, participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         text = self._strip_wrappers(str(instruction or ""))
-        fragments = self._split_fragments(text)
+        explicit_fragments = self._numbered_step_fragments(text)
+        fragments = [item["fragment"] for item in explicit_fragments] if explicit_fragments else self._split_fragments(text)
         if not fragments:
             return []
 
         selected_ids: list[str] = []
+        step_aliases: dict[str, str] = {}
+        last_outputs: list[str] = []
         steps: list[dict[str, Any]] = []
-        for fragment in fragments:
+        for idx, fragment in enumerate(fragments):
+            source_step_id = explicit_fragments[idx]["id"] if explicit_fragments and idx < len(explicit_fragments) else ""
+            declared_deps = self._declared_step_dependencies(fragment, step_aliases)
             refs = self._referenced_participants(fragment, participants)
+            if explicit_fragments and not declared_deps and not refs and last_outputs:
+                declared_deps = list(last_outputs)
+            current_outputs: list[str] = []
             # A fragment may contain multiple existing participant references.
             # Each declared participant remains its own executable node so the
             # downstream graph can show parallel branches and bind outputs.
@@ -50,15 +58,21 @@ class StructuralStepPlanner:
                 if not pid or pid in selected_ids:
                     continue
                 selected_ids.append(pid)
+                step_id = f"declared_step_{len(steps) + 1}"
                 steps.append({
-                    "id": f"declared_step_{len(steps) + 1}",
+                    "id": step_id,
                     "label": self._participant_name(participant),
                     "objective": fragment.strip() or self._participant_name(participant),
                     "instruction_fragment": fragment.strip(),
                     "executable": True,
-                    "depends_on": [],
+                    "depends_on": list(declared_deps),
                     "route": {"participant_id": pid},
                 })
+                if source_step_id:
+                    step_aliases[source_step_id] = pid
+                    step_aliases[source_step_id.casefold()] = pid
+                    step_aliases[step_id] = pid
+                current_outputs.append(pid)
                 added_participant = True
 
             # If the fragment references already-selected upstream participants
@@ -66,9 +80,13 @@ class StructuralStepPlanner:
             # dataflow step. Its objective remains runtime text, not source-code
             # knowledge about a specific operation.
             deps = [self._participant_id(p) for p in refs if self._participant_id(p) in selected_ids]
-            if deps and self._should_keep_generated_fragment(fragment, refs, added_participant):
+            for dep in declared_deps:
+                if dep and dep not in deps:
+                    deps.append(dep)
+            if deps and not added_participant and self._should_keep_generated_fragment(fragment, refs, added_participant):
+                step_id = f"generated_step_{len(steps) + 1}"
                 steps.append({
-                    "id": f"generated_step_{len(steps) + 1}",
+                    "id": step_id,
                     "label": self._compact_fragment_label(fragment),
                     "objective": fragment.strip(),
                     "instruction_fragment": fragment.strip(),
@@ -76,8 +94,62 @@ class StructuralStepPlanner:
                     "depends_on": deps,
                     "route": {"requires_generated_step": True},
                 })
+                if source_step_id:
+                    step_aliases[source_step_id] = step_id
+                    step_aliases[source_step_id.casefold()] = step_id
+                current_outputs.append(step_id)
+            if current_outputs:
+                last_outputs = list(current_outputs)
 
         return self._remove_redundant_generated_steps(steps)
+
+    def _numbered_step_fragments(self, text: str) -> list[dict[str, str]]:
+        """Extract explicitly numbered instruction fragments.
+
+        This is structure parsing, not capability routing. It only recognizes
+        generic step labels and preserves the user's fragments for the runtime
+        semantic layer. If no numbered structure is present, callers use the
+        existing configured splitter.
+        """
+        source = str(text or "").strip()
+        if not source:
+            return []
+        pattern = re.compile(r"(?is)(?:^|[\r\n]+)\s*(step\s*\d+|\d+)\s*[:：.)-]\s*")
+        matches = list(pattern.finditer(source))
+        if len(matches) < 2:
+            return []
+        items: list[dict[str, str]] = []
+        for index, match in enumerate(matches):
+            start = match.end()
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
+            fragment = source[start:end].strip(" \t\r\n,.;。")
+            if not fragment:
+                continue
+            raw_id = " ".join(match.group(1).split()).casefold()
+            number_match = re.search(r"\d+", raw_id)
+            canonical = f"step_{number_match.group(0)}" if number_match else raw_id.replace(" ", "_")
+            items.append({"id": canonical, "fragment": fragment})
+        return items
+
+    def _declared_step_dependencies(self, fragment: str, step_aliases: dict[str, str]) -> list[str]:
+        """Resolve explicit references to earlier numbered steps.
+
+        The method never infers business semantics. It only maps references to
+        already-known step aliases, so a downstream fragment can consume a prior
+        step's material without making the upstream participant depend on it.
+        """
+        text = str(fragment or "")
+        if not text or not step_aliases:
+            return []
+        deps: list[str] = []
+        seen: set[str] = set()
+        for match in re.finditer(r"(?i)\bstep\s*(\d+)\b", text):
+            key = f"step_{match.group(1)}"
+            dep = step_aliases.get(key) or step_aliases.get(key.casefold())
+            if dep and dep not in seen:
+                deps.append(dep)
+                seen.add(dep)
+        return deps
 
     def _load_config(self) -> dict[str, Any]:
         if self.config_path.exists():

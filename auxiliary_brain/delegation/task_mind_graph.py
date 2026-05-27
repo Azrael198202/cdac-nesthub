@@ -152,10 +152,7 @@ class TaskMindGraphBuilder:
             # participant identity, treat that as a structural data dependency.
             # This is not a domain rule: it only uses runtime participant
             # identities and the generated task/participant structure.
-            reference_text = " ".join([
-                objective,
-                str(task_graph.get("instruction") or task_graph.get("objective") or "").lower(),
-            ])
+            reference_text = objective
             for peer_name, peer_id in name_to_id.items():
                 if peer_id == pid or peer_id in deps:
                     continue

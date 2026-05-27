@@ -26,7 +26,7 @@ class RuntimeSemanticPlanner:
         except RuntimeError:
             return asyncio.run(self._build_plan_async(instruction=instruction, participants=participants, run_id=run_id))
         with ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(lambda: asyncio.run(self._build_plan_async(instruction=instruction, participants=participants, run_id=run_id))).result(timeout=90)
+            return pool.submit(lambda: asyncio.run(self._build_plan_async(instruction=instruction, participants=participants, run_id=run_id))).result(timeout=150)
 
     async def _build_plan_async(self, *, instruction: str, participants: list[dict[str, Any]], run_id: str) -> dict[str, Any]:
         participant_refs = []
@@ -90,7 +90,7 @@ class RuntimeSemanticPlanner:
             result = await self.router.generate_json(
                 run_id=run_id,
                 node_id="semantic_task_graph_planning",
-                adapter={"provider_timeout_seconds": 45, "max_provider_attempts": 1, "provider_options": {"temperature": 0}},
+                adapter={"provider_timeout_seconds": 90, "max_provider_attempts": 1, "provider_options": {"temperature": 0}},
                 prompt=prompt,
                 rendered_user_prompt=str(rendered),
                 schema=schema,
