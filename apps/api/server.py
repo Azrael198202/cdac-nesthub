@@ -20,6 +20,7 @@ from auxiliary_brain.studio import AgentStudioService
 from ai_core.runtime.bootstrap import RuntimeBootstrapService
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 from ai_core.context.session_memory_store import SessionMemoryStore
+from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.graph.graph_visualization import GraphVisualStateBuilder
 
 import traceback
@@ -31,6 +32,7 @@ bootstrap_service = RuntimeBootstrapService()
 model_selection_store = UserModelSelectionStore()
 session_store = SessionMemoryStore()
 graph_visual_builder = GraphVisualStateBuilder()
+knowledge_service = KnowledgeService()
 
 
 class ChatRequest(BaseModel):
@@ -52,6 +54,13 @@ class AgentStudioRequest(BaseModel):
     uploaded_artifacts: list[dict[str, Any]] | None = None
     session_id: str | None = None
 
+
+
+
+class KnowledgeQueryRequest(BaseModel):
+    query: str
+    knowledge_base_id: str | None = None
+    limit: int = 5
 
 class AgentStudioSecretRequest(BaseModel):
     key: str
@@ -216,6 +225,62 @@ async def graph_runtime_state(graph_id: str | None = None):
             status_code=200,
         )
 
+
+
+
+@app.get("/knowledge")
+async def knowledge_home():
+    html = open("apps/web/knowledge.html", "r", encoding="utf-8").read()
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@app.get("/api/knowledge/status")
+async def knowledge_status():
+    return JSONResponse({"ok": True, "status": knowledge_service.status()})
+
+
+@app.get("/api/knowledge/documents")
+async def knowledge_documents(knowledge_base_id: str | None = None):
+    return JSONResponse(knowledge_service.list_documents(knowledge_base_id=knowledge_base_id))
+
+
+@app.post("/api/knowledge/upload")
+async def knowledge_upload(files: list[UploadFile] = File(...), knowledge_base_id: str | None = None):
+    upload_dir = Path("runtime") / "knowledge" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    results: list[dict[str, Any]] = []
+    for file in files:
+        safe_name = Path(file.filename or "uploaded_document").name
+        target = upload_dir / f"kb_{uuid4().hex[:12]}_{safe_name}"
+        target.write_bytes(await file.read())
+        try:
+            results.append(knowledge_service.ingest_file(
+                file_path=target,
+                original_name=safe_name,
+                content_type=file.content_type or "application/octet-stream",
+                knowledge_base_id=knowledge_base_id or "default",
+            ))
+        except Exception as exc:
+            results.append({
+                "ok": False,
+                "filename": safe_name,
+                "status": "failed",
+                "error": str(exc),
+            })
+    return JSONResponse({"ok": all(item.get("ok") for item in results), "results": results, "documents": knowledge_service.list_documents(knowledge_base_id=knowledge_base_id or "default").get("documents", [])})
+
+
+@app.post("/api/knowledge/query")
+async def knowledge_query(req: KnowledgeQueryRequest):
+    payload = knowledge_service.rag_query(req.query, knowledge_base_id=req.knowledge_base_id, limit=req.limit)
+    return JSONResponse(payload)
 
 @app.get("/agent-studio")
 async def agent_studio_home():

@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
+from uuid import uuid4
 from pathlib import Path
 from typing import Any
 
 from ai_core.config.paths import RUNTIME_KNOWLEDGE, RUNTIME_DATASETS
+from ai_core.context.vector_memory_store import VectorMemoryStore
+from ai_core.knowledge.document_processor import DocumentChunker, DocumentTextExtractor, SUPPORTED_EXTENSIONS
 
 
 class KnowledgeService:
@@ -47,6 +50,167 @@ class KnowledgeService:
         "feedback_learning",
         "output",
     }
+
+
+    DOCUMENT_MEMORY_TYPE = "user_provided_document_fact"
+    DOCUMENT_USAGE_SCOPE = "final_answer_evidence"
+
+    def ingest_file(
+        self,
+        *,
+        file_path: str | Path,
+        original_name: str | None = None,
+        content_type: str | None = None,
+        knowledge_base_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Ingest one user-provided document into runtime knowledge.
+
+        This method is domain-neutral: it extracts text, chunks it, stores chunk
+        evidence, and mirrors chunks into the local vector memory store.  It does
+        not infer business meaning from filenames or text.
+        """
+        source_path = Path(file_path)
+        extractor = DocumentTextExtractor()
+        extracted = extractor.extract(source_path, original_name=original_name, content_type=content_type)
+        chunks = DocumentChunker().chunk(extracted.text)
+        kb_id = self._safe_id(knowledge_base_id or "default")
+        document_id = "doc_" + uuid4().hex[:16]
+        root = self._document_root(kb_id)
+        root.mkdir(parents=True, exist_ok=True)
+        raw_dir = root / "files"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        stored_path = raw_dir / f"{document_id}{source_path.suffix.lower()}"
+        if source_path.exists() and source_path.resolve() != stored_path.resolve():
+            stored_path.write_bytes(source_path.read_bytes())
+        now = datetime.utcnow().isoformat()
+        meta = {
+            "document_id": document_id,
+            "knowledge_base_id": kb_id,
+            "filename": original_name or source_path.name,
+            "stored_path": str(stored_path if stored_path.exists() else source_path),
+            "source_path": str(source_path),
+            "content_type": content_type or extracted.metadata.get("content_type") or "",
+            "extension": extracted.metadata.get("extension") or source_path.suffix.lower(),
+            "size_bytes": extracted.metadata.get("size_bytes") or (source_path.stat().st_size if source_path.exists() else 0),
+            "status": "indexed" if chunks else "empty",
+            "chunk_count": len(chunks),
+            "warnings": extracted.warnings,
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._append_jsonl(root / "documents.jsonl", meta)
+        chunk_records: list[dict[str, Any]] = []
+        vector_store = VectorMemoryStore(root=root / "vector_memory", collection_name=f"kb_{kb_id}")
+        for chunk in chunks:
+            record = {
+                "memory_type": self.DOCUMENT_MEMORY_TYPE,
+                "usage_scope": self.DOCUMENT_USAGE_SCOPE,
+                "knowledge_base_id": kb_id,
+                "document_id": document_id,
+                "chunk_id": f"{document_id}_chunk_{chunk['chunk_index']}",
+                "chunk_index": chunk["chunk_index"],
+                "text": chunk["text"],
+                "metadata": {
+                    "filename": meta["filename"],
+                    "document_id": document_id,
+                    "knowledge_base_id": kb_id,
+                    "chunk_index": chunk["chunk_index"],
+                },
+                "created_at": now,
+            }
+            chunk_records.append(record)
+            self._append_jsonl(root / "chunks.jsonl", record)
+            vector_store.add_text(
+                text=chunk["text"],
+                metadata=record["metadata"],
+                memory_type=self.DOCUMENT_MEMORY_TYPE,
+                usage_scope=self.DOCUMENT_USAGE_SCOPE,
+            )
+        return {"ok": True, "status": meta["status"], "document": meta, "chunk_count": len(chunk_records)}
+
+    def list_documents(self, *, knowledge_base_id: str | None = None) -> dict[str, Any]:
+        kb_ids = [self._safe_id(knowledge_base_id)] if knowledge_base_id else self._knowledge_base_ids()
+        documents: list[dict[str, Any]] = []
+        for kb_id in kb_ids:
+            root = self._document_root(kb_id)
+            for row in self._read_jsonl(root / "documents.jsonl"):
+                documents.append(row)
+        documents.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return {"ok": True, "knowledge_bases": kb_ids, "documents": documents, "supported_extensions": sorted(SUPPORTED_EXTENSIONS)}
+
+    def search_documents(self, query: str, *, knowledge_base_id: str | None = None, limit: int = 5) -> list[dict[str, Any]]:
+        q = str(query or "").strip()
+        if not q:
+            return []
+        kb_ids = [self._safe_id(knowledge_base_id)] if knowledge_base_id else self._knowledge_base_ids()
+        results: list[dict[str, Any]] = []
+        for kb_id in kb_ids:
+            root = self._document_root(kb_id)
+            vector_hits = VectorMemoryStore(root=root / "vector_memory", collection_name=f"kb_{kb_id}").search(
+                q, limit=limit, usage_scope=self.DOCUMENT_USAGE_SCOPE
+            )
+            if vector_hits:
+                for hit in vector_hits:
+                    meta = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
+                    results.append({
+                        "knowledge_base_id": kb_id,
+                        "document_id": meta.get("document_id"),
+                        "chunk_index": meta.get("chunk_index"),
+                        "filename": meta.get("filename"),
+                        "text": hit.get("text") or "",
+                        "score": float(hit.get("score") or 0.0),
+                        "source": hit.get("source") or "vector_memory",
+                    })
+            else:
+                query_terms = self._terms(q)
+                for row in self._read_jsonl(root / "chunks.jsonl"):
+                    text = str(row.get("text") or "")
+                    score = self._score(text, query_terms, {})
+                    if score <= 0:
+                        continue
+                    meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                    results.append({
+                        "knowledge_base_id": kb_id,
+                        "document_id": row.get("document_id"),
+                        "chunk_index": row.get("chunk_index"),
+                        "filename": meta.get("filename"),
+                        "text": text,
+                        "score": score,
+                        "source": "chunk_index",
+                    })
+        results.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
+        return results[: max(1, int(limit))]
+
+    def rag_query(self, query: str, *, knowledge_base_id: str | None = None, limit: int = 5) -> dict[str, Any]:
+        hits = self.search_documents(query, knowledge_base_id=knowledge_base_id, limit=limit)
+        if not hits:
+            return {
+                "ok": True,
+                "status": "no_evidence",
+                "answer_material": "No matching local knowledge evidence was found.",
+                "citations": [],
+                "results": [],
+            }
+        citations = []
+        lines = []
+        for idx, hit in enumerate(hits, start=1):
+            citations.append({
+                "ref": idx,
+                "knowledge_base_id": hit.get("knowledge_base_id"),
+                "document_id": hit.get("document_id"),
+                "filename": hit.get("filename"),
+                "chunk_index": hit.get("chunk_index"),
+                "score": hit.get("score"),
+            })
+            excerpt = self._compact_excerpt(str(hit.get("text") or ""))
+            lines.append(f"[{idx}] {excerpt}")
+        return {
+            "ok": True,
+            "status": "evidence_found",
+            "answer_material": "\n\n".join(lines),
+            "citations": citations,
+            "results": hits,
+        }
 
     def search(
         self,
@@ -250,12 +414,16 @@ class KnowledgeService:
                 rows += 1
                 if self.classify_record(row, source_path=path, flattened_text=self._flatten_text(row)).get("final_answer_eligible"):
                     eligible += 1
+        document_state = self.list_documents()
         return {
             "enabled": True,
             "paths": [str(RUNTIME_KNOWLEDGE), str(RUNTIME_DATASETS)],
             "file_count": len(files),
             "record_count": rows,
             "final_answer_eligible_count": eligible,
+            "document_count": len(document_state.get("documents") or []),
+            "knowledge_bases": document_state.get("knowledge_bases") or [],
+            "supported_extensions": sorted(SUPPORTED_EXTENSIONS),
         }
 
     def save_success_case(self, run_id: str, data: dict) -> None:
@@ -272,7 +440,36 @@ class KnowledgeService:
         for base in [RUNTIME_KNOWLEDGE, RUNTIME_DATASETS]:
             if base.exists():
                 files.extend(sorted(base.glob("*.jsonl")))
+        documents_root = RUNTIME_KNOWLEDGE / "document_bases"
+        if documents_root.exists():
+            files.extend(sorted(documents_root.glob("*/chunks.jsonl")))
         return files
+
+    def _document_root(self, knowledge_base_id: str) -> Path:
+        return RUNTIME_KNOWLEDGE / "document_bases" / self._safe_id(knowledge_base_id or "default")
+
+    def _knowledge_base_ids(self) -> list[str]:
+        root = RUNTIME_KNOWLEDGE / "document_bases"
+        if not root.exists():
+            return ["default"]
+        ids = [p.name for p in sorted(root.iterdir()) if p.is_dir()]
+        return ids or ["default"]
+
+    def _safe_id(self, value: str | None) -> str:
+        raw = str(value or "default").strip() or "default"
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("._-")
+        return safe[:80] or "default"
+
+    def _append_jsonl(self, path: Path, row: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def _compact_excerpt(self, text: str, *, max_chars: int = 900) -> str:
+        value = re.sub(r"\s+", " ", str(text or "")).strip()
+        if len(value) <= max_chars:
+            return value
+        return value[:max_chars].rstrip() + " ..."
 
     def _read_jsonl(self, path: Path) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []

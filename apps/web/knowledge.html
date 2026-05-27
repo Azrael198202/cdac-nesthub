@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Runtime Knowledge Base</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{--bg:#050914;--panel:#0b1220;--panel2:#111827;--line:#26344f;--text:#e5edff;--muted:#8ea3c7;--blue:#2563eb;--green:#22c55e;--yellow:#f59e0b;--red:#ef4444;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sans:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans)}
+    .wrap{max-width:1180px;margin:0 auto;padding:24px;display:grid;grid-template-columns:380px 1fr;gap:18px}
+    .card{border:1px solid var(--line);background:linear-gradient(180deg,#0f172a,#0b1220);border-radius:16px;padding:16px;box-shadow:0 12px 30px rgba(0,0,0,.22)}
+    h1{font-size:22px;margin:0 0 6px} h2{font-size:15px;margin:0 0 12px}.muted{color:var(--muted);font-size:12px;line-height:1.5;font-family:var(--mono)}
+    input,textarea,select{width:100%;background:#020617;color:var(--text);border:1px solid #334155;border-radius:10px;padding:10px;font-family:var(--mono);font-size:12px;outline:none}
+    textarea{min-height:90px;resize:vertical} button{border:0;border-radius:10px;padding:10px 13px;background:var(--blue);color:#fff;font-weight:700;cursor:pointer}button:disabled{opacity:.55;cursor:not-allowed}
+    .row{display:flex;gap:8px;align-items:center}.row>*{flex:1}.section{margin-top:14px}.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 8px;font-size:11px;font-family:var(--mono);color:#bfdbfe;background:#0b1b3a;margin:2px}.ok{color:#bbf7d0;border-color:#166534;background:#052e16}.warn{color:#fde68a;border-color:#92400e;background:#2a1b05}.err{color:#fecaca;border-color:#991b1b;background:#3b0a0a}
+    .doc,.hit{border:1px solid var(--line);background:#07101f;border-radius:12px;padding:12px;margin:10px 0}.doc-title{font-family:var(--mono);font-size:12px;font-weight:700}.doc-meta,.hit-meta{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:5px}.hit-text{white-space:pre-wrap;line-height:1.5;font-family:var(--mono);font-size:12px;color:#dbeafe;margin-top:8px;max-height:220px;overflow:auto}.log{white-space:pre-wrap;font-family:var(--mono);font-size:11px;background:#020617;border:1px solid var(--line);border-radius:10px;padding:10px;max-height:220px;overflow:auto;color:#dbeafe}.top{grid-column:1 / -1;display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.links a{color:#93c5fd;text-decoration:none;margin-left:12px;font-family:var(--mono);font-size:12px}.small{font-size:11px}.support{margin-top:8px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <h1>Runtime Knowledge Base</h1>
+        <div class="muted">Upload files, build a local runtime index, and test RAG retrieval. This page stores data under runtime/knowledge, not source code.</div>
+      </div>
+      <div class="links"><a href="/">Chat</a><a href="/agent-studio">Agent Studio</a><a href="/graph-runtime">Graph Runtime</a></div>
+    </div>
+
+    <div class="card">
+      <h2>Upload</h2>
+      <div class="muted">Supported file types are loaded from the backend.</div>
+      <div class="section"><input id="kbId" value="default" placeholder="knowledge_base_id" /></div>
+      <div class="section"><input id="files" type="file" multiple /></div>
+      <div class="section"><button id="uploadBtn">Upload and index</button></div>
+      <div class="support" id="supported"></div>
+      <div class="section"><h2>Status</h2><div id="status" class="log">Loading...</div></div>
+    </div>
+
+    <div class="card">
+      <h2>RAG Query</h2>
+      <textarea id="query" placeholder="Ask a question based on the local knowledge base..."></textarea>
+      <div class="row section"><input id="limit" type="number" min="1" max="20" value="5" /><button id="queryBtn">Search</button></div>
+      <div id="answer" class="section"></div>
+    </div>
+
+    <div class="card">
+      <h2>Documents</h2>
+      <div id="documents" class="muted">No documents loaded.</div>
+    </div>
+
+    <div class="card">
+      <h2>Evidence</h2>
+      <div id="results" class="muted">Run a query to see retrieved chunks.</div>
+    </div>
+  </div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+    function kb(){return $('kbId').value.trim() || 'default';}
+    async function jsonFetch(url, opts){const res=await fetch(url, opts); const data=await res.json().catch(()=>({ok:false,error:'invalid_json'})); if(!res.ok) throw new Error(data.error||data.message||res.statusText); return data;}
+    async function refresh(){
+      try{
+        const st=await jsonFetch('/api/knowledge/status');
+        $('status').textContent=JSON.stringify(st.status,null,2);
+        const exts=(st.status.supported_extensions||[]).map(x=>`<span class="pill">${esc(x)}</span>`).join('');
+        $('supported').innerHTML=exts;
+        const docs=await jsonFetch('/api/knowledge/documents?knowledge_base_id='+encodeURIComponent(kb()));
+        const items=docs.documents||[];
+        $('documents').innerHTML=items.length?items.map(d=>`<div class="doc"><div class="doc-title">${esc(d.filename)}</div><div class="doc-meta">${esc(d.document_id)} · ${esc(d.status)} · chunks: ${esc(d.chunk_count)} · ${esc(d.created_at)}</div></div>`).join(''):'No documents loaded.';
+      }catch(e){$('status').textContent='Error: '+e.message;}
+    }
+    $('uploadBtn').onclick=async()=>{
+      const files=$('files').files; if(!files.length){alert('Choose at least one file.'); return;}
+      const fd=new FormData(); for(const f of files) fd.append('files',f);
+      $('uploadBtn').disabled=true;
+      try{await jsonFetch('/api/knowledge/upload?knowledge_base_id='+encodeURIComponent(kb()),{method:'POST',body:fd}); await refresh();}
+      catch(e){$('status').textContent='Upload failed: '+e.message;}
+      finally{$('uploadBtn').disabled=false;}
+    };
+    $('queryBtn').onclick=async()=>{
+      const q=$('query').value.trim(); if(!q){alert('Enter a query.'); return;}
+      $('queryBtn').disabled=true;
+      try{
+        const data=await jsonFetch('/api/knowledge/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,knowledge_base_id:kb(),limit:Number($('limit').value||5)})});
+        $('answer').innerHTML=`<div class="doc"><div class="doc-title">${esc(data.status)}</div><div class="hit-text">${esc(data.answer_material||'')}</div></div>`;
+        const hits=data.results||[];
+        $('results').innerHTML=hits.length?hits.map((h,i)=>`<div class="hit"><div class="doc-title">[${i+1}] ${esc(h.filename||h.document_id||'source')}</div><div class="hit-meta">score: ${Number(h.score||0).toFixed(4)} · chunk: ${esc(h.chunk_index)}</div><div class="hit-text">${esc(h.text)}</div></div>`).join(''):'No matching evidence.';
+      }catch(e){$('answer').innerHTML=`<span class="pill err">${esc(e.message)}</span>`;}
+      finally{$('queryBtn').disabled=false;}
+    };
+    refresh();
+  </script>
+</body>
+</html>

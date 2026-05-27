@@ -2822,29 +2822,34 @@ class ToolCallExecutor:
             })
 
         item = self.knowledge.best_covered(query, required_terms=required_terms, min_score=1.0, final_answer_only=True)
+        rag_payload = None
         if not item:
-            await event_bus.emit(run_id, {
-                "type": "LOCAL_KNOWLEDGE_NO_FINAL_EVIDENCE",
-                "title": "No final-answer local knowledge",
-                "message": "Local knowledge did not contain eligible final-answer evidence; continuing to web/API/tool execution.",
-                "node_id": node_id,
-                "step_id": step_id,
-                "result": {"hint_available": bool(hint_item)},
-            })
-            return None
+            rag_payload = self.knowledge.rag_query(query, limit=5)
+            if not isinstance(rag_payload, dict) or rag_payload.get("status") != "evidence_found":
+                await event_bus.emit(run_id, {
+                    "type": "LOCAL_KNOWLEDGE_NO_FINAL_EVIDENCE",
+                    "title": "No final-answer local knowledge",
+                    "message": "Local knowledge did not contain eligible final-answer evidence; continuing to web/API/tool execution.",
+                    "node_id": node_id,
+                    "step_id": step_id,
+                    "result": {"hint_available": bool(hint_item)},
+                })
+                return None
+        answer_material = str((rag_payload or {}).get("answer_material") or (item.get("text_excerpt") if item else "")).strip()
         result = {
             "status": "success",
             "data": {
-                "answer_material": item.get("text_excerpt"),
-                "source": item.get("source"),
-                "coverage": item.get("coverage"),
+                "answer_material": answer_material,
+                "source": item.get("source") if item else "runtime_document_knowledge",
+                "coverage": item.get("coverage") if item else {},
+                "citations": (rag_payload or {}).get("citations") or [],
                 "known_parameters": tool_input.get("known") or (tool_input.get("parameters") or {}).get("known") or {},
                 "local_knowledge_used": True,
-                "local_knowledge_classification": item.get("classification"),
+                "local_knowledge_classification": item.get("classification") if item else {"memory_type": "user_provided_document_fact", "usage_scope": "final_answer_evidence"},
                 "answer_material_quality": {
                     "passed": True,
                     "reason": "eligible_final_answer_local_knowledge",
-                    "source": item.get("source"),
+                    "source": item.get("source") if item else "runtime_document_knowledge",
                 },
             },
             "source": "runtime_local_knowledge",
