@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime
@@ -10,6 +11,8 @@ from uuid import uuid4
 from ai_core.config.paths import RUNTIME_DATASETS, RUNTIME_KNOWLEDGE
 from ai_core.knowledge.document_processor import DocumentChunker, DocumentTextExtractor, SUPPORTED_EXTENSIONS
 from ai_core.knowledge.embedding_index import LocalVectorIndex
+from ai_core.llm.provider_handlers.base import ProviderUnavailableError
+from ai_core.llm.provider_router import ProviderRouter
 
 
 class KnowledgeService:
@@ -45,6 +48,9 @@ class KnowledgeService:
 
     DOCUMENT_MEMORY_TYPE = "user_provided_document_fact"
     DOCUMENT_USAGE_SCOPE = "final_answer_evidence"
+
+    def __init__(self) -> None:
+        self.provider_router = ProviderRouter()
 
     def ingest_file(
         self,
@@ -238,6 +244,127 @@ class KnowledgeService:
             "citations": citations,
             "results": hits,
         }
+
+    async def rag_answer(
+        self,
+        query: str,
+        *,
+        knowledge_base_id: str | None = None,
+        limit: int = 5,
+        synthesize: bool = True,
+    ) -> dict[str, Any]:
+        """Retrieve local evidence and synthesize a grounded answer.
+
+        The method is intentionally generic: it treats retrieved chunks as
+        evidence material and asks the configured synthesis model to produce an
+        answer constrained by that evidence. If no provider is available, it
+        returns the evidence material without failing the local query path.
+        """
+        payload = self.rag_query(query, knowledge_base_id=knowledge_base_id, limit=limit)
+        if payload.get("status") != "evidence_found" or not synthesize:
+            payload.setdefault("answer", payload.get("answer_material") or "")
+            payload.setdefault("synthesis_status", "not_requested" if synthesize is False else "no_evidence")
+            return payload
+        evidence_items = self._prepare_evidence_for_synthesis(payload.get("results") or [], max_items=limit)
+        if not evidence_items:
+            payload["answer"] = payload.get("answer_material") or ""
+            payload["synthesis_status"] = "no_usable_evidence"
+            return payload
+        try:
+            synthesized = await self._synthesize_grounded_answer(query=str(query or ""), evidence_items=evidence_items)
+        except Exception as exc:
+            payload["answer"] = payload.get("answer_material") or ""
+            payload["synthesis_status"] = "model_unavailable"
+            payload["synthesis_error"] = str(exc)[:300]
+            return payload
+        answer = str((synthesized or {}).get("answer") or "").strip()
+        used_refs = synthesized.get("used_refs") if isinstance(synthesized.get("used_refs"), list) else []
+        if not answer:
+            payload["answer"] = payload.get("answer_material") or ""
+            payload["synthesis_status"] = "empty_model_answer"
+            return payload
+        payload["answer"] = answer
+        payload["synthesis_status"] = "completed"
+        payload["used_refs"] = used_refs
+        payload["confidence"] = synthesized.get("confidence")
+        return payload
+
+    async def _synthesize_grounded_answer(self, *, query: str, evidence_items: list[dict[str, Any]]) -> dict[str, Any]:
+        schema = {
+            "type": "object",
+            "required": ["answer", "used_refs", "confidence"],
+            "properties": {
+                "answer": {"type": "string"},
+                "used_refs": {"type": "array", "items": {"type": "integer"}},
+                "confidence": {"type": "string"},
+                "insufficient_evidence": {"type": "boolean"},
+            },
+            "additionalProperties": True,
+        }
+        prompt = {
+            "id": "local_knowledge_grounded_synthesis",
+            "system": (
+                "You synthesize a user-facing answer from provided local evidence. "
+                "Use only the evidence provided in the prompt. Do not invent facts. "
+                "If the evidence is insufficient, say that the local knowledge base does not contain enough information. "
+                "Use the user's language when it is clear. Return only valid JSON matching the schema."
+            ),
+            "runtime_rules": [
+                "Ground every factual statement in the provided evidence.",
+                "Do not mention internal retrieval, chunks, vectors, embeddings, or runtime implementation details.",
+                "Keep the answer concise unless the user explicitly asks for detail.",
+            ],
+        }
+        rendered = self._render_synthesis_prompt(query=query, evidence_items=evidence_items)
+        adapter = {
+            "adapter_id": "local_knowledge_grounded_synthesis_adapter",
+            "route_name": "final_synthesis",
+            "model_route_name": "final_synthesis",
+            "model_stage": "final_synthesis",
+            "provider_route": [],
+            "max_prompt_tokens": 1800,
+            "provider_timeout_seconds": 40,
+            "max_provider_attempts": 1,
+            "provider_options": {"temperature": 0, "num_predict": 512, "num_ctx": 3072, "think": False},
+        }
+        run_id = "knowledge_synthesis_" + datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+        return await asyncio.wait_for(
+            self.provider_router.generate_json(
+                run_id=run_id,
+                node_id="final_synthesis",
+                adapter=adapter,
+                prompt=prompt,
+                rendered_user_prompt=rendered,
+                schema=schema,
+            ),
+            timeout=45,
+        )
+
+    def _prepare_evidence_for_synthesis(self, results: list[dict[str, Any]], *, max_items: int = 5) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for idx, hit in enumerate(results[: max(1, int(max_items or 5))], start=1):
+            text = self._compact_excerpt(str(hit.get("text") or ""), max_chars=1200)
+            if not text:
+                continue
+            items.append({
+                "ref": idx,
+                "text": text,
+                "filename": hit.get("filename"),
+                "document_id": hit.get("document_id"),
+                "chunk_id": hit.get("chunk_id"),
+                "score": hit.get("score"),
+            })
+        return items
+
+    def _render_synthesis_prompt(self, *, query: str, evidence_items: list[dict[str, Any]]) -> str:
+        lines = ["USER_QUESTION:", str(query or "").strip(), "", "LOCAL_EVIDENCE:"]
+        for item in evidence_items:
+            lines.append(f"[{int(item.get('ref') or 0)}]")
+            lines.append(str(item.get("text") or ""))
+            lines.append("")
+        lines.append("ANSWER_REQUIREMENT:")
+        lines.append("Produce the final answer directly, based only on LOCAL_EVIDENCE. Include no hidden reasoning.")
+        return "\n".join(lines)
 
     def search(
         self,

@@ -61,6 +61,7 @@ class KnowledgeQueryRequest(BaseModel):
     query: str
     knowledge_base_id: str | None = None
     limit: int = 5
+    synthesize: bool = True
 
 class AgentStudioSecretRequest(BaseModel):
     key: str
@@ -279,7 +280,12 @@ async def knowledge_upload(files: list[UploadFile] = File(...), knowledge_base_i
 
 @app.post("/api/knowledge/query")
 async def knowledge_query(req: KnowledgeQueryRequest):
-    payload = knowledge_service.rag_query(req.query, knowledge_base_id=req.knowledge_base_id, limit=req.limit)
+    payload = await knowledge_service.rag_answer(
+        req.query,
+        knowledge_base_id=req.knowledge_base_id,
+        limit=req.limit,
+        synthesize=req.synthesize,
+    )
     return JSONResponse(payload)
 
 @app.get("/agent-studio")

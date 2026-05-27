@@ -2824,7 +2824,7 @@ class ToolCallExecutor:
         item = self.knowledge.best_covered(query, required_terms=required_terms, min_score=1.0, final_answer_only=True)
         rag_payload = None
         if not item:
-            rag_payload = self.knowledge.rag_query(query, limit=5)
+            rag_payload = await self.knowledge.rag_answer(query, limit=5, synthesize=True)
             if not isinstance(rag_payload, dict) or rag_payload.get("status") != "evidence_found":
                 await event_bus.emit(run_id, {
                     "type": "LOCAL_KNOWLEDGE_NO_FINAL_EVIDENCE",
@@ -2835,7 +2835,7 @@ class ToolCallExecutor:
                     "result": {"hint_available": bool(hint_item)},
                 })
                 return None
-        answer_material = str((rag_payload or {}).get("answer_material") or (item.get("text_excerpt") if item else "")).strip()
+        answer_material = str((rag_payload or {}).get("answer") or (rag_payload or {}).get("answer_material") or (item.get("text_excerpt") if item else "")).strip()
         result = {
             "status": "success",
             "data": {

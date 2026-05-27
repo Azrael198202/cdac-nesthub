@@ -39,7 +39,7 @@
     <div class="card">
       <h2>RAG Query</h2>
       <textarea id="query" placeholder="Ask a question based on the local knowledge base..."></textarea>
-      <div class="row section"><input id="limit" type="number" min="1" max="20" value="5" /><button id="queryBtn">Search</button></div>
+      <div class="row section"><input id="limit" type="number" min="1" max="20" value="5" /><select id="synthesize"><option value="true" selected>Answer + Evidence</option><option value="false">Evidence only</option></select><button id="queryBtn">Search</button></div>
       <div id="answer" class="section"></div>
     </div>
 
@@ -82,8 +82,8 @@
       const q=$('query').value.trim(); if(!q){alert('Enter a query.'); return;}
       $('queryBtn').disabled=true;
       try{
-        const data=await jsonFetch('/api/knowledge/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,knowledge_base_id:kb(),limit:Number($('limit').value||5)})});
-        $('answer').innerHTML=`<div class="doc"><div class="doc-title">${esc(data.status)}</div><div class="hit-text">${esc(data.answer_material||'')}</div></div>`;
+        const data=await jsonFetch('/api/knowledge/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,knowledge_base_id:kb(),limit:Number($('limit').value||5),synthesize:$('synthesize').value==='true'})});
+        $('answer').innerHTML=`<div class="doc"><div class="doc-title">${esc(data.synthesis_status||data.status)}</div><div class="hit-text">${esc(data.answer||data.answer_material||'')}</div><div class="doc-meta">status: ${esc(data.status)} · citations: ${esc((data.citations||[]).length)}</div></div>`;
         const hits=data.results||[];
         $('results').innerHTML=hits.length?hits.map((h,i)=>`<div class="hit"><div class="doc-title">[${i+1}] ${esc(h.filename||h.document_id||'source')}</div><div class="hit-meta">score: ${Number(h.score||0).toFixed(4)} · vector: ${Number(h.vector_score||0).toFixed(4)} · lexical: ${Number(h.lexical_score||0).toFixed(4)} · chunk: ${esc(h.chunk_index)}</div><div class="hit-text">${esc(h.text)}</div></div>`).join(''):'No matching evidence.';
       }catch(e){$('answer').innerHTML=`<span class="pill err">${esc(e.message)}</span>`;}
