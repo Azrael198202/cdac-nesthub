@@ -21,6 +21,7 @@ from ai_core.runtime.bootstrap import RuntimeBootstrapService
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 from ai_core.context.session_memory_store import SessionMemoryStore
 from ai_core.knowledge.knowledge_service import KnowledgeService
+from ai_core.config.paths import RUNTIME_DOWNLOADS
 from ai_core.graph.graph_visualization import GraphVisualStateBuilder
 
 import traceback
@@ -395,6 +396,22 @@ async def agent_studio_artifact_edit_proposal(artifact_id: str, req: ArtifactEdi
     )
     return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
 
+
+
+
+@app.get("/api/downloads/{download_id}/{filename}")
+async def download_runtime_file(download_id: str, filename: str):
+    safe_id = Path(download_id).name
+    safe_name = Path(filename).name
+    path = (RUNTIME_DOWNLOADS / safe_id / safe_name).resolve()
+    root = RUNTIME_DOWNLOADS.resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return JSONResponse({"ok": False, "status": "invalid_path"}, status_code=400)
+    if not path.exists() or not path.is_file():
+        return JSONResponse({"ok": False, "status": "not_found"}, status_code=404)
+    return FileResponse(str(path), filename=safe_name)
 
 @app.get("/api/agent-studio/artifact-edit/{proposal_id}/download")
 async def agent_studio_artifact_edit_download(proposal_id: str):

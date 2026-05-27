@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 import copy
+import mimetypes
 import re
 
-from ai_core.agent_delegation import AgentExecutionRequest, PrimaryBrainDelegationClient
+from ai_core.agent_delegation import AgentExecutionRequest, AgentExecutionResult, PrimaryBrainDelegationClient
 from auxiliary_brain.storage import JsonStore
 from auxiliary_brain.runtime import new_id
 from auxiliary_brain.delegation.task_mind_graph import TaskMindGraphBuilder
+from ai_core.config.paths import RUNTIME_DOWNLOADS
 from auxiliary_brain.parameters.agent_parameter_contract import AgentParameterContractService
 
 
@@ -59,7 +62,7 @@ class AgentDelegationRuntime:
         # Values supplied in the task instruction or resume form belong only to
         # this in-memory run and are not written back to durable agent profiles.
         self._apply_task_runtime_parameters_to_selected(selected, task_graph.get("runtime_parameters") if isinstance(task_graph, dict) else {})
-        missing_parameter_fields = self._collect_missing_agent_parameter_fields(selected)
+        missing_parameter_fields = self._collect_missing_agent_parameter_fields(selected, dependency_plan=dependency_plan)
         if missing_parameter_fields:
             pending_action = {
                 "kind": "agent_parameter_collection",
@@ -113,6 +116,29 @@ class AgentDelegationRuntime:
                 f"Preparing participant: {participant_name}",
                 "running",
             )
+            self._bind_dependency_outputs_to_participant(
+                participant=participant,
+                completed_results=agent_results,
+                dependency_plan=dependency_plan,
+            )
+            material_result = self._try_execute_file_material_generation(
+                participant=participant,
+                completed_results=agent_results,
+                dependency_plan=dependency_plan,
+                task_name=task_name,
+            )
+            if material_result is not None:
+                result = material_result
+                result_payload = self._sanitize_result_payload(result.__dict__)
+                agent_results.append(result)
+                run_payload["agent_results"].append(result_payload)
+                self._record_progress(
+                    run_payload,
+                    f"participant_{index + 1}_complete",
+                    f"Participant finished: {participant_name}",
+                    "completed",
+                )
+                continue
             shared_context = self._build_participant_shared_context(
                 task_graph=task_graph,
                 selected=selected,
@@ -138,14 +164,22 @@ class AgentDelegationRuntime:
                 "running",
             )
             if self._is_generated_dataflow_step(participant, task_graph):
-                result = await self._execute_intermediate_step_with_progress(
-                    request,
-                    self._build_primary_runtime_progress_bridge(
-                        run_payload,
-                        participant_index=index + 1,
-                        participant_name=participant_name,
-                    ),
+                material_return = self._try_return_dependency_material(
+                    participant=participant,
+                    completed_results=agent_results,
+                    dependency_plan=dependency_plan,
                 )
+                if material_return is not None:
+                    result = material_return
+                else:
+                    result = await self._execute_intermediate_step_with_progress(
+                        request,
+                        self._build_primary_runtime_progress_bridge(
+                            run_payload,
+                            participant_index=index + 1,
+                            participant_name=participant_name,
+                        ),
+                    )
             else:
                 result = await self._execute_agent_request_with_progress(
                     request,
@@ -204,6 +238,7 @@ class AgentDelegationRuntime:
             "task_name": task_name,
             "run_id": run_id,
             "final_answer": synthesis.get("final_answer"),
+            "generated_files": self._collect_generated_files(agent_results),
             "synthesis": synthesis,
             "created_at": self._now(),
         }
@@ -300,6 +335,7 @@ class AgentDelegationRuntime:
             "task_name": task_name,
             "run_id": run_id,
             "final_answer": synthesis.get("final_answer"),
+            "generated_files": self._collect_generated_files(agent_results),
             "synthesis": synthesis,
             "adaptation": {"feedback": feedback, "strategy": strategy},
             "created_at": self._now(),
@@ -415,6 +451,23 @@ class AgentDelegationRuntime:
                 continue
             participant_name = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant_id or "participant")
             self._record_progress(run_payload, f"participant_{index + 1}_primary_runtime", f"Primary runtime executing participant: {participant_name}", "running")
+            self._bind_dependency_outputs_to_participant(
+                participant=participant,
+                completed_results=agent_results,
+                dependency_plan=dependency_plan,
+            )
+            material_result = self._try_execute_file_material_generation(
+                participant=participant,
+                completed_results=agent_results,
+                dependency_plan=dependency_plan,
+                task_name=task_name,
+            )
+            if material_result is not None:
+                payload = self._sanitize_result_payload(material_result.__dict__)
+                existing_results.append(payload)
+                agent_results.append(material_result)
+                self._record_progress(run_payload, f"participant_{index + 1}_complete", f"Participant finished: {participant_name}", "completed")
+                continue
             request = AgentExecutionRequest(
                 participant_id=participant_id,
                 participant_name=participant_name,
@@ -433,14 +486,22 @@ class AgentDelegationRuntime:
                 ),
             )
             if self._is_generated_dataflow_step(participant, task_graph):
-                result = await self._execute_intermediate_step_with_progress(
-                    request,
-                    self._build_primary_runtime_progress_bridge(
-                        run_payload,
-                        participant_index=index + 1,
-                        participant_name=participant_name,
-                    ),
+                material_return = self._try_return_dependency_material(
+                    participant=participant,
+                    completed_results=agent_results,
+                    dependency_plan=dependency_plan,
                 )
+                if material_return is not None:
+                    result = material_return
+                else:
+                    result = await self._execute_intermediate_step_with_progress(
+                        request,
+                        self._build_primary_runtime_progress_bridge(
+                            run_payload,
+                            participant_index=index + 1,
+                            participant_name=participant_name,
+                        ),
+                    )
             else:
                 result = await self._execute_agent_request_with_progress(
                     request,
@@ -497,6 +558,7 @@ class AgentDelegationRuntime:
             "task_name": task_name,
             "run_id": run_id,
             "final_answer": synthesis.get("final_answer"),
+            "generated_files": self._collect_generated_files(agent_results),
             "synthesis": synthesis,
             "created_at": self._now(),
         }
@@ -513,6 +575,20 @@ class AgentDelegationRuntime:
         self.store.write_json(f"generated/results/{run_id}.json", run_payload)
         return run_payload
 
+
+
+    def _collect_generated_files(self, agent_results: list[Any]) -> list[dict[str, Any]]:
+        files: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for result in agent_results or []:
+            for item in self._generated_files_from_result(result):
+                key = str(item.get("download_url") or item.get("file_path") or item.get("file_name") or "")
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                files.append(item)
+        return files
 
     def _participant_identity(self, participant: dict[str, Any]) -> str:
         return str(participant.get("participant_id") or participant.get("id") or participant.get("name") or "").strip()
@@ -758,7 +834,7 @@ class AgentDelegationRuntime:
                 continue
             self.parameter_contract_service.apply_values(participant, runtime_parameters)
 
-    def _collect_missing_agent_parameter_fields(self, participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _collect_missing_agent_parameter_fields(self, participants: list[dict[str, Any]], dependency_plan: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         fields: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
         for participant in participants:
@@ -775,6 +851,8 @@ class AgentDelegationRuntime:
                 if not isinstance(field, dict):
                     continue
                 if not self._is_blocking_agent_parameter_field(participant, field):
+                    continue
+                if self._can_defer_field_to_dependency_output(participant, field, dependency_plan or {}):
                     continue
                 field_name = str(field.get("name") or field.get("field") or field.get("key") or "").strip()
                 key = (owner, field_name)
@@ -806,6 +884,8 @@ class AgentDelegationRuntime:
         )
         if explicit:
             return True
+        if self._looks_like_file_material_contract(participant):
+            return bool(field.get("required", True))
 
         # Backward compatibility for older runtime-generated participant records:
         # if a contract describes a user-facing content deliverable but was
@@ -822,6 +902,198 @@ class AgentDelegationRuntime:
             # not on participant names or fixed example phrases.
             return bool(field.get("required", True))
         return False
+
+
+    def _participant_dependency_ids(self, participant: dict[str, Any], dependency_plan: dict[str, Any] | None) -> set[str]:
+        pid = self._participant_identity(participant)
+        plan = (dependency_plan or {}).get("participants") if isinstance(dependency_plan, dict) else {}
+        item = plan.get(pid) if isinstance(plan, dict) else {}
+        return {str(x) for x in (item or {}).get("depends_on") or [] if str(x)}
+
+    def _field_text(self, field: dict[str, Any]) -> str:
+        return " ".join(str(field.get(k) or "") for k in ("name", "field", "key", "label", "description")).lower()
+
+    def _field_accepts_upstream_material(self, field: dict[str, Any]) -> bool:
+        text = self._field_text(field)
+        return bool(re.search(r"\b(content|body|text|payload|data|material|input)\b", text, flags=re.I))
+
+    def _can_defer_field_to_dependency_output(self, participant: dict[str, Any], field: dict[str, Any], dependency_plan: dict[str, Any]) -> bool:
+        if not self._field_accepts_upstream_material(field):
+            return False
+        return bool(self._participant_dependency_ids(participant, dependency_plan))
+
+    def _contract_fields(self, participant: dict[str, Any]) -> list[dict[str, Any]]:
+        contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}
+        params = contract.get("parameters") if isinstance(contract.get("parameters"), list) else []
+        return [p for p in params if isinstance(p, dict)]
+
+    def _field_name(self, field: dict[str, Any]) -> str:
+        return str(field.get("name") or field.get("field") or field.get("key") or "").strip()
+
+    def _extract_primary_material_from_result(self, result: Any) -> str:
+        workflow_results = getattr(result, "workflow_results", None) if result is not None else None
+        if isinstance(workflow_results, dict):
+            for key in ("final_content", "content", "text", "output", "material"):
+                value = workflow_results.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        answer = str(getattr(result, "final_answer", "") or "").strip()
+        return answer
+
+    def _dependency_material_text(self, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> str:
+        deps = self._participant_dependency_ids(participant, dependency_plan)
+        materials: list[str] = []
+        for result in completed_results:
+            result_pid = str(getattr(result, "participant_id", "") or "")
+            result_name = str(getattr(result, "participant_name", "") or "")
+            if deps and result_pid not in deps and result_name not in deps:
+                continue
+            if str(getattr(result, "status", "") or "") != "completed":
+                continue
+            material = self._extract_primary_material_from_result(result)
+            if material:
+                materials.append(material)
+        return "\n\n".join(materials).strip()
+
+    def _bind_dependency_outputs_to_participant(self, *, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> None:
+        material = self._dependency_material_text(participant, completed_results, dependency_plan)
+        if not material:
+            return
+        values = dict(participant.get("runtime_parameters") or {}) if isinstance(participant.get("runtime_parameters"), dict) else {}
+        changed = False
+        for field in self._contract_fields(participant):
+            name = self._field_name(field)
+            if not name or values.get(name) not in (None, "", [], {}):
+                continue
+            if self._field_accepts_upstream_material(field):
+                values[name] = material
+                changed = True
+        if changed:
+            participant["runtime_parameters"] = values
+            self.parameter_contract_service.apply_values(participant, values)
+
+    def _looks_like_file_material_contract(self, participant: dict[str, Any]) -> bool:
+        fields = self._contract_fields(participant)
+        if not fields:
+            return False
+        joined = " ".join(self._field_text(field) for field in fields)
+        has_output_container = bool(re.search(r"\b(file|document|artifact)\b", joined, flags=re.I))
+        has_material = any(self._field_accepts_upstream_material(field) for field in fields)
+        has_name_or_format = bool(re.search(r"\b(name|format|type|extension|mime)\b", joined, flags=re.I))
+        return has_output_container and has_material and has_name_or_format
+
+    def _value_for_field_role(self, participant: dict[str, Any], pattern: str) -> Any:
+        values = participant.get("runtime_parameters") if isinstance(participant.get("runtime_parameters"), dict) else {}
+        for field in self._contract_fields(participant):
+            if re.search(pattern, self._field_text(field), flags=re.I):
+                name = self._field_name(field)
+                if name and values.get(name) not in (None, "", [], {}):
+                    return values.get(name)
+        return None
+
+    def _first_scalar(self, value: Any) -> str:
+        if isinstance(value, list):
+            for item in value:
+                text = self._first_scalar(item)
+                if text:
+                    return text
+            return ""
+        if isinstance(value, dict):
+            for key in ("value", "text", "content", "name"):
+                if key in value:
+                    text = self._first_scalar(value.get(key))
+                    if text:
+                        return text
+            return ""
+        return str(value or "").strip()
+
+    def _safe_download_filename(self, name: str, fmt: str) -> str:
+        base = Path(str(name or "generated_output")).name.strip() or "generated_output"
+        ext = re.sub(r"[^A-Za-z0-9]", "", str(fmt or "txt").lower()) or "txt"
+        if ext == "text":
+            ext = "txt"
+        if not Path(base).suffix:
+            base = f"{base}.{ext}"
+        return re.sub(r"[^A-Za-z0-9._-]", "_", base) or f"generated_output.{ext}"
+
+    def _try_execute_file_material_generation(self, *, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any], task_name: str) -> AgentExecutionResult | None:
+        if not self._looks_like_file_material_contract(participant):
+            return None
+        self._bind_dependency_outputs_to_participant(participant=participant, completed_results=completed_results, dependency_plan=dependency_plan)
+        content = self._first_scalar(self._value_for_field_role(participant, r"\b(content|body|text|payload|data|material|input)\b"))
+        if not content:
+            return None
+        name = self._first_scalar(self._value_for_field_role(participant, r"\b(name|filename|file name)\b")) or "generated_output"
+        fmt = self._first_scalar(self._value_for_field_role(participant, r"\b(format|type|extension|mime)\b")) or Path(name).suffix.lstrip(".") or "txt"
+        filename = self._safe_download_filename(name, fmt)
+        download_id = new_id("download")
+        target_dir = RUNTIME_DOWNLOADS / download_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        path = target_dir / filename
+        path.write_text(content, encoding="utf-8")
+        size = path.stat().st_size
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        download_url = f"/api/downloads/{download_id}/{filename}"
+        file_record = {
+            "download_id": download_id,
+            "file_name": filename,
+            "file_path": str(path),
+            "download_url": download_url,
+            "mime_type": mime_type,
+            "size": size,
+        }
+        final_answer = f"Generated file: [{filename}]({download_url})"
+        return AgentExecutionResult(
+            participant_id=self._participant_identity(participant),
+            participant_name=self._participant_name(participant),
+            core_run_id=download_id,
+            status="completed",
+            final_answer=final_answer,
+            workflow_results={
+                "status": "completed",
+                "generated_files": [file_record],
+                "verified_result_material": {"type": "file", **file_record},
+                "final_content": final_answer,
+            },
+            origin="auxiliary_brain",
+        )
+
+    def _generated_files_from_result(self, result: Any) -> list[dict[str, Any]]:
+        workflow_results = getattr(result, "workflow_results", None) if result is not None else None
+        if not isinstance(workflow_results, dict):
+            return []
+        files = workflow_results.get("generated_files")
+        return [x for x in files if isinstance(x, dict)] if isinstance(files, list) else []
+
+    def _try_return_dependency_material(self, *, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> AgentExecutionResult | None:
+        deps = self._participant_dependency_ids(participant, dependency_plan)
+        collected: list[dict[str, Any]] = []
+        for result in completed_results:
+            result_pid = str(getattr(result, "participant_id", "") or "")
+            result_name = str(getattr(result, "participant_name", "") or "")
+            if deps and result_pid not in deps and result_name not in deps:
+                continue
+            collected.extend(self._generated_files_from_result(result))
+        if not collected:
+            return None
+        lines = []
+        for item in collected:
+            name = str(item.get("file_name") or Path(str(item.get("file_path") or "generated_file")).name)
+            url = str(item.get("download_url") or "")
+            lines.append(f"Generated file: [{name}]({url})" if url else f"Generated file: {name}")
+        return AgentExecutionResult(
+            participant_id=self._participant_identity(participant),
+            participant_name=self._participant_name(participant),
+            core_run_id=new_id("material_return"),
+            status="completed",
+            final_answer="\n".join(lines),
+            workflow_results={
+                "status": "completed",
+                "generated_files": collected,
+                "verified_result_material": {"type": "file_collection", "files": collected},
+            },
+            origin="auxiliary_brain",
+        )
 
     def _uses_uploaded_artifact_runtime(self, participant: dict[str, Any]) -> bool:
         if not isinstance(participant, dict):
@@ -875,11 +1147,18 @@ class AgentDelegationRuntime:
         downstream LLM JSON output is not destabilized by quotes, newlines, or
         partially trimmed dictionaries.
         """
+        workflow_results = getattr(result, "workflow_results", None) if result is not None else None
+        generated_files = []
+        if isinstance(workflow_results, dict):
+            maybe_files = workflow_results.get("generated_files")
+            if isinstance(maybe_files, list):
+                generated_files = [x for x in maybe_files if isinstance(x, dict)]
         return {
             "participant_id": str(getattr(result, "participant_id", "") or ""),
             "participant_name": str(getattr(result, "participant_name", "") or ""),
             "status": str(getattr(result, "status", "") or ""),
             "final_answer_summary": self._compact_text(getattr(result, "final_answer", "") or "", 600),
+            "generated_files": generated_files,
             "missing_inputs": list(getattr(result, "missing_inputs", None) or []),
         }
 

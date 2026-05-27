@@ -246,41 +246,6 @@ class KnowledgeService:
             "results": hits,
         }
 
-
-    def has_relevant_evidence(
-        self,
-        query: str,
-        *,
-        knowledge_base_id: str | None = None,
-        limit: int = 5,
-        min_score: float = 0.18,
-        min_lexical_score: float = 0.12,
-    ) -> dict[str, Any]:
-        """Probe whether local evidence is strong enough to answer a user message.
-
-        This is a generic evidence gate.  It does not inspect domain words or
-        task names.  The decision is based only on retrieval scores and the
-        availability of non-empty local evidence material.
-        """
-        hits = self.search_documents(query, knowledge_base_id=knowledge_base_id, limit=limit)
-        usable: list[dict[str, Any]] = []
-        for hit in hits:
-            text = str(hit.get("text") or "").strip()
-            if not text:
-                continue
-            score = float(hit.get("score") or 0.0)
-            lexical = float(hit.get("lexical_score") or 0.0)
-            vector = float(hit.get("vector_score") or 0.0)
-            if score >= float(min_score) and (lexical >= float(min_lexical_score) or vector >= float(min_score)):
-                usable.append(hit)
-        return {
-            "ok": True,
-            "relevant": bool(usable),
-            "status": "evidence_found" if usable else "no_relevant_evidence",
-            "results": usable[: max(1, int(limit or 5))],
-            "top_score": float(usable[0].get("score") or 0.0) if usable else 0.0,
-        }
-
     async def rag_answer(
         self,
         query: str,

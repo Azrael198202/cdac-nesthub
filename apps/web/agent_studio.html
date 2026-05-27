@@ -47,15 +47,14 @@
 <script>
 const messages = document.getElementById('messages');
 function renderJson(obj){ return JSON.stringify(obj, null, 2); }
+function linkifyAnswerLine(line){
+  const escaped=escapeHtml(line.trim());
+  return escaped.replace(/\[([^\]]+)\]\((\/api\/downloads\/[^)]+)\)/g, '<a href="$2" download>$1</a>');
+}
 function formatAnswerHtml(text){
-  let raw=String(text||'').trim();
+  const raw=String(text||'').trim();
   if(!raw){ return '<div class="message">(no answer)</div>'; }
-  raw=raw.replace(/\s*\|\s*/g, '\n');
-  const blocks=raw.split(/\n{2,}/).map(x=>x.trim()).filter(Boolean);
-  if(blocks.length>1){
-    return '<div class="answerText">'+blocks.map(block=>'<div class="answerBlock">'+block.split(/\n+/).map(line=>'<span class="answerLine">'+escapeHtml(line.trim())+'</span>').join('')+'</div>').join('')+'</div>';
-  }
-  return '<div class="answerText">'+raw.split(/\n+/).map(line=>'<span class="answerLine">'+escapeHtml(line.trim())+'</span>').join('')+'</div>';
+  return '<div class="answerText">'+raw.split(/\n+/).map(line=>'<span class="answerLine">'+linkifyAnswerLine(line)+'</span>').join('')+'</div>';
 }
 function addMessage(text, cls='item', options={}) {
   const el=document.createElement('div');
