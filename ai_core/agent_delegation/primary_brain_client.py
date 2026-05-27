@@ -98,6 +98,7 @@ class PrimaryBrainDelegationClient:
             status=status,
             final_answer=final_answer,
             pending_action=pending_action,
+            results=results,
         ):
             fallback_answer = await self._direct_public_answer_fallback(request=request, core_run_id=core_run_id)
             if self._answer_has_result_material(fallback_answer):
@@ -766,6 +767,7 @@ class PrimaryBrainDelegationClient:
         status: str,
         final_answer: str,
         pending_action: Any,
+        results: dict[str, Any] | None = None,
     ) -> bool:
         """Use a small direct-answer fallback only for non-artifact participants.
 
@@ -781,9 +783,46 @@ class PrimaryBrainDelegationClient:
             return False
         if self._shared_context_has_missing_required_inputs(context):
             return False
+        if self._results_contain_blocking_execution_failure(results):
+            return False
         if str(status or "").lower() in {"requires_input", "requires_key", "paused", "failed", "timeout", "blocked", "waiting_for_input"}:
             return False
         return not self._answer_has_result_material(final_answer)
+
+    def _results_contain_blocking_execution_failure(self, results: dict[str, Any] | None) -> bool:
+        """Return True when primary execution explicitly rejected its material.
+
+        A direct public-answer fallback is useful for pure direct responses, but
+        it must not convert a failed execution-quality gate into a successful
+        answer.  The check is structural and generic: it looks for failure
+        states/codes in the runtime result tree, not for task names or domains.
+        """
+        if not isinstance(results, dict):
+            return False
+
+        blocking_statuses = {"failed_quality_gate", "requires_input", "waiting_for_input", "blocked", "failed_by_dependency"}
+        blocking_codes = {"generated_answer_quality_failed"}
+
+        def walk(value: Any) -> bool:
+            if isinstance(value, dict):
+                status = str(value.get("status") or value.get("_status") or "").casefold()
+                if status in blocking_statuses:
+                    return True
+                error = value.get("error")
+                if isinstance(error, dict) and str(error.get("code") or "").casefold() in blocking_codes:
+                    return True
+                if str(value.get("code") or "").casefold() in blocking_codes:
+                    return True
+                for nested in value.values():
+                    if walk(nested):
+                        return True
+            elif isinstance(value, list):
+                for nested in value:
+                    if walk(nested):
+                        return True
+            return False
+
+        return walk(results)
 
     def _shared_context_has_missing_required_inputs(self, context: dict[str, Any]) -> bool:
         """Return True when the selected execution context still needs user input.

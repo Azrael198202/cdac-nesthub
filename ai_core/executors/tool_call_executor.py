@@ -2439,6 +2439,13 @@ class ToolCallExecutor:
         params = tool_input.get("parameters") if isinstance(tool_input.get("parameters"), dict) else {}
         if isinstance(params.get("known"), dict):
             known.update(params.get("known") or {})
+        for key, value in params.items():
+            if key in {"known", "optional", "missing_required", "missing_information", "context", "source_step"}:
+                continue
+            if key in {"timestamp", "system_clock", "timezone"} and key not in tool_input:
+                continue
+            if isinstance(value, (str, int, float, bool, list, dict)):
+                known.setdefault(str(key), value)
         for key, value in tool_input.items():
             if key in {"known", "parameters", "optional", "context", "source_step"}:
                 continue
@@ -2466,34 +2473,31 @@ class ToolCallExecutor:
             )
         }
         executor_instruction = self._executor_generation_instruction(step=step)
+        parameter_lines = self._render_confirmed_parameters_for_generation(known)
         rendered = (
             "FINAL_DELIVERABLE_REQUEST=" + executor_instruction[:1200] +
             "\nOBJECTIVE=" + str(step.get("objective") or state.get("input") or "")[:600] +
-            "\nCONFIRMED_PARAMETERS=" + json.dumps(make_json_safe(known), ensure_ascii=False, separators=(",", ":"))[:1600] +
-            "\nReturn one JSON object where answer_material contains only the completed final deliverable, not a requirements summary."
+            "\nCONFIRMED_PARAMETERS_JSON=" + json.dumps(make_json_safe(known), ensure_ascii=False, separators=(",", ":"))[:1600] +
+            "\nCONFIRMED_PARAMETER_CONSTRAINTS=\n" + parameter_lines[:1800] +
+            "\nEXECUTION_DIRECTIVE=Use the confirmed parameter constraints as the concrete content brief. Produce the completed final deliverable now. The answer_material value must start directly with the deliverable content itself, not with an explanation of the task, agent, request, parameters, readiness, or plan."
         )
-        adapter = {
-            "adapter_id": "content_generation_execution_adapter",
-            "provider_route": ["ollama", "openai"],
-            "provider_timeout_seconds": 90,
-            "max_provider_attempts": 1,
-            "max_prompt_tokens": 900,
-            "max_schema_chars": 600,
-            "provider_options": {"temperature": 0.4, "num_predict": 900, "num_ctx": 2048, "think": False},
-        }
-
-        async def _generate_once(user_prompt: str) -> dict[str, Any]:
-            return await self.provider_router.generate_json(
+        try:
+            generated = await self.provider_router.generate_json(
                 run_id=run_id,
                 node_id="content_generation_execution",
-                adapter=adapter,
+                adapter={
+                    "adapter_id": "content_generation_execution_adapter",
+                    "provider_route": ["ollama", "openai"],
+                    "provider_timeout_seconds": 90,
+                    "max_provider_attempts": 1,
+                    "max_prompt_tokens": 900,
+                    "max_schema_chars": 600,
+                    "provider_options": {"temperature": 0.4, "num_predict": 900, "num_ctx": 2048, "think": False},
+                },
                 prompt=prompt,
-                rendered_user_prompt=user_prompt,
+                rendered_user_prompt=rendered,
                 schema=schema,
             )
-
-        try:
-            generated = await _generate_once(rendered)
         except Exception as exc:
             return {
                 "input": tool_input,
@@ -2507,16 +2511,40 @@ class ToolCallExecutor:
             }
 
         answer = str(generated.get("answer_material") or generated.get("final_answer") or generated.get("content") or "").strip()
-        quality = self._generated_answer_quality(answer=answer, step=step, known=known) if answer else {"passed": False, "reason": "empty_answer_material", "source_type": "model_generated"}
+        if not answer:
+            return None
+        quality = self._generated_answer_quality(answer=answer, step=step, known=known)
+
+        # A local model may return a planning/request summary even when the
+        # content-generation path asked for the final deliverable.  Retry once
+        # with a narrower prompt before failing the node.  This is generic: it
+        # relies only on the output contract and quality decision, not on any
+        # domain-specific task names or example requests.
         if not quality.get("passed"):
-            repair_rendered = (
+            retry_rendered = (
                 rendered
                 + "\nPREVIOUS_OUTPUT_REJECTED_REASON="
                 + str(quality.get("reason") or "quality gate failed")
-                + "\nGenerate the completed final deliverable now. The answer_material field must contain the deliverable itself. Do not state that the agent was tasked, asked, ready, able, or will produce something."
+                + "\nReturn the completed final deliverable itself in answer_material. "
+                  "Do not describe the assignment, capability, plan, readiness, or parameters."
             )
             try:
-                repaired = await _generate_once(repair_rendered)
+                repaired = await self.provider_router.generate_json(
+                    run_id=run_id,
+                    node_id="content_generation_execution_retry",
+                    adapter={
+                        "adapter_id": "content_generation_execution_retry_adapter",
+                        "provider_route": ["ollama", "openai"],
+                        "provider_timeout_seconds": 90,
+                        "max_provider_attempts": 1,
+                        "max_prompt_tokens": 900,
+                        "max_schema_chars": 600,
+                        "provider_options": {"temperature": 0.35, "num_predict": 1200, "num_ctx": 2048, "think": False},
+                    },
+                    prompt=prompt,
+                    rendered_user_prompt=retry_rendered,
+                    schema=schema,
+                )
                 repaired_answer = str(repaired.get("answer_material") or repaired.get("final_answer") or repaired.get("content") or "").strip()
                 repaired_quality = self._generated_answer_quality(answer=repaired_answer, step=step, known=known) if repaired_answer else {"passed": False, "reason": "empty_answer_material", "source_type": "model_generated"}
                 if repaired_quality.get("passed"):
@@ -2525,13 +2553,14 @@ class ToolCallExecutor:
                     quality = repaired_quality
             except Exception:
                 pass
-        if not answer or not quality.get("passed"):
+
+        if not quality.get("passed"):
             return {
                 "input": tool_input,
                 "result": {
                     "status": "failed_quality_gate",
                     "error": {"code": "generated_answer_quality_failed", "message": str(quality.get("reason") or "quality gate failed")},
-                    "data": {"answer_material_quality": quality},
+                    "data": {"answer_material_quality": quality, "rejected_answer_preview": answer[:300]},
                     "source": "model_generated_content",
                     "requires_human_confirmation": False,
                 },
@@ -2559,43 +2588,131 @@ class ToolCallExecutor:
         return {"input": tool_input, "result": result}
 
     def _generated_answer_quality(self, *, answer: str, step: dict[str, Any], known: dict[str, Any]) -> dict[str, Any]:
-        """Generic guard against returning planning/request summaries as final content."""
+        """Generic guard against returning planning/request summaries as final content.
+
+        The guard is intentionally domain-neutral. It only checks whether the
+        candidate answer is the actual deliverable promised by the execution
+        contract, rather than a meta-description of the task, capability, or
+        parameters.  It does not hard-code task names or business vocabulary.
+        """
         text = " ".join(str(answer or "").split())
         lower = text.casefold()
-        word_count = len(text.split())
+        words = text.split()
         if not text:
             return {"passed": False, "reason": "empty_answer_material", "source_type": "model_generated"}
-        summary_markers = (
-            " can ", " capable of ", " is able to ", "the request is", "requirements",
-            "parameters", "based on the provided", "will generate", "next step",
-            " has been tasked ", " tasked with ", " was tasked ", " asked to ",
-            " ready to ", " will produce ", " will write ", " should write ",
-            " is requested ", " has been asked ", " has been instructed ",
+
+        # Generic meta-output markers. These indicate that the model described
+        # the assignment or execution state instead of producing the deliverable.
+        hard_summary_markers = (
+            "has been tasked with",
+            "was tasked with",
+            "is tasked with",
+            "tasked with",
+            "has been asked to",
+            "was asked to",
+            "asked to",
+            "has been requested to",
+            "is requested to",
+            "ready to",
+            "is ready to",
+            "will write",
+            "will produce",
+            "will generate",
+            "will create",
+            "going to write",
+            "going to produce",
+            "is capable of",
+            "can produce",
+            "can generate",
+            "the agent will",
+            "the task is to",
         )
-        padded = f" {lower} "
-        if any(marker in padded for marker in summary_markers) and word_count < 80:
-            return {"passed": False, "reason": "answer_looks_like_request_summary", "source_type": "model_generated", "actual_words": word_count}
+        if any(marker in lower for marker in hard_summary_markers):
+            return {
+                "passed": False,
+                "reason": "answer_looks_like_request_or_capability_summary",
+                "source_type": "model_generated",
+                "actual_words": len(words),
+            }
+
+        soft_summary_markers = (
+            "capable of",
+            "requirements",
+            "parameters",
+            "based on the provided",
+            "next step",
+            "objective is",
+            "request is",
+        )
+        if len(words) < 80 and any(marker in lower for marker in soft_summary_markers):
+            return {
+                "passed": False,
+                "reason": "answer_looks_like_short_internal_summary",
+                "source_type": "model_generated",
+                "actual_words": len(words),
+            }
+
         requested_counts: list[int] = []
-        count_sources: list[Any] = list(known.values())
-        for key in ("execution_instruction", "executor_instruction", "objective", "content", "instruction", "request"):
-            value = step.get(key) if isinstance(step, dict) else None
-            if isinstance(value, (str, int, float)):
-                count_sources.append(value)
-        prompt_contract = step.get("prompt_contract") if isinstance(step.get("prompt_contract"), dict) else {}
-        for value in prompt_contract.values():
-            if isinstance(value, (str, int, float)):
-                count_sources.append(value)
-        for value in count_sources:
+        import re
+
+        def collect_numbers(value: Any) -> None:
+            if value is None:
+                return
+            if isinstance(value, dict):
+                for nested in value.values():
+                    collect_numbers(nested)
+                return
+            if isinstance(value, (list, tuple, set)):
+                for nested in value:
+                    collect_numbers(nested)
+                return
             for match in re.findall(r"(?<!\d)(\d{2,5})(?!\d)", str(value)):
                 try:
                     requested_counts.append(int(match))
                 except ValueError:
                     pass
+
+        collect_numbers(known)
+        # Include the step contract itself because some generated workflows keep
+        # size/format requirements in objective/notes instead of parameters.
+        collect_numbers({
+            "name": step.get("name"),
+            "objective": step.get("objective"),
+            "description": step.get("description"),
+            "notes": step.get("notes"),
+            "input_schema": step.get("input_schema"),
+            "output_schema": step.get("output_schema"),
+            "validation_rule": step.get("validation_rule"),
+        })
+
         if requested_counts:
             target = max(requested_counts)
-            if target >= 50 and word_count < max(30, int(target * 0.4)):
-                return {"passed": False, "reason": "answer_too_short_for_requested_size", "source_type": "model_generated", "requested_size_hint": target, "actual_words": word_count}
-        return {"passed": True, "reason": "model_generated_content_contract", "source_type": "model_generated", "actual_words": word_count}
+            if target >= 50 and len(words) < max(30, int(target * 0.4)):
+                return {
+                    "passed": False,
+                    "reason": "answer_too_short_for_requested_size",
+                    "source_type": "model_generated",
+                    "requested_size_hint": target,
+                    "actual_words": len(words),
+                }
+        return {"passed": True, "reason": "model_generated_content_contract", "source_type": "model_generated"}
+
+
+    def _render_confirmed_parameters_for_generation(self, known: dict[str, Any]) -> str:
+        """Render confirmed runtime parameters as generic executor constraints."""
+        if not isinstance(known, dict) or not known:
+            return "- no confirmed parameter values were provided"
+        lines: list[str] = []
+        for key in sorted(known.keys(), key=lambda item: str(item)):
+            value = known.get(key)
+            if value is None or value == "":
+                continue
+            if isinstance(value, (dict, list)):
+                rendered = json.dumps(make_json_safe(value), ensure_ascii=False, separators=(",", ":"))
+            else:
+                rendered = str(value)
+            lines.append(f"- {key}: {rendered[:400]}")
+        return "\n".join(lines) if lines else "- no confirmed parameter values were provided"
 
     async def _try_local_knowledge_execution(
         self,
@@ -2910,6 +3027,17 @@ class ToolCallExecutor:
         params = step.get("parameters") if isinstance(step.get("parameters"), dict) else {}
         known = params.get("known") if isinstance(params.get("known"), dict) else {}
         optional = params.get("optional") if isinstance(params.get("optional"), dict) else {}
+        if not known and not optional:
+            # Runtime-generated routes may store confirmed values as a flat
+            # parameters object instead of parameters.known. Preserve those
+            # existing values as known execution inputs without interpreting
+            # field names or adding any task-specific assumptions.
+            known = {
+                str(key): value
+                for key, value in params.items()
+                if key not in {"known", "optional", "missing_required", "missing_information"}
+                and isinstance(value, (str, int, float, bool, list, dict))
+            }
 
         tool_input: dict[str, Any] = {}
         for source in (known, optional):
