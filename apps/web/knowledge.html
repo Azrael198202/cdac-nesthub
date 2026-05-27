@@ -67,7 +67,7 @@
         $('supported').innerHTML=exts;
         const docs=await jsonFetch('/api/knowledge/documents?knowledge_base_id='+encodeURIComponent(kb()));
         const items=docs.documents||[];
-        $('documents').innerHTML=items.length?items.map(d=>`<div class="doc"><div class="doc-title">${esc(d.filename)}</div><div class="doc-meta">${esc(d.document_id)} · ${esc(d.status)} · chunks: ${esc(d.chunk_count)} · ${esc(d.created_at)}</div></div>`).join(''):'No documents loaded.';
+        $('documents').innerHTML=items.length?items.map(d=>`<div class="doc"><div class="doc-title">${esc(d.filename)}</div><div class="doc-meta">${esc(d.document_id)} · ${esc(d.status)} · chunks: ${esc(d.chunk_count)} · embeddings: ${esc(d.embedding_count||0)} · ${esc(d.created_at)}</div></div>`).join(''):'No documents loaded.';
       }catch(e){$('status').textContent='Error: '+e.message;}
     }
     $('uploadBtn').onclick=async()=>{
@@ -85,7 +85,7 @@
         const data=await jsonFetch('/api/knowledge/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,knowledge_base_id:kb(),limit:Number($('limit').value||5)})});
         $('answer').innerHTML=`<div class="doc"><div class="doc-title">${esc(data.status)}</div><div class="hit-text">${esc(data.answer_material||'')}</div></div>`;
         const hits=data.results||[];
-        $('results').innerHTML=hits.length?hits.map((h,i)=>`<div class="hit"><div class="doc-title">[${i+1}] ${esc(h.filename||h.document_id||'source')}</div><div class="hit-meta">score: ${Number(h.score||0).toFixed(4)} · chunk: ${esc(h.chunk_index)}</div><div class="hit-text">${esc(h.text)}</div></div>`).join(''):'No matching evidence.';
+        $('results').innerHTML=hits.length?hits.map((h,i)=>`<div class="hit"><div class="doc-title">[${i+1}] ${esc(h.filename||h.document_id||'source')}</div><div class="hit-meta">score: ${Number(h.score||0).toFixed(4)} · vector: ${Number(h.vector_score||0).toFixed(4)} · lexical: ${Number(h.lexical_score||0).toFixed(4)} · chunk: ${esc(h.chunk_index)}</div><div class="hit-text">${esc(h.text)}</div></div>`).join(''):'No matching evidence.';
       }catch(e){$('answer').innerHTML=`<span class="pill err">${esc(e.message)}</span>`;}
       finally{$('queryBtn').disabled=false;}
     };

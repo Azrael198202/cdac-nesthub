@@ -3,25 +3,17 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
-from uuid import uuid4
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from ai_core.config.paths import RUNTIME_KNOWLEDGE, RUNTIME_DATASETS
-from ai_core.context.vector_memory_store import VectorMemoryStore
+from ai_core.config.paths import RUNTIME_DATASETS, RUNTIME_KNOWLEDGE
 from ai_core.knowledge.document_processor import DocumentChunker, DocumentTextExtractor, SUPPORTED_EXTENSIONS
+from ai_core.knowledge.embedding_index import LocalVectorIndex
 
 
 class KnowledgeService:
-    """Small local runtime knowledge service.
-
-    v70.11 separates *knowledge that can answer the user* from *knowledge that
-    only helps the runtime*.  Prompt optimization memories, workflow templates,
-    and success-pattern records are useful hints, but they must never be used as
-    final answer evidence.  This class stays domain-neutral by classifying
-    records by generic memory metadata and internal-structure signals instead of
-    by business-specific words.
-    """
+    """Local runtime knowledge service with chunk and embedding lifecycles."""
 
     FINAL_ANSWER_MEMORY_TYPES = {
         "factual_observation",
@@ -51,7 +43,6 @@ class KnowledgeService:
         "output",
     }
 
-
     DOCUMENT_MEMORY_TYPE = "user_provided_document_fact"
     DOCUMENT_USAGE_SCOPE = "final_answer_evidence"
 
@@ -63,27 +54,34 @@ class KnowledgeService:
         content_type: str | None = None,
         knowledge_base_id: str | None = None,
     ) -> dict[str, Any]:
-        """Ingest one user-provided document into runtime knowledge.
-
-        This method is domain-neutral: it extracts text, chunks it, stores chunk
-        evidence, and mirrors chunks into the local vector memory store.  It does
-        not infer business meaning from filenames or text.
-        """
         source_path = Path(file_path)
-        extractor = DocumentTextExtractor()
-        extracted = extractor.extract(source_path, original_name=original_name, content_type=content_type)
-        chunks = DocumentChunker().chunk(extracted.text)
         kb_id = self._safe_id(knowledge_base_id or "default")
         document_id = "doc_" + uuid4().hex[:16]
         root = self._document_root(kb_id)
-        root.mkdir(parents=True, exist_ok=True)
+        now = datetime.utcnow().isoformat()
+
+        processing_state = self._processing_state(
+            knowledge_base_id=kb_id,
+            document_id=document_id,
+            status="extracting",
+            updated_at=now,
+        )
+        self._write_json(root / "processing" / f"{document_id}.json", processing_state)
+
+        extractor = DocumentTextExtractor()
+        extracted = extractor.extract(source_path, original_name=original_name, content_type=content_type)
         raw_dir = root / "files"
+        document_dir = root / "documents"
+        chunk_dir = root / "chunks"
         raw_dir.mkdir(parents=True, exist_ok=True)
+        document_dir.mkdir(parents=True, exist_ok=True)
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+
         stored_path = raw_dir / f"{document_id}{source_path.suffix.lower()}"
         if source_path.exists() and source_path.resolve() != stored_path.resolve():
             stored_path.write_bytes(source_path.read_bytes())
-        now = datetime.utcnow().isoformat()
-        meta = {
+
+        document_payload = {
             "document_id": document_id,
             "knowledge_base_id": kb_id,
             "filename": original_name or source_path.name,
@@ -92,41 +90,85 @@ class KnowledgeService:
             "content_type": content_type or extracted.metadata.get("content_type") or "",
             "extension": extracted.metadata.get("extension") or source_path.suffix.lower(),
             "size_bytes": extracted.metadata.get("size_bytes") or (source_path.stat().st_size if source_path.exists() else 0),
-            "status": "indexed" if chunks else "empty",
-            "chunk_count": len(chunks),
+            "text": extracted.text,
             "warnings": extracted.warnings,
             "created_at": now,
             "updated_at": now,
         }
-        self._append_jsonl(root / "documents.jsonl", meta)
+        self._write_json(document_dir / f"{document_id}.json", document_payload)
+
+        processing_state.update({"status": "chunking", "updated_at": datetime.utcnow().isoformat()})
+        self._write_json(root / "processing" / f"{document_id}.json", processing_state)
+        chunker = DocumentChunker()
+        chunks = chunker.chunk(extracted.text, document_id=document_id)
         chunk_records: list[dict[str, Any]] = []
-        vector_store = VectorMemoryStore(root=root / "vector_memory", collection_name=f"kb_{kb_id}")
         for chunk in chunks:
             record = {
                 "memory_type": self.DOCUMENT_MEMORY_TYPE,
                 "usage_scope": self.DOCUMENT_USAGE_SCOPE,
                 "knowledge_base_id": kb_id,
                 "document_id": document_id,
-                "chunk_id": f"{document_id}_chunk_{chunk['chunk_index']}",
+                "chunk_id": chunk["chunk_id"],
                 "chunk_index": chunk["chunk_index"],
                 "text": chunk["text"],
                 "metadata": {
-                    "filename": meta["filename"],
+                    "filename": document_payload["filename"],
                     "document_id": document_id,
                     "knowledge_base_id": kb_id,
+                    "chunk_id": chunk["chunk_id"],
                     "chunk_index": chunk["chunk_index"],
+                    "char_start": chunk.get("char_start"),
+                    "char_end": chunk.get("char_end"),
+                    "token_estimate": chunk.get("token_estimate"),
+                    "previous_chunk_id": chunk.get("previous_chunk_id"),
+                    "next_chunk_id": chunk.get("next_chunk_id"),
                 },
                 "created_at": now,
             }
             chunk_records.append(record)
-            self._append_jsonl(root / "chunks.jsonl", record)
-            vector_store.add_text(
-                text=chunk["text"],
-                metadata=record["metadata"],
-                memory_type=self.DOCUMENT_MEMORY_TYPE,
-                usage_scope=self.DOCUMENT_USAGE_SCOPE,
-            )
-        return {"ok": True, "status": meta["status"], "document": meta, "chunk_count": len(chunk_records)}
+        self._write_jsonl(chunk_dir / f"{document_id}.jsonl", chunk_records, append=False)
+        self._append_jsonl(root / "chunks.jsonl", chunk_records)
+
+        processing_state.update({"status": "embedding", "updated_at": datetime.utcnow().isoformat()})
+        self._write_json(root / "processing" / f"{document_id}.json", processing_state)
+        index = self._vector_index(kb_id)
+        index_result = index.upsert_texts([
+            {
+                "id": record["chunk_id"],
+                "text": record["text"],
+                "metadata": record["metadata"],
+            }
+            for record in chunk_records
+        ])
+
+        status = "indexed" if chunk_records else "empty"
+        meta = {
+            "document_id": document_id,
+            "knowledge_base_id": kb_id,
+            "filename": document_payload["filename"],
+            "stored_path": document_payload["stored_path"],
+            "source_path": document_payload["source_path"],
+            "content_type": document_payload["content_type"],
+            "extension": document_payload["extension"],
+            "size_bytes": document_payload["size_bytes"],
+            "status": status,
+            "chunk_count": len(chunk_records),
+            "embedding_count": int(index_result.get("indexed_count") or 0),
+            "embedding_provider": index_result.get("embedding_provider"),
+            "warnings": extracted.warnings,
+            "created_at": now,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        self._append_jsonl(root / "documents.jsonl", meta)
+        self._update_registry(kb_id, meta)
+        processing_state.update({
+            "status": status,
+            "chunk_count": len(chunk_records),
+            "embedding_count": int(index_result.get("indexed_count") or 0),
+            "updated_at": datetime.utcnow().isoformat(),
+        })
+        self._write_json(root / "processing" / f"{document_id}.json", processing_state)
+        return {"ok": True, "status": status, "document": meta, "chunk_count": len(chunk_records), "embedding": index_result}
 
     def list_documents(self, *, knowledge_base_id: str | None = None) -> dict[str, Any]:
         kb_ids = [self._safe_id(knowledge_base_id)] if knowledge_base_id else self._knowledge_base_ids()
@@ -145,39 +187,23 @@ class KnowledgeService:
         kb_ids = [self._safe_id(knowledge_base_id)] if knowledge_base_id else self._knowledge_base_ids()
         results: list[dict[str, Any]] = []
         for kb_id in kb_ids:
-            root = self._document_root(kb_id)
-            vector_hits = VectorMemoryStore(root=root / "vector_memory", collection_name=f"kb_{kb_id}").search(
-                q, limit=limit, usage_scope=self.DOCUMENT_USAGE_SCOPE
-            )
-            if vector_hits:
-                for hit in vector_hits:
-                    meta = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
-                    results.append({
-                        "knowledge_base_id": kb_id,
-                        "document_id": meta.get("document_id"),
-                        "chunk_index": meta.get("chunk_index"),
-                        "filename": meta.get("filename"),
-                        "text": hit.get("text") or "",
-                        "score": float(hit.get("score") or 0.0),
-                        "source": hit.get("source") or "vector_memory",
-                    })
-            else:
-                query_terms = self._terms(q)
-                for row in self._read_jsonl(root / "chunks.jsonl"):
-                    text = str(row.get("text") or "")
-                    score = self._score(text, query_terms, {})
-                    if score <= 0:
-                        continue
-                    meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-                    results.append({
-                        "knowledge_base_id": kb_id,
-                        "document_id": row.get("document_id"),
-                        "chunk_index": row.get("chunk_index"),
-                        "filename": meta.get("filename"),
-                        "text": text,
-                        "score": score,
-                        "source": "chunk_index",
-                    })
+            vector_hits = self._vector_index(kb_id).search(q, limit=limit)
+            for hit in vector_hits:
+                meta = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
+                results.append({
+                    "knowledge_base_id": kb_id,
+                    "document_id": meta.get("document_id"),
+                    "chunk_id": meta.get("chunk_id") or hit.get("id"),
+                    "chunk_index": meta.get("chunk_index"),
+                    "filename": meta.get("filename"),
+                    "text": hit.get("text") or "",
+                    "score": float(hit.get("score") or 0.0),
+                    "vector_score": hit.get("vector_score"),
+                    "lexical_score": hit.get("lexical_score"),
+                    "source": hit.get("source") or "local_vector_index",
+                })
+            if not vector_hits:
+                results.extend(self._keyword_search_documents(q, kb_id=kb_id, limit=limit))
         results.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
         return results[: max(1, int(limit))]
 
@@ -198,6 +224,7 @@ class KnowledgeService:
                 "ref": idx,
                 "knowledge_base_id": hit.get("knowledge_base_id"),
                 "document_id": hit.get("document_id"),
+                "chunk_id": hit.get("chunk_id"),
                 "filename": hit.get("filename"),
                 "chunk_index": hit.get("chunk_index"),
                 "score": hit.get("score"),
@@ -261,17 +288,7 @@ class KnowledgeService:
                 return item
         return None
 
-
-    def best_hint(
-        self,
-        query: str,
-        *,
-        required_terms: dict[str, list[str]] | None = None,
-    ) -> dict[str, Any] | None:
-        """Return a matching hint-only record for prompt/workflow optimization.
-
-        The caller may use this as context, but not as final answer material.
-        """
+    def best_hint(self, query: str, *, required_terms: dict[str, list[str]] | None = None) -> dict[str, Any] | None:
         for item in self.search(query, required_terms=required_terms, limit=10, final_answer_only=False):
             classification = item.get("classification") if isinstance(item.get("classification"), dict) else {}
             if classification.get("usage_scope") == "hint_only":
@@ -284,7 +301,6 @@ class KnowledgeService:
         node_id = str(row.get("node_id") or row.get("_node_id") or "").lower()
         if isinstance(row.get("data"), dict):
             node_id = node_id or str((row.get("data") or {}).get("node_id") or "").lower()
-
         reasons: list[str] = []
         if memory_type in self.HINT_ONLY_MEMORY_TYPES:
             reasons.append(f"memory_type={memory_type}_is_hint_only")
@@ -294,18 +310,11 @@ class KnowledgeService:
             reasons.append(f"node_id={node_id}_is_internal_runtime_stage")
         if self._looks_like_runtime_structure(row, flattened_text):
             reasons.append("record_looks_like_runtime_structure_not_user_answer")
-
         final_answer_eligible = False
         if memory_type in self.FINAL_ANSWER_MEMORY_TYPES and not reasons:
             final_answer_eligible = True
-
-        # Tool execution results may be stored without a memory_type. Allow only
-        # when they explicitly contain user-facing answer/result fields or verified
-        # evidence quality. Do not allow workflow/planning structures.
-        if not memory_type and not reasons:
-            if self._has_user_answer_payload(row):
-                final_answer_eligible = True
-
+        if not memory_type and not reasons and self._has_user_answer_payload(row):
+            final_answer_eligible = True
         return {
             "memory_type": memory_type or "unknown",
             "usage_scope": "final_answer_evidence" if final_answer_eligible else "hint_only",
@@ -313,69 +322,7 @@ class KnowledgeService:
             "reasons": reasons,
         }
 
-    def _memory_type(self, row: dict[str, Any]) -> str:
-        candidates = [row.get("memory_type")]
-        for key in ("data", "metadata", "record"):
-            nested = row.get(key) if isinstance(row.get(key), dict) else {}
-            candidates.append(nested.get("memory_type"))
-        for item in candidates:
-            if isinstance(item, str) and item.strip():
-                return item.strip().lower()
-        return ""
-
-    def _looks_like_runtime_structure(self, row: dict[str, Any], text: str) -> bool:
-        runtime_keys = {
-            "planned_steps", "approved_structure", "_executor_type", "_node_id",
-            "_adapter_id", "required_capabilities", "blocking_missing_information",
-            "human_interaction", "execution_ready", "next_action", "source_run_id",
-        }
-        found = 0
-        def walk(v: Any) -> None:
-            nonlocal found
-            if found >= 3:
-                return
-            if isinstance(v, dict):
-                for k, vv in v.items():
-                    if str(k) in runtime_keys:
-                        found += 1
-                    walk(vv)
-            elif isinstance(v, list):
-                for item in v[:20]:
-                    walk(item)
-        walk(row)
-        low = (text or "").lower()
-        markers = ["planned_steps", "workflow_planning", "approved_structure", "_executor_type", "recommendation"]
-        found += sum(1 for m in markers if m in low)
-        return found >= 3
-
-    def _has_user_answer_payload(self, row: dict[str, Any]) -> bool:
-        answer_keys = {"final_answer", "answer", "summary", "message", "text", "answer_material"}
-        quality_passed = False
-        found_answer = False
-        def walk(v: Any) -> None:
-            nonlocal found_answer, quality_passed
-            if isinstance(v, dict):
-                q = v.get("answer_material_quality")
-                if isinstance(q, dict) and q.get("passed") is True:
-                    quality_passed = True
-                for k, vv in v.items():
-                    if str(k) in answer_keys and isinstance(vv, str) and vv.strip():
-                        found_answer = True
-                    walk(vv)
-            elif isinstance(v, list):
-                for item in v[:20]:
-                    walk(item)
-        walk(row)
-        return found_answer and quality_passed
-
-
     def save_answer_result(self, *, run_id: str, query: str, final_answer: str, facts: list[dict[str, Any]] | None = None, trust_summary: dict[str, Any] | None = None) -> None:
-        """Persist a verified user-facing answer for later local retrieval.
-
-        Runtime outputs are stored as data, not shipped with source packages.
-        This method intentionally writes only final-answer evidence records and
-        compact verified facts, not raw pages or intermediate node JSON.
-        """
         RUNTIME_KNOWLEDGE.mkdir(parents=True, exist_ok=True)
         record = {
             "memory_type": "answer_result",
@@ -398,12 +345,7 @@ class KnowledgeService:
         answer = row.get("final_answer") or row.get("answer") or row.get("message")
         if not isinstance(answer, str) or not answer.strip():
             return None
-        return {
-            "answer": answer.strip(),
-            "source": item.get("source"),
-            "score": item.get("score"),
-            "memory_type": item.get("memory_type"),
-        }
+        return {"answer": answer.strip(), "source": item.get("source"), "score": item.get("score"), "memory_type": item.get("memory_type")}
 
     def status(self) -> dict[str, Any]:
         files = self._knowledge_files()
@@ -415,6 +357,16 @@ class KnowledgeService:
                 if self.classify_record(row, source_path=path, flattened_text=self._flatten_text(row)).get("final_answer_eligible"):
                     eligible += 1
         document_state = self.list_documents()
+        chunk_count = 0
+        embedding_count = 0
+        vector_stats: dict[str, Any] = {}
+        for kb_id in document_state.get("knowledge_bases") or ["default"]:
+            root = self._document_root(kb_id)
+            for path in (root / "chunks").glob("*.jsonl") if (root / "chunks").exists() else []:
+                chunk_count += len(self._read_jsonl(path))
+            stats = self._vector_index(kb_id).stats()
+            embedding_count += int(stats.get("vector_count") or 0)
+            vector_stats[kb_id] = stats
         return {
             "enabled": True,
             "paths": [str(RUNTIME_KNOWLEDGE), str(RUNTIME_DATASETS)],
@@ -422,18 +374,40 @@ class KnowledgeService:
             "record_count": rows,
             "final_answer_eligible_count": eligible,
             "document_count": len(document_state.get("documents") or []),
+            "chunk_count": chunk_count,
+            "embedding_count": embedding_count,
             "knowledge_bases": document_state.get("knowledge_bases") or [],
             "supported_extensions": sorted(SUPPORTED_EXTENSIONS),
+            "vector_indexes": vector_stats,
         }
 
     def save_success_case(self, run_id: str, data: dict) -> None:
         RUNTIME_KNOWLEDGE.mkdir(parents=True, exist_ok=True)
         with (RUNTIME_KNOWLEDGE / "success_cases.jsonl").open("a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "run_id": run_id,
-                "created_at": datetime.utcnow().isoformat(),
-                "data": data,
-            }, ensure_ascii=False) + "\n")
+            f.write(json.dumps({"run_id": run_id, "created_at": datetime.utcnow().isoformat(), "data": data}, ensure_ascii=False) + "\n")
+
+    def _keyword_search_documents(self, query: str, *, kb_id: str, limit: int) -> list[dict[str, Any]]:
+        root = self._document_root(kb_id)
+        query_terms = self._terms(query)
+        results: list[dict[str, Any]] = []
+        for row in self._read_jsonl(root / "chunks.jsonl"):
+            text = str(row.get("text") or "")
+            score = self._score(text, query_terms, {})
+            if score <= 0:
+                continue
+            meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            results.append({
+                "knowledge_base_id": kb_id,
+                "document_id": row.get("document_id"),
+                "chunk_id": row.get("chunk_id"),
+                "chunk_index": row.get("chunk_index"),
+                "filename": meta.get("filename"),
+                "text": text,
+                "score": score,
+                "source": "keyword_chunk_index",
+            })
+        results.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
+        return results[: max(1, int(limit))]
 
     def _knowledge_files(self) -> list[Path]:
         files: list[Path] = []
@@ -443,10 +417,14 @@ class KnowledgeService:
         documents_root = RUNTIME_KNOWLEDGE / "document_bases"
         if documents_root.exists():
             files.extend(sorted(documents_root.glob("*/chunks.jsonl")))
+            files.extend(sorted(documents_root.glob("*/chunks/*.jsonl")))
         return files
 
     def _document_root(self, knowledge_base_id: str) -> Path:
         return RUNTIME_KNOWLEDGE / "document_bases" / self._safe_id(knowledge_base_id or "default")
+
+    def _vector_index(self, knowledge_base_id: str) -> LocalVectorIndex:
+        return LocalVectorIndex(root=self._document_root(knowledge_base_id), index_name="chunks")
 
     def _knowledge_base_ids(self) -> list[str]:
         root = RUNTIME_KNOWLEDGE / "document_bases"
@@ -455,15 +433,50 @@ class KnowledgeService:
         ids = [p.name for p in sorted(root.iterdir()) if p.is_dir()]
         return ids or ["default"]
 
+    def _processing_state(self, **kwargs: Any) -> dict[str, Any]:
+        payload = dict(kwargs)
+        payload.setdefault("created_at", datetime.utcnow().isoformat())
+        return payload
+
+    def _update_registry(self, knowledge_base_id: str, document_meta: dict[str, Any]) -> None:
+        root = self._document_root(knowledge_base_id)
+        registry_path = root / "registry.json"
+        registry = {"knowledge_base_id": knowledge_base_id, "documents": [], "updated_at": datetime.utcnow().isoformat()}
+        if registry_path.exists():
+            try:
+                existing = json.loads(registry_path.read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    registry.update(existing)
+            except Exception:
+                pass
+        docs = [item for item in registry.get("documents", []) if isinstance(item, dict) and item.get("document_id") != document_meta.get("document_id")]
+        docs.append(document_meta)
+        registry["documents"] = docs
+        registry["updated_at"] = datetime.utcnow().isoformat()
+        self._write_json(registry_path, registry)
+
     def _safe_id(self, value: str | None) -> str:
         raw = str(value or "default").strip() or "default"
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("._-")
         return safe[:80] or "default"
 
-    def _append_jsonl(self, path: Path, row: dict[str, Any]) -> None:
+    def _append_jsonl(self, path: Path, rows: dict[str, Any] | list[dict[str, Any]]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        payloads = rows if isinstance(rows, list) else [rows]
         with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            for row in payloads:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def _write_jsonl(self, path: Path, rows: list[dict[str, Any]], *, append: bool = False) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        mode = "a" if append else "w"
+        with path.open(mode, encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _compact_excerpt(self, text: str, *, max_chars: int = 900) -> str:
         value = re.sub(r"\s+", " ", str(text or "")).strip()
@@ -507,10 +520,7 @@ class KnowledgeService:
         matched: dict[str, list[str]] = {}
         missing: list[str] = []
         for key, aliases in required_terms.items():
-            found = []
-            for alias in aliases:
-                if str(alias).strip() and str(alias).lower() in low:
-                    found.append(str(alias))
+            found = [str(alias) for alias in aliases if str(alias).strip() and str(alias).lower() in low]
             if found:
                 matched[key] = found[:5]
             else:
@@ -520,7 +530,7 @@ class KnowledgeService:
         return {"passed": not missing, "coverage_ratio": ratio, "matched": matched, "missing": missing}
 
     def _terms(self, query: str) -> set[str]:
-        return {t.lower() for t in re.findall(r"[A-Za-z0-9_\-]{3,}", str(query or ""))}
+        return {t.lower() for t in re.findall(r"[\w\-]{2,}", str(query or ""), flags=re.UNICODE)}
 
     def _flatten_text(self, value: Any, *, max_chars: int = 20000) -> str:
         parts: list[str] = []
@@ -533,7 +543,7 @@ class KnowledgeService:
                 parts.append(str(v))
             elif isinstance(v, dict):
                 for k, vv in v.items():
-                    if str(k).lower() in {"provenance", "trace", "raw_html"}:
+                    if str(k).lower() in {"provenance", "trace", "raw_html", "vector"}:
                         continue
                     parts.append(str(k))
                     walk(vv)
@@ -542,3 +552,58 @@ class KnowledgeService:
                     walk(item)
         walk(value)
         return "\n".join(parts)[:max_chars]
+
+    def _memory_type(self, row: dict[str, Any]) -> str:
+        candidates = [row.get("memory_type")]
+        for key in ("data", "metadata", "record"):
+            nested = row.get(key) if isinstance(row.get(key), dict) else {}
+            candidates.append(nested.get("memory_type"))
+        for item in candidates:
+            if isinstance(item, str) and item.strip():
+                return item.strip().lower()
+        return ""
+
+    def _looks_like_runtime_structure(self, row: dict[str, Any], text: str) -> bool:
+        runtime_keys = {
+            "planned_steps", "approved_structure", "_executor_type", "_node_id",
+            "_adapter_id", "required_capabilities", "blocking_missing_information",
+            "human_interaction", "execution_ready", "next_action", "source_run_id",
+        }
+        found = 0
+        def walk(v: Any) -> None:
+            nonlocal found
+            if found >= 3:
+                return
+            if isinstance(v, dict):
+                for k, vv in v.items():
+                    if str(k) in runtime_keys:
+                        found += 1
+                    walk(vv)
+            elif isinstance(v, list):
+                for item in v[:20]:
+                    walk(item)
+        walk(row)
+        low = (text or "").lower()
+        markers = ["planned_steps", "workflow_planning", "approved_structure", "_executor_type", "recommendation"]
+        found += sum(1 for marker in markers if marker in low)
+        return found >= 3
+
+    def _has_user_answer_payload(self, row: dict[str, Any]) -> bool:
+        answer_keys = {"final_answer", "answer", "summary", "message", "text", "answer_material"}
+        quality_passed = False
+        found_answer = False
+        def walk(v: Any) -> None:
+            nonlocal found_answer, quality_passed
+            if isinstance(v, dict):
+                q = v.get("answer_material_quality")
+                if isinstance(q, dict) and q.get("passed") is True:
+                    quality_passed = True
+                for k, vv in v.items():
+                    if str(k) in answer_keys and isinstance(vv, str) and vv.strip():
+                        found_answer = True
+                    walk(vv)
+            elif isinstance(v, list):
+                for item in v[:20]:
+                    walk(item)
+        walk(row)
+        return found_answer and quality_passed

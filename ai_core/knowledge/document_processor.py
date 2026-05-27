@@ -174,25 +174,91 @@ class DocumentTextExtractor:
 class DocumentChunker:
     """Generic chunking independent of document domain."""
 
-    def chunk(self, text: str, *, max_chars: int = 1200, overlap_chars: int = 160) -> list[dict[str, Any]]:
+    def chunk(
+        self,
+        text: str,
+        *,
+        document_id: str | None = None,
+        max_chars: int = 1200,
+        overlap_chars: int = 160,
+    ) -> list[dict[str, Any]]:
         cleaned = str(text or "").strip()
         if not cleaned:
             return []
+        safe_max = max(300, int(max_chars or 1200))
+        safe_overlap = max(0, min(int(overlap_chars or 0), safe_max // 2))
         units = self._paragraph_units(cleaned)
         chunks: list[dict[str, Any]] = []
         current = ""
+        cursor = 0
+
         for unit in units:
-            if current and len(current) + len(unit) + 2 > max_chars:
-                chunks.append({"text": current.strip(), "char_count": len(current.strip())})
-                prefix = current[-overlap_chars:] if overlap_chars > 0 else ""
+            candidate = (current + "\n\n" + unit).strip() if current else unit
+            if current and len(candidate) > safe_max:
+                text_value = current.strip()
+                start = max(0, cursor - len(text_value))
+                chunks.append(self._make_chunk(text_value, len(chunks), document_id=document_id, char_start=start))
+                prefix = text_value[-safe_overlap:] if safe_overlap > 0 else ""
                 current = (prefix + "\n" + unit).strip() if prefix else unit
+            elif len(unit) > safe_max:
+                if current.strip():
+                    text_value = current.strip()
+                    start = max(0, cursor - len(text_value))
+                    chunks.append(self._make_chunk(text_value, len(chunks), document_id=document_id, char_start=start))
+                    current = ""
+                for part in self._split_large_unit(unit, max_chars=safe_max, overlap_chars=safe_overlap):
+                    chunks.append(self._make_chunk(part, len(chunks), document_id=document_id, char_start=cursor))
+                    cursor += max(1, len(part) - safe_overlap)
+                continue
             else:
-                current = (current + "\n\n" + unit).strip() if current else unit
+                current = candidate
+            cursor += len(unit) + 2
+
         if current.strip():
-            chunks.append({"text": current.strip(), "char_count": len(current.strip())})
-        for index, chunk in enumerate(chunks):
-            chunk["chunk_index"] = index
+            text_value = current.strip()
+            start = max(0, cursor - len(text_value))
+            chunks.append(self._make_chunk(text_value, len(chunks), document_id=document_id, char_start=start))
+        self._link_chunks(chunks)
         return chunks
+
+    def _make_chunk(self, text: str, index: int, *, document_id: str | None, char_start: int) -> dict[str, Any]:
+        chunk_id = f"{document_id or 'document'}_chunk_{index}"
+        value = str(text or "").strip()
+        return {
+            "chunk_id": chunk_id,
+            "chunk_index": index,
+            "text": value,
+            "char_count": len(value),
+            "char_start": max(0, int(char_start or 0)),
+            "char_end": max(0, int(char_start or 0)) + len(value),
+            "token_estimate": self._token_estimate(value),
+        }
+
+    def _link_chunks(self, chunks: list[dict[str, Any]]) -> None:
+        for index, chunk in enumerate(chunks):
+            chunk["previous_chunk_id"] = chunks[index - 1]["chunk_id"] if index > 0 else None
+            chunk["next_chunk_id"] = chunks[index + 1]["chunk_id"] if index + 1 < len(chunks) else None
+
+    def _split_large_unit(self, text: str, *, max_chars: int, overlap_chars: int) -> list[str]:
+        value = str(text or "").strip()
+        if not value:
+            return []
+        parts: list[str] = []
+        step = max(1, max_chars - overlap_chars)
+        for start in range(0, len(value), step):
+            part = value[start:start + max_chars].strip()
+            if part:
+                parts.append(part)
+            if start + max_chars >= len(value):
+                break
+        return parts
+
+    def _token_estimate(self, text: str) -> int:
+        value = str(text or "")
+        word_like = re.findall(r"[\w\-]+", value, flags=re.UNICODE)
+        if word_like:
+            return max(1, int(len(word_like) * 1.25))
+        return max(1, len(value) // 4)
 
     def _paragraph_units(self, text: str) -> list[str]:
         paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
