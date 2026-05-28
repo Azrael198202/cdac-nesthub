@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import math
+import os
+import re
 import textwrap
 import time
 from pathlib import Path
@@ -14,6 +16,10 @@ from ai_core.config.paths import RUNTIME_DIR
 # installation is disabled or failed. Keeping this as data avoids shelling out
 # or hardcoding any business/domain behavior in ai_core.
 _MINIMAL_GIF_BASE64 = "R0lGODlhAQABAPAAAP///wAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw=="
+
+_DEFAULT_FRAMES = 8
+_MIN_FRAMES = 8
+_ABSOLUTE_MAX_FRAMES = 120
 
 
 def generate_text_animation(*, prompt: str, options: dict[str, Any] | None = None, provider: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -48,39 +54,54 @@ def generate_text_animation(*, prompt: str, options: dict[str, Any] | None = Non
             ImageFont=ImageFont,
         )
     except Exception as exc:
-        # Last-resort fallback: return a valid GIF artifact so text->video never
-        # collapses into chat/failure merely because optional preview rendering
-        # dependencies are unavailable in the runtime environment.
-        target.write_bytes(base64.b64decode(_MINIMAL_GIF_BASE64))
-        if not target.exists() or target.stat().st_size <= 0:
-            return {
-                "ok": False,
-                "status": "failed",
-                "reason": "generic_text_animation_failed",
-                "error_type": exc.__class__.__name__,
-                "error": str(exc)[-1000:],
-            }
+        # Do not return a single-frame placeholder as a successful video. The
+        # runtime dependency recovery layer should install declared dependencies
+        # such as Pillow. If rendering still fails, surface a diagnostic so the
+        # next provider or setup flow can handle it.
+        try:
+            target.write_bytes(base64.b64decode(_MINIMAL_GIF_BASE64))
+        except Exception:
+            pass
         return {
-            "ok": True,
-            "status": "completed",
-            "file_path": str(target),
-            "provider_warning": {
-                "reason": "pillow_render_fallback_used",
-                "error_type": exc.__class__.__name__,
-                "error": str(exc)[-500:],
-            },
+            "ok": False,
+            "status": "failed",
+            "reason": "generic_text_animation_render_failed",
+            "minimum_required_frames": _MIN_FRAMES,
+            "error_type": exc.__class__.__name__,
+            "error": str(exc)[-1000:],
         }
 
     if not target.exists() or target.stat().st_size <= 0:
         return {"ok": False, "status": "failed", "reason": "empty_animation_output"}
-    return {"ok": True, "status": "completed", "file_path": str(target)}
+    frame_count = _inspect_gif_frame_count(target)
+    if frame_count < _MIN_FRAMES:
+        return {
+            "ok": False,
+            "status": "failed",
+            "reason": "animation_frame_count_too_low",
+            "frame_count": frame_count,
+            "minimum_required_frames": _MIN_FRAMES,
+            "file_path": str(target),
+        }
+    return {
+        "ok": True,
+        "status": "completed",
+        "file_path": str(target),
+        "artifact_metadata": {
+            "frame_count": frame_count,
+            "minimum_required_frames": _MIN_FRAMES,
+            "duration_ms": frame_count * _int_value(options.get("frame_duration_ms") or provider.get("frame_duration_ms"), 120),
+        },
+    }
 
 
 def _generate_with_pillow(*, target: Path, prompt: str, options: dict[str, Any], provider: dict[str, Any], Image: Any, ImageDraw: Any, ImageFont: Any) -> None:
     width = _int_value(options.get("width") or provider.get("width"), 768)
     height = _int_value(options.get("height") or provider.get("height"), 432)
-    frames_count = max(8, min(_int_value(options.get("frames") or provider.get("frames"), 36), 120))
-    duration_ms = max(40, min(_int_value(options.get("frame_duration_ms") or provider.get("frame_duration_ms"), 90), 1000))
+    max_frames = _effective_max_frames(options=options, provider=provider)
+    requested_frames = _requested_frame_count(prompt=prompt, options=options, provider=provider)
+    frames_count = max(_MIN_FRAMES, min(requested_frames, max_frames))
+    duration_ms = max(40, min(_int_value(options.get("frame_duration_ms") or provider.get("frame_duration_ms"), 120), 1000))
 
     frames = []
     font_large = _font(ImageFont, 28)
@@ -104,6 +125,58 @@ def _generate_with_pillow(*, target: Path, prompt: str, options: dict[str, Any],
         frames.append(img)
 
     frames[0].save(target, save_all=True, append_images=frames[1:], duration=duration_ms, loop=0, optimize=True)
+
+
+def _requested_frame_count(*, prompt: str, options: dict[str, Any], provider: dict[str, Any]) -> int:
+    explicit = options.get("frames") or options.get("frame_count")
+    if explicit is not None:
+        return _int_value(explicit, _DEFAULT_FRAMES)
+    text = str(prompt or "")
+    patterns = [
+        r"(?<!\d)(\d{1,3})\s*(?:frames?|frame\s*count)",
+        r"(?<!\d)(\d{1,3})\s*(?:帧|フレーム|コマ)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return _int_value(match.group(1), _DEFAULT_FRAMES)
+    return _int_value(provider.get("frames"), _DEFAULT_FRAMES)
+
+
+def _effective_max_frames(*, options: dict[str, Any], provider: dict[str, Any]) -> int:
+    configured = _int_value(options.get("max_frames") or provider.get("max_frames"), 0)
+    if configured > 0:
+        return max(_MIN_FRAMES, min(configured, _ABSOLUTE_MAX_FRAMES))
+    cpu_count = os.cpu_count() or 2
+    memory_gb = _available_memory_gb()
+    if cpu_count >= 16 and memory_gb >= 24:
+        return 96
+    if cpu_count >= 8 and memory_gb >= 12:
+        return 64
+    if cpu_count >= 4 and memory_gb >= 6:
+        return 36
+    return 24
+
+
+def _available_memory_gb() -> float:
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    kb = float(line.split()[1])
+                    return kb / 1024 / 1024
+    except Exception:
+        return 0.0
+    return 0.0
+
+
+def _inspect_gif_frame_count(path: Path) -> int:
+    try:
+        from PIL import Image  # type: ignore
+        with Image.open(path) as img:
+            return int(getattr(img, "n_frames", 1) or 1)
+    except Exception:
+        return 1
 
 
 def _int_value(value: Any, fallback: int) -> int:

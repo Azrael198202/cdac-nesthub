@@ -85,6 +85,7 @@ class VideoGenerationService(ImageGenerationService):
             "setup_actions": self._setup_actions(route=route, providers=providers, attempted=attempted),
             "interaction_request": self._first_missing_secret_action(attempted),
             "stage_policy": stage_meta,
+            "artifact_metadata": artifact_metadata,
         }
         self._record_execution_event(result=final, duration_seconds=time.time() - start_time, attempted=attempted)
         return final
@@ -715,6 +716,7 @@ class VideoGenerationService(ImageGenerationService):
             mime = "image/gif"
         elif filename.lower().endswith(".mov"):
             mime = "video/quicktime"
+        artifact_metadata = result.get("artifact_metadata") if isinstance(result.get("artifact_metadata"), dict) else {}
         material = {
             "type": "video",
             "download_id": download_id,

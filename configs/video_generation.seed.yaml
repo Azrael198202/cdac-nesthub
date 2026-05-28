@@ -28,8 +28,9 @@ providers:
       PIL: Pillow>=10.0.0
     width: 768
     height: 432
-    frames: 36
-    frame_duration_ms: 90
+    frames: 8
+    max_frames: 64
+    frame_duration_ms: 120
     setup_hints:
       - This provider is a generic local text-to-animation preview fallback and does not require external model assets.
   local_video_generation:
