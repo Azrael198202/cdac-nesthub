@@ -50,6 +50,8 @@ class AgentDelegationRuntime:
             "run_id": run_id,
             "origin": "auxiliary_brain",
             "status": "running",
+            "graph_id": str(task_graph.get("graph_id") or task_name),
+            "task_graph_id": str(task_graph.get("graph_id") or task_name),
             "task_name": task_name,
             "community_id": community_id,
             "started_at": self._now(),

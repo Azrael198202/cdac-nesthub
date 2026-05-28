@@ -86,8 +86,10 @@ class NaturalConversationService:
             "model_route_name": "stable_synthesis",
             "provider_route": [],
             "max_prompt_tokens": 600,
-            "provider_timeout_seconds": 18,
+            "provider_timeout_seconds": 45,
             "max_provider_attempts": 1,
+            "accept_raw_text_as_final_answer": True,
+            "json_repair_retry": False,
             "provider_options": {"temperature": 0, "num_predict": 120, "num_ctx": 1024, "think": False},
         })
         run_id = "conversation_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
@@ -101,11 +103,11 @@ class NaturalConversationService:
                     rendered_user_prompt=rendered,
                     schema=schema,
                 ),
-                timeout=18,
+                timeout=50,
             )
         except Exception:
             return ""
-        answer = str((result or {}).get("answer") or "").strip()
+        answer = str((result or {}).get("answer") or (result or {}).get("final_answer") or "").strip()
         return answer
 
     def _safe_fallback_answer(self, text: str) -> str:

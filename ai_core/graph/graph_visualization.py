@@ -272,7 +272,7 @@ class GraphVisualStateBuilder:
             status = self._normalize_status(event.get("status"))
             if status not in {"running", "completed", "failed", "skipped", "reused", "repair", "waiting", "waiting_input"}:
                 continue
-            target_ids = self._event_target_node_ids(event, id_by_index)
+            target_ids = self._event_target_node_ids(event, id_by_index, nodes)
             for node_id in target_ids:
                 if not node_id:
                     continue
@@ -313,11 +313,13 @@ class GraphVisualStateBuilder:
             ids[index] = node_id
         return ids
 
-    def _event_target_node_ids(self, event: dict[str, Any], id_by_index: dict[int, str]) -> list[str]:
-        direct = str(event.get("participant_id") or event.get("node_id") or "").strip()
-        if direct and direct in set(id_by_index.values()):
+    def _event_target_node_ids(self, event: dict[str, Any], id_by_index: dict[int, str], nodes: list[dict[str, Any]] | None = None) -> list[str]:
+        direct = str(event.get("participant_id") or event.get("node_id") or event.get("id") or "").strip()
+        known = set(id_by_index.values())
+        if direct and (direct in known or not known):
             return [direct]
         stage = str(event.get("stage") or "")
+        message = str(event.get("message") or event.get("title") or "")
         candidates: list[str] = []
         for pattern in (r"participant_(\d+)", r"node_(\d+)"):
             match = re.search(pattern, stage)
@@ -325,7 +327,34 @@ class GraphVisualStateBuilder:
                 node_id = id_by_index.get(int(match.group(1)))
                 if node_id:
                     candidates.append(node_id)
-        return candidates
+        # Some runtime telemetry is emitted with user-visible participant names
+        # rather than stable ids (for example "Preparing participant: X").
+        # Map by structural labels from the selected graph without relying on
+        # task-specific vocabulary.
+        if nodes:
+            haystack = f"{stage} {message}".casefold()
+            for idx, node in enumerate(nodes):
+                node_id = self._node_id(node, idx)
+                labels = [
+                    node_id,
+                    str(node.get("participant_id") or ""),
+                    str(node.get("participant_name") or ""),
+                    str(node.get("agent_name") or ""),
+                    str(node.get("display_name") or ""),
+                    str(node.get("name") or ""),
+                    str(node.get("label") or ""),
+                ]
+                for label in labels:
+                    normalized = str(label or "").strip().casefold()
+                    if normalized and normalized in haystack:
+                        candidates.append(node_id)
+                        break
+        # Preserve order while deduplicating.
+        out: list[str] = []
+        for item in candidates:
+            if item and item not in out:
+                out.append(item)
+        return out
 
     def _topological_lanes(self, nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> list[list[str]]:
         ids = [str(node.get("id")) for node in nodes]
@@ -414,6 +443,7 @@ class GraphVisualStateBuilder:
         matched = [
             r for r in dicts
             if str(r.get("graph_id") or "") == graph_id
+            or str(r.get("task_graph_id") or "") == graph_id
             or str(r.get("task_name") or "") == graph_id
         ]
         matched.sort(key=lambda item: str(item.get("completed_at") or item.get("started_at") or item.get("updated_at") or ""))
