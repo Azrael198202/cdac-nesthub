@@ -15,6 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 from ai_core.config.paths import CONFIGS_DIR, RUNTIME_CONFIGS, RUNTIME_DIR, RUNTIME_DOWNLOADS, RUNTIME_GENERATED
+from ai_core.dependencies import RuntimeDependencyInstaller
 from ai_core.media.image_generation_service import ImageGenerationService
 from ai_core.secrets.secret_store import SecretStore
 
@@ -51,7 +52,7 @@ class VideoGenerationService(ImageGenerationService):
                 attempted.append({"provider": provider_name, "status": "skipped", "reason": "not_allowed_by_runtime_source_policy"})
                 continue
             try:
-                result = await self._call_provider(provider_name=provider_name, provider=provider, prompt=prompt, options=options)
+                result = await self._call_provider_with_dependency_recovery(provider_name=provider_name, provider=provider, prompt=prompt, options=options)
             except Exception as exc:
                 result = {
                     "ok": False,
@@ -185,6 +186,37 @@ class VideoGenerationService(ImageGenerationService):
         caps = " ".join(str(x) for x in provider.get("capabilities", []) or [])
         modalities = json.dumps(provider.get("modalities") or {}, ensure_ascii=False)
         return "video_generation" in f"{text} {caps} {modalities}" or endpoint
+
+
+    async def _call_provider_with_dependency_recovery(self, *, provider_name: str, provider: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
+        installer = RuntimeDependencyInstaller()
+        declared_results = installer.install_declared_dependencies(provider)
+        try:
+            result = await self._call_provider(provider_name=provider_name, provider=provider, prompt=prompt, options=options)
+            if declared_results:
+                result = dict(result)
+                result.setdefault("dependency_recovery", declared_results)
+            return result
+        except (ModuleNotFoundError, ImportError) as exc:
+            missing = installer.missing_import_from_exception(exc)
+            install_result = installer.install_for_missing_import(missing, provider=provider)
+            if not install_result.get("ok"):
+                return {
+                    "ok": False,
+                    "status": install_result.get("status") or "requires_setup",
+                    "reason": "python_dependency_missing",
+                    "missing_import": missing,
+                    "dependency_install": install_result,
+                    "dependency_recovery": declared_results,
+                    "error_type": exc.__class__.__name__,
+                    "error": str(exc)[-1000:],
+                }
+            result = await self._call_provider(provider_name=provider_name, provider=provider, prompt=prompt, options=options)
+            result = dict(result)
+            recovery = list(declared_results)
+            recovery.append(install_result)
+            result["dependency_recovery"] = recovery
+            return result
 
     async def _call_provider(self, *, provider_name: str, provider: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
         protocol = str(provider.get("protocol") or provider.get("type") or "").strip()
@@ -436,12 +468,33 @@ class VideoGenerationService(ImageGenerationService):
 
     def _first_missing_secret_action(self, attempted: list[dict[str, Any]]) -> dict[str, Any] | None:
         for item in attempted:
-            if str(item.get("reason") or "") == "missing_secret":
+            reason = str(item.get("reason") or "")
+            if reason == "missing_secret":
                 secret_key = str(item.get("secret_key") or "").strip()
                 provider = str(item.get("provider") or "external_video_generation").strip()
                 if secret_key:
                     return self._missing_secret_interaction(provider_name=provider, secret_key=secret_key)
+            if reason == "missing_endpoint":
+                provider = str(item.get("provider") or "external_video_generation").strip()
+                return self._missing_endpoint_interaction(provider_name=provider)
         return None
+
+    def _missing_endpoint_interaction(self, *, provider_name: str) -> dict[str, Any]:
+        return {
+            "type": "runtime_config_input",
+            "kind": "endpoint_input",
+            "provider": provider_name,
+            "message": "Please enter the video generation endpoint for this external provider.",
+            "config_fields": [
+                {
+                    "name": "VIDEO_GENERATION_ENDPOINT",
+                    "env": "VIDEO_GENERATION_ENDPOINT",
+                    "interaction_type": "endpoint",
+                    "provider": provider_name,
+                    "required": True,
+                }
+            ],
+        }
 
     def _redact_url(self, url: str) -> str:
         return re.sub(r"([?&][^=]*(?:key|token|secret|credential)[^=]*=)[^&]+", r"\1***", str(url), flags=re.IGNORECASE)
@@ -564,7 +617,8 @@ class VideoGenerationService(ImageGenerationService):
         for item in attempted[:5]:
             provider = str(item.get("provider") or "provider")
             reason = str(item.get("reason") or item.get("status") or "not_ready")
-            parts.append(f"{provider}: {reason}")
+            detail = str(item.get("error_type") or item.get("missing_import") or "").strip()
+            parts.append(f"{provider}: {reason}" + (f" ({detail})" if detail else ""))
         return "Video generation provider setup is required. Attempted providers: " + "; ".join(parts) + "."
 
     def _setup_actions(self, *, route: list[str], providers: dict[str, Any], attempted: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -575,6 +629,13 @@ class VideoGenerationService(ImageGenerationService):
             attempt = attempted_by_provider.get(provider_name, {})
             protocol = str(provider.get("protocol") or provider.get("type") or "").strip()
             reason = str(attempt.get("reason") or "").strip()
+            if reason == "missing_endpoint":
+                actions.append({
+                    "provider": provider_name,
+                    "kind": "set_endpoint",
+                    "env": "VIDEO_GENERATION_ENDPOINT",
+                    "message": "Set VIDEO_GENERATION_ENDPOINT for this provider or disable it in runtime/configs/media/video_generation.yaml.",
+                })
             if str(provider.get("api_key_env") or provider.get("secret_key") or "").strip():
                 env_name = str(provider.get("api_key_env") or provider.get("secret_key"))
                 actions.append({

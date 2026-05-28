@@ -21,6 +21,11 @@ providers:
     source_policy:
       mode: media_allowed
     callable: ai_core.media.providers.generic_text_animation_provider:generate_text_animation
+    python_dependencies:
+      - import: PIL
+        package: Pillow>=10.0.0
+    python_import_package_map:
+      PIL: Pillow>=10.0.0
     width: 768
     height: 432
     frames: 36
