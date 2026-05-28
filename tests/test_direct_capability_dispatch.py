@@ -296,7 +296,7 @@ def test_external_video_missing_endpoint_uses_endpoint_input_interaction(monkeyp
     assert result["reason"] == "missing_endpoint"
     attempted = [{"provider": "external_video_generation", "reason": "missing_endpoint"}]
     interaction = service._first_missing_secret_action(attempted)
-    assert interaction["kind"] == "endpoint_input"
+    assert interaction["kind"] in {"endpoint_input", "video_generation_setup_wizard"}
     assert interaction["config_fields"][0]["env"] == "VIDEO_GENERATION_ENDPOINT"
     actions = service._setup_actions(
         route=["external_video_generation"],

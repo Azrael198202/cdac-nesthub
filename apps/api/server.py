@@ -88,6 +88,10 @@ class AgentStudioSecretRequest(BaseModel):
     value: str
 
 
+class VideoGenerationSetupRequest(BaseModel):
+    provided_inputs: dict[str, Any] | None = None
+
+
 class ArtifactEditRequest(BaseModel):
     instruction: str
     feedback: str | None = None
@@ -585,6 +589,18 @@ async def agent_studio_secret(req: AgentStudioSecretRequest):
     SecretStore().set(key, value)
     return JSONResponse({"ok": True, "status": "saved", "key": key, "path": "runtime/configs/secrets/secrets.json"})
 
+
+
+
+@app.post("/api/agent-studio/video-generation/setup")
+async def agent_studio_video_generation_setup(req: VideoGenerationSetupRequest):
+    try:
+        from ai_core.media.video_generation_setup_wizard import VideoGenerationSetupWizard
+        payload = VideoGenerationSetupWizard().apply_inputs(req.provided_inputs or {})
+        return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
+    except Exception as exc:
+        _write_api_error_log(area="video_generation_setup", exc=exc, context={"provided_keys": list((req.provided_inputs or {}).keys())})
+        return JSONResponse({"ok": False, "status": "failed", "error": str(exc), "diagnostic_log": "runtime/logs/api_errors.jsonl"}, status_code=500)
 
 @app.post("/api/agent-studio/resume-run")
 async def agent_studio_resume_run(req: AgentStudioResumeRunRequest):

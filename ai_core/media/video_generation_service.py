@@ -19,6 +19,7 @@ from ai_core.config.paths import CONFIGS_DIR, RUNTIME_CONFIGS, RUNTIME_DIR, RUNT
 from ai_core.dependencies import RuntimeDependencyInstaller
 from ai_core.media.image_generation_service import ImageGenerationService
 from ai_core.secrets.secret_store import SecretStore
+from ai_core.media.video_generation_setup_wizard import VideoGenerationSetupWizard
 
 
 class VideoGenerationService(ImageGenerationService):
@@ -124,13 +125,17 @@ class VideoGenerationService(ImageGenerationService):
                     )
                     return final
 
+            setup_actions = self._setup_actions(route=route, providers=providers, attempted=attempted)
+            interaction_request = self._first_missing_secret_action(attempted)
+            if interaction_request is None:
+                interaction_request = VideoGenerationSetupWizard().interaction_request(setup_actions=setup_actions, attempted=attempted)
             final = {
                 "ok": False,
                 "status": "requires_setup",
                 "message": self._setup_message(attempted),
                 "attempted": attempted,
-                "setup_actions": self._setup_actions(route=route, providers=providers, attempted=attempted),
-                "interaction_request": self._first_missing_secret_action(attempted),
+                "setup_actions": setup_actions,
+                "interaction_request": interaction_request,
                 "stage_policy": stage_meta,
             }
             self._record_execution_event(result=final, duration_seconds=time.time() - start_time, attempted=attempted)
@@ -766,9 +771,23 @@ class VideoGenerationService(ImageGenerationService):
     def _missing_endpoint_interaction(self, *, provider_name: str) -> dict[str, Any]:
         return {
             "type": "runtime_config_input",
-            "kind": "endpoint_input",
+            "kind": "video_generation_setup_wizard",
+            "capability_type": "video_generation",
             "provider": provider_name,
-            "message": "Please enter the video generation endpoint for this external provider.",
+            "message": "Please enter the video generation endpoint for this external provider. The runtime will save it and retry the same request.",
+            "fields": [
+                {
+                    "kind": "video_generation_setup",
+                    "field": "VIDEO_GENERATION_ENDPOINT",
+                    "name": "VIDEO_GENERATION_ENDPOINT",
+                    "label": "External video endpoint",
+                    "message": "Enter the external video generation endpoint.",
+                    "placeholder": "https://api.example.com/v1/video/generate",
+                    "input_type": "text",
+                    "provider": provider_name,
+                    "required": True,
+                }
+            ],
             "config_fields": [
                 {
                     "name": "VIDEO_GENERATION_ENDPOINT",

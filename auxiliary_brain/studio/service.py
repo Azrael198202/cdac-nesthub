@@ -18,6 +18,7 @@ from ai_core.artifacts.artifact_edit_service import ArtifactEditService
 from ai_core.commands import CommandSetService
 from ai_core.capabilities.capability_dispatcher import CapabilityDispatcher
 from ai_core.media import ImageGenerationService, VideoGenerationService
+from ai_core.media.video_generation_setup_wizard import VideoGenerationSetupWizard
 from ai_core.context.execution_reuse_store import ExecutionReuseStore
 from ai_core.execution.parameter_resolution import ParameterResolutionPipeline, PreflightResolutionContext
 from auxiliary_brain.studio.instruction_workflow_planner import InstructionWorkflowPlanner
@@ -80,7 +81,11 @@ class AgentStudioService:
         if routed.action == "chat":
             direct_capability = await self.direct_capability_dispatcher.dispatch(
                 text=message,
-                context={"session_id": session_id, "surface": "agent_studio"},
+                context={
+                    "session_id": session_id,
+                    "surface": "agent_studio",
+                    "provided_inputs": provided_inputs or {},
+                },
             )
             if direct_capability is not None:
                 return direct_capability
@@ -167,8 +172,15 @@ class AgentStudioService:
 
     async def _handle_direct_video_generation(self, request: dict[str, Any]) -> dict[str, Any]:
         text = str(request.get("text") or "").strip()
+        provided_inputs = request.get("provided_inputs") if isinstance(request.get("provided_inputs"), dict) else {}
+        setup_result = None
+        if provided_inputs:
+            setup_result = VideoGenerationSetupWizard().apply_inputs(provided_inputs)
         service = VideoGenerationService()
         provider_payload = await service.generate(prompt=text, options={})
+        if setup_result:
+            provider_payload = dict(provider_payload)
+            provider_payload["runtime_setup"] = setup_result
         status = str(provider_payload.get("status") or ("completed" if provider_payload.get("ok") else "failed"))
         if not provider_payload.get("ok"):
             return {
