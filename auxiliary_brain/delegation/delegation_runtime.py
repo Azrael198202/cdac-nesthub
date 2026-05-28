@@ -1264,6 +1264,12 @@ class AgentDelegationRuntime:
                 status=str(payload.get("status") or "failed"),
                 final_answer=str(payload.get("message") or "Image generation provider setup is required."),
                 workflow_results={"status": payload.get("status") or "failed", "capability_type": "image_generation", "provider_result": payload},
+                pending_action={
+                    "kind": "capability_provider_setup",
+                    "capability_type": "image_generation",
+                    "setup_actions": payload.get("setup_actions") or [],
+                    "attempted": payload.get("attempted") or [],
+                },
                 origin="auxiliary_brain",
             )
         material = payload.get("material") if isinstance(payload.get("material"), dict) else {}

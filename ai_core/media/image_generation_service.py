@@ -53,11 +53,11 @@ class ImageGenerationService:
             if not provider.get("enabled", True):
                 attempted.append({"provider": provider_name, "status": "skipped", "reason": "disabled"})
                 continue
-            if not self.user_selection.route_allowed(provider_name, provider):
-                attempted.append({"provider": provider_name, "status": "skipped", "reason": "not_allowed_by_user_model_source"})
+            if not self._media_provider_allowed(provider_name, provider):
+                attempted.append({"provider": provider_name, "status": "skipped", "reason": "not_allowed_by_runtime_source_policy"})
                 continue
             result = await self._call_provider(provider_name=provider_name, provider=provider, prompt=prompt, options=options)
-            attempted.append({"provider": provider_name, "status": result.get("status") or result.get("ok"), "reason": result.get("reason")})
+            attempted.append(self._attempt_record(provider_name=provider_name, result=result))
             if result.get("ok"):
                 material = self._persist_image(result, provider_name=provider_name, stage_meta=stage_meta)
                 final = {"ok": True, "status": "completed", "material": material, "attempted": attempted, "stage_policy": stage_meta}
@@ -68,8 +68,9 @@ class ImageGenerationService:
         final = {
             "ok": False,
             "status": "requires_setup",
-            "message": "No configured image generation provider produced image material.",
+            "message": self._setup_message(attempted),
             "attempted": attempted,
+            "setup_actions": self._setup_actions(route=route, providers=providers, attempted=attempted),
             "stage_policy": stage_meta,
         }
         self._record_execution_event(result=final, duration_seconds=time.time() - start_time, attempted=attempted)
@@ -102,12 +103,16 @@ class ImageGenerationService:
         shutil.copyfile(seed_path, runtime_path)
 
     def _image_seed_config(self) -> dict[str, Any]:
-        candidates = [RUNTIME_CONFIGS / "media" / "image_generation.yaml", CONFIGS_DIR / "image_generation.seed.yaml"]
-        for path in candidates:
+        # Load the packaged seed first, then overlay runtime overrides. This
+        # keeps newly added provider templates available even when an older
+        # runtime/configs/media/image_generation.yaml already exists.
+        merged: dict[str, Any] = {}
+        for path in [CONFIGS_DIR / "image_generation.seed.yaml", RUNTIME_CONFIGS / "media" / "image_generation.yaml"]:
             data = self.loader.load_yaml(path)
-            if isinstance(data, dict) and data:
-                return data
-        return {}
+            if not isinstance(data, dict) or not data:
+                continue
+            merged = self._merge_provider_config(merged, data)
+        return merged
 
     def _merge_provider_config(self, base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
         merged = json.loads(json.dumps(base or {}))
@@ -142,12 +147,24 @@ class ImageGenerationService:
         route = self.execution_policy.snapshot(provider_config=config2).filter_route(route or stage_route, providers)
         if not route:
             route = [name for name, provider in providers.items() if self._provider_can_generate_image(provider)]
+        for name, provider in providers.items():
+            if name not in route and self._provider_can_generate_image(provider) and self._media_provider_allowed(name, provider):
+                route.append(name)
         selected_provider = str(options.get("selected_provider") or "").strip()
         if selected_provider and selected_provider in providers:
             route = [selected_provider] + [item for item in route if item != selected_provider]
         else:
             route = self._rank_route_by_observations(route, providers)
         return route, providers, meta
+
+    def _media_provider_allowed(self, provider_name: str, provider: dict[str, Any]) -> bool:
+        source_policy = provider.get("source_policy") if isinstance(provider.get("source_policy"), dict) else {}
+        mode = str(source_policy.get("mode") or "").strip().lower()
+        if mode in {"always_allowed", "fallback_allowed", "media_allowed"}:
+            return True
+        if mode in {"disabled", "never"}:
+            return False
+        return self.user_selection.route_allowed(provider_name, provider)
 
     def _rank_route_by_observations(self, route: list[str], providers: dict[str, Any]) -> list[str]:
         """Reorder equivalent providers using runtime observations.
@@ -210,6 +227,56 @@ class ImageGenerationService:
         modalities = json.dumps(provider.get("modalities") or {}, ensure_ascii=False)
         return "image_generation" in f"{text} {caps} {modalities}" or bool(provider.get("image_generation_endpoint") or provider.get("image_endpoint"))
 
+    def _attempt_record(self, *, provider_name: str, result: dict[str, Any]) -> dict[str, Any]:
+        record = {
+            "provider": provider_name,
+            "status": result.get("status") or result.get("ok"),
+            "reason": result.get("reason"),
+        }
+        for key in ("endpoint", "root", "secret_key", "stderr"):
+            value = result.get(key)
+            if value:
+                record[key] = str(value)[-1000:] if key == "stderr" else value
+        return record
+
+    def _setup_message(self, attempted: list[dict[str, Any]]) -> str:
+        if not attempted:
+            return "Image generation is recognized, but no image provider is available in the current runtime route."
+        parts = []
+        for item in attempted[:5]:
+            provider = str(item.get("provider") or "provider")
+            reason = str(item.get("reason") or item.get("status") or "not_ready")
+            parts.append(f"{provider}: {reason}")
+        return "Image generation provider setup is required. Attempted providers: " + "; ".join(parts) + "."
+
+    def _setup_actions(self, *, route: list[str], providers: dict[str, Any], attempted: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        actions: list[dict[str, Any]] = []
+        attempted_by_provider = {str(x.get("provider") or ""): x for x in attempted if isinstance(x, dict)}
+        for provider_name in route:
+            provider = providers.get(provider_name) if isinstance(providers.get(provider_name), dict) else {}
+            attempt = attempted_by_provider.get(provider_name, {})
+            protocol = str(provider.get("protocol") or provider.get("type") or "").strip()
+            reason = str(attempt.get("reason") or "").strip()
+            if str(provider.get("api_key_env") or provider.get("secret_key") or "").strip():
+                env_name = str(provider.get("api_key_env") or provider.get("secret_key"))
+                actions.append({
+                    "provider": provider_name,
+                    "kind": "set_secret",
+                    "env": env_name,
+                    "message": f"Set {env_name} for this provider or disable it in runtime/configs/media/image_generation.yaml.",
+                })
+            if protocol in {"comfyui", "comfyui_runtime", "local_comfyui"} or "runtime" in provider:
+                actions.append({
+                    "provider": provider_name,
+                    "kind": "prepare_local_runtime",
+                    "message": "Prepare the configured local media runtime and model assets, or point runtime/configs/media/image_generation.yaml to an already running endpoint.",
+                    "reason": reason or str(attempt.get("status") or "not_ready"),
+                    "endpoint": provider.get("base_url") or (provider.get("runtime") or {}).get("base_url"),
+                })
+            if not provider:
+                actions.append({"provider": provider_name, "kind": "register_provider", "message": "Register a provider record for this route."})
+        return actions
+
     async def _call_provider(self, *, provider_name: str, provider: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
         protocol = str(provider.get("protocol") or provider.get("type") or "").strip()
         if protocol in {"comfyui", "comfyui_runtime", "local_comfyui"}:
@@ -238,8 +305,10 @@ class ImageGenerationService:
         prompt_id = str((queued or {}).get("prompt_id") or "")
         if not prompt_id:
             return {"ok": False, "status": "failed", "reason": "missing_prompt_id", "response": queued}
-        history = self._wait_comfy_history(endpoint=endpoint, prompt_id=prompt_id, timeout=float(runtime.get("generation_timeout_seconds") or provider.get("timeout_seconds") or options.get("timeout_seconds") or 300))
+        timeout_seconds = self._effective_generation_timeout(provider=provider, runtime=runtime, options=options)
+        history = self._wait_comfy_history(endpoint=endpoint, prompt_id=prompt_id, timeout=timeout_seconds)
         if not history.get("ok"):
+            history.setdefault("timeout_seconds", timeout_seconds)
             return history
         image = self._extract_comfy_image(endpoint=endpoint, history=history["history"], target_dir=self._provider_temp_dir(provider_name))
         if not image.get("ok"):
@@ -249,6 +318,30 @@ class ImageGenerationService:
     def _runtime_settings(self, provider: dict[str, Any]) -> dict[str, Any]:
         runtime = provider.get("runtime") if isinstance(provider.get("runtime"), dict) else {}
         return dict(runtime or {})
+
+    def _effective_generation_timeout(self, *, provider: dict[str, Any], runtime: dict[str, Any], options: dict[str, Any]) -> float:
+        configured = options.get("generation_timeout_seconds") or runtime.get("generation_timeout_seconds") or provider.get("timeout_seconds") or options.get("timeout_seconds") or 300
+        try:
+            value = float(configured)
+        except Exception:
+            value = 300.0
+        # Local media runtimes can legitimately finish after several minutes on
+        # CPU/MPS/low-memory environments. Treat the seed/runtime value as a
+        # lower bound, not as a hard business rule, so a successful backend job
+        # is not reported as provider failure before it has time to produce the
+        # artifact. Users may still reduce this per request with
+        # strict_timeout_seconds when they intentionally want a fast cutoff.
+        if options.get("strict_timeout_seconds") is not None:
+            try:
+                return max(1.0, float(options.get("strict_timeout_seconds")))
+            except Exception:
+                return max(1.0, value)
+        floor = runtime.get("minimum_generation_timeout_seconds") or provider.get("minimum_generation_timeout_seconds") or 900
+        try:
+            floor_value = float(floor)
+        except Exception:
+            floor_value = 900.0
+        return max(value, floor_value)
 
     def _provider_temp_dir(self, provider_name: str) -> Path:
         path = RUNTIME_DIR / "generated" / "media" / "temp" / provider_name
@@ -544,13 +637,16 @@ class ImageGenerationService:
             headers[str(provider.get("authorization_header") or "Authorization")] = str(provider.get("authorization_prefix") or "Bearer ") + secret
         req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers, method=str(provider.get("method") or "POST"))
         timeout = float(provider.get("timeout_seconds") or options.get("timeout_seconds") or 180)
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            raw = response.read()
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                raw = response.read()
+        except Exception as exc:
+            return {"ok": False, "status": "failed", "reason": "provider_request_failed", "endpoint": endpoint, "error": str(exc)[-1000:]}
         try:
             data = json.loads(raw.decode("utf-8"))
         except Exception:
             data = {"image_bytes": base64.b64encode(raw).decode("ascii")}
-        return self._normalize_provider_result(data)
+        return self._normalize_provider_result(data, provider=provider)
 
     def _render_payload(self, *, provider: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
         template = provider.get("request_template") if isinstance(provider.get("request_template"), dict) else {}
@@ -558,9 +654,18 @@ class ImageGenerationService:
             template = {"prompt": "{prompt}"}
         rendered = json.loads(json.dumps(template))
 
+        replacements = {"prompt": prompt}
+        for key in ("model", "size", "quality", "style", "width", "height"):
+            value = options.get(key, provider.get(key))
+            if value is not None:
+                replacements[key] = str(value)
+
         def walk(value: Any) -> Any:
             if isinstance(value, str):
-                return value.replace("{prompt}", prompt)
+                out = value
+                for key, replacement in replacements.items():
+                    out = out.replace("{" + key + "}", replacement)
+                return out
             if isinstance(value, list):
                 return [walk(x) for x in value]
             if isinstance(value, dict):
@@ -572,7 +677,8 @@ class ImageGenerationService:
             payload.update(options["request_overrides"])
         return payload
 
-    def _normalize_provider_result(self, result: Any) -> dict[str, Any]:
+    def _normalize_provider_result(self, result: Any, provider: dict[str, Any] | None = None) -> dict[str, Any]:
+        provider = provider if isinstance(provider, dict) else {}
         if not isinstance(result, dict):
             return {"ok": False, "status": "failed", "reason": "invalid_provider_result"}
         for key in ("file_path", "path", "output_path"):
@@ -586,13 +692,35 @@ class ImageGenerationService:
         data = result.get("data")
         if isinstance(data, list):
             for item in data:
-                normalized = self._normalize_provider_result(item)
+                normalized = self._normalize_provider_result(item, provider=provider)
                 if normalized.get("ok"):
                     return normalized
         if result.get("url"):
+            if bool(provider.get("download_remote_url", True)):
+                downloaded = self._download_remote_image(str(result.get("url") or ""), timeout=float(provider.get("download_timeout_seconds") or 180))
+                if downloaded.get("ok"):
+                    return downloaded
             return {"ok": False, "status": "requires_setup", "reason": "remote_url_download_not_configured"}
         return {"ok": False, "status": str(result.get("status") or "failed"), "reason": str(result.get("reason") or "no_image_material")}
 
+
+    def _download_remote_image(self, url: str, *, timeout: float) -> dict[str, Any]:
+        if not url.strip():
+            return {"ok": False, "status": "failed", "reason": "empty_remote_url"}
+        temp_dir = self._provider_temp_dir("remote_image")
+        parsed = urllib.parse.urlparse(url)
+        suffix = Path(parsed.path).suffix.lower()
+        if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+            suffix = ".png"
+        target = temp_dir / f"remote_{uuid4().hex[:12]}{suffix}"
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as response:
+                target.write_bytes(response.read())
+        except Exception as exc:
+            return {"ok": False, "status": "failed", "reason": "remote_url_download_failed", "error": str(exc)[-1000:]}
+        if target.stat().st_size <= 0:
+            return {"ok": False, "status": "failed", "reason": "remote_url_empty_file"}
+        return {"ok": True, "status": "completed", "file_path": str(target)}
 
     def _metrics_path(self) -> Path:
         path = RUNTIME_DIR / "generated" / "media" / "image_generation_metrics.jsonl"

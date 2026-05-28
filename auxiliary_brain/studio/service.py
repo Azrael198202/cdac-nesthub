@@ -134,6 +134,12 @@ class AgentStudioService:
             return {
                 "status": status,
                 "final_answer": str(provider_payload.get("message") or "Image generation provider setup is required."),
+                "pending_action": {
+                    "kind": "capability_provider_setup",
+                    "capability_type": "image_generation",
+                    "setup_actions": provider_payload.get("setup_actions") or [],
+                    "attempted": provider_payload.get("attempted") or [],
+                },
                 "workflow_results": {
                     "status": status,
                     "capability_type": "image_generation",
