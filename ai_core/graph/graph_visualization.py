@@ -403,11 +403,21 @@ class GraphVisualStateBuilder:
         return dicts[-1] if dicts else None
 
     def _select_run(self, runs: list[Any], graph_id: str) -> dict[str, Any] | None:
+        """Select only the run that belongs to the selected graph.
+
+        Runtime visualization must not reuse a previous run only because node
+        labels or participant names are similar.  A newly created graph with no
+        run must remain pending/created until a run with the same graph id or
+        task name exists.
+        """
         dicts = [r for r in runs if isinstance(r, dict)]
-        matched = [r for r in dicts if str(r.get("graph_id") or r.get("task_name") or r.get("run_id") or "") == graph_id]
-        candidates = matched or dicts
-        candidates.sort(key=lambda item: str(item.get("completed_at") or item.get("started_at") or item.get("updated_at") or ""))
-        return candidates[-1] if candidates else None
+        matched = [
+            r for r in dicts
+            if str(r.get("graph_id") or "") == graph_id
+            or str(r.get("task_name") or "") == graph_id
+        ]
+        matched.sort(key=lambda item: str(item.get("completed_at") or item.get("started_at") or item.get("updated_at") or ""))
+        return matched[-1] if matched else None
 
     def _graph_id(self, graph: dict[str, Any]) -> str:
         return str(graph.get("graph_id") or graph.get("task_name") or graph.get("id") or "runtime_graph")

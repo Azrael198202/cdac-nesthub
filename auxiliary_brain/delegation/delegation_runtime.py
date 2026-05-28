@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import copy
+import json
 import mimetypes
 import re
 
@@ -13,6 +14,7 @@ from auxiliary_brain.runtime import new_id
 from auxiliary_brain.delegation.task_mind_graph import TaskMindGraphBuilder
 from ai_core.config.paths import RUNTIME_DOWNLOADS
 from ai_core.knowledge.knowledge_service import KnowledgeService
+from ai_core.media import ImageGenerationService
 from auxiliary_brain.parameters.agent_parameter_contract import AgentParameterContractService
 
 
@@ -30,6 +32,7 @@ class AgentDelegationRuntime:
         self.primary_client = primary_client or PrimaryBrainDelegationClient()
         self.parameter_contract_service = AgentParameterContractService()
         self.knowledge_service = KnowledgeService()
+        self.image_generation_service = ImageGenerationService()
 
     async def execute_task(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
         selected = self._fresh_task_participants(self._select_participants(task_graph, participants))
@@ -56,6 +59,8 @@ class AgentDelegationRuntime:
             "agent_results": [],
             "participant_dependency_plan": dependency_plan,
             "task_mind_graph": task_mind_graph,
+            "graph_self_check": dependency_plan.get("self_check") if isinstance(dependency_plan, dict) else {},
+            "repair_plan": (dependency_plan.get("self_check") or {}).get("repair_plan") if isinstance(dependency_plan, dict) and isinstance(dependency_plan.get("self_check"), dict) else [],
         }
         self._record_progress(run_payload, "prepare", "Preparing delegation run", "running")
         self._record_global_mind_graph_progress(run_payload, task_mind_graph)
@@ -1170,6 +1175,8 @@ class AgentDelegationRuntime:
     ) -> AgentExecutionResult | None:
         profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
         capability_type = str(profile.get("capability_type") or "").strip()
+        if capability_type == "image_generation":
+            return await self._execute_image_generation_capability(participant=participant, completed_results=completed_results, dependency_plan=dependency_plan)
         if capability_type != "local_knowledge_retrieval":
             return None
         values = participant.get("runtime_parameters") if isinstance(participant.get("runtime_parameters"), dict) else {}
@@ -1216,6 +1223,69 @@ class AgentDelegationRuntime:
             origin="auxiliary_brain",
         )
 
+
+    async def _execute_image_generation_capability(self, *, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> AgentExecutionResult | None:
+        self._bind_dependency_outputs_to_participant(participant=participant, completed_results=completed_results, dependency_plan=dependency_plan)
+        values = participant.get("runtime_parameters") if isinstance(participant.get("runtime_parameters"), dict) else {}
+        prompt = ""
+        for field in self._contract_fields(participant):
+            role = str(field.get("input_role") or "").strip()
+            name = self._field_name(field)
+            if role in {"prompt", "instruction", "query"} and name:
+                prompt = self._first_scalar(values.get(name))
+                if prompt:
+                    break
+        if not prompt:
+            prompt = self._dependency_material_text(participant, completed_results, dependency_plan)
+        if not prompt:
+            prompt = self._participant_objective(participant)
+        if not str(prompt or "").strip():
+            return AgentExecutionResult(
+                participant_id=self._participant_identity(participant),
+                participant_name=self._participant_name(participant),
+                core_run_id=new_id("capability_missing_input"),
+                status="requires_input",
+                final_answer="",
+                workflow_results={"status": "requires_input", "capability_type": "image_generation"},
+                pending_action={
+                    "kind": "agent_parameter_collection",
+                    "message": "Runtime input is required before execution can continue.",
+                    "request": {"input_mode": "multi_value_list", "fields": self.parameter_contract_service.to_missing_input_fields(participant)},
+                },
+                missing_inputs=self.parameter_contract_service.to_missing_input_fields(participant),
+                origin="auxiliary_brain",
+            )
+        payload = await self.image_generation_service.generate(prompt=str(prompt), options={})
+        if not payload.get("ok"):
+            return AgentExecutionResult(
+                participant_id=self._participant_identity(participant),
+                participant_name=self._participant_name(participant),
+                core_run_id=new_id("image_generation_setup"),
+                status=str(payload.get("status") or "failed"),
+                final_answer=str(payload.get("message") or "Image generation provider setup is required."),
+                workflow_results={"status": payload.get("status") or "failed", "capability_type": "image_generation", "provider_result": payload},
+                origin="auxiliary_brain",
+            )
+        material = payload.get("material") if isinstance(payload.get("material"), dict) else {}
+        url = str(material.get("download_url") or "")
+        name = str(material.get("file_name") or "generated_image")
+        final_answer = f"Generated image: ![{name}]({url})\nDownload: [{name}]({url})" if url else "Generated image material is available."
+        return AgentExecutionResult(
+            participant_id=self._participant_identity(participant),
+            participant_name=self._participant_name(participant),
+            core_run_id=str(material.get("download_id") or new_id("image_result")),
+            status="completed",
+            final_answer=final_answer,
+            workflow_results={
+                "status": "completed",
+                "capability_type": "image_generation",
+                "generated_files": [material] if material else [],
+                "verified_result_material": material,
+                "final_content": final_answer,
+            },
+            origin="auxiliary_brain",
+        )
+
     def _try_execute_file_material_generation(self, *, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any], task_name: str) -> AgentExecutionResult | None:
         profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
         if not self._looks_like_file_material_contract(participant) and str(profile.get("capability_type") or "") != "file_generation":
@@ -1237,13 +1307,16 @@ class AgentDelegationRuntime:
         mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
         download_url = f"/api/downloads/{download_id}/{filename}"
         file_record = {
+            "type": "file",
             "download_id": download_id,
             "file_name": filename,
             "file_path": str(path),
             "download_url": download_url,
             "mime_type": mime_type,
             "size": size,
+            "source_material": "verified_upstream_or_runtime_input",
         }
+        (target_dir / "metadata.json").write_text(json.dumps(file_record, ensure_ascii=False, indent=2), encoding="utf-8")
         final_answer = f"Generated file: [{filename}]({download_url})"
         return AgentExecutionResult(
             participant_id=self._participant_identity(participant),

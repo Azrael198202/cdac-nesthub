@@ -23,11 +23,12 @@
   <div class="modelBar">
     <div class="topSessionBar"><span id="activeSessionText" class="activeSessionText">no session</span><a class="btn primary" href="/graph-runtime" target="_blank" rel="noopener">Graph Runtime</a></div>
     <div class="modelGroup radioGroup">
-      <label><input type="radio" name="modelMode" value="local_only" onchange="onModelModeChanged()"> Local only</label>
-      <label><input type="radio" name="modelMode" value="api_only" onchange="onModelModeChanged()"> API only</label>
-      <label><input type="radio" name="modelMode" value="hybrid" onchange="onModelModeChanged()"> Hybrid</label>
+      <label><input type="radio" name="modelMode" value="hybrid" onchange="onModelModeChanged()"> Auto</label>
+      <label><input type="radio" name="modelMode" value="local_only" onchange="onModelModeChanged()"> Local</label>
+      <label><input type="radio" name="modelMode" value="api_only" onchange="onModelModeChanged()"> External</label>
     </div>
-    <div class="modelGroup"><label id="modelSelectLabel" for="initialModelSelect">Initial model</label><select id="initialModelSelect" class="modelSelect" onchange="saveModelSelection()"></select></div>
+    <div class="modelGroup"><label id="providerSelectLabel" for="providerSelect">Provider</label><select id="providerSelect" class="modelSelect" onchange="onProviderChanged()"><option value="auto">Auto route</option></select></div>
+    <div class="modelGroup"><label id="modelSelectLabel" for="initialModelSelect">Model</label><select id="initialModelSelect" class="modelSelect" onchange="saveModelSelection()"></select></div>
     <button class="btn" title="Command help" aria-label="Command help" onclick="openCommandHelpModal()">?</button>
     <button class="btn" onclick="refreshState()">Refresh</button>
     <div id="modelPolicyHint" class="modelHint"></div>
@@ -48,7 +49,14 @@
 const messages = document.getElementById('messages');
 function renderJson(obj){ return JSON.stringify(obj, null, 2); }
 function linkifyAnswerLine(line){
-  const escaped=escapeHtml(line.trim());
+  const trimmed=String(line||'').trim();
+  const imageMatch=trimmed.match(/^!\[([^\]]*)\]\((\/api\/downloads\/[^)]+)\)$/);
+  if(imageMatch){
+    const alt=escapeHtml(imageMatch[1]||'generated image');
+    const url=escapeHtml(imageMatch[2]);
+    return `<a href="${url}" download><img src="${url}" alt="${alt}" style="max-width:100%;border-radius:12px;border:1px solid var(--line);margin:6px 0" /></a>`;
+  }
+  const escaped=escapeHtml(trimmed);
   return escaped
     .replace(/\[([^\]]+)\]\((\/api\/downloads\/[^)]+)\)/g, '<a href="$2" download>$1</a>')
     .replace(/(^|\s)(\/api\/downloads\/[^\s<]+)/g, '$1<a href="$2" download>$2</a>');
@@ -743,6 +751,29 @@ function selectedOptionMeta(){
     secret: opt ? (opt.dataset.secret || '') : ''
   };
 }
+function fillProviderSelect(data, mode){
+  const select=document.getElementById('providerSelect');
+  if(!select)return;
+  const models=(data&&data.available_models)||{};
+  const items=modelListForMode(mode, models);
+  const providers=[]; const seen=new Set();
+  providers.push({id:'auto',label: mode==='local_only'?'local runtime':(mode==='api_only'?'external provider':'auto route')});
+  (items||[]).forEach(item=>{
+    const id=String(item.provider||'').trim();
+    if(id && !seen.has(id)){ seen.add(id); providers.push({id,label:id}); }
+  });
+  select.innerHTML=providers.map(p=>`<option value="${escapeHtml(p.id)}">${escapeHtml(p.label)}</option>`).join('');
+}
+async function onProviderChanged(){
+  if(!modelSelectionState)return;
+  const mode=currentModelMode();
+  const provider=document.getElementById('providerSelect') ? document.getElementById('providerSelect').value : 'auto';
+  const models=(modelSelectionState&&modelSelectionState.available_models)||{};
+  const all=modelListForMode(mode, models);
+  const items=provider && provider!=='auto' ? all.filter(x=>String(x.provider||'')===provider) : all;
+  fillSelect(document.getElementById('initialModelSelect'), items.length?items:all, defaultModelForMode(mode, (modelSelectionState&&modelSelectionState.selection)||{}));
+  await saveModelSelection();
+}
 function renderModelSelection(data){
   const selection=(data&&data.selection)||{};
   const models=(data&&data.available_models)||{};
@@ -750,13 +781,15 @@ function renderModelSelection(data){
   suppressModelSave=true;
   document.querySelectorAll('input[name="modelMode"]').forEach(r=>{ r.checked = r.value === mode; });
   const items=modelListForMode(mode, models);
+  fillProviderSelect(data, mode);
   const preferred=defaultModelForMode(mode, selection);
   fillSelect(document.getElementById('initialModelSelect'), items, preferred);
   const label=document.getElementById('modelSelectLabel');
-  if(label){ label.textContent = mode==='local_only' ? 'Local model' : (mode==='api_only' ? 'API model' : 'Initial model'); }
+  if(label){ label.textContent = 'Model'; }
   const hint=document.getElementById('modelPolicyHint');
   const selected=selectedOptionMeta();
-  hint.textContent = `Mode: ${mode}; selected: ${selected.model_id || selection.initial_model_id || ''}; provider: ${selected.provider || selection.initial_provider || ''}; escalation: ${selection.allow_escalation ? 'enabled' : 'disabled'}`;
+  const sourceLabel = mode==='local_only' ? 'Local' : (mode==='api_only' ? 'External' : 'Auto');
+  hint.textContent = `Model Source: ${sourceLabel}; selected: ${selected.model_id || selection.initial_model_id || ''}; provider: ${selected.provider || selection.initial_provider || 'auto'}`;
   suppressModelSave=false;
 }
 function currentModelMode(){
@@ -772,7 +805,7 @@ async function onModelModeChanged(){
   const items=modelListForMode(mode, models);
   fillSelect(document.getElementById('initialModelSelect'), items, defaultModelForMode(mode, selection));
   const label=document.getElementById('modelSelectLabel');
-  if(label){ label.textContent = mode==='local_only' ? 'Local model' : (mode==='api_only' ? 'API model' : 'Initial model'); }
+  if(label){ label.textContent = 'Model'; }
   suppressModelSave=false;
   await saveModelSelection();
 }
@@ -786,6 +819,7 @@ async function saveModelSelection(){
   if(meta.family==='api' || mode==='api_only'){ selectedApi = meta.model_id || selectedApi; }
   const payload={
     mode,
+    selected_provider: (document.getElementById('providerSelect') ? document.getElementById('providerSelect').value : 'auto'),
     selected_local_model_id: selectedLocal,
     selected_api_model_id: selectedApi,
     initial_model_id: meta.model_id || '',

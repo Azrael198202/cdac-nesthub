@@ -23,6 +23,8 @@ class UserModelSelectionSnapshot:
     initial_provider: str = "ollama"
     selected_local_model_id: str = "qwen3:8b"
     selected_api_model_id: str = "gpt-4o-mini"
+    selected_provider: str = "auto"
+    custom_endpoint: str = ""
     allow_escalation: bool = True
     ask_for_missing_keys_at_start: bool = True
     updated_at: str = ""
@@ -83,6 +85,8 @@ class UserModelSelectionStore:
             initial_provider=provider,
             selected_local_model_id=local_model,
             selected_api_model_id=api_model,
+            selected_provider=str(data.get("selected_provider") or "auto"),
+            custom_endpoint=str(data.get("custom_endpoint") or ""),
             allow_escalation=bool(data.get("allow_escalation", True)),
             ask_for_missing_keys_at_start=bool(data.get("ask_for_missing_keys_at_start", True)),
             updated_at=str(data.get("updated_at") or ""),
@@ -107,6 +111,8 @@ class UserModelSelectionStore:
             "initial_provider": self.provider_for_model(initial),
             "selected_local_model_id": local_model,
             "selected_api_model_id": api_model,
+            "selected_provider": str(payload.get("selected_provider") or current.selected_provider or "auto"),
+            "custom_endpoint": str(payload.get("custom_endpoint") or current.custom_endpoint or ""),
             "allow_escalation": bool(payload.get("allow_escalation", current.allow_escalation)),
             "ask_for_missing_keys_at_start": bool(payload.get("ask_for_missing_keys_at_start", current.ask_for_missing_keys_at_start)),
             "source": "agent_studio_ui",

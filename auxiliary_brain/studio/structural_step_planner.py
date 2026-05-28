@@ -222,6 +222,15 @@ class StructuralStepPlanner:
                 "requires_user_query": True,
                 "produces_verified_material": True,
             }
+        # Modality-level capability hints are generic runtime signals. They do
+        # not select a business domain or a concrete provider.
+        if re.search(r"\b(generate|create|render|produce|make)\b.*\b(image|picture|visual|illustration|graphic)\b", text):
+            return {
+                "capability_type": "image_generation",
+                "prompt_parameter": "prompt",
+                "produces_verified_material": True,
+                "output_modality": "image",
+            }
         if "generate a file" in text:
             return {
                 "capability_type": "file_generation",

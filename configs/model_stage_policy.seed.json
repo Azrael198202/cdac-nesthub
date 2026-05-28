@@ -2860,14 +2860,14 @@
       }
     },
     "image_generation": {
-      "default": "openai-image-generation",
+      "default": "stable-diffusion-local",
       "fallback": [
-        "stable-diffusion-local"
+        "openai-image-generation"
       ],
-      "upper_substitutes": [],
-      "lower_substitutes": [
-        "stable-diffusion-local"
+      "upper_substitutes": [
+        "openai-image-generation"
       ],
+      "lower_substitutes": [],
       "required_capabilities": [
         "image_generation"
       ],
@@ -2900,6 +2900,10 @@
         "require_modality_match": true,
         "allow_candidate_status": true,
         "prefer_benchmark_score": true
+      },
+      "routing_policy": {
+        "default_model_source": "local_first",
+        "external_requires_user_selection_or_policy_allowance": true
       }
     },
     "image_editing": {

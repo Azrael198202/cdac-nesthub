@@ -225,6 +225,10 @@ class TaskMindGraphBuilder:
             "removed_edges": removed_edges,
             "cycle_free": True,
             "participant_order": task_order,
+            "repair_plan": [
+                {"action": "remove_invalid_dependency", "from": item.get("from"), "to": item.get("to"), "reason": item.get("reason")}
+                for item in removed_edges
+            ],
         }
         return plan
 
