@@ -5,24 +5,29 @@ import base64
 import importlib
 import json
 import os
+import shutil
 import subprocess
+import sys
+import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from ai_core.config.loader import ConfigLoader
-from ai_core.config.paths import RUNTIME_CONFIGS, RUNTIME_DOWNLOADS
+from ai_core.config.paths import CONFIGS_DIR, RUNTIME_CONFIGS, RUNTIME_DIR, RUNTIME_DOWNLOADS
 from ai_core.runtime.modeling import ModelStagePolicy, RuntimeExecutionPolicy
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
-from uuid import uuid4
 
 
 class ImageGenerationService:
     """Provider-routed image generation capability.
 
-    The service is capability- and provider-config driven.  It does not embed a
-    concrete vendor, model, domain, or prompt policy.  Providers are read from
-    runtime model configuration and selected by the shared model stage policy.
+    The service is driven by runtime/provider configuration. Core code supports
+    generic provider protocols and lifecycle hooks, while concrete models,
+    checkpoints, workflow templates, endpoints, and install policies are read
+    from configuration or runtime-generated provider records.
     """
 
     def __init__(self) -> None:
@@ -49,7 +54,7 @@ class ImageGenerationService:
                 attempted.append({"provider": provider_name, "status": "skipped", "reason": "not_allowed_by_user_model_source"})
                 continue
             result = await self._call_provider(provider_name=provider_name, provider=provider, prompt=prompt, options=options)
-            attempted.append({"provider": provider_name, "status": result.get("status") or result.get("ok")})
+            attempted.append({"provider": provider_name, "status": result.get("status") or result.get("ok"), "reason": result.get("reason")})
             if result.get("ok"):
                 material = self._persist_image(result, provider_name=provider_name, stage_meta=stage_meta)
                 return {"ok": True, "status": "completed", "material": material, "attempted": attempted, "stage_policy": stage_meta}
@@ -66,7 +71,36 @@ class ImageGenerationService:
     def _provider_config(self) -> dict[str, Any]:
         path = RUNTIME_CONFIGS / "models" / "providers.yaml"
         data = self.loader.load_yaml(path)
-        return data if isinstance(data, dict) else {}
+        config = data if isinstance(data, dict) else {}
+        seeded = self._image_seed_config()
+        if seeded:
+            config = self._merge_provider_config(config, seeded)
+        return config
+
+    def _image_seed_config(self) -> dict[str, Any]:
+        candidates = [RUNTIME_CONFIGS / "media" / "image_generation.yaml", CONFIGS_DIR / "image_generation.seed.yaml"]
+        for path in candidates:
+            data = self.loader.load_yaml(path)
+            if isinstance(data, dict) and data:
+                return data
+        return {}
+
+    def _merge_provider_config(self, base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+        merged = json.loads(json.dumps(base or {}))
+        base_providers = merged.setdefault("providers", {})
+        for name, provider in (extra.get("providers") or {}).items():
+            if name not in base_providers:
+                base_providers[name] = provider
+            else:
+                combined = dict(provider or {})
+                combined.update(dict(base_providers.get(name) or {}))
+                base_providers[name] = combined
+        route = list(merged.get("default_route") or [])
+        for item in extra.get("default_route") or []:
+            if item not in route:
+                route.append(item)
+        merged["default_route"] = route
+        return merged
 
     def _route(self, *, config: dict[str, Any], options: dict[str, Any]) -> tuple[list[str], dict[str, Any], dict[str, Any]]:
         providers = dict(config.get("providers") or {})
@@ -97,6 +131,8 @@ class ImageGenerationService:
 
     async def _call_provider(self, *, provider_name: str, provider: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
         protocol = str(provider.get("protocol") or provider.get("type") or "").strip()
+        if protocol in {"comfyui", "comfyui_runtime", "local_comfyui"}:
+            return await asyncio.to_thread(self._call_comfyui, provider_name, provider, prompt, options)
         if protocol in {"python_function", "function"}:
             return await asyncio.to_thread(self._call_python_function, provider, prompt, options)
         if protocol in {"local_command", "command"}:
@@ -104,6 +140,283 @@ class ImageGenerationService:
         if protocol in {"generic_http_json", "openai_compatible_api", "openai_compatible_image", "http_json", "image_generation_http"} or provider.get("image_generation_endpoint") or provider.get("image_endpoint"):
             return await asyncio.to_thread(self._call_http_json, provider_name, provider, prompt, options)
         return {"ok": False, "status": "requires_setup", "reason": "unsupported_provider_protocol"}
+
+    def _call_comfyui(self, provider_name: str, provider: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
+        runtime = self._runtime_settings(provider)
+        endpoint = str(provider.get("base_url") or runtime.get("base_url") or "http://127.0.0.1:8188").rstrip("/")
+        ensure = self._ensure_comfyui_runtime(provider=provider, runtime=runtime, endpoint=endpoint)
+        if not ensure.get("ok"):
+            return ensure
+        assets = self._ensure_model_assets(provider=provider, runtime=runtime)
+        if not assets.get("ok"):
+            return assets
+        workflow = self._render_workflow(provider=provider, runtime=runtime, prompt=prompt, options=options)
+        if not workflow.get("ok"):
+            return workflow
+        queued = self._comfy_post_json(endpoint, "/prompt", {"prompt": workflow["workflow"]}, timeout=float(runtime.get("request_timeout_seconds") or 30))
+        prompt_id = str((queued or {}).get("prompt_id") or "")
+        if not prompt_id:
+            return {"ok": False, "status": "failed", "reason": "missing_prompt_id", "response": queued}
+        history = self._wait_comfy_history(endpoint=endpoint, prompt_id=prompt_id, timeout=float(runtime.get("generation_timeout_seconds") or provider.get("timeout_seconds") or options.get("timeout_seconds") or 300))
+        if not history.get("ok"):
+            return history
+        image = self._extract_comfy_image(endpoint=endpoint, history=history["history"], target_dir=self._provider_temp_dir(provider_name))
+        if not image.get("ok"):
+            return image
+        return {"ok": True, "status": "completed", "file_path": image["file_path"], "provider_response": {"prompt_id": prompt_id}}
+
+    def _runtime_settings(self, provider: dict[str, Any]) -> dict[str, Any]:
+        runtime = provider.get("runtime") if isinstance(provider.get("runtime"), dict) else {}
+        return dict(runtime or {})
+
+    def _provider_temp_dir(self, provider_name: str) -> Path:
+        path = RUNTIME_DIR / "generated" / "media" / "temp" / provider_name
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _ensure_comfyui_runtime(self, *, provider: dict[str, Any], runtime: dict[str, Any], endpoint: str) -> dict[str, Any]:
+        if self._comfy_healthy(endpoint, float(runtime.get("health_timeout_seconds") or 2)):
+            return {"ok": True, "status": "ready"}
+        if not bool(runtime.get("auto_start", True)):
+            return {"ok": False, "status": "requires_setup", "reason": "runtime_not_running", "endpoint": endpoint}
+        root = self._resolve_runtime_root(runtime)
+        install = runtime.get("install") if isinstance(runtime.get("install"), dict) else {}
+        if not (root / "main.py").exists():
+            installed = self._install_runtime(root=root, install=install)
+            if not installed.get("ok"):
+                return installed
+        started = self._start_runtime_process(root=root, runtime=runtime)
+        if not started.get("ok"):
+            return started
+        wait_seconds = float(runtime.get("startup_timeout_seconds") or 120)
+        deadline = time.time() + wait_seconds
+        while time.time() < deadline:
+            if self._comfy_healthy(endpoint, float(runtime.get("health_timeout_seconds") or 3)):
+                return {"ok": True, "status": "ready", "started": True}
+            time.sleep(2)
+        return {"ok": False, "status": "requires_setup", "reason": "runtime_start_timeout", "endpoint": endpoint, "root": str(root)}
+
+    def _resolve_runtime_root(self, runtime: dict[str, Any]) -> Path:
+        root = self._resolve_config_value(str(runtime.get("root") or "").strip())
+        if root:
+            return Path(root).expanduser().resolve()
+        return (RUNTIME_DIR / "external_runtimes" / "comfyui").resolve()
+
+    def _runtime_python(self, *, root: Path, runtime: dict[str, Any], install: dict[str, Any] | None = None) -> str:
+        install = install if isinstance(install, dict) else {}
+        explicit = self._resolve_config_value(str(runtime.get("python") or install.get("python") or "").strip())
+        if explicit:
+            return explicit
+        if bool(install.get("create_venv", runtime.get("create_venv", True))):
+            venv_dir = root / str(install.get("venv_dir") or runtime.get("venv_dir") or ".venv")
+            if os.name == "nt":
+                candidate = venv_dir / "Scripts" / "python.exe"
+            else:
+                candidate = venv_dir / "bin" / "python"
+            if candidate.exists():
+                return str(candidate)
+        return sys.executable
+
+    def _venv_python_path(self, *, root: Path, install: dict[str, Any]) -> Path:
+        venv_dir = root / str(install.get("venv_dir") or ".venv")
+        if os.name == "nt":
+            return venv_dir / "Scripts" / "python.exe"
+        return venv_dir / "bin" / "python"
+
+    def _ensure_runtime_python(self, *, root: Path, install: dict[str, Any]) -> dict[str, Any]:
+        if not bool(install.get("create_venv", True)):
+            return {"ok": True, "python": sys.executable, "venv": False}
+        python_path = self._venv_python_path(root=root, install=install)
+        if python_path.exists():
+            return {"ok": True, "python": str(python_path), "venv": True}
+        root.mkdir(parents=True, exist_ok=True)
+        create = subprocess.run([sys.executable, "-m", "venv", str(python_path.parents[1])], text=True, capture_output=True, timeout=float(install.get("venv_timeout_seconds") or 600))
+        if create.returncode != 0:
+            return {"ok": False, "status": "requires_setup", "reason": "runtime_venv_create_failed", "stderr": create.stderr[-1000:], "root": str(root)}
+        return {"ok": True, "python": str(python_path), "venv": True}
+
+    def _install_runtime(self, *, root: Path, install: dict[str, Any]) -> dict[str, Any]:
+        if not bool(install.get("enabled", True)):
+            return {"ok": False, "status": "requires_setup", "reason": "runtime_missing", "root": str(root)}
+        repo = str(install.get("repository") or "https://github.com/comfyanonymous/ComfyUI.git").strip()
+        root.parent.mkdir(parents=True, exist_ok=True)
+        if not root.exists():
+            git = shutil.which("git")
+            if not git:
+                return {"ok": False, "status": "requires_setup", "reason": "git_not_available", "root": str(root)}
+            clone = subprocess.run([git, "clone", "--depth", "1", repo, str(root)], text=True, capture_output=True, timeout=float(install.get("clone_timeout_seconds") or 600))
+            if clone.returncode != 0:
+                return {"ok": False, "status": "requires_setup", "reason": "runtime_clone_failed", "stderr": clone.stderr[-1000:], "root": str(root)}
+        py = self._ensure_runtime_python(root=root, install=install)
+        if not py.get("ok"):
+            return py
+        if bool(install.get("install_requirements", True)):
+            req = root / "requirements.txt"
+            if req.exists():
+                pip = subprocess.run([str(py["python"]), "-m", "pip", "install", "-r", str(req)], text=True, capture_output=True, timeout=float(install.get("pip_timeout_seconds") or 1800))
+                if pip.returncode != 0:
+                    return {"ok": False, "status": "requires_setup", "reason": "runtime_dependency_install_failed", "stderr": pip.stderr[-1000:], "root": str(root)}
+        return {"ok": True, "status": "installed", "root": str(root), "python": str(py.get("python"))}
+
+    def _start_runtime_process(self, *, root: Path, runtime: dict[str, Any]) -> dict[str, Any]:
+        process_dir = RUNTIME_DIR / "processes"
+        process_dir.mkdir(parents=True, exist_ok=True)
+        log_path = process_dir / "comfyui.log"
+        command = runtime.get("start_command")
+        if isinstance(command, str):
+            command = [command]
+        install = runtime.get("install") if isinstance(runtime.get("install"), dict) else {}
+        if not isinstance(command, list) or not command:
+            command = [self._runtime_python(root=root, runtime=runtime, install=install), "main.py", "--listen", str(runtime.get("host") or "127.0.0.1"), "--port", str(runtime.get("port") or "8188")]
+        try:
+            with log_path.open("ab") as log:
+                proc = subprocess.Popen([str(x) for x in command], cwd=str(root), stdout=log, stderr=log, start_new_session=True)
+            (process_dir / "comfyui.pid").write_text(str(proc.pid), encoding="utf-8")
+            return {"ok": True, "status": "starting", "pid": proc.pid, "log_path": str(log_path)}
+        except Exception as exc:
+            return {"ok": False, "status": "requires_setup", "reason": "runtime_start_failed", "error": str(exc), "root": str(root)}
+
+    def _comfy_healthy(self, endpoint: str, timeout: float) -> bool:
+        try:
+            with urllib.request.urlopen(endpoint.rstrip("/") + "/system_stats", timeout=timeout) as response:
+                return 200 <= int(response.status) < 500
+        except Exception:
+            return False
+
+    def _ensure_model_assets(self, *, provider: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        assets = provider.get("model_assets") or runtime.get("model_assets") or []
+        if not isinstance(assets, list):
+            return {"ok": False, "status": "requires_setup", "reason": "invalid_model_assets"}
+        root = self._resolve_runtime_root(runtime)
+        if not assets:
+            return {"ok": True, "status": "ready", "assets": []}
+        ready: list[dict[str, str]] = []
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            target = self._asset_target(root=root, asset=asset)
+            if target.exists() and target.stat().st_size > 0:
+                ready.append({"target": str(target), "status": "exists"})
+                continue
+            if not bool(asset.get("auto_download", True)):
+                return {"ok": False, "status": "requires_setup", "reason": "asset_missing", "target": str(target)}
+            url = self._resolve_config_value(str(asset.get("url") or asset.get("source_url") or "").strip())
+            if not url:
+                return {"ok": False, "status": "requires_setup", "reason": "asset_url_missing", "target": str(target), "env_hint": asset.get("url_env")}
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                self._download_file(url=url, target=target, timeout=float(asset.get("timeout_seconds") or 7200))
+            except Exception as exc:
+                return {"ok": False, "status": "requires_setup", "reason": "asset_download_failed", "target": str(target), "error": str(exc)}
+            ready.append({"target": str(target), "status": "downloaded"})
+        return {"ok": True, "status": "ready", "assets": ready}
+
+    def _asset_target(self, *, root: Path, asset: dict[str, Any]) -> Path:
+        target = str(asset.get("target") or "").strip()
+        if target:
+            return Path(os.path.expandvars(target)).expanduser().resolve()
+        subdir = str(asset.get("target_subdir") or "models/checkpoints").strip().strip("/")
+        filename = self._resolve_config_value(str(asset.get("file_name") or asset.get("filename") or "").strip())
+        if not filename:
+            url = str(asset.get("url") or asset.get("source_url") or "").strip()
+            filename = Path(urllib.parse.urlparse(url).path).name or "model.asset"
+        return (root / subdir / filename).resolve()
+
+    def _resolve_config_value(self, value: str) -> str:
+        value = (value or "").strip()
+        if value.startswith("env:"):
+            return os.getenv(value.split(":", 1)[1], "")
+        expanded = os.path.expandvars(value)
+        if "${" in expanded or "$" in expanded:
+            return ""
+        return expanded
+
+    def _download_file(self, *, url: str, target: Path, timeout: float) -> None:
+        tmp = target.with_suffix(target.suffix + ".partial")
+        req = urllib.request.Request(url, headers={"User-Agent": "ai-core-runtime"})
+        with urllib.request.urlopen(req, timeout=timeout) as response, tmp.open("wb") as fh:
+            shutil.copyfileobj(response, fh)
+        tmp.replace(target)
+
+    def _render_workflow(self, *, provider: dict[str, Any], runtime: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
+        template = options.get("workflow_template") or provider.get("workflow_template") or runtime.get("workflow_template")
+        if isinstance(template, str):
+            template_path = Path(os.path.expandvars(template)).expanduser()
+            if template_path.exists():
+                template = json.loads(template_path.read_text(encoding="utf-8"))
+            else:
+                try:
+                    template = json.loads(template)
+                except Exception:
+                    template = None
+        if not isinstance(template, dict):
+            return {"ok": False, "status": "requires_setup", "reason": "workflow_template_missing"}
+        substitutions = dict(provider.get("workflow_values") if isinstance(provider.get("workflow_values"), dict) else {})
+        substitutions.update(dict(options.get("workflow_values") if isinstance(options.get("workflow_values"), dict) else {}))
+        substitutions.setdefault("prompt", prompt)
+        substitutions.setdefault("negative_prompt", str(options.get("negative_prompt") or provider.get("negative_prompt") or ""))
+        substitutions.setdefault("seed", str(options.get("seed") or provider.get("seed") or int(time.time()) % 2147483647))
+        substitutions.setdefault("width", str(options.get("width") or provider.get("width") or 512))
+        substitutions.setdefault("height", str(options.get("height") or provider.get("height") or 512))
+        workflow = self._replace_placeholders(template, substitutions)
+        return {"ok": True, "status": "ready", "workflow": workflow}
+
+    def _replace_placeholders(self, value: Any, substitutions: dict[str, Any]) -> Any:
+        if isinstance(value, str):
+            rendered = value
+            for key, replacement in substitutions.items():
+                rendered = rendered.replace("{" + str(key) + "}", str(replacement))
+            return rendered
+        if isinstance(value, list):
+            return [self._replace_placeholders(item, substitutions) for item in value]
+        if isinstance(value, dict):
+            return {key: self._replace_placeholders(item, substitutions) for key, item in value.items()}
+        return value
+
+    def _comfy_post_json(self, endpoint: str, path: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        req = urllib.request.Request(endpoint.rstrip("/") + path, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _wait_comfy_history(self, *, endpoint: str, prompt_id: str, timeout: float) -> dict[str, Any]:
+        deadline = time.time() + timeout
+        url = endpoint.rstrip("/") + "/history/" + urllib.parse.quote(prompt_id)
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(url, timeout=10) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                if prompt_id in data:
+                    return {"ok": True, "status": "completed", "history": data[prompt_id]}
+            except Exception:
+                pass
+            time.sleep(2)
+        return {"ok": False, "status": "failed", "reason": "generation_timeout", "prompt_id": prompt_id}
+
+    def _extract_comfy_image(self, *, endpoint: str, history: dict[str, Any], target_dir: Path) -> dict[str, Any]:
+        outputs = history.get("outputs") if isinstance(history.get("outputs"), dict) else {}
+        for output in outputs.values():
+            images = output.get("images") if isinstance(output, dict) else None
+            if not isinstance(images, list):
+                continue
+            for item in images:
+                if not isinstance(item, dict):
+                    continue
+                filename = str(item.get("filename") or "").strip()
+                if not filename:
+                    continue
+                params = urllib.parse.urlencode({
+                    "filename": filename,
+                    "subfolder": str(item.get("subfolder") or ""),
+                    "type": str(item.get("type") or "output"),
+                })
+                with urllib.request.urlopen(endpoint.rstrip("/") + "/view?" + params, timeout=60) as response:
+                    data = response.read()
+                target_dir.mkdir(parents=True, exist_ok=True)
+                suffix = Path(filename).suffix or ".png"
+                target = target_dir / f"comfyui_output_{uuid4().hex[:8]}{suffix}"
+                target.write_bytes(data)
+                return {"ok": True, "status": "completed", "file_path": str(target)}
+        return {"ok": False, "status": "failed", "reason": "no_image_output"}
 
     def _call_python_function(self, provider: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
         target = str(provider.get("callable") or provider.get("function") or "").strip()
@@ -163,6 +476,7 @@ class ImageGenerationService:
         if not template:
             template = {"prompt": "{prompt}"}
         rendered = json.loads(json.dumps(template))
+
         def walk(value: Any) -> Any:
             if isinstance(value, str):
                 return value.replace("{prompt}", prompt)
@@ -171,6 +485,7 @@ class ImageGenerationService:
             if isinstance(value, dict):
                 return {k: walk(v) for k, v in value.items()}
             return value
+
         payload = walk(rendered)
         if isinstance(options.get("request_overrides"), dict):
             payload.update(options["request_overrides"])
