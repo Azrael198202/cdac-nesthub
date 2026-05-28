@@ -37,13 +37,10 @@ class ImageGenerationService:
         self.user_selection = UserModelSelectionStore()
 
     async def generate(self, *, prompt: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
-        start_time = time.time()
         prompt = str(prompt or "").strip()
         options = options if isinstance(options, dict) else {}
         if not prompt:
-            result = {"ok": False, "status": "requires_input", "missing_inputs": ["prompt"]}
-            self._record_execution_event(result=result, duration_seconds=time.time() - start_time, attempted=[])
-            return result
+            return {"ok": False, "status": "requires_input", "missing_inputs": ["prompt"]}
 
         config = self._provider_config()
         route, providers, stage_meta = self._route(config=config, options=options)
@@ -60,23 +57,18 @@ class ImageGenerationService:
             attempted.append({"provider": provider_name, "status": result.get("status") or result.get("ok"), "reason": result.get("reason")})
             if result.get("ok"):
                 material = self._persist_image(result, provider_name=provider_name, stage_meta=stage_meta)
-                final = {"ok": True, "status": "completed", "material": material, "attempted": attempted, "stage_policy": stage_meta}
-                self._record_execution_event(result=final, duration_seconds=time.time() - start_time, attempted=attempted)
-                return final
+                return {"ok": True, "status": "completed", "material": material, "attempted": attempted, "stage_policy": stage_meta}
             if result.get("status") == "requires_setup":
                 continue
-        final = {
+        return {
             "ok": False,
             "status": "requires_setup",
             "message": "No configured image generation provider produced image material.",
             "attempted": attempted,
             "stage_policy": stage_meta,
         }
-        self._record_execution_event(result=final, duration_seconds=time.time() - start_time, attempted=attempted)
-        return final
 
     def _provider_config(self) -> dict[str, Any]:
-        self._ensure_runtime_image_config()
         path = RUNTIME_CONFIGS / "models" / "providers.yaml"
         data = self.loader.load_yaml(path)
         config = data if isinstance(data, dict) else {}
@@ -84,22 +76,6 @@ class ImageGenerationService:
         if seeded:
             config = self._merge_provider_config(config, seeded)
         return config
-
-    def _ensure_runtime_image_config(self) -> None:
-        """Materialize a runtime-editable image capability config from the seed.
-
-        The seed is only a bootstrap template. Runtime behavior should be
-        adjusted through runtime configs or generated provider records without
-        changing core source code.
-        """
-        runtime_path = RUNTIME_CONFIGS / "media" / "image_generation.yaml"
-        if runtime_path.exists():
-            return
-        seed_path = CONFIGS_DIR / "image_generation.seed.yaml"
-        if not seed_path.exists():
-            return
-        runtime_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(seed_path, runtime_path)
 
     def _image_seed_config(self) -> dict[str, Any]:
         candidates = [RUNTIME_CONFIGS / "media" / "image_generation.yaml", CONFIGS_DIR / "image_generation.seed.yaml"]
@@ -145,64 +121,7 @@ class ImageGenerationService:
         selected_provider = str(options.get("selected_provider") or "").strip()
         if selected_provider and selected_provider in providers:
             route = [selected_provider] + [item for item in route if item != selected_provider]
-        else:
-            route = self._rank_route_by_observations(route, providers)
         return route, providers, meta
-
-    def _rank_route_by_observations(self, route: list[str], providers: dict[str, Any]) -> list[str]:
-        """Reorder equivalent providers using runtime observations.
-
-        This is intentionally generic: it does not encode model names or
-        capability-specific upgrade rules. It only prefers historically healthy
-        and faster providers when the current user selection leaves routing to
-        automatic mode.
-        """
-        if len(route) <= 1:
-            return route
-        observations = self._provider_observations()
-        indexed = {name: index for index, name in enumerate(route)}
-
-        def score(name: str) -> tuple[float, float, int]:
-            stats = observations.get(name) or {}
-            total = float(stats.get("total") or 0)
-            success = float(stats.get("success") or 0)
-            avg_duration = float(stats.get("avg_duration_seconds") or 1e9)
-            success_rate = success / total if total > 0 else 0.5
-            # Local providers stay preferred when observations are neutral.
-            locality_bonus = 0.05 if self.user_selection.provider_is_local(name, providers.get(name) or {}) else 0.0
-            return (-(success_rate + locality_bonus), avg_duration, indexed.get(name, 9999))
-
-        return sorted(route, key=score)
-
-    def _provider_observations(self) -> dict[str, dict[str, float]]:
-        path = self._metrics_path()
-        if not path.exists():
-            return {}
-        rows: list[dict[str, Any]] = []
-        try:
-            for line in path.read_text(encoding="utf-8").splitlines()[-200:]:
-                try:
-                    item = json.loads(line)
-                except Exception:
-                    continue
-                if isinstance(item, dict):
-                    rows.append(item)
-        except Exception:
-            return {}
-        by_provider: dict[str, dict[str, float]] = {}
-        for item in rows:
-            provider = str(item.get("provider") or "").strip()
-            if not provider:
-                continue
-            stats = by_provider.setdefault(provider, {"total": 0.0, "success": 0.0, "duration_sum": 0.0})
-            stats["total"] += 1.0
-            if bool(item.get("ok")):
-                stats["success"] += 1.0
-            stats["duration_sum"] += float(item.get("duration_seconds") or 0)
-        for stats in by_provider.values():
-            total = max(float(stats.get("total") or 0), 1.0)
-            stats["avg_duration_seconds"] = float(stats.get("duration_sum") or 0) / total
-        return by_provider
 
     def _provider_can_generate_image(self, provider: dict[str, Any]) -> bool:
         text = " ".join(str(provider.get(k) or "") for k in ("type", "protocol", "role"))
@@ -592,33 +511,6 @@ class ImageGenerationService:
         if result.get("url"):
             return {"ok": False, "status": "requires_setup", "reason": "remote_url_download_not_configured"}
         return {"ok": False, "status": str(result.get("status") or "failed"), "reason": str(result.get("reason") or "no_image_material")}
-
-
-    def _metrics_path(self) -> Path:
-        path = RUNTIME_DIR / "generated" / "media" / "image_generation_metrics.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        return path
-
-    def _record_execution_event(self, *, result: dict[str, Any], duration_seconds: float, attempted: list[dict[str, Any]]) -> None:
-        try:
-            material = result.get("material") if isinstance(result.get("material"), dict) else {}
-            provider = str(material.get("provider") or "").strip()
-            if not provider and attempted:
-                provider = str(attempted[-1].get("provider") or "").strip()
-            event = {
-                "event_type": "capability_execution_metric",
-                "capability_type": "image_generation",
-                "provider": provider,
-                "ok": bool(result.get("ok")),
-                "status": str(result.get("status") or ""),
-                "duration_seconds": round(float(duration_seconds), 3),
-                "attempted": attempted[-5:] if isinstance(attempted, list) else [],
-                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            }
-            with self._metrics_path().open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(event, ensure_ascii=False) + "\n")
-        except Exception:
-            return
 
     def _persist_image(self, result: dict[str, Any], *, provider_name: str, stage_meta: dict[str, Any]) -> dict[str, Any]:
         download_id = f"image_{uuid4().hex[:12]}"

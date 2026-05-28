@@ -1,0 +1,36 @@
+{
+  "version": "1.0",
+  "description": "Runtime output modality routing policy. Core code loads this policy; modality triggers live in configuration so capability routing can evolve without source changes.",
+  "routes": [
+    {
+      "route_id": "generated_visual_still",
+      "output_modality": "image",
+      "capability_type": "image_generation",
+      "confidence": 0.9,
+      "match_any_token_sets": [
+        ["generate", "image"],
+        ["create", "image"],
+        ["make", "image"],
+        ["render", "image"],
+        ["generate", "picture"],
+        ["create", "picture"],
+        ["draw"],
+        ["illustration"]
+      ]
+    },
+    {
+      "route_id": "generated_motion_visual",
+      "output_modality": "video",
+      "capability_type": "video_generation",
+      "confidence": 0.85,
+      "match_any_token_sets": [
+        ["generate", "video"],
+        ["create", "video"],
+        ["make", "video"],
+        ["render", "video"],
+        ["animation"],
+        ["motion", "visual"]
+      ]
+    }
+  ]
+}
