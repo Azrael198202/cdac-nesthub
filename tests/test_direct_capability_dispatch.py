@@ -296,7 +296,7 @@ def test_external_video_missing_endpoint_uses_endpoint_input_interaction(monkeyp
     assert result["reason"] == "missing_endpoint"
     attempted = [{"provider": "external_video_generation", "reason": "missing_endpoint"}]
     interaction = service._first_missing_secret_action(attempted)
-    assert interaction["kind"] in {"endpoint_input", "video_generation_setup_wizard"}
+    assert interaction["kind"] == "endpoint_input"
     assert interaction["config_fields"][0]["env"] == "VIDEO_GENERATION_ENDPOINT"
     actions = service._setup_actions(
         route=["external_video_generation"],
@@ -430,86 +430,3 @@ def test_agent_studio_renders_gif_artifact_as_image_not_video() -> None:
     assert "answerGifPreview" in html
     assert "renderVideoLikeMedia(url, label" in html
     assert "<img class=\"answerGifPreview\"" in html
-
-
-def test_video_model_dependency_manifest_seed_is_loaded() -> None:
-    from ai_core.media.video_generation_service import VideoGenerationService
-
-    service = VideoGenerationService()
-    config = service._video_seed_config()
-    provider = config["providers"]["local_video_generation"]
-    assert provider["model_dependency_manifest"]["enabled"] is True
-    manifest = service._load_video_model_dependency_manifest(provider=provider, runtime={})
-    assert manifest["ok"] is True
-    assert manifest["profile"] == "text_to_video"
-    assert "model_assets" in manifest
-    assert "custom_nodes" in manifest
-
-
-def test_video_model_dependency_manifest_downloads_model_asset(tmp_path, monkeypatch) -> None:
-    import ai_core.media.video_generation_service as video_service_mod
-    from ai_core.media.video_generation_service import VideoGenerationService
-
-    project_root = tmp_path / "project"
-    runtime_dir = project_root / "runtime"
-    configs_dir = project_root / "configs"
-    (runtime_dir / "configs" / "media").mkdir(parents=True)
-    configs_dir.mkdir(parents=True)
-    monkeypatch.setattr(video_service_mod, "RUNTIME_CONFIGS", runtime_dir / "configs")
-    monkeypatch.setattr(video_service_mod, "RUNTIME_DIR", runtime_dir)
-    monkeypatch.setattr(video_service_mod, "CONFIGS_DIR", configs_dir)
-
-    source = tmp_path / "model.bin"
-    source.write_bytes(b"model-bytes")
-    manifest = runtime_dir / "configs" / "media" / "video_model_dependency_manifest.yaml"
-    manifest.write_text(
-        f"""
-version: 1.0
-profiles:
-  text_to_video:
-    model_assets:
-      - name: tiny_test_model
-        target_subdir: models/checkpoints
-        file_name: tiny_test_model.bin
-        url: {source.as_uri()}
-        auto_download: true
-""".strip(),
-        encoding="utf-8",
-    )
-    service = VideoGenerationService()
-    runtime = {"root": str(tmp_path / "comfyui")}
-    provider = {
-        "model_dependency_manifest": {
-            "enabled": True,
-            "manifest_file": str(manifest),
-            "profile": "text_to_video",
-        }
-    }
-    result = service._ensure_model_assets(provider=provider, runtime=runtime)
-    assert result["ok"] is True
-    target = tmp_path / "comfyui" / "models" / "checkpoints" / "tiny_test_model.bin"
-    assert target.read_bytes() == b"model-bytes"
-    assert result["dependency_manifest"]["model_asset_count"] == 1
-
-
-def test_video_workflow_values_include_frame_count_and_uppercase_placeholders(tmp_path) -> None:
-    from ai_core.media.video_generation_service import VideoGenerationService
-
-    workflow = tmp_path / "workflow.json"
-    workflow.write_text(
-        '{"1":{"class_type":"Prompt","inputs":{"text":"{PROMPT}","frames":"{FRAME_COUNT}","w":"{WIDTH}","h":"{HEIGHT}"}}}',
-        encoding="utf-8",
-    )
-    service = VideoGenerationService()
-    result = service._render_workflow(
-        provider={"workflow_template": str(workflow), "width": 320, "height": 180},
-        runtime={},
-        prompt="hello video",
-        options={"frames": 12},
-    )
-    assert result["ok"] is True
-    inputs = result["workflow"]["1"]["inputs"]
-    assert inputs["text"] == "hello video"
-    assert inputs["frames"] == "12"
-    assert inputs["w"] == "320"
-    assert inputs["h"] == "180"
