@@ -639,3 +639,4 @@ ai_core/knowledge/__pycache__/embedding_index.cpython-313.pyc
 ai_core/media/__pycache__/__init__.cpython-313.pyc
 ai_core/media/__pycache__/image_generation_service.cpython-313.pyc
 ai_core/media/__pycache__/video_generation_service.cpython-313.pyc
+ai_core/media/__pycache__/video_generation_setup_wizard.cpython-311.pyc

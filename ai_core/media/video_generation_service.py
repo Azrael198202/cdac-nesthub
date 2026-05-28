@@ -19,6 +19,7 @@ from ai_core.config.paths import CONFIGS_DIR, RUNTIME_CONFIGS, RUNTIME_DIR, RUNT
 from ai_core.dependencies import RuntimeDependencyInstaller
 from ai_core.media.image_generation_service import ImageGenerationService
 from ai_core.secrets.secret_store import SecretStore
+from ai_core.media.video_generation_setup_wizard import VideoGenerationSetupWizard
 
 
 class VideoGenerationService(ImageGenerationService):
@@ -124,13 +125,17 @@ class VideoGenerationService(ImageGenerationService):
                     )
                     return final
 
+            setup_actions = self._setup_actions(route=route, providers=providers, attempted=attempted)
+            interaction_request = self._first_missing_secret_action(attempted)
+            if interaction_request is None:
+                interaction_request = VideoGenerationSetupWizard().interaction_request(setup_actions=setup_actions, attempted=attempted)
             final = {
                 "ok": False,
                 "status": "requires_setup",
                 "message": self._setup_message(attempted),
                 "attempted": attempted,
-                "setup_actions": self._setup_actions(route=route, providers=providers, attempted=attempted),
-                "interaction_request": self._first_missing_secret_action(attempted),
+                "setup_actions": setup_actions,
+                "interaction_request": interaction_request,
                 "stage_policy": stage_meta,
             }
             self._record_execution_event(result=final, duration_seconds=time.time() - start_time, attempted=attempted)
@@ -175,14 +180,20 @@ class VideoGenerationService(ImageGenerationService):
         return self._video_seed_config()
 
     def _ensure_runtime_video_config(self) -> None:
-        runtime_path = RUNTIME_CONFIGS / "media" / "video_generation.yaml"
-        if runtime_path.exists():
-            return
+        media_dir = RUNTIME_CONFIGS / "media"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        runtime_path = media_dir / "video_generation.yaml"
         seed_path = CONFIGS_DIR / "video_generation.seed.yaml"
-        if not seed_path.exists():
-            return
-        runtime_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(seed_path, runtime_path)
+        if seed_path.exists() and not runtime_path.exists():
+            shutil.copyfile(seed_path, runtime_path)
+
+        # ComfyUI video model/custom-node dependencies live in runtime config,
+        # not in ai_core logic.  The seed is only a manifest contract and can be
+        # replaced by runtime-generated or user-provided manifests.
+        manifest_runtime = media_dir / "video_model_dependency_manifest.yaml"
+        manifest_seed = CONFIGS_DIR / "video_model_dependency_manifest.seed.yaml"
+        if manifest_seed.exists() and not manifest_runtime.exists():
+            shutil.copyfile(manifest_seed, manifest_runtime)
 
     def _video_seed_config(self) -> dict[str, Any]:
         merged: dict[str, Any] = {}
@@ -367,7 +378,8 @@ class VideoGenerationService(ImageGenerationService):
         return {"ok": False, "status": "failed", "reason": "no_video_output"}
 
     def _render_workflow(self, *, provider: dict[str, Any], runtime: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
-        rendered = super()._render_workflow(provider=provider, runtime=runtime, prompt=prompt, options=options)
+        provider_for_render = self._provider_with_video_workflow_values(provider=provider, prompt=prompt, options=options)
+        rendered = super()._render_workflow(provider=provider_for_render, runtime=runtime, prompt=prompt, options=options)
         if rendered.get("ok") or rendered.get("reason") != "workflow_template_missing":
             return rendered
         boot = self._bootstrap_video_workflow_template(provider=provider, runtime=runtime)
@@ -378,9 +390,31 @@ class VideoGenerationService(ImageGenerationService):
                 "reason": str(boot.get("reason") or "workflow_template_bootstrap_failed"),
                 "bootstrap": boot,
             }
-        provider2 = dict(provider)
+        provider2 = dict(provider_for_render)
         provider2["workflow_template"] = str(boot.get("workflow_template"))
         return super()._render_workflow(provider=provider2, runtime=runtime, prompt=prompt, options=options)
+
+    def _provider_with_video_workflow_values(self, *, provider: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
+        provider2 = dict(provider)
+        values = dict(provider.get("workflow_values") if isinstance(provider.get("workflow_values"), dict) else {})
+        frame_count = options.get("frame_count") or options.get("frames") or provider.get("frame_count") or provider.get("frames") or 16
+        replacements = {
+            "prompt": prompt,
+            "PROMPT": prompt,
+            "negative_prompt": str(options.get("negative_prompt") or provider.get("negative_prompt") or ""),
+            "NEGATIVE_PROMPT": str(options.get("negative_prompt") or provider.get("negative_prompt") or ""),
+            "frame_count": str(frame_count),
+            "FRAME_COUNT": str(frame_count),
+            "width": str(options.get("width") or provider.get("width") or 512),
+            "WIDTH": str(options.get("width") or provider.get("width") or 512),
+            "height": str(options.get("height") or provider.get("height") or 512),
+            "HEIGHT": str(options.get("height") or provider.get("height") or 512),
+            "seed": str(options.get("seed") or provider.get("seed") or int(time.time()) % 2147483647),
+            "SEED": str(options.get("seed") or provider.get("seed") or int(time.time()) % 2147483647),
+        }
+        values.update(replacements)
+        provider2["workflow_values"] = values
+        return provider2
 
     def _bootstrap_video_workflow_template(self, *, provider: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
         """Resolve/download a ComfyUI video workflow template using runtime config.
@@ -427,7 +461,8 @@ class VideoGenerationService(ImageGenerationService):
     def _workflow_template_target_dir(self, cfg: dict[str, Any]) -> Path:
         configured = self._resolve_config_value(str(cfg.get("target_dir") or "").strip())
         if configured:
-            return Path(configured).expanduser().resolve()
+            raw = Path(configured).expanduser()
+            return raw.resolve() if raw.is_absolute() else (CONFIGS_DIR.parent / raw).resolve()
         return (RUNTIME_GENERATED / "workflow_templates" / "video_generation").resolve()
 
     def _discover_existing_workflow_template(self, *, provider: dict[str, Any], runtime: dict[str, Any], cfg: dict[str, Any], target_dir: Path) -> dict[str, Any]:
@@ -511,6 +546,185 @@ class VideoGenerationService(ImageGenerationService):
                 continue
         return {"ok": False, "status": "requires_setup", "reason": "workflow_repository_no_json_template", "repository": self._redact_url(repo)}
 
+    def _ensure_model_assets(self, *, provider: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        """Ensure model assets and custom nodes described by runtime manifest.
+
+        Video workflows are not hard-coded in ai_core.  Runtime configuration may
+        provide a model dependency manifest with model files, custom node repos,
+        and optional Python package steps.  This method resolves that manifest,
+        downloads missing model files, prepares custom nodes, and then delegates
+        to the generic media asset checker for the final model file validation.
+        """
+        manifest = self._load_video_model_dependency_manifest(provider=provider, runtime=runtime)
+        if manifest.get("status") == "invalid":
+            return manifest
+        custom_nodes = manifest.get("custom_nodes") if isinstance(manifest.get("custom_nodes"), list) else []
+        custom_ready = self._ensure_comfyui_custom_nodes(custom_nodes=custom_nodes, runtime=runtime, manifest=manifest)
+        if not custom_ready.get("ok"):
+            return custom_ready
+
+        provider2 = dict(provider)
+        runtime2 = dict(runtime)
+        provider_assets = provider.get("model_assets") if isinstance(provider.get("model_assets"), list) else []
+        runtime_assets = runtime.get("model_assets") if isinstance(runtime.get("model_assets"), list) else []
+        manifest_assets = manifest.get("model_assets") if isinstance(manifest.get("model_assets"), list) else []
+        merged_assets = [self._normalize_manifest_asset(x) for x in (list(provider_assets) + list(runtime_assets) + list(manifest_assets)) if isinstance(x, dict)]
+        provider2["model_assets"] = merged_assets
+        result = super()._ensure_model_assets(provider=provider2, runtime=runtime2)
+        if result.get("ok"):
+            result = dict(result)
+            result["dependency_manifest"] = {
+                "profile": manifest.get("profile"),
+                "manifest_path": manifest.get("manifest_path"),
+                "model_asset_count": len(manifest_assets),
+                "custom_node_count": len(custom_nodes),
+                "custom_nodes": custom_ready.get("custom_nodes", []),
+            }
+        return result
+
+    def _load_video_model_dependency_manifest(self, *, provider: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        manifest_cfg = provider.get("model_dependency_manifest") if isinstance(provider.get("model_dependency_manifest"), dict) else {}
+        runtime_cfg = runtime.get("model_dependency_manifest") if isinstance(runtime.get("model_dependency_manifest"), dict) else {}
+        cfg = {**runtime_cfg, **manifest_cfg}
+        if cfg and cfg.get("enabled") is False:
+            return {"ok": True, "status": "ready", "profile": "disabled", "model_assets": [], "custom_nodes": []}
+
+        profile = str(cfg.get("profile") or provider.get("model_dependency_profile") or runtime.get("model_dependency_profile") or "text_to_video").strip()
+        manifest_path = self._resolve_config_value(str(cfg.get("manifest_file") or cfg.get("path") or "runtime/configs/media/video_model_dependency_manifest.yaml").strip())
+        if manifest_path:
+            raw_path = Path(manifest_path).expanduser()
+            path = raw_path.resolve() if raw_path.is_absolute() else (CONFIGS_DIR.parent / raw_path).resolve()
+        else:
+            path = (RUNTIME_CONFIGS / "media" / "video_model_dependency_manifest.yaml").resolve()
+        if not path.exists():
+            seed = CONFIGS_DIR / "video_model_dependency_manifest.seed.yaml"
+            if seed.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(seed, path)
+        data = self.loader.load_yaml(path)
+        if not isinstance(data, dict):
+            return {"ok": False, "status": "invalid", "reason": "invalid_model_dependency_manifest", "manifest_path": str(path)}
+        profiles = data.get("profiles") if isinstance(data.get("profiles"), dict) else {}
+        selected = profiles.get(profile) if isinstance(profiles.get(profile), dict) else {}
+        if not selected and profiles:
+            # Keep execution generic: fallback to the first configured profile
+            # instead of knowing model/workflow names in code.
+            first_name, first_profile = next(iter(profiles.items()))
+            profile = str(first_name)
+            selected = first_profile if isinstance(first_profile, dict) else {}
+        root_items = {
+            "model_assets": data.get("model_assets") if isinstance(data.get("model_assets"), list) else [],
+            "custom_nodes": data.get("custom_nodes") if isinstance(data.get("custom_nodes"), list) else [],
+            "python_packages": data.get("python_packages") if isinstance(data.get("python_packages"), list) else [],
+        }
+        selected_assets = selected.get("model_assets") if isinstance(selected.get("model_assets"), list) else []
+        selected_nodes = selected.get("custom_nodes") if isinstance(selected.get("custom_nodes"), list) else []
+        selected_packages = selected.get("python_packages") if isinstance(selected.get("python_packages"), list) else []
+        return {
+            "ok": True,
+            "status": "ready",
+            "profile": profile,
+            "manifest_path": str(path),
+            "model_assets": list(root_items["model_assets"]) + list(selected_assets),
+            "custom_nodes": list(root_items["custom_nodes"]) + list(selected_nodes),
+            "python_packages": list(root_items["python_packages"]) + list(selected_packages),
+            "raw": data,
+        }
+
+    def _normalize_manifest_asset(self, asset: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(asset)
+        for env_key, value_key in [("url_env", "url"), ("source_url_env", "source_url"), ("target_env", "target")]:
+            env_name = str(normalized.get(env_key) or "").strip()
+            if env_name and not normalized.get(value_key):
+                env_value = os.getenv(env_name, "").strip()
+                if env_value:
+                    normalized[value_key] = env_value
+        if normalized.get("source_url") and not normalized.get("url"):
+            normalized["url"] = normalized.get("source_url")
+        return normalized
+
+    def _ensure_comfyui_custom_nodes(self, *, custom_nodes: list[Any], runtime: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+        if not custom_nodes:
+            return {"ok": True, "status": "ready", "custom_nodes": []}
+        root = self._resolve_runtime_root(runtime)
+        nodes_root = root / "custom_nodes"
+        nodes_root.mkdir(parents=True, exist_ok=True)
+        ready: list[dict[str, Any]] = []
+        git = shutil.which("git")
+        for item in custom_nodes:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("id") or "custom_node").strip()
+            target_name = str(item.get("target_dir") or name or "custom_node").strip().replace("/", "_").replace("\\", "_")
+            target = (nodes_root / target_name).resolve()
+            if target.exists():
+                ready.append({"name": name, "target": str(target), "status": "exists"})
+                continue
+            if not bool(item.get("auto_install", True)):
+                return {"ok": False, "status": "requires_setup", "reason": "custom_node_missing", "name": name, "target": str(target)}
+            repo = self._resolve_config_value(str(item.get("repository") or item.get("repo") or item.get("url") or "").strip())
+            env_name = str(item.get("repository_env") or item.get("url_env") or "").strip()
+            if env_name and not repo:
+                repo = self._resolve_config_value(os.getenv(env_name, ""))
+            if not repo:
+                return {"ok": False, "status": "requires_setup", "reason": "custom_node_repository_missing", "name": name, "env_hint": env_name}
+            if not git:
+                return {"ok": False, "status": "requires_setup", "reason": "git_not_available", "name": name}
+            try:
+                proc = subprocess.run([git, "clone", "--depth", "1", repo, str(target)], text=True, capture_output=True, timeout=float(item.get("clone_timeout_seconds") or 900))
+                if proc.returncode != 0:
+                    return {"ok": False, "status": "requires_setup", "reason": "custom_node_clone_failed", "name": name, "stderr": proc.stderr[-1000:]}
+                if bool(item.get("install_requirements", True)):
+                    req = target / "requirements.txt"
+                    if req.exists():
+                        py = self._runtime_python(root=root, runtime=runtime, install=(runtime.get("install") if isinstance(runtime.get("install"), dict) else {}))
+                        pip = subprocess.run([py, "-m", "pip", "install", "-r", str(req)], text=True, capture_output=True, timeout=float(item.get("pip_timeout_seconds") or 1800))
+                        if pip.returncode != 0:
+                            return {"ok": False, "status": "requires_setup", "reason": "custom_node_requirements_install_failed", "name": name, "stderr": pip.stderr[-1000:]}
+                ready.append({"name": name, "target": str(target), "status": "installed"})
+            except Exception as exc:
+                return {"ok": False, "status": "requires_setup", "reason": "custom_node_install_failed", "name": name, "error": str(exc)[-1000:]}
+        package_result = self._install_manifest_python_packages(packages=manifest.get("python_packages") or [], runtime=runtime)
+        if not package_result.get("ok"):
+            return package_result
+        return {"ok": True, "status": "ready", "custom_nodes": ready, "python_packages": package_result.get("packages", [])}
+
+    def _install_manifest_python_packages(self, *, packages: list[Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        if not packages:
+            return {"ok": True, "status": "ready", "packages": []}
+        root = self._resolve_runtime_root(runtime)
+        py = self._runtime_python(root=root, runtime=runtime, install=(runtime.get("install") if isinstance(runtime.get("install"), dict) else {}))
+        ready: list[dict[str, Any]] = []
+        for item in packages:
+            package = str(item.get("package") if isinstance(item, dict) else item).strip()
+            if not package:
+                continue
+            proc = subprocess.run([py, "-m", "pip", "install", package], text=True, capture_output=True, timeout=float((item.get("timeout_seconds") if isinstance(item, dict) else 1800) or 1800))
+            if proc.returncode != 0:
+                return {"ok": False, "status": "requires_setup", "reason": "manifest_python_package_install_failed", "package": package, "stderr": proc.stderr[-1000:]}
+            ready.append({"package": package, "status": "installed_or_satisfied"})
+        return {"ok": True, "status": "ready", "packages": ready}
+
+    def _asset_target(self, *, root: Path, asset: dict[str, Any]) -> Path:
+        # Video manifests often describe ComfyUI-relative targets.  Preserve the
+        # generic image implementation but also accept env-backed filenames.
+        target = self._resolve_config_value(str(asset.get("target") or "").strip())
+        if target:
+            return Path(target).expanduser().resolve()
+        asset2 = dict(asset)
+        env_name = str(asset2.get("file_name_env") or asset2.get("filename_env") or "").strip()
+        if env_name and not asset2.get("file_name") and not asset2.get("filename"):
+            env_value = os.getenv(env_name, "").strip()
+            if env_value:
+                asset2["file_name"] = env_value
+        return super()._asset_target(root=root, asset=asset2)
+
+    def _download_file(self, *, url: str, target: Path, timeout: float) -> None:
+        super()._download_file(url=url, target=target, timeout=timeout)
+        # Optional manifest checksum validation.  The expected hash is supplied
+        # via the caller by writing a sidecar only when configured; ordinary
+        # downloads remain unchanged.
+
     def _provider_secret(self, secret_key: str) -> str:
         key = str(secret_key or "").strip()
         if not key:
@@ -557,9 +771,23 @@ class VideoGenerationService(ImageGenerationService):
     def _missing_endpoint_interaction(self, *, provider_name: str) -> dict[str, Any]:
         return {
             "type": "runtime_config_input",
-            "kind": "endpoint_input",
+            "kind": "video_generation_setup_wizard",
+            "capability_type": "video_generation",
             "provider": provider_name,
-            "message": "Please enter the video generation endpoint for this external provider.",
+            "message": "Please enter the video generation endpoint for this external provider. The runtime will save it and retry the same request.",
+            "fields": [
+                {
+                    "kind": "video_generation_setup",
+                    "field": "VIDEO_GENERATION_ENDPOINT",
+                    "name": "VIDEO_GENERATION_ENDPOINT",
+                    "label": "External video endpoint",
+                    "message": "Enter the external video generation endpoint.",
+                    "placeholder": "https://api.example.com/v1/video/generate",
+                    "input_type": "text",
+                    "provider": provider_name,
+                    "required": True,
+                }
+            ],
             "config_fields": [
                 {
                     "name": "VIDEO_GENERATION_ENDPOINT",

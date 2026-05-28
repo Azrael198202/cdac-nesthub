@@ -124,6 +124,15 @@ function renderStudioResponse(data, originalText){
     addMessage(data.message || 'Please select an uploaded artifact.', 'item error');
     return;
   }
+  const pendingItemsTop = collectMissingInputs(data || {});
+  if(pendingItemsTop.length){
+    lastMissingInputs = pendingItemsTop;
+    lastPendingRunId = data.run_id || '';
+    lastPendingInstruction = originalText || lastSubmittedInstruction;
+    addMessage((data.final_answer || data.message || 'Runtime setup is required.') + '\nFill the setup form to continue.', 'item error');
+    openMissingInputModal(pendingItemsTop, lastPendingRunId || 'video_generation_setup');
+    return;
+  }
   if(data && (data.action==='conversation_message' || data.action==='model_preflight')){
     const answer = data.final_answer || data.message || '';
     addFinalAnswer(answer || '(no answer)', data.status==='blocked' ? 'item error' : 'item final');
@@ -615,6 +624,35 @@ function addListValue(input, chips){
 }
 
 function closeMissingInputModal(){ document.getElementById('missingInputModal').classList.remove('show'); }
+
+async function apiFetchJson(url, options){
+  const started = Date.now();
+  try{
+    const res = await fetch(url, options || {});
+    const text = await res.text();
+    let data = {};
+    if(text){
+      try{ data = JSON.parse(text); }
+      catch(e){ data = {ok:false, status:'invalid_json_response', raw:text.slice(0,2000)}; }
+    }
+    if(!res.ok || data.ok===false){
+      const msg = (data && (data.message || data.error || (data.error && data.error.message))) || ('HTTP '+res.status);
+      throw new Error(msg + ' [' + url + ']');
+    }
+    return data;
+  }catch(e){
+    const detail = {
+      url:url,
+      error:String(e && e.message ? e.message : e),
+      elapsed_ms:Date.now()-started,
+      hint:'Backend API is unreachable or the request was blocked. Check backend console and runtime/logs/api_errors.jsonl.'
+    };
+    try{
+      await fetch('/api/agent-studio/client-error',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(detail)});
+    }catch(_ignored){}
+    throw new Error('API request failed: '+detail.error+'; url='+url+'; see runtime/logs/frontend_errors.jsonl and runtime/logs/api_errors.jsonl');
+  }
+}
 async function skipCredentialAndContinue(){
   closeMissingInputModal();
   const provided={action:'skip_credential', choice:'skip_credential', skip_credential:true, credential_mode:'skip'};
@@ -670,26 +708,37 @@ async function submitMissingInputs(){
   });
   if(missingRequired.length){ addMessage('Please enter required value(s): '+missingRequired.join(', '),'item error'); return; }
   closeMissingInputModal();
-  if(provided.secret_key && provided.value){
-    await saveRuntimeSecret(provided.secret_key, provided.value);
-  }
-  if(lastPendingRunId){ await resumePendingRun(lastPendingRunId, provided); return; }
-  const text=lastPendingInstruction || lastSubmittedInstruction;
-  if(text){
-    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, session_id:activeSessionId, provided_inputs:provided, uploaded_artifacts:selectedArtifactsForRequest(text)})});
-    const data=await res.json();
-    addMessage(renderJson(data), data.status==='completed'?'item':'item error');
-    await refreshState();
+  try{
+    if(provided.secret_key && provided.value){
+      await saveRuntimeSecret(provided.secret_key, provided.value);
+    }
+    await saveVideoGenerationSetup(provided);
+    if(lastPendingRunId){ await resumePendingRun(lastPendingRunId, provided); return; }
+    const text=lastPendingInstruction || lastSubmittedInstruction;
+    if(text){
+      const data=await apiFetchJson('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, session_id:activeSessionId, provided_inputs:provided, uploaded_artifacts:selectedArtifactsForRequest(text)})});
+      addMessage(renderJson(data), data.status==='completed'?'item':'item error');
+      await refreshState();
+    }
+  }catch(e){
+    addMessage('Runtime setup submit failed: '+String(e && e.message ? e.message : e),'item error');
   }
 }
 async function saveRuntimeSecret(key, value){
   const cleanKey=String(key||'').trim();
   const cleanValue=String(value||'').trim();
   if(!cleanKey || !cleanValue){ return; }
-  const res=await fetch('/api/agent-studio/secret',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:cleanKey,value:cleanValue})});
-  const data=await res.json().catch(()=>({}));
-  if(!res.ok || data.ok===false){ throw new Error(data.message || 'Failed to save runtime secret.'); }
+  await apiFetchJson('/api/agent-studio/secret',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:cleanKey,value:cleanValue})});
   addProgressMessage('runtime secret saved');
+}
+
+async function saveVideoGenerationSetup(providedInputs){
+  const dataIn = providedInputs || {};
+  const keys = Object.keys(dataIn);
+  const relevant = keys.some(k => ['video_workflow_source','video_workflow_repository_file','VIDEO_GENERATION_ENDPOINT','video_generation_endpoint','endpoint','VIDEO_GENERATION_API_KEY'].includes(k));
+  if(!relevant){ return; }
+  await apiFetchJson('/api/agent-studio/video-generation/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provided_inputs:dataIn})});
+  addProgressMessage('video generation setup saved');
 }
 
 async function resumePendingRun(runId, providedInputs){
@@ -703,10 +752,10 @@ async function resumePendingRun(runId, providedInputs){
     if(providedInputs && providedInputs.secret_key && providedInputs.value){
       await saveRuntimeSecret(providedInputs.secret_key, providedInputs.value);
     }
+    if(providedInputs){ await saveVideoGenerationSetup(providedInputs); }
     addProgressMessage('resuming suspended delegated run');
     pollTimer=setInterval(()=>refreshState(), 1200);
-    const res=await fetch('/api/agent-studio/resume-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_id:runId, provided_inputs:providedInputs||null})});
-    const data=await res.json();
+    const data=await apiFetchJson('/api/agent-studio/resume-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_id:runId, provided_inputs:providedInputs||null})});
     addMessage(renderJson(data), data.status==='completed'?'item':'item error');
     const pendingItems = collectMissingInputs(data);
     if(pendingItems.length){ lastMissingInputs=pendingItems; lastPendingRunId=data.run_id||runId; addMissingInputs(pendingItems, lastPendingInstruction, lastPendingRunId); }
@@ -986,9 +1035,27 @@ function taskGraphCard(g){
 function collectMissingInputs(payload){
   if(!payload || typeof payload !== 'object'){ return []; }
   if(Array.isArray(payload.missing_inputs) && payload.missing_inputs.length){ return normalizeInteractionItems(payload.missing_inputs); }
+  if(payload.pending_action && typeof payload.pending_action === 'object'){
+    const pa = payload.pending_action;
+    if(Array.isArray(pa.fields) && pa.fields.length){ return normalizeInteractionItems(pa.fields.map(f=>({...f, kind:f.kind||pa.kind||pa.type||'human_information_required'}))); }
+    if(pa.request && Array.isArray(pa.request.fields) && pa.request.fields.length){ return normalizeInteractionItems(pa.request.fields.map(f=>({...f, kind:f.kind||pa.kind||pa.type||'human_information_required'}))); }
+    if(Array.isArray(pa.setup_actions) && pa.setup_actions.length){
+      const fs=[];
+      pa.setup_actions.forEach(a=>{
+        const kind=String((a&&a.kind)||''); const reason=String((a&&a.reason)||'');
+        if(kind==='prepare_local_video_runtime' || reason.indexOf('workflow_template')>=0){
+          fs.push({kind:'video_generation_setup', field:'video_workflow_source', label:'ComfyUI video workflow source', message:'Enter a ComfyUI workflow JSON local path, URL, or Git repository URL. Runtime will save it and retry.', required:true});
+          fs.push({kind:'video_generation_setup', field:'video_workflow_repository_file', label:'Workflow file inside repository', message:'Optional path to workflow JSON inside the repository.', required:false});
+        }
+        if(kind==='set_endpoint'){ fs.push({kind:'video_generation_setup', field:'VIDEO_GENERATION_ENDPOINT', label:'External video endpoint', message:'Enter the external video generation endpoint.', required:true}); }
+      });
+      if(fs.length){ return normalizeInteractionItems(fs); }
+    }
+  }
   if(payload.interaction_request && typeof payload.interaction_request === 'object'){
     const req = payload.interaction_request;
-    if(Array.isArray(req.fields) && req.fields.length){ return normalizeInteractionItems(req.fields.map(f=>({...f, kind:req.kind||req.type||'human_information_required'}))); }
+    if(Array.isArray(req.fields) && req.fields.length){ return normalizeInteractionItems(req.fields.map(f=>({...f, kind:f.kind||req.kind||req.type||'human_information_required'}))); }
+    if(Array.isArray(req.config_fields) && req.config_fields.length){ return normalizeInteractionItems(req.config_fields.map(f=>({kind:req.kind||req.type||'runtime_config_input', field:f.name||f.env, label:f.name||f.env, message:req.message||'Please provide this runtime configuration value.', input_type:f.interaction_type==='secret'?'password':'text', required:f.required!==false}))); }
   }
   if(Array.isArray(payload.human_interactions) && payload.human_interactions.length){
     const fields=[];
