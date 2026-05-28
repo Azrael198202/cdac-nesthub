@@ -422,3 +422,11 @@ def test_runtime_permission_policy_defaults_to_administrator_install() -> None:
     assert policy.can_execute(kind="install") is True
     assert policy.can_use_arbitrary_runtime_material(material_type="package_spec") is True
     assert policy.allow_shell_injection is True
+
+
+def test_agent_studio_renders_gif_artifact_as_image_not_video() -> None:
+    html = Path("apps/web/agent_studio.html").read_text(encoding="utf-8")
+    assert "function isGifDownloadUrl" in html
+    assert "answerGifPreview" in html
+    assert "renderVideoLikeMedia(url, label" in html
+    assert "<img class=\"answerGifPreview\"" in html
