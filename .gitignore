@@ -623,3 +623,6 @@ tests/__pycache__/test_stage_planner_regression.cpython-313-pytest-9.0.2.pyc
 tests/__pycache__/test_step_planner_stage_boundaries.cpython-313-pytest-9.0.2.pyc
 ai_core/knowledge/__pycache__/document_processor.cpython-311.pyc
 ai_core/knowledge/__pycache__/embedding_index.cpython-311.pyc
+ai_core/capabilities/__pycache__/capability_dispatcher.cpython-311.pyc
+ai_core/media/__pycache__/__init__.cpython-311.pyc
+ai_core/media/__pycache__/image_generation_service.cpython-311.pyc
