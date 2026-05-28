@@ -1330,7 +1330,7 @@ class AgentDelegationRuntime:
                 status=str(payload.get("status") or "failed"),
                 final_answer=str(payload.get("message") or "Video generation provider setup is required."),
                 workflow_results={"status": payload.get("status") or "failed", "capability_type": "video_generation", "provider_result": payload},
-                pending_action={
+                pending_action=payload.get("interaction_request") or {
                     "kind": "capability_provider_setup",
                     "capability_type": "video_generation",
                     "setup_actions": payload.get("setup_actions") or [],

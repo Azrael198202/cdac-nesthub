@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -13,8 +14,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from ai_core.config.paths import CONFIGS_DIR, RUNTIME_CONFIGS, RUNTIME_DIR, RUNTIME_DOWNLOADS
+from ai_core.config.paths import CONFIGS_DIR, RUNTIME_CONFIGS, RUNTIME_DIR, RUNTIME_DOWNLOADS, RUNTIME_GENERATED
 from ai_core.media.image_generation_service import ImageGenerationService
+from ai_core.secrets.secret_store import SecretStore
 
 
 class VideoGenerationService(ImageGenerationService):
@@ -61,6 +63,7 @@ class VideoGenerationService(ImageGenerationService):
             "message": self._setup_message(attempted),
             "attempted": attempted,
             "setup_actions": self._setup_actions(route=route, providers=providers, attempted=attempted),
+            "interaction_request": self._first_missing_secret_action(attempted),
             "stage_policy": stage_meta,
         }
         self._record_execution_event(result=final, duration_seconds=time.time() - start_time, attempted=attempted)
@@ -237,6 +240,193 @@ class VideoGenerationService(ImageGenerationService):
                     return {"ok": True, "status": "completed", "file_path": str(target)}
         return {"ok": False, "status": "failed", "reason": "no_video_output"}
 
+    def _render_workflow(self, *, provider: dict[str, Any], runtime: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
+        rendered = super()._render_workflow(provider=provider, runtime=runtime, prompt=prompt, options=options)
+        if rendered.get("ok") or rendered.get("reason") != "workflow_template_missing":
+            return rendered
+        boot = self._bootstrap_video_workflow_template(provider=provider, runtime=runtime)
+        if not boot.get("ok"):
+            return {
+                "ok": False,
+                "status": "requires_setup",
+                "reason": str(boot.get("reason") or "workflow_template_bootstrap_failed"),
+                "bootstrap": boot,
+            }
+        provider2 = dict(provider)
+        provider2["workflow_template"] = str(boot.get("workflow_template"))
+        return super()._render_workflow(provider=provider2, runtime=runtime, prompt=prompt, options=options)
+
+    def _bootstrap_video_workflow_template(self, *, provider: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        """Resolve/download a ComfyUI video workflow template using runtime config.
+
+        The core remains generic: it does not know AnimateDiff, model names, or
+        a fixed workflow. Runtime configuration supplies either a URL, repository,
+        file path, or discovery directories. Missing values are surfaced as setup
+        actions so the UI can collect them without falling back to chat.
+        """
+        bootstrap = provider.get("workflow_bootstrap") if isinstance(provider.get("workflow_bootstrap"), dict) else {}
+        runtime_bootstrap = runtime.get("workflow_bootstrap") if isinstance(runtime.get("workflow_bootstrap"), dict) else {}
+        cfg = {**runtime_bootstrap, **bootstrap}
+        if cfg and cfg.get("enabled") is False:
+            return {"ok": False, "status": "requires_setup", "reason": "workflow_template_missing"}
+        target_dir = self._workflow_template_target_dir(cfg)
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        discovered = self._discover_existing_workflow_template(provider=provider, runtime=runtime, cfg=cfg, target_dir=target_dir)
+        if discovered.get("ok"):
+            return discovered
+
+        downloaded = self._download_workflow_template_from_config(provider=provider, runtime=runtime, cfg=cfg, target_dir=target_dir)
+        if downloaded.get("ok"):
+            return downloaded
+
+        cloned = self._clone_workflow_template_repo(provider=provider, runtime=runtime, cfg=cfg, target_dir=target_dir)
+        if cloned.get("ok"):
+            return cloned
+        if cloned.get("reason") and cloned.get("reason") != "workflow_repository_source_missing":
+            return cloned
+
+        return {
+            "ok": False,
+            "status": "requires_setup",
+            "reason": downloaded.get("reason") or "workflow_template_source_missing",
+            "expected_inputs": [
+                "AI_CORE_VIDEO_WORKFLOW_TEMPLATE_URL",
+                "AI_CORE_VIDEO_WORKFLOW_TEMPLATE_REPOSITORY",
+                "AI_CORE_VIDEO_WORKFLOW_TEMPLATE_FILE",
+            ],
+            "target_dir": str(target_dir),
+        }
+
+    def _workflow_template_target_dir(self, cfg: dict[str, Any]) -> Path:
+        configured = self._resolve_config_value(str(cfg.get("target_dir") or "").strip())
+        if configured:
+            return Path(configured).expanduser().resolve()
+        return (RUNTIME_GENERATED / "workflow_templates" / "video_generation").resolve()
+
+    def _discover_existing_workflow_template(self, *, provider: dict[str, Any], runtime: dict[str, Any], cfg: dict[str, Any], target_dir: Path) -> dict[str, Any]:
+        explicit_file = self._resolve_config_value(str(cfg.get("file") or cfg.get("workflow_template_file") or os.getenv(str(cfg.get("file_env") or "AI_CORE_VIDEO_WORKFLOW_TEMPLATE_FILE"), "") or "").strip())
+        candidates: list[Path] = []
+        if explicit_file:
+            candidates.append(Path(explicit_file).expanduser())
+        candidates.extend(sorted(target_dir.glob("*.json")))
+        raw_dirs = cfg.get("search_dirs") if isinstance(cfg.get("search_dirs"), list) else []
+        for item in raw_dirs:
+            d = self._resolve_config_value(str(item or "").strip())
+            if d:
+                candidates.extend(sorted(Path(d).expanduser().glob("**/*.json"))[:50])
+        root = self._resolve_runtime_root(runtime)
+        for rel in ["workflows", "user/default/workflows", "custom_nodes"]:
+            d = root / rel
+            if d.exists():
+                candidates.extend(sorted(d.glob("**/*.json"))[:50])
+        for candidate in candidates:
+            try:
+                path = candidate.expanduser().resolve()
+                if not path.exists() or path.suffix.lower() != ".json":
+                    continue
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return {"ok": True, "status": "ready", "workflow_template": str(path), "source": "discovered"}
+            except Exception:
+                continue
+        return {"ok": False, "status": "requires_setup", "reason": "workflow_template_not_discovered"}
+
+    def _download_workflow_template_from_config(self, *, provider: dict[str, Any], runtime: dict[str, Any], cfg: dict[str, Any], target_dir: Path) -> dict[str, Any]:
+        urls: list[str] = []
+        raw_urls = cfg.get("urls") or provider.get("workflow_template_urls") or runtime.get("workflow_template_urls")
+        if isinstance(raw_urls, list):
+            urls.extend(str(x).strip() for x in raw_urls if str(x).strip())
+        for key in ["url", "workflow_template_url"]:
+            value = str(cfg.get(key) or provider.get(key) or runtime.get(key) or "").strip()
+            if value:
+                urls.append(value)
+        env_name = str(cfg.get("url_env") or "AI_CORE_VIDEO_WORKFLOW_TEMPLATE_URL").strip()
+        env_value = os.getenv(env_name, "").strip() if env_name else ""
+        if env_value:
+            urls.insert(0, env_value)
+        urls = [self._resolve_config_value(x) for x in urls]
+        urls = [x for x in urls if x]
+        if not urls:
+            return {"ok": False, "status": "requires_setup", "reason": "workflow_template_source_missing", "env": env_name}
+        last_error = ""
+        for idx, url in enumerate(urls):
+            try:
+                parsed = urllib.parse.urlparse(url)
+                suffix = Path(parsed.path).suffix.lower() or ".json"
+                target = target_dir / f"video_workflow_{idx}{suffix}"
+                self._download_file(url=url, target=target, timeout=float(cfg.get("download_timeout_seconds") or 600))
+                json.loads(target.read_text(encoding="utf-8"))
+                return {"ok": True, "status": "downloaded", "workflow_template": str(target), "source_url": self._redact_url(url)}
+            except Exception as exc:
+                last_error = str(exc)[-1000:]
+                continue
+        return {"ok": False, "status": "requires_setup", "reason": "workflow_template_download_failed", "error": last_error}
+
+    def _clone_workflow_template_repo(self, *, provider: dict[str, Any], runtime: dict[str, Any], cfg: dict[str, Any], target_dir: Path) -> dict[str, Any]:
+        repo = self._resolve_config_value(str(cfg.get("repository") or os.getenv(str(cfg.get("repository_env") or "AI_CORE_VIDEO_WORKFLOW_TEMPLATE_REPOSITORY"), "") or "").strip())
+        if not repo:
+            return {"ok": False, "status": "requires_setup", "reason": "workflow_repository_source_missing"}
+        git = shutil.which("git")
+        if not git:
+            return {"ok": False, "status": "requires_setup", "reason": "git_not_available"}
+        repo_dir = target_dir / "workflow_repo"
+        if not repo_dir.exists():
+            proc = subprocess.run([git, "clone", "--depth", "1", repo, str(repo_dir)], text=True, capture_output=True, timeout=float(cfg.get("clone_timeout_seconds") or 600))
+            if proc.returncode != 0:
+                return {"ok": False, "status": "requires_setup", "reason": "workflow_repository_clone_failed", "stderr": proc.stderr[-1000:]}
+        pattern = str(cfg.get("repository_file") or os.getenv(str(cfg.get("repository_file_env") or "AI_CORE_VIDEO_WORKFLOW_TEMPLATE_REPOSITORY_FILE"), "") or "**/*.json")
+        for candidate in sorted(repo_dir.glob(pattern))[:100]:
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return {"ok": True, "status": "downloaded", "workflow_template": str(candidate), "source_repository": self._redact_url(repo)}
+            except Exception:
+                continue
+        return {"ok": False, "status": "requires_setup", "reason": "workflow_repository_no_json_template", "repository": self._redact_url(repo)}
+
+    def _provider_secret(self, secret_key: str) -> str:
+        key = str(secret_key or "").strip()
+        if not key:
+            return ""
+        value = os.getenv(key, "")
+        if value:
+            return value
+        try:
+            return SecretStore().get(key) or ""
+        except Exception:
+            return ""
+
+    def _missing_secret_interaction(self, *, provider_name: str, secret_key: str) -> dict[str, Any]:
+        return {
+            "kind": "secret_input",
+            "capability_type": "video_generation",
+            "provider": provider_name,
+            "secret_key": secret_key,
+            "message": f"{provider_name} requires {secret_key}. Please enter the key to continue, or choose a local provider.",
+            "secret_fields": [
+                {
+                    "name": secret_key,
+                    "secret_key": secret_key,
+                    "interaction_type": "secret",
+                    "provider": provider_name,
+                    "required": True,
+                }
+            ],
+        }
+
+    def _first_missing_secret_action(self, attempted: list[dict[str, Any]]) -> dict[str, Any] | None:
+        for item in attempted:
+            if str(item.get("reason") or "") == "missing_secret":
+                secret_key = str(item.get("secret_key") or "").strip()
+                provider = str(item.get("provider") or "external_video_generation").strip()
+                if secret_key:
+                    return self._missing_secret_interaction(provider_name=provider, secret_key=secret_key)
+        return None
+
+    def _redact_url(self, url: str) -> str:
+        return re.sub(r"([?&][^=]*(?:key|token|secret|credential)[^=]*=)[^&]+", r"\1***", str(url), flags=re.IGNORECASE)
+
     def _call_local_command(self, provider: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
         command = provider.get("command") or provider.get("commands")
         if isinstance(command, str):
@@ -256,17 +446,17 @@ class VideoGenerationService(ImageGenerationService):
             return self._normalize_provider_result({"file_path": output}, provider=provider)
 
     def _call_http_json(self, provider_name: str, provider: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
-        endpoint = str(provider.get("video_generation_endpoint") or provider.get("video_endpoint") or provider.get("endpoint") or "").strip()
+        endpoint = self._resolve_config_value(str(provider.get("video_generation_endpoint") or provider.get("video_endpoint") or provider.get("endpoint") or "").strip())
         if not endpoint:
-            base = str(provider.get("base_url") or "").rstrip("/")
+            base = self._resolve_config_value(str(provider.get("base_url") or "").rstrip("/"))
             path = str(provider.get("video_generation_path") or provider.get("path") or "").strip("/")
             endpoint = f"{base}/{path}" if base and path else ""
         if not endpoint:
             return {"ok": False, "status": "requires_setup", "reason": "missing_endpoint"}
         secret_key = str(provider.get("secret_key") or provider.get("api_key_env") or "").strip()
-        secret = os.getenv(secret_key) if secret_key else ""
+        secret = self._provider_secret(secret_key)
         if secret_key and not secret:
-            return {"ok": False, "status": "requires_setup", "reason": "missing_secret", "secret_key": secret_key}
+            return {"ok": False, "status": "requires_setup", "reason": "missing_secret", "secret_key": secret_key, "interaction_type": "secret_input"}
         payload = self._render_payload(provider=provider, prompt=prompt, options=options)
         headers = {"Content-Type": "application/json"}
         if secret:
@@ -382,9 +572,11 @@ class VideoGenerationService(ImageGenerationService):
                     "reason": reason or str(attempt.get("status") or "not_ready"),
                     "endpoint": provider.get("base_url") or (provider.get("runtime") or {}).get("base_url"),
                 }
-                if reason == "workflow_template_missing":
+                if reason in {"workflow_template_missing", "workflow_template_source_missing", "workflow_template_download_failed", "workflow_repository_clone_failed"}:
                     action["env"] = "AI_CORE_VIDEO_WORKFLOW_TEMPLATE"
-                    action["message"] = "Set AI_CORE_VIDEO_WORKFLOW_TEMPLATE to a valid ComfyUI video workflow JSON file, or set workflow_template directly in runtime/configs/media/video_generation.yaml."
+                    action["url_env"] = "AI_CORE_VIDEO_WORKFLOW_TEMPLATE_URL"
+                    action["repository_env"] = "AI_CORE_VIDEO_WORKFLOW_TEMPLATE_REPOSITORY"
+                    action["message"] = "Provide AI_CORE_VIDEO_WORKFLOW_TEMPLATE_URL or AI_CORE_VIDEO_WORKFLOW_TEMPLATE_REPOSITORY. The runtime will download/discover the ComfyUI video workflow template automatically before execution. AI_CORE_VIDEO_WORKFLOW_TEMPLATE is still accepted when a local workflow file already exists."
                 actions.append(action)
             if not provider:
                 actions.append({"provider": provider_name, "kind": "register_provider", "message": "Register a provider record for this video generation route."})

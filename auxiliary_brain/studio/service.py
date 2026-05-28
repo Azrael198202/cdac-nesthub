@@ -174,7 +174,7 @@ class AgentStudioService:
             return {
                 "status": status,
                 "final_answer": str(provider_payload.get("message") or "Video generation provider setup is required."),
-                "pending_action": {
+                "pending_action": provider_payload.get("interaction_request") or {
                     "kind": "capability_provider_setup",
                     "capability_type": "video_generation",
                     "setup_actions": provider_payload.get("setup_actions") or [],
