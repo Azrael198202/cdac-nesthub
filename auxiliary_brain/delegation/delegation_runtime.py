@@ -1635,19 +1635,23 @@ class AgentDelegationRuntime:
         return fresh
 
     def _select_participants(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if not participants:
-            return []
         declared_ids = {str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()}
         if declared_ids:
             selected = [
                 participant
-                for participant in participants
+                for participant in (participants or [])
                 if str(participant.get("participant_id") or participant.get("id") or "").strip() in declared_ids
             ]
-            # The task graph is the source of truth.  Do not re-filter the
-            # selected graph nodes by instruction text; generated intermediate
-            # nodes may not be named verbatim in the user instruction.
-            return self._dedupe_participants_for_execution(selected or participants)
+            found_ids = {str(participant.get("participant_id") or participant.get("id") or "").strip() for participant in selected}
+            missing_ids = declared_ids - found_ids
+            if missing_ids:
+                selected.extend(self._participants_from_task_graph(task_graph, missing_ids))
+            # A task graph with selected ids must never fall back to unrelated
+            # durable participants.  Missing generated steps are rebuilt from
+            # the task graph, otherwise execution stays empty and fails cleanly.
+            return self._dedupe_participants_for_execution(selected)
+        if not participants:
+            return []
         text = (str(task_graph.get("instruction") or "") + " " + str(task_graph.get("task_name") or "")).casefold()
         selected = []
         for participant in participants:
@@ -1658,6 +1662,49 @@ class AgentDelegationRuntime:
             elif pid and pid in text:
                 selected.append(participant)
         return self._dedupe_participants_for_execution(selected or participants)
+
+    def _participants_from_task_graph(self, task_graph: dict[str, Any], participant_ids: set[str]) -> list[dict[str, Any]]:
+        rebuilt: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for task in task_graph.get("tasks") or []:
+            if not isinstance(task, dict):
+                continue
+            pid = str(task.get("participant_id") or "").strip()
+            if not pid or pid not in participant_ids or pid in seen:
+                continue
+            seen.add(pid)
+            name = str(task.get("participant_display_name") or task.get("source_instruction_fragment") or pid).strip() or pid
+            objective = str(task.get("source_instruction_fragment") or task.get("objective") or name).strip()
+            rebuilt.append({
+                "participant_id": pid,
+                "name": name,
+                "agent_name": name,
+                "display_name": name,
+                "role_name": name,
+                "instruction": objective,
+                "execution_objective": objective,
+                "definition_instruction": objective,
+                "parameter_contract": task.get("parameter_contract") if isinstance(task.get("parameter_contract"), dict) else {
+                    "contract_type": "generated_intermediate_step_contract",
+                    "parameters": [],
+                    "missing_information": [],
+                    "runtime_scope": "task_run",
+                },
+                "capability_profile": task.get("capability_profile") if isinstance(task.get("capability_profile"), dict) else {},
+                "runtime_parameters": {},
+                "missing_information": [],
+                "origin": "auxiliary_brain",
+                "status": "created",
+                "execution_policy": "delegate_to_ai_core",
+                "generated_by": "task_graph_rebuild",
+                "depends_on": task.get("depends_on") or [],
+                "input_from": task.get("input_from") or task.get("depends_on") or [],
+                "workflow_step_type": task.get("step_type") or "semantic_intermediate_step",
+                "source_step_id": task.get("source_step_id") or "",
+                "input_contract": task.get("input_contract") if isinstance(task.get("input_contract"), dict) else {},
+                "output_contract": task.get("output_contract") if isinstance(task.get("output_contract"), dict) else {},
+            })
+        return rebuilt
 
     def _dedupe_participants_for_execution(self, participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Keep one participant per reusable capability identity.

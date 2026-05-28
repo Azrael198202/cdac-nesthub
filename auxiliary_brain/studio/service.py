@@ -628,8 +628,16 @@ class AgentStudioService:
                 "task_name": task_name,
             }
         all_participants = self.store.list_json("generated/agents")
-        selected_ids = set(task_graph.get("selected_participant_ids") or [])
-        participants = [p for p in all_participants if p.get("participant_id") in selected_ids] or all_participants
+        selected_ids = {str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()}
+        if selected_ids:
+            participants = [p for p in all_participants if str(p.get("participant_id") or p.get("id") or "").strip() in selected_ids]
+            found_ids = {str(p.get("participant_id") or p.get("id") or "").strip() for p in participants}
+            missing_ids = selected_ids - found_ids
+            if missing_ids:
+                task_participants = self._participants_from_task_graph(task_graph, missing_ids)
+                participants.extend(task_participants)
+        else:
+            participants = all_participants
         runtime_parameters = {}
         if isinstance(task_graph.get("runtime_parameters"), dict):
             runtime_parameters.update(task_graph.get("runtime_parameters") or {})
@@ -796,6 +804,56 @@ class AgentStudioService:
             }
             response["message"] = self._paused_message(response["missing_inputs"], pending_action)
         return response
+
+    def _participants_from_task_graph(self, task_graph: dict[str, Any], participant_ids: set[str]) -> list[dict[str, Any]]:
+        """Rebuild task-scoped generated participants when they are not durable agents.
+
+        The task graph is the source of truth for runtime-generated steps. If a
+        task selected generated participants that are not present in the durable
+        agent store, execution must not fall back to unrelated agents from the
+        same community.
+        """
+        rebuilt: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for task in task_graph.get("tasks") or []:
+            if not isinstance(task, dict):
+                continue
+            pid = str(task.get("participant_id") or "").strip()
+            if not pid or pid not in participant_ids or pid in seen:
+                continue
+            seen.add(pid)
+            name = str(task.get("participant_display_name") or task.get("source_instruction_fragment") or pid).strip() or pid
+            objective = str(task.get("source_instruction_fragment") or task.get("objective") or name).strip()
+            rebuilt.append({
+                "participant_id": pid,
+                "name": name,
+                "agent_name": name,
+                "display_name": name,
+                "role_name": name,
+                "instruction": objective,
+                "execution_objective": objective,
+                "definition_instruction": objective,
+                "parameter_contract": task.get("parameter_contract") if isinstance(task.get("parameter_contract"), dict) else {
+                    "contract_type": "generated_intermediate_step_contract",
+                    "parameters": [],
+                    "missing_information": [],
+                    "runtime_scope": "task_run",
+                },
+                "capability_profile": task.get("capability_profile") if isinstance(task.get("capability_profile"), dict) else {},
+                "runtime_parameters": {},
+                "missing_information": [],
+                "origin": "auxiliary_brain",
+                "status": "created",
+                "execution_policy": "delegate_to_ai_core",
+                "generated_by": "task_graph_rebuild",
+                "depends_on": task.get("depends_on") or [],
+                "input_from": task.get("input_from") or task.get("depends_on") or [],
+                "workflow_step_type": task.get("step_type") or "semantic_intermediate_step",
+                "source_step_id": task.get("source_step_id") or "",
+                "input_contract": task.get("input_contract") if isinstance(task.get("input_contract"), dict) else {},
+                "output_contract": task.get("output_contract") if isinstance(task.get("output_contract"), dict) else {},
+            })
+        return rebuilt
 
     def _normalize_missing_inputs(self, missing_inputs: Any, pending_action: dict[str, Any] | None) -> list[dict[str, Any]]:
         if isinstance(missing_inputs, list) and missing_inputs:
