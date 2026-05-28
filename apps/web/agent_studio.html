@@ -131,7 +131,16 @@ function renderStudioResponse(data, originalText){
   }
   const status = data && data.status ? String(data.status) : 'received';
   const action = data && data.action ? String(data.action) : 'runtime response';
-  addMessage(`${action}: ${status}`, data && data.status==='completed' ? 'item' : 'item error');
+  let detail = '';
+  if(data && data.error){
+    if(typeof data.error === 'string'){ detail = data.error; }
+    else { detail = data.error.message || data.error.type || JSON.stringify(data.error); }
+  }
+  if(!detail && data && data.workflow_results && data.workflow_results.provider_result){
+    const pr = data.workflow_results.provider_result;
+    detail = pr.message || pr.reason || (pr.attempted ? pr.attempted.map(x=>`${x.provider||'provider'}: ${x.reason||x.status||'not_ready'}`).join('; ') : '');
+  }
+  addMessage(`${action}: ${status}${detail ? ' — '+detail : ''}`, data && data.status==='completed' ? 'item' : 'item error');
 }
 function escapeHtml(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function setStudioStatus(text, running=false){ const el=document.getElementById('status'); el.textContent=text; el.classList.toggle('running', !!running); }

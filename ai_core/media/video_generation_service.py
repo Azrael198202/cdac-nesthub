@@ -50,10 +50,29 @@ class VideoGenerationService(ImageGenerationService):
             if not self._media_provider_allowed(provider_name, provider):
                 attempted.append({"provider": provider_name, "status": "skipped", "reason": "not_allowed_by_runtime_source_policy"})
                 continue
-            result = await self._call_provider(provider_name=provider_name, provider=provider, prompt=prompt, options=options)
+            try:
+                result = await self._call_provider(provider_name=provider_name, provider=provider, prompt=prompt, options=options)
+            except Exception as exc:
+                result = {
+                    "ok": False,
+                    "status": "failed",
+                    "reason": "provider_exception",
+                    "error_type": exc.__class__.__name__,
+                    "error": str(exc)[-1000:],
+                }
             attempted.append(self._attempt_record(provider_name=provider_name, result=result))
             if result.get("ok"):
-                material = self._persist_video(result, provider_name=provider_name, stage_meta=stage_meta)
+                try:
+                    material = self._persist_video(result, provider_name=provider_name, stage_meta=stage_meta)
+                except Exception as exc:
+                    attempted.append({
+                        "provider": provider_name,
+                        "status": "failed",
+                        "reason": "artifact_persist_failed",
+                        "error_type": exc.__class__.__name__,
+                        "error": str(exc)[-1000:],
+                    })
+                    continue
                 final = {"ok": True, "status": "completed", "material": material, "attempted": attempted, "stage_policy": stage_meta}
                 self._record_execution_event(result=final, duration_seconds=time.time() - start_time, attempted=attempted)
                 return final

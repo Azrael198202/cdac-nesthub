@@ -3,8 +3,30 @@ scope: video_generation
 capability_type: video_generation
 default_route:
   - local_video_generation
+  - generic_text_animation
   - external_video_generation
 providers:
+  generic_text_animation:
+    enabled: true
+    protocol: python_function
+    role: local_video_generation
+    capabilities:
+      - video_generation
+    modalities:
+      input:
+        - text
+      output:
+        - video
+        - gif
+    source_policy:
+      mode: media_allowed
+    callable: ai_core.media.providers.generic_text_animation_provider:generate_text_animation
+    width: 768
+    height: 432
+    frames: 36
+    frame_duration_ms: 90
+    setup_hints:
+      - This provider is a generic local text-to-animation preview fallback and does not require external model assets.
   local_video_generation:
     enabled: true
     protocol: comfyui
@@ -37,6 +59,15 @@ providers:
         clone_timeout_seconds: 600
         pip_timeout_seconds: 1800
     workflow_template: ${AI_CORE_VIDEO_WORKFLOW_TEMPLATE}
+    workflow_bootstrap:
+      enabled: true
+      url_env: AI_CORE_VIDEO_WORKFLOW_TEMPLATE_URL
+      repository_env: AI_CORE_VIDEO_WORKFLOW_TEMPLATE_REPOSITORY
+      repository_file_env: AI_CORE_VIDEO_WORKFLOW_TEMPLATE_REPOSITORY_FILE
+      file_env: AI_CORE_VIDEO_WORKFLOW_TEMPLATE_FILE
+      target_dir: runtime/generated/workflow_templates/video_generation
+      download_timeout_seconds: 600
+      clone_timeout_seconds: 600
     workflow_values:
       prompt: "{prompt}"
     setup_hints:

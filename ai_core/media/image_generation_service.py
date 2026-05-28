@@ -597,9 +597,19 @@ class ImageGenerationService:
         if not target or ":" not in target:
             return {"ok": False, "status": "requires_setup", "reason": "missing_callable"}
         module_name, func_name = target.split(":", 1)
-        func = getattr(importlib.import_module(module_name), func_name)
-        result = func(prompt=prompt, options=options, provider=provider)
-        return self._normalize_provider_result(result)
+        try:
+            func = getattr(importlib.import_module(module_name), func_name)
+            result = func(prompt=prompt, options=options, provider=provider)
+            return self._normalize_provider_result(result)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "status": "failed",
+                "reason": "python_function_provider_failed",
+                "error_type": exc.__class__.__name__,
+                "error": str(exc)[-1000:],
+                "callable": target,
+            }
 
     def _call_local_command(self, provider: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
         command = provider.get("command") or provider.get("commands")
