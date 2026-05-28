@@ -68,13 +68,13 @@ class VideoGenerationService(ImageGenerationService):
 
     def _provider_config(self) -> dict[str, Any]:
         self._ensure_runtime_video_config()
-        path = RUNTIME_CONFIGS / "models" / "providers.yaml"
-        data = self.loader.load_yaml(path)
-        config = data if isinstance(data, dict) else {}
-        seeded = self._video_seed_config()
-        if seeded:
-            config = self._merge_provider_config(config, seeded)
-        return config
+        # Video generation is a media artifact capability, not a text model
+        # stage.  Do not start from runtime/configs/models/providers.yaml here,
+        # because generic LLM providers such as ollama/vllm may be injected by
+        # stage policy and later reported as unsupported video providers.
+        # Runtime video providers are loaded only from the media capability
+        # seed/override files.
+        return self._video_seed_config()
 
     def _ensure_runtime_video_config(self) -> None:
         runtime_path = RUNTIME_CONFIGS / "media" / "video_generation.yaml"
@@ -98,34 +98,70 @@ class VideoGenerationService(ImageGenerationService):
     def _route(self, *, config: dict[str, Any], options: dict[str, Any]) -> tuple[list[str], dict[str, Any], dict[str, Any]]:
         providers = dict(config.get("providers") or {})
         base_route = list(config.get("default_route") or [])
-        stage_route = list(options.get("provider_route") or base_route)
+        requested_route = list(options.get("provider_route") or base_route)
         config2, route, meta = self.stage_policy.apply_to_route(
             config=config,
-            route=stage_route,
+            route=requested_route,
             node_id="video_generation",
             adapter={"model_stage": "video_generation", "preferred_local_model": options.get("preferred_local_model")},
             route_name="video_generation",
             escalated=bool(options.get("force_external")),
         )
         providers = dict(config2.get("providers") or providers)
-        route = self.execution_policy.snapshot(provider_config=config2).filter_route(route or stage_route, providers)
-        if not route:
-            route = [name for name, provider in providers.items() if self._provider_can_generate_video(provider)]
+
+        # Keep the stage policy useful for ordering/escalation, but isolate this
+        # artifact route from normal LLM providers. Only providers whose records
+        # explicitly advertise video generation are allowed into the executable
+        # route. This prevents messages such as "ollama: unsupported_provider_protocol"
+        # for text-only model providers.
+        raw_route = self.execution_policy.snapshot(provider_config=config2).filter_route(route or requested_route, providers)
+        media_route = [
+            name for name in raw_route
+            if self._provider_can_generate_video(providers.get(name) if isinstance(providers.get(name), dict) else {})
+            and self._media_provider_allowed(name, providers.get(name) if isinstance(providers.get(name), dict) else {})
+        ]
+        if not media_route:
+            media_route = [
+                name for name in requested_route
+                if self._provider_can_generate_video(providers.get(name) if isinstance(providers.get(name), dict) else {})
+                and self._media_provider_allowed(name, providers.get(name) if isinstance(providers.get(name), dict) else {})
+            ]
         for name, provider in providers.items():
-            if name not in route and self._provider_can_generate_video(provider) and self._media_provider_allowed(name, provider):
-                route.append(name)
+            if name not in media_route and self._provider_can_generate_video(provider) and self._media_provider_allowed(name, provider):
+                media_route.append(name)
         selected_provider = str(options.get("selected_provider") or "").strip()
-        if selected_provider and selected_provider in providers:
-            route = [selected_provider] + [item for item in route if item != selected_provider]
+        if selected_provider and selected_provider in providers and self._provider_can_generate_video(providers.get(selected_provider) or {}):
+            media_route = [selected_provider] + [item for item in media_route if item != selected_provider]
         else:
-            route = self._rank_route_by_observations(route, providers)
-        return route, providers, meta
+            media_route = self._rank_route_by_observations(media_route, providers)
+        meta = dict(meta or {})
+        meta["route_isolated_to_capability"] = "video_generation"
+        return media_route, providers, meta
 
     def _provider_can_generate_video(self, provider: dict[str, Any]) -> bool:
+        if not isinstance(provider, dict):
+            return False
+        protocol = str(provider.get("protocol") or provider.get("type") or "").strip()
+        supported_protocols = {
+            "comfyui",
+            "comfyui_runtime",
+            "local_comfyui",
+            "python_function",
+            "function",
+            "local_command",
+            "command",
+            "generic_http_json",
+            "openai_compatible_api",
+            "openai_compatible_video",
+            "http_json",
+            "video_generation_http",
+        }
+        endpoint = bool(provider.get("video_generation_endpoint") or provider.get("video_endpoint"))
+        if protocol not in supported_protocols and not endpoint:
+            return False
         text = " ".join(str(provider.get(k) or "") for k in ("type", "protocol", "role"))
         caps = " ".join(str(x) for x in provider.get("capabilities", []) or [])
         modalities = json.dumps(provider.get("modalities") or {}, ensure_ascii=False)
-        endpoint = bool(provider.get("video_generation_endpoint") or provider.get("video_endpoint"))
         return "video_generation" in f"{text} {caps} {modalities}" or endpoint
 
     async def _call_provider(self, *, provider_name: str, provider: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
@@ -321,6 +357,38 @@ class VideoGenerationService(ImageGenerationService):
             reason = str(item.get("reason") or item.get("status") or "not_ready")
             parts.append(f"{provider}: {reason}")
         return "Video generation provider setup is required. Attempted providers: " + "; ".join(parts) + "."
+
+    def _setup_actions(self, *, route: list[str], providers: dict[str, Any], attempted: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        actions: list[dict[str, Any]] = []
+        attempted_by_provider = {str(x.get("provider") or ""): x for x in attempted if isinstance(x, dict)}
+        for provider_name in route:
+            provider = providers.get(provider_name) if isinstance(providers.get(provider_name), dict) else {}
+            attempt = attempted_by_provider.get(provider_name, {})
+            protocol = str(provider.get("protocol") or provider.get("type") or "").strip()
+            reason = str(attempt.get("reason") or "").strip()
+            if str(provider.get("api_key_env") or provider.get("secret_key") or "").strip():
+                env_name = str(provider.get("api_key_env") or provider.get("secret_key"))
+                actions.append({
+                    "provider": provider_name,
+                    "kind": "set_secret",
+                    "env": env_name,
+                    "message": f"Set {env_name} for this provider or disable it in runtime/configs/media/video_generation.yaml.",
+                })
+            if protocol in {"comfyui", "comfyui_runtime", "local_comfyui"} or "runtime" in provider:
+                action = {
+                    "provider": provider_name,
+                    "kind": "prepare_local_video_runtime",
+                    "message": "Prepare the configured local video runtime, workflow template, custom nodes, and model assets, or point runtime/configs/media/video_generation.yaml to an already running video provider.",
+                    "reason": reason or str(attempt.get("status") or "not_ready"),
+                    "endpoint": provider.get("base_url") or (provider.get("runtime") or {}).get("base_url"),
+                }
+                if reason == "workflow_template_missing":
+                    action["env"] = "AI_CORE_VIDEO_WORKFLOW_TEMPLATE"
+                    action["message"] = "Set AI_CORE_VIDEO_WORKFLOW_TEMPLATE to a valid ComfyUI video workflow JSON file, or set workflow_template directly in runtime/configs/media/video_generation.yaml."
+                actions.append(action)
+            if not provider:
+                actions.append({"provider": provider_name, "kind": "register_provider", "message": "Register a provider record for this video generation route."})
+        return actions
 
     def _metrics_path(self) -> Path:
         path = RUNTIME_DIR / "generated" / "media" / "video_generation_metrics.jsonl"
