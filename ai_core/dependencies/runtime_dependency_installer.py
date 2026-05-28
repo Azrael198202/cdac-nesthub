@@ -162,6 +162,23 @@ class RuntimeDependencyInstaller:
         package = str(package or "").strip()
         if not package or len(package) > 160:
             return False
-        if re.search(r"[;&|`$(){}<>\\]", package):
+
+        # Runtime permission defaults to administrator for local development,
+        # so the installer must accept ordinary pinned/ranged Python package
+        # specifications declared by providers, for example:
+        #   Package
+        #   Package==1.2.3
+        #   Package>=1.2.3
+        #   Package~=1.2
+        #   Package[extra]>=1.2.3
+        # It still rejects shell metacharacters, URLs, paths, spaces, and command
+        # chaining. Installation is always executed as argv, never through shell.
+        if re.search(r"[;&|`$(){}\\\s/]", package):
             return False
-        return bool(re.match(r"^[A-Za-z0-9_.-]+([<>=!~]=?[A-Za-z0-9_.+!*,-]+)?$", package))
+
+        name = r"[A-Za-z0-9_.-]+"
+        extras = r"(?:\[[A-Za-z0-9_.-]+(?:,[A-Za-z0-9_.-]+)*\])?"
+        version = r"[A-Za-z0-9_.+!*,-]+"
+        comparator = r"(?:==|!=|<=|>=|~=|<|>)"
+        spec = rf"^{name}{extras}(?:{comparator}{version})?$"
+        return bool(re.match(spec, package))
