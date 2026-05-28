@@ -92,6 +92,14 @@ class VideoGenerationSetupRequest(BaseModel):
     provided_inputs: dict[str, Any] | None = None
 
 
+class ClientErrorRequest(BaseModel):
+    url: str | None = None
+    error: str | None = None
+    elapsed_ms: int | None = None
+    hint: str | None = None
+    context: dict[str, Any] | None = None
+
+
 class ArtifactEditRequest(BaseModel):
     instruction: str
     feedback: str | None = None
@@ -592,15 +600,45 @@ async def agent_studio_secret(req: AgentStudioSecretRequest):
 
 
 
-@app.post("/api/agent-studio/video-generation/setup")
-async def agent_studio_video_generation_setup(req: VideoGenerationSetupRequest):
+async def _apply_video_generation_setup(req: VideoGenerationSetupRequest):
     try:
         from ai_core.media.video_generation_setup_wizard import VideoGenerationSetupWizard
         payload = VideoGenerationSetupWizard().apply_inputs(req.provided_inputs or {})
         return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
     except Exception as exc:
         _write_api_error_log(area="video_generation_setup", exc=exc, context={"provided_keys": list((req.provided_inputs or {}).keys())})
-        return JSONResponse({"ok": False, "status": "failed", "error": str(exc), "diagnostic_log": "runtime/logs/api_errors.jsonl"}, status_code=500)
+        return JSONResponse({"ok": False, "status": "failed", "error": str(exc), "message": str(exc), "diagnostic_log": "runtime/logs/api_errors.jsonl"}, status_code=500)
+
+@app.post("/api/agent-studio/video-generation/setup")
+async def agent_studio_video_generation_setup(req: VideoGenerationSetupRequest):
+    return await _apply_video_generation_setup(req)
+
+@app.post("/api/agent-studio/video_generation/setup")
+async def agent_studio_video_generation_setup_alias(req: VideoGenerationSetupRequest):
+    return await _apply_video_generation_setup(req)
+
+@app.post("/api/video-generation/setup")
+async def video_generation_setup_alias(req: VideoGenerationSetupRequest):
+    return await _apply_video_generation_setup(req)
+
+@app.post("/api/agent-studio/client-error")
+async def agent_studio_client_error(req: ClientErrorRequest):
+    try:
+        path = Path("runtime") / "logs" / "frontend_errors.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        event = {
+            "event_type": "frontend_error",
+            "area": "agent_studio",
+            "url": req.url,
+            "error": req.error,
+            "elapsed_ms": req.elapsed_ms,
+            "hint": req.hint,
+            "context": req.context or {},
+        }
+        path.open("a", encoding="utf-8").write(json.dumps(event, ensure_ascii=False)+"\n")
+    except Exception:
+        pass
+    return JSONResponse({"ok": True, "status": "logged"})
 
 @app.post("/api/agent-studio/resume-run")
 async def agent_studio_resume_run(req: AgentStudioResumeRunRequest):
