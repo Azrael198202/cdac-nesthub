@@ -1,0 +1,145 @@
+default_route:
+  - local_image_generation
+  - external_image_generation
+providers:
+  local_image_generation:
+    enabled: true
+    protocol: comfyui_runtime
+    role: local_media_runtime
+    capabilities:
+      - image_generation
+    modalities:
+      input:
+        - text
+      output:
+        - image
+        - file
+    base_url: http://127.0.0.1:8188
+    timeout_seconds: 900
+    runtime:
+      auto_start: true
+      base_url: http://127.0.0.1:8188
+      host: 127.0.0.1
+      port: 8188
+      startup_timeout_seconds: 180
+      health_timeout_seconds: 3
+      request_timeout_seconds: 30
+      generation_timeout_seconds: 900
+      minimum_generation_timeout_seconds: 900
+      create_venv: true
+      venv_dir: .venv
+      install:
+        enabled: true
+        repository: https://github.com/comfyanonymous/ComfyUI.git
+        create_venv: true
+        venv_dir: .venv
+        install_requirements: true
+        clone_timeout_seconds: 600
+        venv_timeout_seconds: 600
+        pip_timeout_seconds: 1800
+    model_assets:
+      - target_subdir: models/checkpoints
+        file_name: sd_xl_turbo_1.0_fp16.safetensors
+        url: https://huggingface.co/stabilityai/sdxl-turbo/resolve/main/sd_xl_turbo_1.0_fp16.safetensors
+        auto_download: true
+        timeout_seconds: 7200
+        metadata:
+          model_family: sdxl_turbo
+          source: huggingface
+          reference: https://huggingface.co/stabilityai/sdxl-turbo
+          license_note: Check upstream model license before commercial use.
+    workflow_values:
+      checkpoint: sd_xl_turbo_1.0_fp16.safetensors
+    negative_prompt: low quality, blurry, distorted
+    width: 512
+    height: 512
+    workflow_template:
+      "3":
+        class_type: KSampler
+        inputs:
+          seed: "{seed}"
+          steps: 4
+          cfg: 1
+          sampler_name: euler
+          scheduler: normal
+          denoise: 1
+          model:
+            - "4"
+            - 0
+          positive:
+            - "6"
+            - 0
+          negative:
+            - "7"
+            - 0
+          latent_image:
+            - "5"
+            - 0
+      "4":
+        class_type: CheckpointLoaderSimple
+        inputs:
+          ckpt_name: "{checkpoint}"
+      "5":
+        class_type: EmptyLatentImage
+        inputs:
+          width: "{width}"
+          height: "{height}"
+          batch_size: 1
+      "6":
+        class_type: CLIPTextEncode
+        inputs:
+          text: "{prompt}"
+          clip:
+            - "4"
+            - 1
+      "7":
+        class_type: CLIPTextEncode
+        inputs:
+          text: "{negative_prompt}"
+          clip:
+            - "4"
+            - 1
+      "8":
+        class_type: VAEDecode
+        inputs:
+          samples:
+            - "3"
+            - 0
+          vae:
+            - "4"
+            - 2
+      "9":
+        class_type: SaveImage
+        inputs:
+          filename_prefix: ai_core_image
+          images:
+            - "8"
+            - 0
+
+  external_image_generation:
+    enabled: true
+    source_policy:
+      mode: fallback_allowed
+    protocol: openai_compatible_image
+    role: external_media_runtime
+    capabilities:
+      - image_generation
+    modalities:
+      input:
+        - text
+      output:
+        - image
+        - file
+    base_url: https://api.openai.com
+    image_generation_path: v1/images/generations
+    method: POST
+    api_key_env: OPENAI_API_KEY
+    authorization_header: Authorization
+    authorization_prefix: "Bearer "
+    timeout_seconds: 300
+    model: gpt-image-1
+    size: 1024x1024
+    request_template:
+      model: "{model}"
+      prompt: "{prompt}"
+      size: "{size}"

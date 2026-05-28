@@ -1,0 +1,63 @@
+{
+  "run_id": "agent_parameter_contract",
+  "node_id": "agent_parameter_contract",
+  "provider": "stage_input_parsing_ollama_qwen3_8b",
+  "provider_type": "universal_model",
+  "model": "qwen3:8b",
+  "timeout_seconds": 45.0,
+  "options": {
+    "temperature": 0,
+    "num_predict": 256,
+    "num_ctx": 1536
+  },
+  "think": false,
+  "prompt": {
+    "system": "Return JSON only. Infer required runtime parameters for executing this agent later. Do not execute, plan, or name tools. Use generic snake_case names. Every parameter values field is an array. Fill explicit values only.",
+    "user": "{\"participant_name\":\"Weather Agent\",\"definition_instruction\":\"Create an agent named Weather Agent  to use file weather.py to get he weather information.\",\"execution_objective\":\"use file weather.py to get he weather information\",\"requirements\":{\"infer_required_parameters\":true,\"all_values_must_be_lists\":true,\"do_not_fill_missing_values\":true,\"use_generic_lower_snake_case_names\":true}}"
+  },
+  "schema": {
+    "type": "object",
+    "required": [
+      "parameters"
+    ],
+    "properties": {
+      "parameters": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": [
+            "name",
+            "label",
+            "description",
+            "required",
+            "values"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "required": {
+              "type": "boolean"
+            },
+            "values": {
+              "type": "array"
+            }
+          },
+          "additionalProperties": true
+        }
+      }
+    },
+    "additionalProperties": true
+  },
+  "budget": {
+    "budget_tokens": 1000,
+    "estimated_tokens": 97,
+    "truncated": false
+  }
+}

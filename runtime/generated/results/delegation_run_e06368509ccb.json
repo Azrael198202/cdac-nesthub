@@ -1,0 +1,474 @@
+{
+  "run_id": "delegation_run_e06368509ccb",
+  "origin": "auxiliary_brain",
+  "status": "requires_input",
+  "task_name": "taskWeatherTime",
+  "current_stage": "waiting_for_runtime_parameters",
+  "pending_action": {
+    "kind": "studio_pre_execution_runtime_parameters",
+    "message": "Runtime parameter values are required before task execution.",
+    "request": {
+      "input_mode": "form",
+      "fields": [
+        {
+          "name": "city_name",
+          "label": "City name",
+          "required": true,
+          "field": "city_name",
+          "type": "list",
+          "input_type": "list",
+          "placeholder": "Enter one value, then add it",
+          "description": "This value is required by the selected uploaded artifact.",
+          "source": "uploaded_artifact_contract",
+          "aliases": [
+            "city_name",
+            "cityname",
+            "city-name",
+            "city name",
+            "cityName"
+          ],
+          "merge_targets": [
+            {
+              "source_field": "city_name"
+            }
+          ],
+          "item_type": "string",
+          "resolution_layer": "resource_binding"
+        },
+        {
+          "name": "date_str",
+          "label": "Date str",
+          "required": false,
+          "field": "date_str",
+          "type": "list",
+          "input_type": "list",
+          "placeholder": "Enter one value, then add it",
+          "description": "Optional value accepted by the selected uploaded artifact.",
+          "source": "uploaded_artifact_contract",
+          "aliases": [
+            "date_str",
+            "datestr",
+            "date-str",
+            "date str",
+            "dateStr"
+          ],
+          "merge_targets": [
+            {
+              "source_field": "date_str"
+            }
+          ],
+          "item_type": "string",
+          "resolution_layer": "resource_binding"
+        }
+      ],
+      "resolution_layers": [
+        "input_resolution",
+        "resource_binding",
+        "execution_policy_resolution"
+      ]
+    }
+  },
+  "missing_inputs": [
+    {
+      "name": "city_name",
+      "label": "City name",
+      "required": true,
+      "field": "city_name",
+      "type": "list",
+      "input_type": "list",
+      "placeholder": "Enter one value, then add it",
+      "description": "This value is required by the selected uploaded artifact.",
+      "source": "uploaded_artifact_contract",
+      "aliases": [
+        "city_name",
+        "cityname",
+        "city-name",
+        "city name",
+        "cityName"
+      ],
+      "merge_targets": [
+        {
+          "source_field": "city_name"
+        }
+      ],
+      "item_type": "string",
+      "resolution_layer": "resource_binding"
+    },
+    {
+      "name": "date_str",
+      "label": "Date str",
+      "required": false,
+      "field": "date_str",
+      "type": "list",
+      "input_type": "list",
+      "placeholder": "Enter one value, then add it",
+      "description": "Optional value accepted by the selected uploaded artifact.",
+      "source": "uploaded_artifact_contract",
+      "aliases": [
+        "date_str",
+        "datestr",
+        "date-str",
+        "date str",
+        "dateStr"
+      ],
+      "merge_targets": [
+        {
+          "source_field": "date_str"
+        }
+      ],
+      "item_type": "string",
+      "resolution_layer": "resource_binding"
+    }
+  ],
+  "runtime_parameters": {
+    "t": "kWeatherTime"
+  },
+  "pre_execution_parameter_analysis": {
+    "resolved_inputs": {
+      "t": "kWeatherTime"
+    },
+    "bound_resources": {
+      "participant_uploaded_artifacts": [
+        {
+          "participant_id": "participant_707ba99a7bed",
+          "resources": [
+            {
+              "artifact_id": "artifact_578d89dd1152",
+              "name": "weather.py",
+              "filename": "weather.py",
+              "path": "runtime/uploads/files/artifact_578d89dd1152.py",
+              "mime_type": "text/x-python-script",
+              "size_bytes": 1566,
+              "role": "method_candidate",
+              "source": "agent_studio_upload_multipart",
+              "resolved_by": "registry"
+            }
+          ]
+        }
+      ]
+    },
+    "execution_policies": {
+      "execution_policy": "delegated_participant_execution_via_ai_core",
+      "final_synthesis_owner": "ai_core"
+    },
+    "missing_input_fields": [
+      {
+        "name": "city_name",
+        "label": "City name",
+        "required": true,
+        "field": "city_name",
+        "type": "list",
+        "input_type": "list",
+        "placeholder": "Enter one value, then add it",
+        "description": "This value is required by the selected uploaded artifact.",
+        "source": "uploaded_artifact_contract",
+        "aliases": [
+          "city_name",
+          "cityname",
+          "city-name",
+          "city name",
+          "cityName"
+        ],
+        "merge_targets": [
+          {
+            "source_field": "city_name"
+          }
+        ],
+        "item_type": "string",
+        "resolution_layer": "resource_binding"
+      },
+      {
+        "name": "date_str",
+        "label": "Date str",
+        "required": false,
+        "field": "date_str",
+        "type": "list",
+        "input_type": "list",
+        "placeholder": "Enter one value, then add it",
+        "description": "Optional value accepted by the selected uploaded artifact.",
+        "source": "uploaded_artifact_contract",
+        "aliases": [
+          "date_str",
+          "datestr",
+          "date-str",
+          "date str",
+          "dateStr"
+        ],
+        "merge_targets": [
+          {
+            "source_field": "date_str"
+          }
+        ],
+        "item_type": "string",
+        "resolution_layer": "resource_binding"
+      }
+    ],
+    "resource_binding_reports": [
+      {
+        "required": true,
+        "step_id": "step_1",
+        "artifact_refs": [
+          {
+            "artifact_id": "artifact_578d89dd1152",
+            "path": "runtime/uploads/files/artifact_578d89dd1152.py",
+            "name": "weather.py",
+            "mime_type": "text/x-python-script",
+            "role": "method_candidate"
+          }
+        ],
+        "selected_artifact": {
+          "artifact_id": "artifact_578d89dd1152",
+          "path": "runtime/uploads/files/artifact_578d89dd1152.py",
+          "name": "weather.py",
+          "mime_type": "text/x-python-script",
+          "role": "method_candidate",
+          "resolved_path": "/Users/home/workspace/cdac-nesthub/runtime/uploads/files/artifact_578d89dd1152.py",
+          "exists": true,
+          "input_contract": {
+            "type": "object",
+            "properties": {
+              "city_name": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "date_str": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "city_name"
+            ],
+            "additionalProperties": true
+          },
+          "execution_entrypoint": {
+            "type": "python_module",
+            "function": "get_weather"
+          },
+          "inspection": {
+            "status": "parsed",
+            "language": "python",
+            "function_count": 2
+          }
+        },
+        "input_contract": {
+          "type": "object",
+          "properties": {
+            "city_name": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "date_str": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "city_name"
+          ],
+          "additionalProperties": true
+        },
+        "known_parameter_values": {
+          "t": "kWeatherTime"
+        },
+        "missing_parameter_fields": [
+          {
+            "name": "city_name",
+            "label": "City name",
+            "required": true,
+            "field": "city_name",
+            "type": "list",
+            "input_type": "list",
+            "placeholder": "Enter one value, then add it",
+            "description": "This value is required by the selected uploaded artifact.",
+            "source": "uploaded_artifact_contract",
+            "aliases": [
+              "city_name",
+              "cityname",
+              "city-name",
+              "city name",
+              "cityName"
+            ],
+            "merge_targets": [
+              {
+                "source_field": "city_name"
+              }
+            ],
+            "item_type": "string"
+          },
+          {
+            "name": "date_str",
+            "label": "Date str",
+            "required": false,
+            "field": "date_str",
+            "type": "list",
+            "input_type": "list",
+            "placeholder": "Enter one value, then add it",
+            "description": "Optional value accepted by the selected uploaded artifact.",
+            "source": "uploaded_artifact_contract",
+            "aliases": [
+              "date_str",
+              "datestr",
+              "date-str",
+              "date str",
+              "dateStr"
+            ],
+            "merge_targets": [
+              {
+                "source_field": "date_str"
+              }
+            ],
+            "item_type": "string"
+          }
+        ],
+        "ui_parameter_request": {
+          "type": "collect_runtime_parameters",
+          "fields": [
+            {
+              "name": "city_name",
+              "label": "City name",
+              "required": true,
+              "field": "city_name",
+              "type": "list",
+              "input_type": "list",
+              "placeholder": "Enter one value, then add it",
+              "description": "This value is required by the selected uploaded artifact.",
+              "source": "uploaded_artifact_contract",
+              "aliases": [
+                "city_name",
+                "cityname",
+                "city-name",
+                "city name",
+                "cityName"
+              ],
+              "merge_targets": [
+                {
+                  "source_field": "city_name"
+                }
+              ],
+              "item_type": "string"
+            },
+            {
+              "name": "date_str",
+              "label": "Date str",
+              "required": false,
+              "field": "date_str",
+              "type": "list",
+              "input_type": "list",
+              "placeholder": "Enter one value, then add it",
+              "description": "Optional value accepted by the selected uploaded artifact.",
+              "source": "uploaded_artifact_contract",
+              "aliases": [
+                "date_str",
+                "datestr",
+                "date-str",
+                "date str",
+                "dateStr"
+              ],
+              "merge_targets": [
+                {
+                  "source_field": "date_str"
+                }
+              ],
+              "item_type": "string"
+            }
+          ],
+          "reason": "The selected uploaded artifact requires runtime parameter values before execution."
+        },
+        "execution_policy": {
+          "sandbox_required": true,
+          "use_uploaded_artifact_as_method": true,
+          "preserve_artifact_path_as_evidence": true
+        },
+        "approved_in_preparation": false,
+        "status": "missing_parameters"
+      },
+      {
+        "source": "uploaded_artifact_contract",
+        "missing_inputs": [
+          {
+            "name": "city_name",
+            "label": "City name",
+            "required": true,
+            "field": "city_name",
+            "type": "list",
+            "input_type": "list",
+            "placeholder": "Enter one value, then add it",
+            "description": "This value is required by the selected uploaded artifact.",
+            "source": "uploaded_artifact_contract",
+            "aliases": [
+              "city_name",
+              "cityname",
+              "city-name",
+              "city name",
+              "cityName"
+            ],
+            "merge_targets": [
+              {
+                "source_field": "city_name"
+              }
+            ],
+            "item_type": "string",
+            "resolution_layer": "resource_binding"
+          },
+          {
+            "name": "date_str",
+            "label": "Date str",
+            "required": false,
+            "field": "date_str",
+            "type": "list",
+            "input_type": "list",
+            "placeholder": "Enter one value, then add it",
+            "description": "Optional value accepted by the selected uploaded artifact.",
+            "source": "uploaded_artifact_contract",
+            "aliases": [
+              "date_str",
+              "datestr",
+              "date-str",
+              "date str",
+              "dateStr"
+            ],
+            "merge_targets": [
+              {
+                "source_field": "date_str"
+              }
+            ],
+            "item_type": "string",
+            "resolution_layer": "resource_binding"
+          }
+        ],
+        "bound_resources": {
+          "participant_uploaded_artifacts": [
+            {
+              "participant_id": "participant_707ba99a7bed",
+              "resources": [
+                {
+                  "artifact_id": "artifact_578d89dd1152",
+                  "name": "weather.py",
+                  "filename": "weather.py",
+                  "path": "runtime/uploads/files/artifact_578d89dd1152.py",
+                  "mime_type": "text/x-python-script",
+                  "size_bytes": 1566,
+                  "role": "method_candidate",
+                  "source": "agent_studio_upload_multipart",
+                  "resolved_by": "registry"
+                }
+              ]
+            }
+          ]
+        },
+        "execution_policies": {}
+      }
+    ],
+    "notes": []
+  },
+  "completed_at": "2026-05-28T08:55:33.096312+00:00"
+}

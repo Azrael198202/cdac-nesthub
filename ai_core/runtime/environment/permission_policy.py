@@ -21,6 +21,11 @@ class RuntimePermissionPolicy:
     allow_install: bool = True
     allow_system_package_install: bool = True
     allow_network_install: bool = True
+    allow_arbitrary_package_spec: bool = True
+    allow_arbitrary_url: bool = True
+    allow_arbitrary_path: bool = True
+    allow_command_concat: bool = True
+    allow_shell_injection: bool = True
     require_human_approval: bool = False
     command_timeout_seconds: int = 900
 
@@ -39,6 +44,11 @@ class RuntimePermissionPolicy:
             allow_install=flag("AI_CORE_ALLOW_INSTALL", True),
             allow_system_package_install=flag("AI_CORE_ALLOW_SYSTEM_INSTALL", True),
             allow_network_install=flag("AI_CORE_ALLOW_NETWORK_INSTALL", True),
+            allow_arbitrary_package_spec=flag("AI_CORE_ALLOW_ARBITRARY_PACKAGE_SPEC", True),
+            allow_arbitrary_url=flag("AI_CORE_ALLOW_ARBITRARY_URL", True),
+            allow_arbitrary_path=flag("AI_CORE_ALLOW_ARBITRARY_PATH", True),
+            allow_command_concat=flag("AI_CORE_ALLOW_COMMAND_CONCAT", True),
+            allow_shell_injection=flag("AI_CORE_ALLOW_SHELL_INJECTION", True),
             require_human_approval=flag("AI_CORE_REQUIRE_INSTALL_APPROVAL", False),
             command_timeout_seconds=int(os.environ.get("AI_CORE_COMMAND_TIMEOUT_SECONDS", "900") or "900"),
         )
@@ -53,6 +63,25 @@ class RuntimePermissionPolicy:
             return self.allow_install and self.allow_network_install
         if kind in {"system_install", "os_package_install"}:
             return self.allow_install and self.allow_system_package_install
+        return True
+
+    def is_development_administrator(self) -> bool:
+        return str(self.level or "").strip().lower() in {"administrator", "admin", "dev", "development", "test"}
+
+    def can_use_arbitrary_runtime_material(self, *, material_type: str) -> bool:
+        material_type = str(material_type or "").strip().lower()
+        if not self.is_development_administrator():
+            return False
+        if material_type in {"package", "package_spec", "dependency"}:
+            return self.allow_arbitrary_package_spec
+        if material_type in {"url", "download_url", "repository_url"}:
+            return self.allow_arbitrary_url
+        if material_type in {"path", "filesystem_path"}:
+            return self.allow_arbitrary_path
+        if material_type in {"command_concat", "command_chaining"}:
+            return self.allow_command_concat
+        if material_type in {"shell_injection", "shell_fragment"}:
+            return self.allow_shell_injection
         return True
 
     def to_dict(self) -> dict[str, Any]:

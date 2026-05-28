@@ -1,0 +1,191 @@
+{
+  "graph_id": "graph_b232aa88a357",
+  "task_name": "taskWeatherTime",
+  "community_id": "community_cfc662280937",
+  "instruction": "Create a task named taskWeatherTime.\n\nStep 1:\nCall the Weather Agent.\n\nStep 2:\nCall the Time Agent.\n\nStep 3:\nTranslate BOTH outputs from Weather Agent and Time Agent into English.\n\nStep 4:\nReturn ONLY the translated English result.",
+  "origin": "auxiliary_brain",
+  "status": "created",
+  "created_at": "2026-05-28T08:54:31.779350+00:00",
+  "execution_policy": "delegated_participant_execution_via_ai_core",
+  "selected_participant_ids": [
+    "participant_707ba99a7bed",
+    "participant_3abc41e12c93",
+    "participant_f671698af4db",
+    "participant_a5898635d8ae"
+  ],
+  "uploaded_artifacts": [],
+  "parameter_contract": {
+    "contract_type": "task_runtime_parameter_contract",
+    "parameters": [],
+    "missing_information": [],
+    "runtime_scope": "task_run"
+  },
+  "runtime_parameters": {
+    "t": "k"
+  },
+  "tasks": [
+    {
+      "task_id": "graph_b232aa88a357_delegate_1",
+      "participant_id": "participant_707ba99a7bed",
+      "participant_display_name": "Weather Agent",
+      "execution_owner": "ai_core",
+      "status": "pending",
+      "step_type": "participant_execution",
+      "depends_on": [],
+      "source_step_id": "declared_step_1",
+      "source_instruction_fragment": "Call the Weather Agent",
+      "parameter_contract": {
+        "contract_type": "generated_intermediate_step_contract",
+        "parameters": [],
+        "missing_information": [],
+        "runtime_scope": "task_run"
+      },
+      "capability_profile": {},
+      "input_contract": {
+        "contract_type": "runtime_step_input_contract",
+        "bound_from_upstream": [],
+        "accepts_verified_material": false,
+        "user_input_required_for_bound_material": false
+      },
+      "output_contract": {
+        "contract_type": "runtime_step_output_contract",
+        "produces_verified_material": true,
+        "planner_metadata_is_not_result_material": true
+      }
+    },
+    {
+      "task_id": "graph_b232aa88a357_delegate_2",
+      "participant_id": "participant_3abc41e12c93",
+      "participant_display_name": "Time Agent",
+      "execution_owner": "ai_core",
+      "status": "pending",
+      "step_type": "participant_execution",
+      "depends_on": [],
+      "source_step_id": "declared_step_2",
+      "source_instruction_fragment": "Call the Time Agent",
+      "parameter_contract": {
+        "contract_type": "generated_intermediate_step_contract",
+        "parameters": [],
+        "missing_information": [],
+        "runtime_scope": "task_run"
+      },
+      "capability_profile": {},
+      "input_contract": {
+        "contract_type": "runtime_step_input_contract",
+        "bound_from_upstream": [],
+        "accepts_verified_material": false,
+        "user_input_required_for_bound_material": false
+      },
+      "output_contract": {
+        "contract_type": "runtime_step_output_contract",
+        "produces_verified_material": true,
+        "planner_metadata_is_not_result_material": true
+      }
+    },
+    {
+      "task_id": "graph_b232aa88a357_delegate_3",
+      "participant_id": "participant_f671698af4db",
+      "participant_display_name": "Translate BOTH outputs from Weather Agent …",
+      "execution_owner": "ai_core",
+      "status": "pending",
+      "step_type": "semantic_intermediate_step",
+      "depends_on": [
+        "participant_707ba99a7bed",
+        "participant_3abc41e12c93"
+      ],
+      "input_from": [
+        "participant_707ba99a7bed",
+        "participant_3abc41e12c93"
+      ],
+      "source_step_id": "generated_step_3",
+      "source_instruction_fragment": "Translate BOTH outputs from Weather Agent and Time Agent into English",
+      "input_contract": {
+        "contract_type": "runtime_step_input_contract",
+        "bound_from_upstream": [
+          "participant_707ba99a7bed",
+          "participant_3abc41e12c93"
+        ],
+        "accepts_verified_material": true,
+        "user_input_required_for_bound_material": false
+      },
+      "output_contract": {
+        "contract_type": "runtime_step_output_contract",
+        "produces_verified_material": true,
+        "planner_metadata_is_not_result_material": true
+      }
+    },
+    {
+      "task_id": "graph_b232aa88a357_delegate_4",
+      "participant_id": "participant_a5898635d8ae",
+      "participant_display_name": "Return ONLY the translated English result",
+      "execution_owner": "ai_core",
+      "status": "pending",
+      "step_type": "semantic_intermediate_step",
+      "depends_on": [
+        "participant_f671698af4db"
+      ],
+      "input_from": [
+        "participant_f671698af4db"
+      ],
+      "source_step_id": "generated_step_4",
+      "source_instruction_fragment": "Return ONLY the translated English result",
+      "input_contract": {
+        "contract_type": "runtime_step_input_contract",
+        "bound_from_upstream": [
+          "generated_step_3"
+        ],
+        "accepts_verified_material": true,
+        "user_input_required_for_bound_material": false
+      },
+      "output_contract": {
+        "contract_type": "runtime_step_output_contract",
+        "produces_verified_material": true,
+        "planner_metadata_is_not_result_material": true
+      }
+    }
+  ],
+  "instruction_coverage": {
+    "status": "passed",
+    "covered_actions": [
+      {
+        "step_id": "declared_step_1",
+        "type": "participant_execution",
+        "participant_id": "participant_707ba99a7bed"
+      },
+      {
+        "step_id": "declared_step_2",
+        "type": "participant_execution",
+        "participant_id": "participant_3abc41e12c93"
+      },
+      {
+        "step_id": "generated_step_3",
+        "type": "semantic_intermediate_step",
+        "participant_id": "participant_f671698af4db"
+      },
+      {
+        "step_id": "generated_step_4",
+        "type": "semantic_intermediate_step",
+        "participant_id": "participant_a5898635d8ae"
+      }
+    ],
+    "uncovered_fragments": [],
+    "selected_participant_count": 2,
+    "generated_step_count": 2,
+    "planning_mode": "structural_graph_mapping",
+    "semantic_step_count": 0
+  },
+  "workflow_planning": {
+    "mode": "structural_graph_mapping",
+    "semantic_step_count": 0,
+    "semantic_plan_status": [
+      "semantic_provider_unavailable"
+    ],
+    "generated_participant_ids": [
+      "participant_f671698af4db",
+      "participant_a5898635d8ae"
+    ],
+    "step_count": 4,
+    "coverage_status": "passed"
+  },
+  "final_synthesis_owner": "ai_core"
+}

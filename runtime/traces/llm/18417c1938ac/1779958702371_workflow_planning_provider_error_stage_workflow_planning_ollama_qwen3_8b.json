@@ -1,0 +1,9 @@
+{
+  "run_id": "18417c1938ac",
+  "node_id": "workflow_planning",
+  "provider": "stage_workflow_planning_ollama_qwen3_8b",
+  "provider_type": "universal_model",
+  "model": "qwen3:8b",
+  "elapsed_seconds": 88.71,
+  "error": "Expecting value: line 1 column 2 (char 1)"
+}

@@ -1,0 +1,124 @@
+{
+  "run_id": "18417c1938ac",
+  "node_id": "agent_action_planning",
+  "adapter_id": "agent_action_planning_adapter",
+  "prompt_id": "agent_action_planning_prompt",
+  "system_prompt": "Return one JSON object only. Follow the stage boundary exactly. Use domain-neutral fields. Do not introduce concrete business rules, providers, tools, APIs, files, or facts unless supplied by upstream state. Every stage must carry forward the minimal upstream keys needed by the next stage.\n\nAct as a compact code generation runtime role. Generate only the minimal artifact required by the contract and avoid unnecessary dependencies.",
+  "user_prompt": "INPUT={\"participant_name\":\"Weather Agent\",\"objective\":\"use file weather.py to get he weather information\",\"context\":{\"relationship\":\"independent\",\"agent_parameters\":{\"values\":{\"t\":\"kWeatherTime\",\"city_name\":[\"fukuoka\"],\"cityname\":[\"fukuoka\"],\"city-name\":[\"fukuoka\"],\"city name\":[\"fukuoka\"],\"cityName\":[\"fukuoka\"],\"date_str\":[\"2026-05-29\"],\"datestr\":[\"2026-05-29\"],\"date-str\":[\"2026-05-29\"],\"date str\":[\"2026-05-29\"],\"dateStr\":[\"2026-05-29\"]}}}}\nSTATE={\n  \"_compact_json\": \"{\\\"input_parsing\\\":{\\\"language\\\":\\\"unknown\\\",\\\"parsed_entities\\\":{\\\"participant_name\\\":\\\"Weather Agent\\\",\\\"objective\\\":\\\"use file weather.py to get he weather information\\\",\\\"parameters\\\":{\\\"t\\\":\\\"kWeatherTime\\\",\\\"city_name\\\":[\\\"fukuoka\\\"],\\\"cityname\\\":[\\\"fukuoka\\\"],\\\"city-name\\\":[\\\"fukuoka\\\"],\\\"city name\\\":[\\\"fukuoka\\\"],\\\"cityName\\\":[\\\"fukuoka\\\"],\\\"date_str\\\":[\\\"2026-05-29\\\"],\\\"datestr\\\":[\\\"2026-05-29\\\"],\\\"date-str\\\":[\\\"2026-05-29\\\"],\\\"date str\\\":[\\\"2026-05-29\\\"],\\\"dateStr\\\":[\\\"2026-05-29\\\"]},\\\"t\\\":\\\"kWeatherTime\\\",\\\"city_name\\\":[\\\"fukuoka\\\"],\\\"cityname\\\":[\\\"fukuoka\\\"],\\\"city-name\\\":[\\\"fukuoka\\\"],\\\"city name\\\":[\\\"fukuoka\\\"],\\\"cityName\\\":[\\\"fukuoka\\\"],\\\"date_str\\\":[\\\"2026-05-29\\\"],\\\"datestr\\\":[\\\"2026-05-29\\\"],\\\"date-str\\\":[\\\"2026-05-29\\\"],\\\"date str\\\":[\\\"2026-05-29\\\"],\\\"dateStr\\\":[\\\"2026-05-29\\\"]},\\\"semantic_modifiers\\\":[],\\\"constraints\\\":{},\\\"temporal_expressions\\\":[],\\\"missing_information\\\":[],\\\"safety_notes\\\":[]},\\\"intent_recognition\\\":{\\\"intent_type\\\":\\\"use_uploaded_artifact\\\",\\\"intent_summary\\\":\\\"use file weather.py to get he weather information\\\",\\\"normalized_intent\\\":{\\\"action_hint\\\":\\\"use_uploaded_file\\\",\\\"artifact_refs\\\":[{\\\"artifact_id\\\":\\\"artifact_578d89dd1152\\\",\\\"name\\\":\\\"weather.py\\\",\\\"filename\\\":\\\"weather.py\\\",\\\"path\\\":\\\"runtime/uploads/files/artifact_578d89dd1152.py\\\",\\\"mime_type\\\":\\\"text/x-python-script\\\",\\\"size_bytes\\\":\\\"1566\\\",\\\"role\\\":\\\"method_candidate\\\",\\\"source\\\":\\\"agent_studio_upload_multipart\\\",\\\"resolved_by\\\":\\\"registry\\\"},{\\\"artifact_id\\\":\\\"artifact_578d89dd1152\\\",\\\"name\\\":\\\"weather.py\\\",\\\"filename\\\":\\\"wea...[trimmed]\",\n  \"_truncated\": true\n}\nRUNTIME={\n  \"current_datetime_utc\": \"2026-05-28T08:58:22.706391+00:00\",\n  \"current_date_utc\": \"2026-05-28\",\n  \"timezone_hint\": \"system_default\",\n  \"locale_hint\": \"auto\",\n  \"role_profile\": {\n    \"role_id\": \"code_generation_agent\",\n    \"role_type\": \"code_generation\"\n  },\n  \"evidence_summary\": {\n    \"known_parameters\": {\n      \"participant_name\": \"Weather Agent\",\n      \"objective\": \"use file weather.py to get he weather information\",\n      \"parameters\": {\n        \"t\": \"kWeatherTime\",\n        \"city_name\": [\n          \"fukuoka\"\n        ],\n        \"cityname\": [\n          \"fukuoka\"\n        ],\n        \"city-name\": [\n          \"fukuoka\"\n        ],\n        \"city name\": [\n          \"fukuoka\"\n        ],\n        \"cityName\": [\n          \"fukuoka\"\n        ],\n        \"date_str\": [\n          \"2026-05-29\"\n        ],\n        \"datestr\": [\n          \"2026-05-29\"\n        ],\n        \"date-str\": [\n          \"2026-05-29\"\n        ],\n        \"date str\": [\n          \"2026-05-29\"\n        ],\n        \"dateStr\": [\n          \"2026-05-29\"\n        ]\n      },\n      \"t\": \"kWeatherTime\",\n      \"city_name\": [\n        \"fukuoka\"\n      ],\n      \"cityname\": [\n        \"fukuoka\"\n      ],\n      \"city-name\": [\n        \"fukuoka\"\n      ],\n      \"city name\": [\n        \"fukuoka\"\n      ],\n      \"cityName\": [\n        \"fukuoka\"\n      ],\n      \"date_str\": [\n        \"2026-05-29\"\n      ],\n      \"datestr\": [\n        \"2026-05-29\"\n      ],\n      \"date-str\": [\n        \"2026-05-29\"\n      ],\n      \"date str\": [\n        \"2026-05-29\"\n      ],\n      \"dateStr\": [\n        \"2026-05-29\"\n      ]\n    },\n    \"selected_evidence\": []\n  }\n}\n\nRole-scoped runtime rules:\n- Stage owner: use planner LLM only to rank fixed action options and produce executable substeps for each agent.\n- Allowed decisions: planner_llm_action_ranking, fixed_action_selection, substep_generation, execution_method_locking, source_policy_locking\n- Forbidden decisions: runtime_execution, final_answer_creation, planner_output_as_answer, unplanned_fallback\n- Write primary result under action_planning_record when applicable.\n- workflow_planning only builds main workflow, agent graph, agent relations, and agent objectives; it must not execute or produce final task content.\n- agent_action_planning is a planner-LLM stage: it uses LLM only to choose the next action, never to complete the user's task unless selected_action_type is llm_generate.\n- agent_action_planning MUST use the agent action prompt contract: content + target + fixed action list + selection rules. It then ranks fixed execution options: llm_generate, generate_code, generate_shell, call_api_no_key, call_api_with_key, web_query, use_existing_tool, use_external_skill, use_uploaded_file, use_local_knowledge, generate_complex_tool, compose_static_response, ask_user, no_op.\n- agent_action_planning MUST output action_planning_record.planned_steps with execution_decision.ranked_options and selected_action_type for every executable agent/substep.\n- Map action_type to execution_method deterministically from the fixed options. Planner LLM output is planning material only and cannot enter final_synthesis.\n- For web_query or API actions, execution_preparation must prepare concrete targets/endpoints or a discovery contract before execution; it must not rewrite the selected action to llm_generate. For use_uploaded_file actions, execution_preparation must inspect uploaded artifacts, infer runtime parameters, create UI parameter requests when values are missing, and prepare a sandbox execution contract.\n- Execution may only run locked actions/resources approved by agent_action_planning and execution_preparation.\n- Do not output placeholder key lists as the stage result.\n- Preserve the required run(payload) contract when generating executable artifacts.\n- Prefer deterministic adapters when enough evidence already exists.\n- Do not include raw discovery traces unless explicitly required.",
+  "slim_user_input": "{\"participant_name\":\"Weather Agent\",\"objective\":\"use file weather.py to get he weather information\",\"context\":{\"relationship\":\"independent\",\"agent_parameters\":{\"values\":{\"t\":\"kWeatherTime\",\"city_name\":[\"fukuoka\"],\"cityname\":[\"fukuoka\"],\"city-name\":[\"fukuoka\"],\"city name\":[\"fukuoka\"],\"cityName\":[\"fukuoka\"],\"date_str\":[\"2026-05-29\"],\"datestr\":[\"2026-05-29\"],\"date-str\":[\"2026-05-29\"],\"date str\":[\"2026-05-29\"],\"dateStr\":[\"2026-05-29\"]}}}}",
+  "slim_previous_results": {
+    "_compact_json": "{\"input_parsing\":{\"language\":\"unknown\",\"parsed_entities\":{\"participant_name\":\"Weather Agent\",\"objective\":\"use file weather.py to get he weather information\",\"parameters\":{\"t\":\"kWeatherTime\",\"city_name\":[\"fukuoka\"],\"cityname\":[\"fukuoka\"],\"city-name\":[\"fukuoka\"],\"city name\":[\"fukuoka\"],\"cityName\":[\"fukuoka\"],\"date_str\":[\"2026-05-29\"],\"datestr\":[\"2026-05-29\"],\"date-str\":[\"2026-05-29\"],\"date str\":[\"2026-05-29\"],\"dateStr\":[\"2026-05-29\"]},\"t\":\"kWeatherTime\",\"city_name\":[\"fukuoka\"],\"cityname\":[\"fukuoka\"],\"city-name\":[\"fukuoka\"],\"city name\":[\"fukuoka\"],\"cityName\":[\"fukuoka\"],\"date_str\":[\"2026-05-29\"],\"datestr\":[\"2026-05-29\"],\"date-str\":[\"2026-05-29\"],\"date str\":[\"2026-05-29\"],\"dateStr\":[\"2026-05-29\"]},\"semantic_modifiers\":[],\"constraints\":{},\"temporal_expressions\":[],\"missing_information\":[],\"safety_notes\":[]},\"intent_recognition\":{\"intent_type\":\"use_uploaded_artifact\",\"intent_summary\":\"use file weather.py to get he weather information\",\"normalized_intent\":{\"action_hint\":\"use_uploaded_file\",\"artifact_refs\":[{\"artifact_id\":\"artifact_578d89dd1152\",\"name\":\"weather.py\",\"filename\":\"weather.py\",\"path\":\"runtime/uploads/files/artifact_578d89dd1152.py\",\"mime_type\":\"text/x-python-script\",\"size_bytes\":\"1566\",\"role\":\"method_candidate\",\"source\":\"agent_studio_upload_multipart\",\"resolved_by\":\"registry\"},{\"artifact_id\":\"artifact_578d89dd1152\",\"name\":\"weather.py\",\"filename\":\"wea...[trimmed]",
+    "_truncated": true
+  },
+  "runtime_context": {
+    "current_datetime_utc": "2026-05-28T08:58:22.706391+00:00",
+    "current_date_utc": "2026-05-28",
+    "timezone_hint": "system_default",
+    "locale_hint": "auto",
+    "role_profile": {
+      "role_id": "code_generation_agent",
+      "role_type": "code_generation"
+    },
+    "evidence_summary": {
+      "known_parameters": {
+        "participant_name": "Weather Agent",
+        "objective": "use file weather.py to get he weather information",
+        "parameters": {
+          "t": "kWeatherTime",
+          "city_name": [
+            "fukuoka"
+          ],
+          "cityname": [
+            "fukuoka"
+          ],
+          "city-name": [
+            "fukuoka"
+          ],
+          "city name": [
+            "fukuoka"
+          ],
+          "cityName": [
+            "fukuoka"
+          ],
+          "date_str": [
+            "2026-05-29"
+          ],
+          "datestr": [
+            "2026-05-29"
+          ],
+          "date-str": [
+            "2026-05-29"
+          ],
+          "date str": [
+            "2026-05-29"
+          ],
+          "dateStr": [
+            "2026-05-29"
+          ]
+        },
+        "t": "kWeatherTime",
+        "city_name": [
+          "fukuoka"
+        ],
+        "cityname": [
+          "fukuoka"
+        ],
+        "city-name": [
+          "fukuoka"
+        ],
+        "city name": [
+          "fukuoka"
+        ],
+        "cityName": [
+          "fukuoka"
+        ],
+        "date_str": [
+          "2026-05-29"
+        ],
+        "datestr": [
+          "2026-05-29"
+        ],
+        "date-str": [
+          "2026-05-29"
+        ],
+        "date str": [
+          "2026-05-29"
+        ],
+        "dateStr": [
+          "2026-05-29"
+        ]
+      },
+      "selected_evidence": []
+    }
+  },
+  "schema_path": "/Users/home/workspace/cdac-nesthub/runtime/generated/schemas/agent_action_planning.schema.json",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "_executor_type": {
+        "type": "string"
+      },
+      "_node_id": {
+        "type": "string"
+      },
+      "_status": {
+        "type": "string"
+      },
+      "action_planning_record": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "status": {
+        "type": "string"
+      },
+      "message": {
+        "type": "string"
+      },
+      "data": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "additionalProperties": true
+  }
+}

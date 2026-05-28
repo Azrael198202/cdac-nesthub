@@ -160,19 +160,18 @@ class RuntimeDependencyInstaller:
 
     def _safe_package_spec(self, package: str) -> bool:
         package = str(package or "").strip()
-        if not package or len(package) > 160:
+        if not package or len(package) > 1000:
             return False
 
-        # Runtime permission defaults to administrator for local development,
-        # so the installer must accept ordinary pinned/ranged Python package
-        # specifications declared by providers, for example:
-        #   Package
-        #   Package==1.2.3
-        #   Package>=1.2.3
-        #   Package~=1.2
-        #   Package[extra]>=1.2.3
-        # It still rejects shell metacharacters, URLs, paths, spaces, and command
-        # chaining. Installation is always executed as argv, never through shell.
+        # Test/development mode intentionally defaults to administrator. In that
+        # mode the runtime may install dependencies from normal package names,
+        # version specs, local paths, wheel URLs, VCS URLs, and provider-supplied
+        # fragments. Formal deployments can lower this behavior through
+        # RuntimePermissionPolicy without changing routing code.
+        if self.policy.can_use_arbitrary_runtime_material(material_type="package_spec"):
+            return True
+
+        # Restricted mode keeps the conservative production validator.
         if re.search(r"[;&|`$(){}\\\s/]", package):
             return False
 

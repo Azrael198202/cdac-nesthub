@@ -1,0 +1,22 @@
+node_id: intent_recognition
+executor_type: llm_json
+prompt: runtime/generated/prompts/intent_recognition.yaml
+output_schema: runtime/generated/schemas/intent_recognition.schema.json
+capabilities:
+- generic_runtime_stage
+stage_contract:
+  owner: classify user intent and initial capability needs
+  allowed_decisions:
+  - classify_intent
+  - estimate_capability_needs
+  - draft_non_executable_steps
+  - detect_missing_information
+  forbidden_decisions:
+  - execution_method_locking
+  - tool_selection
+  - provider_selection
+  - runtime_execution
+  output_key: intent_record
+review_required: true
+progress_weight: 10
+adapter: runtime/generated/adapters/intent_recognition.yaml

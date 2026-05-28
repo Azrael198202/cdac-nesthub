@@ -1,0 +1,29 @@
+workflow_id: base_orchestration
+name: Domain Neutral Execution-Preparation Orchestration
+version: '4.1'
+stage_boundary_policy: locked_stage_contract
+nodes:
+- id: input_parsing
+  node_config: runtime/generated/nodes/input_parsing.yaml
+- id: intent_recognition
+  node_config: runtime/generated/nodes/intent_recognition.yaml
+- id: requirement_completion
+  node_config: runtime/generated/nodes/requirement_completion.yaml
+- id: context_awareness
+  node_config: runtime/generated/nodes/context_awareness.yaml
+- id: workflow_planning
+  node_config: runtime/generated/nodes/workflow_planning.yaml
+- id: agent_action_planning
+  node_config: runtime/generated/nodes/agent_action_planning.yaml
+- id: execution_preparation
+  node_config: runtime/generated/nodes/execution_preparation.yaml
+- id: pre_execution_validation
+  node_config: runtime/generated/nodes/pre_execution_validation.yaml
+- id: execution
+  node_config: runtime/generated/nodes/execution.yaml
+- id: result_verification
+  node_config: runtime/generated/nodes/result_verification.yaml
+- id: feedback_repair
+  node_config: runtime/generated/nodes/feedback_repair.yaml
+- id: final_synthesis
+  node_config: runtime/generated/nodes/final_synthesis.yaml

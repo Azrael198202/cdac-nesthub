@@ -1,0 +1,193 @@
+{
+  "required": true,
+  "step_id": "step_1",
+  "artifact_refs": [
+    {
+      "artifact_id": "artifact_578d89dd1152",
+      "path": "runtime/uploads/files/artifact_578d89dd1152.py",
+      "name": "weather.py",
+      "mime_type": "text/x-python-script",
+      "role": "method_candidate"
+    }
+  ],
+  "selected_artifact": {
+    "artifact_id": "artifact_578d89dd1152",
+    "path": "runtime/uploads/files/artifact_578d89dd1152.py",
+    "name": "weather.py",
+    "mime_type": "text/x-python-script",
+    "role": "method_candidate",
+    "resolved_path": "/Users/home/workspace/cdac-nesthub/runtime/uploads/files/artifact_578d89dd1152.py",
+    "exists": true,
+    "input_contract": {
+      "type": "object",
+      "properties": {
+        "city_name": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "date_str": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "city_name"
+      ],
+      "additionalProperties": true
+    },
+    "execution_entrypoint": {
+      "type": "python_module",
+      "function": "get_weather"
+    },
+    "inspection": {
+      "status": "parsed",
+      "language": "python",
+      "function_count": 2
+    }
+  },
+  "input_contract": {
+    "type": "object",
+    "properties": {
+      "city_name": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "date_str": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "required": [
+      "city_name"
+    ],
+    "additionalProperties": true
+  },
+  "known_parameter_values": {
+    "participant_name": "Weather Agent",
+    "objective": "use file weather.py to get he weather information",
+    "parameters": {
+      "t": "kWeatherTime",
+      "city_name": [
+        "fukuoka"
+      ],
+      "cityname": [
+        "fukuoka"
+      ],
+      "city-name": [
+        "fukuoka"
+      ],
+      "city name": [
+        "fukuoka"
+      ],
+      "cityName": [
+        "fukuoka"
+      ],
+      "date_str": [
+        "2026-05-29"
+      ],
+      "datestr": [
+        "2026-05-29"
+      ],
+      "date-str": [
+        "2026-05-29"
+      ],
+      "date str": [
+        "2026-05-29"
+      ],
+      "dateStr": [
+        "2026-05-29"
+      ]
+    },
+    "t": "kWeatherTime",
+    "city_name": [
+      "fukuoka"
+    ],
+    "cityname": [
+      "fukuoka"
+    ],
+    "city-name": [
+      "fukuoka"
+    ],
+    "city name": [
+      "fukuoka"
+    ],
+    "cityName": [
+      "fukuoka"
+    ],
+    "date_str": [
+      "2026-05-29"
+    ],
+    "datestr": [
+      "2026-05-29"
+    ],
+    "date-str": [
+      "2026-05-29"
+    ],
+    "date str": [
+      "2026-05-29"
+    ],
+    "dateStr": [
+      "2026-05-29"
+    ],
+    "original_input": "use file weather.py to get he weather information",
+    "action_hint": "use_uploaded_file",
+    "artifact_refs": [
+      {
+        "artifact_id": "artifact_578d89dd1152",
+        "name": "weather.py",
+        "filename": "weather.py",
+        "path": "runtime/uploads/files/artifact_578d89dd1152.py",
+        "mime_type": "text/x-python-script",
+        "size_bytes": 1566,
+        "role": "method_candidate",
+        "source": "agent_studio_upload_multipart",
+        "resolved_by": "registry"
+      },
+      {
+        "artifact_id": "artifact_578d89dd1152",
+        "name": "weather.py",
+        "filename": "weather.py",
+        "path": "runtime/uploads/files/artifact_578d89dd1152.py",
+        "mime_type": "text/x-python-script",
+        "size_bytes": 1566,
+        "role": "method_candidate",
+        "source": "agent_studio_upload_multipart",
+        "backups": [
+          {
+            "path": "/Users/home/workspace/cdac-nesthub/runtime/uploads/backups/artifact_578d89dd1152.edit_1aa1c67ef9ec.backup.py",
+            "proposal_id": "edit_1aa1c67ef9ec",
+            "created_at": "2026-05-28T08:52:17.099071+00:00"
+          }
+        ],
+        "last_edit_proposal_id": "edit_1aa1c67ef9ec",
+        "updated_at": "2026-05-28T08:52:17.099075+00:00"
+      }
+    ],
+    "source": "deterministic_artifact_reference",
+    "intent_type": "use_uploaded_artifact",
+    "intent_summary": "use file weather.py to get he weather information",
+    "required_capabilities": [
+      "uploaded_artifact_execution"
+    ],
+    "reason": "The request references an uploaded artifact that is available in the runtime registry/context.",
+    "city": "fukuoka",
+    "date": "2026-05-29"
+  },
+  "missing_parameter_fields": [],
+  "ui_parameter_request": null,
+  "execution_policy": {
+    "sandbox_required": true,
+    "use_uploaded_artifact_as_method": true,
+    "preserve_artifact_path_as_evidence": true
+  },
+  "approved_in_preparation": true,
+  "status": "prepared"
+}

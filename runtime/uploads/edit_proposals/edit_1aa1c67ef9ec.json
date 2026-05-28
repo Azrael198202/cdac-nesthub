@@ -1,0 +1,21 @@
+{
+  "proposal_id": "edit_1aa1c67ef9ec",
+  "artifact_id": "artifact_578d89dd1152",
+  "artifact_name": "weather.py",
+  "original_path": "/Users/home/workspace/cdac-nesthub/runtime/uploads/files/artifact_578d89dd1152.py",
+  "draft_path": "/Users/home/workspace/cdac-nesthub/runtime/uploads/edit_proposals/edit_1aa1c67ef9ec.py",
+  "instruction": "Change the city_name and date_str parameters in the file to list types ... and generate a new code file.",
+  "feedback": "",
+  "status": "confirmed",
+  "created_at": "2026-05-28T08:52:15.779696+00:00",
+  "generation": {
+    "mode": "deterministic_python_list_parameter_edit",
+    "changed_parameters": [
+      "city_name",
+      "date_str"
+    ]
+  },
+  "download_url": "/api/agent-studio/artifact-edit/edit_1aa1c67ef9ec/download",
+  "confirmed_at": "2026-05-28T08:52:17.098379+00:00",
+  "backup_path": "/Users/home/workspace/cdac-nesthub/runtime/uploads/backups/artifact_578d89dd1152.edit_1aa1c67ef9ec.backup.py"
+}

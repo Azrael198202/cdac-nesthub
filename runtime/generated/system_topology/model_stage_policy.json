@@ -1,0 +1,3369 @@
+{
+  "version": "2.9.14",
+  "policy_kind": "runtime_model_governance_policy",
+  "description": "Domain-neutral model governance policy for stage-bound model selection, multimodal capabilities, validation, cost control, on-demand installation, fallback, escalation, and recommendation intake.",
+  "governance_principles": [
+    "Runtime stages choose models through policy, not through ad-hoc prompt decisions.",
+    "Deterministic taxonomy, registry, parser, and validator components are preferred before LLM proposals.",
+    "LLMs may propose candidates; runtime policy, schema validation, benchmarks, and operator preferences decide acceptance.",
+    "Weak or low-tier models must not directly consume complex raw evidence for final synthesis.",
+    "Every stage must declare validation, fallback, escalation, downgrade, cost, and privacy behavior.",
+    "Business or domain-specific keywords are forbidden in this policy. Capabilities are generic and modality-based."
+  ],
+  "global_policy": {
+    "cost_policy": {
+      "allow_paid_models": true,
+      "prefer_local_when_quality_sufficient": true,
+      "prefer_lower_cost_for_low_risk_stages": true,
+      "missing_paid_key_action": "skip_and_try_lower_substitute",
+      "user_requested_free_mode_action": "use_lower_substitutes_then_local_fallback",
+      "max_paid_retry_per_stage": 1
+    },
+    "quality_policy": {
+      "minimum_schema_success_rate": 0.92,
+      "minimum_json_stability_score": 0.9,
+      "minimum_stage_quality_score": 0.75,
+      "prefer_benchmark_scores_over_static_capability_tags": true,
+      "unknown_model_default_status": "candidate_only"
+    },
+    "privacy_policy": {
+      "default_data_boundary": "runtime_decides_by_stage",
+      "local_first_for_sensitive_material": true,
+      "external_model_requires_stage_allow_external": true,
+      "redact_secrets_before_external_call": true,
+      "raw_evidence_external_call_requires_reduction": true
+    },
+    "missing_model_policy": {
+      "local_model_action": "download_on_demand",
+      "external_model_action": "use_when_key_available",
+      "unknown_model_action": "register_as_candidate_then_validate",
+      "unknown_stage_action": "use_general_runtime_then_request_policy_proposal",
+      "download_requires_catalog_entry": true
+    },
+    "runtime_learning_policy": {
+      "record_latency": true,
+      "record_schema_failures": true,
+      "record_user_feedback": true,
+      "record_cost_estimate": true,
+      "adjust_candidate_priority_from_runtime_scores": true,
+      "never_overwrite_seed_policy_without_review": true
+    },
+    "routing_control": {
+      "model_routing_is_deterministic": true,
+      "llm_may_only_propose_candidates": true,
+      "capability_routing_uses_taxonomy_first": true,
+      "execution_mode_uses_policy_first": true,
+      "tool_selection_uses_registry_first": true,
+      "final_model_selection_uses_policy_resolver": true
+    },
+    "recommendation_intake_policy": {
+      "strong_model_may_recommend_new_models": true,
+      "recommendation_output_schema_required": true,
+      "recommended_model_status": "candidate_only",
+      "candidate_acceptance_requires": [
+        "catalog_normalization",
+        "provider_template_resolution",
+        "capability_benchmark",
+        "schema_stability_test",
+        "cost_profile_check",
+        "runtime_operator_review_or_policy_auto_accept"
+      ]
+    },
+    "runtime_switch": {
+      "local_models_enabled": false,
+      "deprecated": true,
+      "replaced_by": "global_policy.runtime_execution_policy.local_enabled",
+      "switch_sources": [
+        "global_policy.runtime_execution_policy.local_enabled",
+        "AI_CORE_LOCAL_MODELS_ENABLED"
+      ]
+    },
+    "local_model_policy": {
+      "enabled": true,
+      "default_provider_order": [
+        "ollama"
+      ],
+      "code_provider_order": [
+        "ollama_coder_qwen25",
+        "ollama_coder_deepseek"
+      ],
+      "api_provider_order": [
+        "openai",
+        "claude"
+      ],
+      "api_only_when_disabled": false,
+      "local_unavailable_action": "try_next_local_then_api_fallback",
+      "default_local_runtime": "ollama",
+      "fallback_local_runtime": "ollama",
+      "selection_rule": "policy_resolver_expands_one_model_catalog_entry_into_runtime_ordered_provider_templates",
+      "deprecated_authority": true,
+      "replaced_by": "global_policy.runtime_execution_policy"
+    },
+    "runtime_execution_policy": {
+      "source_of_truth": true,
+      "default_mode": "local_only",
+      "local_enabled": true,
+      "api_only_when_local_disabled": false,
+      "api_provider_order": [
+        "openai",
+        "claude"
+      ],
+      "local_provider_order": [
+        "ollama"
+      ],
+      "local_code_provider_order": [
+        "ollama_coder_qwen25",
+        "ollama_coder_deepseek"
+      ],
+      "credential_recovery_enabled": true,
+      "credential_storage": "runtime/configs/secrets/secrets.json",
+      "environment_override": "AI_CORE_LOCAL_MODELS_ENABLED",
+      "runtime_cost_policy": {
+        "enabled": true,
+        "max_prompt_tokens": 6000,
+        "max_provider_attempts": 2,
+        "max_external_discovery_attempts": 1,
+        "max_generated_component_attempts": 1,
+        "max_evidence_pages": 5,
+        "max_evidence_page_chars": 18000,
+        "operation_timeout_seconds": 900,
+        "sandbox_timeout_seconds": 60,
+        "prefer_repair_before_model_escalation": true,
+        "allow_paid_model_escalation": true,
+        "notes": "Domain-neutral runtime budget and convergence controls.",
+        "stage_timeouts": {
+          "web_discovery": 30,
+          "web_search": 90,
+          "extraction": 45,
+          "evidence_validation": 20,
+          "api_discovery": 15,
+          "api_call": 30,
+          "synthesis": 20,
+          "input_parsing": 120,
+          "intent_recognition": 120,
+          "context_awareness": 30,
+          "workflow_planning": 240,
+          "execution": 300,
+          "feedback_learning": 90,
+          "output": 120,
+          "semantic_task_graph_planning": 90
+        },
+        "method_timeout_seconds": {
+          "api_call": 30,
+          "web_search": 90,
+          "extraction": 45
+        },
+        "adaptive_evidence": {
+          "enabled": true,
+          "min_sources": 2,
+          "max_sources": 5,
+          "candidate_window": 6,
+          "initial_fetches": 2,
+          "incremental_fetches": 1,
+          "max_fetches": 5,
+          "fetch_chars_per_source": 18000,
+          "llm_material_chars": 6000,
+          "fact_limit": 48,
+          "block_limit": 32,
+          "stop_quality_score": 0.78
+        }
+      }
+    }
+  },
+  "capability_taxonomy": {
+    "modalities": [
+      "text",
+      "audio",
+      "image",
+      "video",
+      "file",
+      "code",
+      "structured_data",
+      "multimodal"
+    ],
+    "capability_groups": {
+      "language_core": [
+        "language_detection",
+        "input_parsing",
+        "structured_extraction",
+        "json_generation",
+        "reasoning",
+        "planning",
+        "translation",
+        "summarization"
+      ],
+      "governance": [
+        "capability_classification",
+        "execution_mode_decision",
+        "model_routing",
+        "schema_validation",
+        "schema_repair",
+        "fact_verification",
+        "risk_assessment"
+      ],
+      "retrieval_evidence": [
+        "embedding_generation",
+        "query_rewrite",
+        "reranking",
+        "evidence_extraction",
+        "evidence_compression",
+        "citation_grounding"
+      ],
+      "tooling_code": [
+        "tool_selection",
+        "tool_generation",
+        "code_generation",
+        "code_review",
+        "test_generation",
+        "debugging",
+        "schema_design"
+      ],
+      "artifact_generation": [
+        "document_generation",
+        "spreadsheet_generation",
+        "slide_generation",
+        "pdf_generation",
+        "diagram_generation",
+        "file_transformation",
+        "report_generation",
+        "plan_generation"
+      ],
+      "audio": [
+        "speech_to_text",
+        "text_to_speech",
+        "audio_understanding",
+        "audio_generation",
+        "voice_conversion"
+      ],
+      "vision_image": [
+        "image_understanding",
+        "image_generation",
+        "image_editing",
+        "ocr",
+        "layout_understanding",
+        "chart_understanding"
+      ],
+      "video": [
+        "video_understanding",
+        "video_generation",
+        "video_editing",
+        "frame_analysis"
+      ]
+    }
+  },
+  "model_catalog": {
+    "deterministic_taxonomy": {
+      "provider_template": "internal",
+      "provider_model": "deterministic_taxonomy",
+      "family": "runtime_policy",
+      "vendor": "internal",
+      "tier": "deterministic",
+      "cost_class": "free",
+      "deployment": "local_runtime",
+      "install_strategy": "built_in",
+      "status": "available",
+      "modalities": {
+        "input": [
+          "structured_data"
+        ],
+        "output": [
+          "structured_data"
+        ]
+      },
+      "capabilities": [
+        "capability_classification",
+        "schema_validation"
+      ],
+      "priority_bias": 100
+    },
+    "deterministic_runtime_policy": {
+      "provider_template": "internal",
+      "provider_model": "deterministic_runtime_policy",
+      "family": "runtime_policy",
+      "vendor": "internal",
+      "tier": "deterministic",
+      "cost_class": "free",
+      "deployment": "local_runtime",
+      "install_strategy": "built_in",
+      "status": "available",
+      "modalities": {
+        "input": [
+          "structured_data"
+        ],
+        "output": [
+          "structured_data"
+        ]
+      },
+      "capabilities": [
+        "model_routing",
+        "execution_mode_decision",
+        "schema_validation"
+      ],
+      "priority_bias": 100
+    },
+    "deterministic_registry": {
+      "provider_template": "internal",
+      "provider_model": "deterministic_registry",
+      "family": "runtime_policy",
+      "vendor": "internal",
+      "tier": "deterministic",
+      "cost_class": "free",
+      "deployment": "local_runtime",
+      "install_strategy": "built_in",
+      "status": "available",
+      "modalities": {
+        "input": [
+          "structured_data"
+        ],
+        "output": [
+          "structured_data"
+        ]
+      },
+      "capabilities": [
+        "tool_selection",
+        "schema_validation"
+      ],
+      "priority_bias": 100
+    },
+    "parser_rule_engine": {
+      "provider_template": "internal",
+      "provider_model": "parser_rule_engine",
+      "family": "runtime_policy",
+      "vendor": "internal",
+      "tier": "deterministic",
+      "cost_class": "free",
+      "deployment": "local_runtime",
+      "install_strategy": "built_in",
+      "status": "available",
+      "modalities": {
+        "input": [
+          "file",
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "structured_data",
+          "text"
+        ]
+      },
+      "capabilities": [
+        "evidence_extraction",
+        "file_transformation",
+        "ocr",
+        "layout_understanding"
+      ],
+      "priority_bias": 90
+    },
+    "qwen3:4b": {
+      "provider_template": "ollama",
+      "provider_model": "qwen3:4b",
+      "family": "qwen",
+      "vendor": "local",
+      "tier": "local_basic",
+      "cost_class": "free",
+      "deployment": "local_model",
+      "install_strategy": "on_demand",
+      "status": "approved",
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "capabilities": [
+        "json_generation",
+        "structured_extraction",
+        "input_parsing",
+        "simple_intent"
+      ],
+      "context_window_hint": 32768,
+      "priority_bias": 30,
+      "provider_templates": [
+        "vllm",
+        "ollama"
+      ],
+      "provider_models": {
+        "vllm": "Qwen/Qwen3-4B",
+        "ollama": "qwen3:4b"
+      },
+      "fallback_provider_templates": []
+    },
+    "qwen3:8b": {
+      "provider_template": "ollama",
+      "provider_model": "qwen3:8b",
+      "family": "qwen",
+      "vendor": "local",
+      "tier": "local_standard",
+      "cost_class": "free",
+      "deployment": "local_model",
+      "install_strategy": "on_demand",
+      "status": "approved",
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "capabilities": [
+        "json_generation",
+        "structured_extraction",
+        "input_parsing",
+        "simple_intent",
+        "feedback_understanding",
+        "summarization"
+      ],
+      "context_window_hint": 32768,
+      "priority_bias": 40,
+      "provider_templates": [
+        "vllm",
+        "ollama"
+      ],
+      "provider_models": {
+        "vllm": "Qwen/Qwen3-8B",
+        "ollama": "qwen3:8b"
+      },
+      "fallback_provider_templates": []
+    },
+    "qwen3:14b": {
+      "provider_template": "ollama",
+      "provider_model": "qwen3:14b",
+      "family": "qwen",
+      "vendor": "local",
+      "tier": "local_high",
+      "cost_class": "free",
+      "deployment": "local_model",
+      "install_strategy": "on_demand",
+      "status": "approved",
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "capabilities": [
+        "json_generation",
+        "structured_extraction",
+        "reasoning",
+        "planning",
+        "schema_repair",
+        "evidence_compression"
+      ],
+      "context_window_hint": 32768,
+      "priority_bias": 50,
+      "provider_templates": [
+        "vllm",
+        "ollama"
+      ],
+      "provider_models": {
+        "vllm": "Qwen/Qwen3-14B",
+        "ollama": "qwen3:14b"
+      },
+      "fallback_provider_templates": []
+    },
+    "qwen3:32b": {
+      "provider_template": "ollama",
+      "provider_model": "qwen3:32b",
+      "family": "qwen",
+      "vendor": "local",
+      "tier": "local_strong",
+      "cost_class": "free",
+      "deployment": "local_model",
+      "install_strategy": "on_demand",
+      "status": "approved",
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "capabilities": [
+        "json_generation",
+        "reasoning",
+        "workflow_planning",
+        "final_synthesis",
+        "evidence_compression",
+        "report_generation",
+        "plan_generation"
+      ],
+      "context_window_hint": 32768,
+      "priority_bias": 60,
+      "provider_templates": [
+        "vllm",
+        "ollama"
+      ],
+      "provider_models": {
+        "vllm": "Qwen/Qwen3-32B",
+        "ollama": "qwen3:32b"
+      },
+      "fallback_provider_templates": []
+    },
+    "qwen2.5-coder:7b": {
+      "provider_template": "ollama_coder_qwen25",
+      "provider_model": "qwen2.5-coder:7b",
+      "family": "qwen_coder",
+      "vendor": "local",
+      "tier": "local_coder",
+      "cost_class": "free",
+      "deployment": "local_model",
+      "install_strategy": "on_demand",
+      "status": "approved",
+      "modalities": {
+        "input": [
+          "text",
+          "code"
+        ],
+        "output": [
+          "text",
+          "code",
+          "structured_data"
+        ]
+      },
+      "capabilities": [
+        "code_generation",
+        "tool_generation",
+        "schema_repair",
+        "json_generation",
+        "test_generation"
+      ],
+      "context_window_hint": 32768,
+      "priority_bias": 50,
+      "provider_templates": [
+        "vllm_coder",
+        "ollama_coder_qwen25"
+      ],
+      "provider_models": {
+        "vllm_coder": "Qwen/Qwen2.5-Coder-7B-Instruct",
+        "ollama_coder_qwen25": "qwen2.5-coder:7b"
+      },
+      "fallback_provider_templates": [
+        "ollama_coder_deepseek"
+      ]
+    },
+    "qwen2.5-coder:14b": {
+      "provider_template": "ollama_coder_qwen25",
+      "provider_model": "qwen2.5-coder:14b",
+      "family": "qwen_coder",
+      "vendor": "local",
+      "tier": "local_coder_high",
+      "cost_class": "free",
+      "deployment": "local_model",
+      "install_strategy": "on_demand",
+      "status": "approved",
+      "modalities": {
+        "input": [
+          "text",
+          "code"
+        ],
+        "output": [
+          "text",
+          "code",
+          "structured_data"
+        ]
+      },
+      "capabilities": [
+        "code_generation",
+        "tool_generation",
+        "schema_design",
+        "schema_repair",
+        "code_review",
+        "test_generation"
+      ],
+      "context_window_hint": 32768,
+      "priority_bias": 60,
+      "provider_templates": [
+        "vllm_coder",
+        "ollama_coder_qwen25"
+      ],
+      "provider_models": {
+        "vllm_coder": "Qwen/Qwen2.5-Coder-14B-Instruct",
+        "ollama_coder_qwen25": "qwen2.5-coder:14b"
+      },
+      "fallback_provider_templates": [
+        "ollama_coder_deepseek"
+      ]
+    },
+    "deepseek-coder-v2:16b": {
+      "provider_template": "ollama_coder_deepseek",
+      "provider_model": "deepseek-coder-v2:16b",
+      "family": "deepseek_coder",
+      "vendor": "local",
+      "tier": "local_coder_high",
+      "cost_class": "free",
+      "deployment": "local_model",
+      "install_strategy": "on_demand",
+      "status": "approved",
+      "modalities": {
+        "input": [
+          "text",
+          "code"
+        ],
+        "output": [
+          "text",
+          "code",
+          "structured_data"
+        ]
+      },
+      "capabilities": [
+        "code_generation",
+        "tool_generation",
+        "debugging",
+        "code_review",
+        "test_generation"
+      ],
+      "context_window_hint": 32768,
+      "priority_bias": 60,
+      "provider_templates": [
+        "vllm_coder",
+        "ollama_coder_deepseek"
+      ],
+      "provider_models": {
+        "vllm_coder": "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct",
+        "ollama_coder_deepseek": "deepseek-coder-v2:16b"
+      },
+      "fallback_provider_templates": [
+        "ollama_coder_qwen25"
+      ]
+    },
+    "nomic-embed-text": {
+      "provider_template": "ollama_embedding",
+      "provider_model": "nomic-embed-text",
+      "family": "embedding",
+      "vendor": "local",
+      "tier": "local_embedding",
+      "cost_class": "free",
+      "deployment": "local_model",
+      "install_strategy": "on_demand",
+      "status": "approved",
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "structured_data"
+        ]
+      },
+      "capabilities": [
+        "embedding_generation"
+      ],
+      "priority_bias": 70,
+      "provider_templates": [
+        "vllm",
+        "ollama_embedding"
+      ],
+      "fallback_provider_templates": [
+        "ollama"
+      ]
+    },
+    "whisper-local": {
+      "provider_template": "local_stt",
+      "provider_model": "whisper-local",
+      "family": "speech",
+      "vendor": "local",
+      "tier": "local_audio",
+      "cost_class": "free",
+      "deployment": "local_model",
+      "install_strategy": "on_demand_or_package",
+      "status": "candidate",
+      "modalities": {
+        "input": [
+          "audio"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "capabilities": [
+        "speech_to_text",
+        "audio_understanding"
+      ],
+      "priority_bias": 50,
+      "provider_templates": [
+        "vllm",
+        "local_stt"
+      ],
+      "fallback_provider_templates": [
+        "ollama"
+      ]
+    },
+    "piper-tts-local": {
+      "provider_template": "local_tts",
+      "provider_model": "piper-tts-local",
+      "family": "speech",
+      "vendor": "local",
+      "tier": "local_audio",
+      "cost_class": "free",
+      "deployment": "local_model",
+      "install_strategy": "on_demand_or_package",
+      "status": "candidate",
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "audio",
+          "file"
+        ]
+      },
+      "capabilities": [
+        "text_to_speech"
+      ],
+      "priority_bias": 45,
+      "provider_templates": [
+        "vllm",
+        "local_tts"
+      ],
+      "fallback_provider_templates": [
+        "ollama"
+      ]
+    },
+    "stable-diffusion-local": {
+      "provider_template": "local_image_generation",
+      "provider_model": "stable-diffusion-local",
+      "family": "image_generation",
+      "vendor": "local",
+      "tier": "local_media",
+      "cost_class": "free",
+      "deployment": "local_model",
+      "install_strategy": "on_demand_or_package",
+      "status": "candidate",
+      "modalities": {
+        "input": [
+          "text",
+          "image"
+        ],
+        "output": [
+          "image",
+          "file"
+        ]
+      },
+      "capabilities": [
+        "image_generation",
+        "image_editing"
+      ],
+      "priority_bias": 45,
+      "provider_templates": [
+        "vllm",
+        "local_image_generation"
+      ],
+      "fallback_provider_templates": [
+        "ollama"
+      ]
+    },
+    "local-video-generator": {
+      "provider_template": "local_video_generation",
+      "provider_model": "local-video-generator",
+      "family": "video_generation",
+      "vendor": "local",
+      "tier": "local_media",
+      "cost_class": "free",
+      "deployment": "local_model",
+      "install_strategy": "manual_or_on_demand",
+      "status": "candidate",
+      "modalities": {
+        "input": [
+          "text",
+          "image",
+          "video"
+        ],
+        "output": [
+          "video",
+          "file"
+        ]
+      },
+      "capabilities": [
+        "video_generation",
+        "video_editing"
+      ],
+      "priority_bias": 35,
+      "provider_templates": [
+        "vllm",
+        "local_video_generation"
+      ],
+      "fallback_provider_templates": [
+        "ollama"
+      ]
+    },
+    "gpt-4o-mini": {
+      "provider_template": "openai",
+      "provider_model": "gpt-4o-mini",
+      "family": "openai",
+      "vendor": "openai",
+      "tier": "external_standard",
+      "cost_class": "paid",
+      "deployment": "external_api",
+      "install_strategy": "key_required",
+      "status": "approved",
+      "allow_external": true,
+      "modalities": {
+        "input": [
+          "text",
+          "image"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "capabilities": [
+        "json_generation",
+        "reasoning",
+        "structured_extraction",
+        "workflow_planning",
+        "image_understanding",
+        "document_generation"
+      ],
+      "context_window_hint": 128000,
+      "priority_bias": 55
+    },
+    "gpt-4.1": {
+      "provider_template": "openai",
+      "provider_model": "gpt-4.1",
+      "family": "openai",
+      "vendor": "openai",
+      "tier": "external_strong",
+      "cost_class": "paid",
+      "deployment": "external_api",
+      "install_strategy": "key_required",
+      "status": "approved",
+      "allow_external": true,
+      "modalities": {
+        "input": [
+          "text",
+          "image",
+          "file"
+        ],
+        "output": [
+          "text",
+          "structured_data",
+          "code"
+        ]
+      },
+      "capabilities": [
+        "json_generation",
+        "reasoning",
+        "workflow_planning",
+        "final_synthesis",
+        "fact_verification",
+        "code_generation",
+        "document_generation",
+        "report_generation",
+        "plan_generation"
+      ],
+      "context_window_hint": 1000000,
+      "priority_bias": 70
+    },
+    "gpt-5.x": {
+      "provider_template": "openai",
+      "provider_model": "gpt-5.x",
+      "family": "openai",
+      "vendor": "openai",
+      "tier": "external_top",
+      "cost_class": "paid",
+      "deployment": "external_api",
+      "install_strategy": "key_required",
+      "status": "alias_candidate",
+      "allow_external": true,
+      "modalities": {
+        "input": [
+          "text",
+          "image",
+          "file",
+          "code"
+        ],
+        "output": [
+          "text",
+          "structured_data",
+          "code"
+        ]
+      },
+      "capabilities": [
+        "json_generation",
+        "reasoning",
+        "workflow_planning",
+        "final_synthesis",
+        "fact_verification",
+        "code_generation",
+        "tool_generation",
+        "document_generation",
+        "report_generation",
+        "plan_generation"
+      ],
+      "context_window_hint": 1000000,
+      "priority_bias": 80
+    },
+    "claude-sonnet": {
+      "provider_template": "claude",
+      "provider_model": "claude-sonnet",
+      "family": "claude",
+      "vendor": "anthropic",
+      "tier": "external_strong",
+      "cost_class": "paid",
+      "deployment": "external_api",
+      "install_strategy": "key_required",
+      "status": "alias_candidate",
+      "allow_external": true,
+      "modalities": {
+        "input": [
+          "text",
+          "image",
+          "file",
+          "code"
+        ],
+        "output": [
+          "text",
+          "structured_data",
+          "code"
+        ]
+      },
+      "capabilities": [
+        "reasoning",
+        "final_synthesis",
+        "code_generation",
+        "document_generation",
+        "report_generation",
+        "plan_generation"
+      ],
+      "context_window_hint": 200000,
+      "priority_bias": 70
+    },
+    "openai-stt": {
+      "provider_template": "openai_audio",
+      "provider_model": "openai-stt",
+      "family": "speech",
+      "vendor": "openai",
+      "tier": "external_audio",
+      "cost_class": "paid",
+      "deployment": "external_api",
+      "install_strategy": "key_required",
+      "status": "candidate",
+      "allow_external": true,
+      "modalities": {
+        "input": [
+          "audio"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "capabilities": [
+        "speech_to_text",
+        "audio_understanding"
+      ],
+      "priority_bias": 65
+    },
+    "openai-tts": {
+      "provider_template": "openai_audio",
+      "provider_model": "openai-tts",
+      "family": "speech",
+      "vendor": "openai",
+      "tier": "external_audio",
+      "cost_class": "paid",
+      "deployment": "external_api",
+      "install_strategy": "key_required",
+      "status": "candidate",
+      "allow_external": true,
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "audio",
+          "file"
+        ]
+      },
+      "capabilities": [
+        "text_to_speech",
+        "audio_generation"
+      ],
+      "priority_bias": 65
+    },
+    "openai-image-generation": {
+      "provider_template": "openai_image",
+      "provider_model": "openai-image-generation",
+      "family": "image_generation",
+      "vendor": "openai",
+      "tier": "external_media",
+      "cost_class": "paid",
+      "deployment": "external_api",
+      "install_strategy": "key_required",
+      "status": "candidate",
+      "allow_external": true,
+      "modalities": {
+        "input": [
+          "text",
+          "image"
+        ],
+        "output": [
+          "image",
+          "file"
+        ]
+      },
+      "capabilities": [
+        "image_generation",
+        "image_editing"
+      ],
+      "priority_bias": 70
+    },
+    "external-video-generation": {
+      "provider_template": "external_video",
+      "provider_model": "external-video-generation",
+      "family": "video_generation",
+      "vendor": "external",
+      "tier": "external_media",
+      "cost_class": "paid",
+      "deployment": "external_api",
+      "install_strategy": "key_required",
+      "status": "candidate",
+      "allow_external": true,
+      "modalities": {
+        "input": [
+          "text",
+          "image",
+          "video"
+        ],
+        "output": [
+          "video",
+          "file"
+        ]
+      },
+      "capabilities": [
+        "video_generation",
+        "video_editing"
+      ],
+      "priority_bias": 60
+    },
+    "document_renderer": {
+      "provider_template": "internal",
+      "provider_model": "document_renderer",
+      "family": "runtime_artifact_engine",
+      "vendor": "internal",
+      "tier": "deterministic",
+      "cost_class": "free",
+      "deployment": "local_runtime",
+      "install_strategy": "built_in",
+      "status": "available",
+      "modalities": {
+        "input": [
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "file"
+        ]
+      },
+      "capabilities": [
+        "document_generation",
+        "file_transformation"
+      ],
+      "priority_bias": 95
+    },
+    "spreadsheet_renderer": {
+      "provider_template": "internal",
+      "provider_model": "spreadsheet_renderer",
+      "family": "runtime_artifact_engine",
+      "vendor": "internal",
+      "tier": "deterministic",
+      "cost_class": "free",
+      "deployment": "local_runtime",
+      "install_strategy": "built_in",
+      "status": "available",
+      "modalities": {
+        "input": [
+          "structured_data",
+          "text"
+        ],
+        "output": [
+          "file"
+        ]
+      },
+      "capabilities": [
+        "spreadsheet_generation",
+        "file_transformation"
+      ],
+      "priority_bias": 95
+    },
+    "presentation_renderer": {
+      "provider_template": "internal",
+      "provider_model": "presentation_renderer",
+      "family": "runtime_artifact_engine",
+      "vendor": "internal",
+      "tier": "deterministic",
+      "cost_class": "free",
+      "deployment": "local_runtime",
+      "install_strategy": "built_in",
+      "status": "available",
+      "modalities": {
+        "input": [
+          "structured_data",
+          "text",
+          "image"
+        ],
+        "output": [
+          "file"
+        ]
+      },
+      "capabilities": [
+        "slide_generation",
+        "file_transformation"
+      ],
+      "priority_bias": 95
+    },
+    "pdf_renderer": {
+      "provider_template": "internal",
+      "provider_model": "pdf_renderer",
+      "family": "runtime_artifact_engine",
+      "vendor": "internal",
+      "tier": "deterministic",
+      "cost_class": "free",
+      "deployment": "local_runtime",
+      "install_strategy": "built_in",
+      "status": "available",
+      "modalities": {
+        "input": [
+          "text",
+          "structured_data",
+          "file"
+        ],
+        "output": [
+          "file"
+        ]
+      },
+      "capabilities": [
+        "pdf_generation",
+        "file_transformation"
+      ],
+      "priority_bias": 95
+    },
+    "diagram_renderer": {
+      "provider_template": "internal",
+      "provider_model": "diagram_renderer",
+      "family": "runtime_artifact_engine",
+      "vendor": "internal",
+      "tier": "deterministic",
+      "cost_class": "free",
+      "deployment": "local_runtime",
+      "install_strategy": "built_in",
+      "status": "available",
+      "modalities": {
+        "input": [
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "file",
+          "text"
+        ]
+      },
+      "capabilities": [
+        "diagram_generation",
+        "file_transformation"
+      ],
+      "priority_bias": 95
+    },
+    "file_packager": {
+      "provider_template": "internal",
+      "provider_model": "file_packager",
+      "family": "runtime_artifact_engine",
+      "vendor": "internal",
+      "tier": "deterministic",
+      "cost_class": "free",
+      "deployment": "local_runtime",
+      "install_strategy": "built_in",
+      "status": "available",
+      "modalities": {
+        "input": [
+          "file",
+          "structured_data"
+        ],
+        "output": [
+          "file"
+        ]
+      },
+      "capabilities": [
+        "file_transformation"
+      ],
+      "priority_bias": 95
+    }
+  },
+  "stage_defaults": {
+    "validation": {
+      "schema_required": true,
+      "escalate_on_failure": true,
+      "max_validation_attempts": 2,
+      "repair_before_escalation": false
+    },
+    "selection": {
+      "require_capability_match": true,
+      "require_modality_match": false,
+      "allow_candidate_status": true,
+      "prefer_benchmark_score": true
+    },
+    "evidence_policy": {
+      "raw_evidence_allowed": false,
+      "reduced_material_required": true
+    },
+    "cost_policy": {
+      "allow_paid_override": "inherit_global",
+      "free_mode_uses_lower_substitutes": true
+    },
+    "privacy_policy": {
+      "allow_external": "inherit_model",
+      "redaction_required": true
+    }
+  },
+  "stages": {
+    "language_detection": {
+      "default": "qwen3:1.7b",
+      "fallback": [
+        "qwen2.5:3b",
+        "qwen3:4b",
+        "qwen3:8b"
+      ],
+      "upper_substitutes": [
+        "qwen3:4b",
+        "qwen3:8b",
+        "gpt-4o-mini"
+      ],
+      "lower_substitutes": [
+        "qwen3:1.7b"
+      ],
+      "required_capabilities": [
+        "language_detection",
+        "structured_extraction"
+      ],
+      "required_modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "input_parsing": {
+      "default": "qwen3:1.7b",
+      "fallback": [
+        "qwen2.5:3b",
+        "qwen3:4b",
+        "qwen3:8b"
+      ],
+      "upper_substitutes": [
+        "qwen3:4b",
+        "qwen3:8b",
+        "gpt-4o-mini"
+      ],
+      "lower_substitutes": [
+        "qwen3:1.7b"
+      ],
+      "required_capabilities": [
+        "input_parsing",
+        "json_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "simple_intent": {
+      "default": "qwen3:1.7b",
+      "fallback": [
+        "qwen2.5:3b",
+        "qwen3:4b",
+        "qwen3:8b"
+      ],
+      "upper_substitutes": [
+        "qwen3:4b",
+        "qwen3:8b",
+        "gpt-4o-mini"
+      ],
+      "lower_substitutes": [
+        "qwen3:1.7b"
+      ],
+      "required_capabilities": [
+        "simple_intent",
+        "json_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "complex_intent": {
+      "default": "qwen3:1.7b",
+      "fallback": [
+        "qwen2.5:3b",
+        "qwen3:4b",
+        "qwen3:8b"
+      ],
+      "upper_substitutes": [
+        "qwen3:4b",
+        "qwen3:8b",
+        "gpt-4o-mini"
+      ],
+      "lower_substitutes": [
+        "qwen3:1.7b"
+      ],
+      "required_capabilities": [
+        "reasoning",
+        "planning",
+        "json_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "capability_classification": {
+      "default": "qwen3:1.7b",
+      "fallback": [
+        "qwen2.5:3b",
+        "qwen3:4b",
+        "qwen3:8b"
+      ],
+      "upper_substitutes": [
+        "qwen3:4b",
+        "qwen3:8b",
+        "gpt-4o-mini"
+      ],
+      "lower_substitutes": [
+        "qwen3:1.7b"
+      ],
+      "required_capabilities": [
+        "capability_classification"
+      ],
+      "required_modalities": {
+        "input": [
+          "structured_data",
+          "text"
+        ],
+        "output": [
+          "structured_data"
+        ]
+      },
+      "execution_mode": "deterministic_first",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "execution_mode_decision": {
+      "default": "deterministic_runtime_policy",
+      "fallback": [
+        "qwen3:14b"
+      ],
+      "upper_substitutes": [
+        "gpt-4.1"
+      ],
+      "lower_substitutes": [
+        "qwen3:8b"
+      ],
+      "required_capabilities": [
+        "execution_mode_decision"
+      ],
+      "required_modalities": {
+        "input": [
+          "structured_data",
+          "text"
+        ],
+        "output": [
+          "structured_data"
+        ]
+      },
+      "execution_mode": "deterministic_first",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "model_routing": {
+      "default": "deterministic_runtime_policy",
+      "fallback": [],
+      "upper_substitutes": [],
+      "lower_substitutes": [],
+      "required_capabilities": [
+        "model_routing"
+      ],
+      "required_modalities": {
+        "input": [
+          "structured_data"
+        ],
+        "output": [
+          "structured_data"
+        ]
+      },
+      "execution_mode": "deterministic_only",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": false,
+        "max_validation_attempts": 1
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "workflow_planning": {
+      "default": "qwen3:4b",
+      "fallback": [
+        "qwen3:8b",
+        "qwen2.5:3b",
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "qwen3:8b",
+        "qwen3:14b",
+        "gpt-4o-mini"
+      ],
+      "lower_substitutes": [
+        "qwen2.5:3b",
+        "qwen3:1.7b"
+      ],
+      "required_capabilities": [
+        "workflow_planning",
+        "planning",
+        "json_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "tool_selection": {
+      "default": "qwen3:4b",
+      "fallback": [
+        "qwen3:8b",
+        "qwen2.5:3b",
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "qwen3:8b",
+        "qwen3:14b",
+        "gpt-4o-mini"
+      ],
+      "lower_substitutes": [
+        "qwen2.5:3b",
+        "qwen3:1.7b"
+      ],
+      "required_capabilities": [
+        "tool_selection"
+      ],
+      "required_modalities": {
+        "input": [
+          "structured_data",
+          "text"
+        ],
+        "output": [
+          "structured_data"
+        ]
+      },
+      "execution_mode": "deterministic_first",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "tool_generation": {
+      "default": "qwen2.5-coder:14b",
+      "fallback": [
+        "deepseek-coder-v2:16b",
+        "qwen2.5-coder:7b"
+      ],
+      "upper_substitutes": [
+        "gpt-5.x",
+        "claude-sonnet"
+      ],
+      "lower_substitutes": [
+        "qwen2.5-coder:7b"
+      ],
+      "required_capabilities": [
+        "tool_generation",
+        "code_generation",
+        "schema_design"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "code"
+        ],
+        "output": [
+          "code",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "code_generation": {
+      "default": "qwen2.5-coder:14b",
+      "fallback": [
+        "deepseek-coder-v2:16b",
+        "qwen2.5-coder:7b"
+      ],
+      "upper_substitutes": [
+        "gpt-5.x",
+        "claude-sonnet"
+      ],
+      "lower_substitutes": [
+        "qwen2.5-coder:7b"
+      ],
+      "required_capabilities": [
+        "code_generation",
+        "test_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "code"
+        ],
+        "output": [
+          "code",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "code_review": {
+      "default": "deepseek-coder-v2:16b",
+      "fallback": [
+        "qwen2.5-coder:14b"
+      ],
+      "upper_substitutes": [
+        "gpt-5.x",
+        "claude-sonnet"
+      ],
+      "lower_substitutes": [
+        "qwen2.5-coder:7b"
+      ],
+      "required_capabilities": [
+        "code_review",
+        "debugging"
+      ],
+      "required_modalities": {
+        "input": [
+          "code"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "schema_design": {
+      "default": "qwen2.5-coder:14b",
+      "fallback": [
+        "qwen3:14b"
+      ],
+      "upper_substitutes": [
+        "gpt-4.1",
+        "gpt-5.x"
+      ],
+      "lower_substitutes": [
+        "qwen2.5-coder:7b"
+      ],
+      "required_capabilities": [
+        "schema_design",
+        "json_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "structured_data",
+          "code"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "schema_repair": {
+      "default": "qwen3:14b",
+      "fallback": [
+        "qwen2.5-coder:14b"
+      ],
+      "upper_substitutes": [
+        "gpt-4.1"
+      ],
+      "lower_substitutes": [
+        "qwen3:8b"
+      ],
+      "required_capabilities": [
+        "schema_repair",
+        "json_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "embedding_generation": {
+      "default": "nomic-embed-text",
+      "fallback": [],
+      "upper_substitutes": [],
+      "lower_substitutes": [],
+      "required_capabilities": [
+        "embedding_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "structured_data"
+        ]
+      },
+      "execution_mode": "embedding_provider",
+      "validation": {
+        "schema_required": false,
+        "escalate_on_failure": false,
+        "max_validation_attempts": 1
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "retrieval_query_rewrite": {
+      "default": "qwen3:8b",
+      "fallback": [
+        "qwen3:14b"
+      ],
+      "upper_substitutes": [
+        "gpt-4o-mini"
+      ],
+      "lower_substitutes": [
+        "qwen3:4b"
+      ],
+      "required_capabilities": [
+        "query_rewrite",
+        "json_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "reranking": {
+      "default": "qwen3:14b",
+      "fallback": [
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "gpt-4.1"
+      ],
+      "lower_substitutes": [
+        "qwen3:8b"
+      ],
+      "required_capabilities": [
+        "reranking",
+        "reasoning"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "evidence_extraction": {
+      "default": "parser_rule_engine",
+      "fallback": [
+        "qwen3:14b",
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "gpt-4.1"
+      ],
+      "lower_substitutes": [
+        "qwen3:8b"
+      ],
+      "required_capabilities": [
+        "evidence_extraction"
+      ],
+      "required_modalities": {
+        "input": [
+          "file",
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "structured_data",
+          "text"
+        ]
+      },
+      "execution_mode": "parser_first",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "evidence_compression": {
+      "default": "qwen3:14b",
+      "fallback": [
+        "qwen3:32b",
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "gpt-4.1"
+      ],
+      "lower_substitutes": [
+        "qwen3:8b"
+      ],
+      "required_capabilities": [
+        "evidence_compression",
+        "summarization"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "fact_verification": {
+      "default": "gpt-4.1",
+      "fallback": [
+        "qwen3:32b",
+        "gpt-5.x"
+      ],
+      "upper_substitutes": [
+        "gpt-5.x",
+        "claude-sonnet"
+      ],
+      "lower_substitutes": [
+        "qwen3:14b"
+      ],
+      "required_capabilities": [
+        "fact_verification",
+        "reasoning"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "final_synthesis": {
+      "default": "qwen3:4b",
+      "fallback": [
+        "qwen3:8b",
+        "qwen2.5:3b",
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "qwen3:8b",
+        "qwen3:14b",
+        "gpt-4o-mini"
+      ],
+      "lower_substitutes": [
+        "qwen2.5:3b",
+        "qwen3:1.7b"
+      ],
+      "required_capabilities": [
+        "final_synthesis",
+        "reasoning"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "feedback_understanding": {
+      "default": "qwen3:8b",
+      "fallback": [
+        "qwen3:14b",
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "gpt-4.1"
+      ],
+      "lower_substitutes": [
+        "qwen3:4b"
+      ],
+      "required_capabilities": [
+        "feedback_understanding",
+        "json_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "memory_update": {
+      "default": "qwen3:8b",
+      "fallback": [
+        "qwen3:14b"
+      ],
+      "upper_substitutes": [
+        "gpt-4o-mini"
+      ],
+      "lower_substitutes": [
+        "qwen3:4b"
+      ],
+      "required_capabilities": [
+        "structured_extraction",
+        "json_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "document_generation": {
+      "default": "gpt-4.1",
+      "fallback": [
+        "qwen3:32b",
+        "claude-sonnet"
+      ],
+      "upper_substitutes": [
+        "gpt-5.x",
+        "claude-sonnet"
+      ],
+      "lower_substitutes": [
+        "qwen3:14b"
+      ],
+      "required_capabilities": [
+        "document_generation",
+        "report_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data",
+          "file"
+        ],
+        "output": [
+          "text",
+          "file",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "report_generation": {
+      "default": "gpt-4.1",
+      "fallback": [
+        "qwen3:32b",
+        "claude-sonnet"
+      ],
+      "upper_substitutes": [
+        "gpt-5.x",
+        "claude-sonnet"
+      ],
+      "lower_substitutes": [
+        "qwen3:14b"
+      ],
+      "required_capabilities": [
+        "report_generation",
+        "document_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "text",
+          "file",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "plan_generation": {
+      "default": "qwen3:32b",
+      "fallback": [
+        "gpt-4.1"
+      ],
+      "upper_substitutes": [
+        "gpt-5.x",
+        "claude-sonnet"
+      ],
+      "lower_substitutes": [
+        "qwen3:14b"
+      ],
+      "required_capabilities": [
+        "plan_generation",
+        "planning"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "text",
+          "structured_data",
+          "file"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "slide_generation": {
+      "default": "gpt-4.1",
+      "fallback": [
+        "claude-sonnet",
+        "qwen3:32b"
+      ],
+      "upper_substitutes": [
+        "gpt-5.x",
+        "claude-sonnet"
+      ],
+      "lower_substitutes": [
+        "qwen3:14b"
+      ],
+      "required_capabilities": [
+        "slide_generation",
+        "document_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data",
+          "file",
+          "image"
+        ],
+        "output": [
+          "file",
+          "structured_data",
+          "text"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "spreadsheet_generation": {
+      "default": "qwen3:14b",
+      "fallback": [
+        "gpt-4o-mini",
+        "gpt-4.1"
+      ],
+      "upper_substitutes": [
+        "gpt-4.1"
+      ],
+      "lower_substitutes": [
+        "qwen3:8b"
+      ],
+      "required_capabilities": [
+        "spreadsheet_generation",
+        "structured_extraction"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data",
+          "file"
+        ],
+        "output": [
+          "file",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "pdf_generation": {
+      "default": "gpt-4.1",
+      "fallback": [
+        "qwen3:32b"
+      ],
+      "upper_substitutes": [
+        "gpt-5.x",
+        "claude-sonnet"
+      ],
+      "lower_substitutes": [
+        "qwen3:14b"
+      ],
+      "required_capabilities": [
+        "pdf_generation",
+        "document_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data",
+          "file"
+        ],
+        "output": [
+          "file"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "file_transformation": {
+      "default": "parser_rule_engine",
+      "fallback": [
+        "qwen3:14b",
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "gpt-4.1"
+      ],
+      "lower_substitutes": [
+        "qwen3:8b"
+      ],
+      "required_capabilities": [
+        "file_transformation",
+        "structured_extraction"
+      ],
+      "required_modalities": {
+        "input": [
+          "file",
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "file",
+          "text",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "parser_first",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "diagram_generation": {
+      "default": "gpt-4.1",
+      "fallback": [
+        "qwen3:32b"
+      ],
+      "upper_substitutes": [
+        "gpt-5.x",
+        "claude-sonnet"
+      ],
+      "lower_substitutes": [
+        "qwen3:14b"
+      ],
+      "required_capabilities": [
+        "diagram_generation",
+        "document_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "text",
+          "file",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "speech_to_text": {
+      "default": "whisper-local",
+      "fallback": [
+        "openai-stt"
+      ],
+      "upper_substitutes": [
+        "openai-stt"
+      ],
+      "lower_substitutes": [],
+      "required_capabilities": [
+        "speech_to_text"
+      ],
+      "required_modalities": {
+        "input": [
+          "audio"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": false,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "text_to_speech": {
+      "default": "piper-tts-local",
+      "fallback": [
+        "openai-tts"
+      ],
+      "upper_substitutes": [
+        "openai-tts"
+      ],
+      "lower_substitutes": [],
+      "required_capabilities": [
+        "text_to_speech"
+      ],
+      "required_modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "audio",
+          "file"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": false,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "audio_generation": {
+      "default": "openai-tts",
+      "fallback": [
+        "piper-tts-local"
+      ],
+      "upper_substitutes": [],
+      "lower_substitutes": [
+        "piper-tts-local"
+      ],
+      "required_capabilities": [
+        "audio_generation",
+        "text_to_speech"
+      ],
+      "required_modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "audio",
+          "file"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": false,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "image_understanding": {
+      "default": "gpt-4o-mini",
+      "fallback": [
+        "gpt-4.1"
+      ],
+      "upper_substitutes": [
+        "gpt-5.x"
+      ],
+      "lower_substitutes": [],
+      "required_capabilities": [
+        "image_understanding",
+        "layout_understanding"
+      ],
+      "required_modalities": {
+        "input": [
+          "image",
+          "text",
+          "file"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "image_generation": {
+      "default": "stable-diffusion-local",
+      "fallback": [
+        "openai-image-generation"
+      ],
+      "upper_substitutes": [
+        "openai-image-generation"
+      ],
+      "lower_substitutes": [],
+      "required_capabilities": [
+        "image_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "image"
+        ],
+        "output": [
+          "image",
+          "file"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": false,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      },
+      "routing_policy": {
+        "default_model_source": "local_first",
+        "external_requires_user_selection_or_policy_allowance": true
+      }
+    },
+    "image_editing": {
+      "default": "openai-image-generation",
+      "fallback": [
+        "stable-diffusion-local"
+      ],
+      "upper_substitutes": [],
+      "lower_substitutes": [
+        "stable-diffusion-local"
+      ],
+      "required_capabilities": [
+        "image_editing"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "image"
+        ],
+        "output": [
+          "image",
+          "file"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": false,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "video_understanding": {
+      "default": "gpt-4.1",
+      "fallback": [
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "gpt-5.x"
+      ],
+      "lower_substitutes": [],
+      "required_capabilities": [
+        "video_understanding",
+        "frame_analysis"
+      ],
+      "required_modalities": {
+        "input": [
+          "video",
+          "image",
+          "text"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "video_generation": {
+      "default": "external-video-generation",
+      "fallback": [
+        "local-video-generator"
+      ],
+      "upper_substitutes": [],
+      "lower_substitutes": [
+        "local-video-generator"
+      ],
+      "required_capabilities": [
+        "video_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "image",
+          "video"
+        ],
+        "output": [
+          "video",
+          "file"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": false,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "translation": {
+      "default": "qwen3:14b",
+      "fallback": [
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "gpt-4.1"
+      ],
+      "lower_substitutes": [
+        "qwen3:8b"
+      ],
+      "required_capabilities": [
+        "translation",
+        "json_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "general_runtime": {
+      "default": "qwen3:4b",
+      "fallback": [
+        "qwen3:8b",
+        "qwen2.5:3b",
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "qwen3:8b",
+        "qwen3:14b",
+        "gpt-4o-mini"
+      ],
+      "lower_substitutes": [
+        "qwen2.5:3b",
+        "qwen3:1.7b"
+      ],
+      "required_capabilities": [
+        "json_generation",
+        "reasoning"
+      ],
+      "required_modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "execution_mode": "llm_or_policy",
+      "validation": {
+        "schema_required": true,
+        "escalate_on_failure": true,
+        "max_validation_attempts": 2
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": false,
+        "reduced_material_required": true
+      },
+      "privacy_policy": {
+        "allow_external": "inherit_model",
+        "redaction_required": true
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": true,
+        "prefer_benchmark_score": true
+      }
+    },
+    "document_rendering": {
+      "default": "document_renderer",
+      "fallback": [],
+      "upper_substitutes": [],
+      "lower_substitutes": [],
+      "required_capabilities": [
+        "document_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "file"
+        ]
+      },
+      "execution_mode": "deterministic_only",
+      "validation": {
+        "schema_required": false,
+        "escalate_on_failure": false,
+        "max_validation_attempts": 1
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": true,
+        "reduced_material_required": false
+      },
+      "privacy_policy": {
+        "allow_external": false,
+        "redaction_required": false
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": false,
+        "prefer_benchmark_score": false
+      }
+    },
+    "spreadsheet_rendering": {
+      "default": "spreadsheet_renderer",
+      "fallback": [],
+      "upper_substitutes": [],
+      "lower_substitutes": [],
+      "required_capabilities": [
+        "spreadsheet_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "structured_data",
+          "text"
+        ],
+        "output": [
+          "file"
+        ]
+      },
+      "execution_mode": "deterministic_only",
+      "validation": {
+        "schema_required": false,
+        "escalate_on_failure": false,
+        "max_validation_attempts": 1
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": true,
+        "reduced_material_required": false
+      },
+      "privacy_policy": {
+        "allow_external": false,
+        "redaction_required": false
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": false,
+        "prefer_benchmark_score": false
+      }
+    },
+    "slide_rendering": {
+      "default": "presentation_renderer",
+      "fallback": [],
+      "upper_substitutes": [],
+      "lower_substitutes": [],
+      "required_capabilities": [
+        "slide_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "structured_data",
+          "text",
+          "image"
+        ],
+        "output": [
+          "file"
+        ]
+      },
+      "execution_mode": "deterministic_only",
+      "validation": {
+        "schema_required": false,
+        "escalate_on_failure": false,
+        "max_validation_attempts": 1
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": true,
+        "reduced_material_required": false
+      },
+      "privacy_policy": {
+        "allow_external": false,
+        "redaction_required": false
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": false,
+        "prefer_benchmark_score": false
+      }
+    },
+    "pdf_rendering": {
+      "default": "pdf_renderer",
+      "fallback": [],
+      "upper_substitutes": [],
+      "lower_substitutes": [],
+      "required_capabilities": [
+        "pdf_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data",
+          "file"
+        ],
+        "output": [
+          "file"
+        ]
+      },
+      "execution_mode": "deterministic_only",
+      "validation": {
+        "schema_required": false,
+        "escalate_on_failure": false,
+        "max_validation_attempts": 1
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": true,
+        "reduced_material_required": false
+      },
+      "privacy_policy": {
+        "allow_external": false,
+        "redaction_required": false
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": false,
+        "prefer_benchmark_score": false
+      }
+    },
+    "diagram_rendering": {
+      "default": "diagram_renderer",
+      "fallback": [],
+      "upper_substitutes": [],
+      "lower_substitutes": [],
+      "required_capabilities": [
+        "diagram_generation"
+      ],
+      "required_modalities": {
+        "input": [
+          "text",
+          "structured_data"
+        ],
+        "output": [
+          "file",
+          "text"
+        ]
+      },
+      "execution_mode": "deterministic_only",
+      "validation": {
+        "schema_required": false,
+        "escalate_on_failure": false,
+        "max_validation_attempts": 1
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": true,
+        "reduced_material_required": false
+      },
+      "privacy_policy": {
+        "allow_external": false,
+        "redaction_required": false
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": false,
+        "prefer_benchmark_score": false
+      }
+    },
+    "file_packaging": {
+      "default": "file_packager",
+      "fallback": [],
+      "upper_substitutes": [],
+      "lower_substitutes": [],
+      "required_capabilities": [
+        "file_transformation"
+      ],
+      "required_modalities": {
+        "input": [
+          "file",
+          "structured_data"
+        ],
+        "output": [
+          "file"
+        ]
+      },
+      "execution_mode": "deterministic_only",
+      "validation": {
+        "schema_required": false,
+        "escalate_on_failure": false,
+        "max_validation_attempts": 1
+      },
+      "raw_evidence_policy": {
+        "raw_evidence_allowed": true,
+        "reduced_material_required": false
+      },
+      "privacy_policy": {
+        "allow_external": false,
+        "redaction_required": false
+      },
+      "selection": {
+        "require_capability_match": true,
+        "require_modality_match": true,
+        "allow_candidate_status": false,
+        "prefer_benchmark_score": false
+      }
+    }
+  }
+}

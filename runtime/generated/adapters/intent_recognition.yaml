@@ -1,0 +1,32 @@
+adapter_id: intent_recognition_adapter
+type: llm_json
+provider_route:
+- local
+- external
+route_name: intent_recognition
+model_complexity: low
+model_capabilities:
+- json_generation
+- structured_reasoning
+prompt: runtime/generated/prompts/intent_recognition.yaml
+output_schema: runtime/generated/schemas/intent_recognition.schema.json
+json_mode: true
+stage_prompt_char_limit: 1400
+max_schema_chars: 1400
+provider_timeout_seconds: 120
+provider_options:
+  temperature: 0
+  num_predict: 512
+  num_ctx: 2048
+  think: false
+stage_boundary:
+  allowed_decisions:
+  - classify_intent
+  - estimate_capability_needs
+  - draft_non_executable_steps
+  - detect_missing_information
+  forbidden_decisions:
+  - execution_method_locking
+  - tool_selection
+  - provider_selection
+  - runtime_execution

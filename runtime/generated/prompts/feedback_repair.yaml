@@ -1,0 +1,42 @@
+id: feedback_repair_prompt
+version: 5.1-agent-action-planning
+executor_type: static_transform
+system: Return one JSON object only. Follow the stage boundary exactly. Use domain-neutral
+  fields. Do not introduce concrete business rules, providers, tools, APIs, files,
+  or facts unless supplied by upstream state. Every stage must carry forward the minimal
+  upstream keys needed by the next stage.
+user_template: 'INPUT={{ user_input }}
+
+  STATE={{ previous_results }}
+
+  RUNTIME={{ runtime_context }}'
+runtime_rules:
+- 'Stage owner: route repair using only allowed recovery paths.'
+- 'Allowed decisions: json_repair, missing_parameter_redirect, planned_fallback_retry,
+  failure_reason_output'
+- 'Forbidden decisions: business_logic_injection, unplanned_tool_selection, unplanned_provider_selection,
+  new_fact_creation'
+- Write primary result under repair_record when applicable.
+- workflow_planning only builds main workflow, agent graph, agent relations, and agent
+  objectives; it must not execute or produce final task content.
+- 'agent_action_planning is a planner-LLM stage: it uses LLM only to choose the next
+  action, never to complete the user''s task unless selected_action_type is llm_generate.'
+- 'agent_action_planning MUST use the agent action prompt contract: content + target
+  + fixed action list + selection rules. It then ranks fixed execution options: llm_generate,
+  generate_code, generate_shell, call_api_no_key, call_api_with_key, web_query, use_existing_tool,
+  use_external_skill, use_uploaded_file, use_local_knowledge, generate_complex_tool,
+  compose_static_response, ask_user, no_op.'
+- agent_action_planning MUST output action_planning_record.planned_steps with execution_decision.ranked_options
+  and selected_action_type for every executable agent/substep.
+- Map action_type to execution_method deterministically from the fixed options. Planner
+  LLM output is planning material only and cannot enter final_synthesis.
+- For web_query or API actions, execution_preparation must prepare concrete targets/endpoints
+  or a discovery contract before execution; it must not rewrite the selected action
+  to llm_generate. For use_uploaded_file actions, execution_preparation must inspect
+  uploaded artifacts, infer runtime parameters, create UI parameter requests when
+  values are missing, and prepare a sandbox execution contract.
+- Execution may only run locked actions/resources approved by agent_action_planning
+  and execution_preparation.
+- Do not output placeholder key lists as the stage result.
+output_contract:
+  repair_record: object

@@ -1,0 +1,35 @@
+{
+  "run_id": "c1892a4992e7",
+  "node_id": "dataflow_step",
+  "provider": "stage_final_synthesis_ollama_qwen3_8b",
+  "provider_type": "universal_model",
+  "model": "qwen3:8b",
+  "timeout_seconds": 180.0,
+  "options": {
+    "temperature": 0,
+    "num_predict": 320,
+    "num_ctx": 1536
+  },
+  "think": false,
+  "prompt": {
+    "system": "Output only the requested result text. No JSON. No explanation.",
+    "user": "TASK:\nTranslate BOTH outputs from Weather Agent and Time Agent into English\nINPUT:\n1. The current time is 17:55.\n2. 🌍 城市: Fukuoka-Shi | 📅 日期: 2026-05-29 | 🌡️ 最高温: 23.5°C | 📉 最低温: 17.1°C | ☁️ 天气: 周边有零星小雨\nOutput only the final user-facing text."
+  },
+  "schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "final_answer": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "final_answer"
+    ]
+  },
+  "budget": {
+    "budget_tokens": 1000,
+    "estimated_tokens": 61,
+    "truncated": false
+  }
+}

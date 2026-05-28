@@ -1,0 +1,11 @@
+capability_id: generic_runtime_stage
+type: unknown
+description: Generated capability spec for node input_parsing.
+detect: {}
+install: {}
+verify: {}
+runtime_register:
+  tool_name: generic_runtime_stage
+security:
+  approval_required: true
+  risk_level: unknown

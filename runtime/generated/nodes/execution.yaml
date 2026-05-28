@@ -1,0 +1,22 @@
+node_id: execution
+executor_type: tool_call
+prompt: runtime/generated/prompts/execution.yaml
+output_schema: runtime/generated/schemas/execution.schema.json
+capabilities:
+- generic_runtime_stage
+stage_contract:
+  owner: execute only the locked plan and prepared resources
+  allowed_decisions:
+  - planned_tool_call
+  - planned_provider_call
+  - planned_runtime_call
+  - trace_recording
+  - evidence_recording
+  forbidden_decisions:
+  - intent_reclassification
+  - execution_method_reselection
+  - unplanned_search
+  - final_answer_creation
+  output_key: execution_record
+review_required: false
+progress_weight: 10

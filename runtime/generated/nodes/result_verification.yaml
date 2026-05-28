@@ -1,0 +1,21 @@
+node_id: result_verification
+executor_type: static_transform
+prompt: runtime/generated/prompts/result_verification.yaml
+output_schema: runtime/generated/schemas/result_verification.schema.json
+capabilities:
+- generic_runtime_stage
+stage_contract:
+  owner: verify execution evidence and step satisfaction
+  allowed_decisions:
+  - real_execution_check
+  - step_satisfaction_check
+  - confidence_check
+  - planned_fallback_gate
+  forbidden_decisions:
+  - new_fact_creation
+  - unplanned_search
+  - execution_policy_rewrite
+  - final_answer_creation
+  output_key: verification_record
+review_required: false
+progress_weight: 10

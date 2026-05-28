@@ -1,0 +1,24 @@
+node_id: workflow_planning
+executor_type: llm_json
+prompt: runtime/generated/prompts/workflow_planning.yaml
+output_schema: runtime/generated/schemas/workflow_planning.schema.json
+capabilities:
+- generic_runtime_stage
+stage_contract:
+  owner: create the main workflow, agent graph, agent relations, and agent-level objectives
+    only
+  allowed_decisions:
+  - workflow_generation
+  - agent_graph_generation
+  - dependency_mapping
+  - agent_objective_definition
+  - substep_outline
+  forbidden_decisions:
+  - runtime_execution
+  - result_synthesis
+  - final_action_execution
+  - provider_selection
+  output_key: workflow_record
+review_required: true
+progress_weight: 10
+adapter: runtime/generated/adapters/workflow_planning.yaml

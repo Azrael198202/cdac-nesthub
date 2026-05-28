@@ -1,0 +1,488 @@
+default_route:
+- ollama
+routes:
+  input_parsing:
+  - ollama
+  intent_recognition:
+  - ollama
+  workflow_planning:
+  - ollama
+  reasoning:
+  - ollama
+  stable_synthesis:
+  - ollama
+  code_generation:
+  - ollama
+  - ollama_coder_qwen25
+  - ollama_coder_deepseek
+  - lmstudio_coder
+  fallback:
+  - ollama
+  local_light:
+  - ollama
+  local_capable:
+  - ollama
+  - lmstudio
+  strong_reasoning:
+  - ollama
+  - lmstudio
+  intent_simple:
+  - ollama
+  intent_complex:
+  - ollama
+  - lmstudio
+  workflow_basic:
+  - ollama
+  workflow_complex:
+  - ollama
+  - lmstudio
+  semantic_grounding:
+  - ollama
+  - lmstudio
+  tool_selection:
+  - ollama
+  stable_synthesis_strong:
+  - ollama
+  - lmstudio
+  adapter_generation:
+  - ollama
+  - ollama_coder_qwen25
+  - ollama_coder_deepseek
+  - lmstudio_coder
+  schema_repair:
+  - ollama
+  - ollama_coder_qwen25
+  - ollama_coder_deepseek
+  api_discovery_local:
+  - ollama
+  api_discovery_external:
+  - ollama
+providers:
+  openai:
+    enabled: true
+    type: universal_model
+    protocol: openai_compatible
+    base_url: https://api.openai.com
+    endpoint: /v1/chat/completions
+    model: gpt-4o-mini
+    auth_type: bearer_env
+    auth_env: OPENAI_API_KEY
+    timeout_seconds: 60
+    response_format_json: true
+    model_tags:
+    - api
+    - reasoning
+    - json_generation
+    capabilities:
+    - reasoning
+    - json_generation
+    max_prompt_tokens: 12000
+    max_schema_chars: 12000
+    cache_enabled: true
+    interactive_key_required: true
+    role: external_fallback
+    quality:
+      semantic_grounding: 20
+      workflow_planning: 16
+      stable_synthesis: 16
+      structured_output: 15
+    priority: 4
+  claude:
+    enabled: false
+    type: universal_model
+    protocol: openai_compatible
+    base_url: https://api.anthropic.com
+    endpoint: /v1/messages
+    model: claude-sonnet
+    auth_type: bearer_env
+    auth_env: ANTHROPIC_API_KEY
+    timeout_seconds: 60
+    response_format_json: true
+    model_tags:
+    - api
+    - reasoning
+    - json_generation
+    capabilities:
+    - reasoning
+    - json_generation
+    max_prompt_tokens: 12000
+    max_schema_chars: 12000
+    cache_enabled: true
+    interactive_key_required: true
+    role: external_fallback
+    quality:
+      stable_synthesis: 20
+      code_generation: 20
+      structured_output: 12
+    priority: 3
+  vllm:
+    enabled: false
+    type: universal_model
+    protocol: openai_compatible
+    base_url: http://127.0.0.1:8001
+    endpoint: /v1/chat/completions
+    model: Qwen/Qwen3-8B
+    logical_model_id: qwen3:8b
+    auto_start: false
+    auto_install: false
+    ready_timeout_seconds: 120
+    ready_poll_interval_seconds: 2
+    start_command: python -m vllm.entrypoints.openai.api_server --host 127.0.0.1 --port
+      8001 --model Qwen/Qwen3-8B --served-model-name Qwen/Qwen3-8B
+    timeout_seconds: 60
+    max_prompt_tokens: 12000
+    response_format_json: true
+    provider_models:
+      qwen3:8b: Qwen/Qwen3-8B
+      qwen3:14b: Qwen/Qwen3-14B
+      qwen3:32b: Qwen/Qwen3-32B
+    model_tags:
+    - local
+    - reasoning
+    - json_generation
+    capabilities:
+    - reasoning
+    - json_generation
+    cache_enabled: true
+    disabled_reason: vllm_is_optional_enable_with_AI_CORE_ENABLE_VLLM
+    binary: null
+    chat_endpoint: null
+    generate_endpoint: null
+    endpoint_strategy: null
+    pull_command: null
+  ollama:
+    enabled: true
+    type: universal_model
+    protocol: ollama_chat
+    base_url: http://127.0.0.1:11434
+    binary: ollama
+    auto_install: true
+    auto_start: true
+    auto_pull_missing_model: true
+    start_command: '{binary} serve'
+    pull_command: '{binary} pull {model}'
+    pull_timeout_seconds: 3600
+    install_timeout_seconds: 3600
+    ready_timeout_seconds: 60
+    ready_poll_interval_seconds: 1
+    install:
+      windows:
+      - winget install Ollama.Ollama --accept-source-agreements --accept-package-agreements
+        --disable-interactivity
+      macos:
+      - brew install ollama
+      linux:
+      - curl -fsSL https://ollama.com/install.sh | sh
+    executable_hints:
+      windows:
+      - '%LOCALAPPDATA%\Programs\Ollama\ollama.exe'
+      - '%ProgramFiles%\Ollama\ollama.exe'
+    endpoint_strategy: auto
+    chat_endpoint: /api/chat
+    generate_endpoint: /api/generate
+    model: qwen3:8b
+    fallback_models:
+    - qwen3:32b
+    - qwen3:14b
+    - qwen3:8b
+    - qwen3:4b
+    - qwen2.5:3b
+    - qwen3:1.7b
+    - llama3.2:8b
+    - llama3.2:3b
+    provider_models:
+      qwen3:8b: qwen3:8b
+      qwen3:14b: qwen3:14b
+      qwen3:32b: qwen3:32b
+    timeout_seconds: 180
+    max_prompt_tokens: 10000
+    response_format_json: true
+    model_tags:
+    - reasoning
+    - thinking
+    - vision
+    - screenshot_analysis
+    - ui_understanding
+    - structured_extraction
+    - planning
+    - json_generation
+    - tool_selection
+    - workflow_planning
+    capabilities:
+    - reasoning
+    - vision
+    - screenshot_analysis
+    - ui_understanding
+    - structured_extraction
+    - json_generation
+    - workflow_planning
+    available_local_models:
+    - qwen3-vl:8b-thinking
+    - qwen3:32b
+    - qwen3:14b
+    - qwen3:8b
+    - qwen3:4b
+    - qwen2.5:3b
+    - qwen3:1.7b
+    - llama3.2:8b
+    - llama3.2:3b
+    reasoning:
+      enabled: true
+      effort: medium
+    prompt_budget_safety_tokens: 1500
+    max_schema_chars: 8000
+    cache_enabled: true
+  vllm_coder:
+    enabled: false
+    type: universal_model
+    protocol: openai_compatible
+    base_url: http://127.0.0.1:8002
+    endpoint: /v1/chat/completions
+    model: Qwen/Qwen2.5-Coder-7B-Instruct
+    auto_start: false
+    timeout_seconds: 90
+    response_format_json: true
+    model_tags:
+    - local
+    - code_generation
+    - python_generation
+    - adapter_generation
+    - structured_output
+    - json_generation
+    capabilities:
+    - code_generation
+    - python_generation
+    - adapter_generation
+    - structured_output
+    - json_generation
+    max_prompt_tokens: 12000
+    cache_enabled: true
+    quality:
+      code_generation: 18
+      structured_output: 8
+    priority: 7
+    auto_install: false
+    disabled_reason: vllm_is_optional_enable_with_AI_CORE_ENABLE_VLLM
+    binary: null
+    chat_endpoint: null
+    generate_endpoint: null
+    endpoint_strategy: null
+    start_command: null
+    pull_command: null
+  ollama_coder_qwen25:
+    enabled: true
+    type: universal_model
+    protocol: ollama_chat
+    base_url: http://127.0.0.1:11434
+    binary: ollama
+    auto_install: true
+    auto_start: true
+    auto_pull_missing_model: true
+    model: qwen2.5-coder:7b
+    fallback_models:
+    - qwen2.5-coder:7b
+    - qwen2.5-coder:14b
+    - qwen2.5-coder:3b
+    - qwen3:8b
+    - qwen3:4b
+    timeout_seconds: 150
+    model_tags:
+    - local
+    - free
+    - code_generation
+    - python_generation
+    - adapter_generation
+    - schema_repair
+    - structured_output
+    - json_generation
+    - tool_generation
+    capabilities:
+    - code_generation
+    - python_generation
+    - adapter_generation
+    - schema_repair
+    - structured_output
+    - json_generation
+    - tool_generation
+    endpoint_strategy: auto
+    chat_endpoint: /api/chat
+    generate_endpoint: /api/generate
+    quality:
+      code_generation: 18
+      structured_output: 8
+    priority: 8
+    reasoning:
+      enabled: false
+      effort: low
+    max_prompt_tokens: 8000
+    prompt_budget_safety_tokens: 1200
+    max_schema_chars: 7000
+    cache_enabled: true
+    start_command: '{binary} serve'
+    ready_timeout_seconds: 45
+    ready_poll_interval_seconds: 1
+    pull_command: '{binary} pull {model}'
+    pull_timeout_seconds: 3600
+  ollama_coder_deepseek:
+    enabled: true
+    type: universal_model
+    protocol: ollama_chat
+    base_url: http://127.0.0.1:11434
+    binary: ollama
+    endpoint_strategy: auto
+    chat_endpoint: /api/chat
+    generate_endpoint: /api/generate
+    model: deepseek-coder-v2:16b
+    fallback_models:
+    - deepseek-coder-v2:16b
+    - deepseek-coder-v2:lite
+    - qwen2.5-coder:7b
+    - qwen3:8b
+    model_tags:
+    - local
+    - free
+    - code_generation
+    - python_generation
+    - adapter_generation
+    - schema_repair
+    - structured_output
+    - json_generation
+    - tool_generation
+    capabilities:
+    - code_generation
+    - python_generation
+    - adapter_generation
+    - schema_repair
+    - structured_output
+    - json_generation
+    - tool_generation
+    quality:
+      code_generation: 20
+      structured_output: 7
+    priority: 6
+    reasoning:
+      enabled: false
+      effort: low
+    timeout_seconds: 180
+    max_prompt_tokens: 9000
+    prompt_budget_safety_tokens: 1200
+    max_schema_chars: 8000
+    cache_enabled: true
+    auto_start: true
+    start_command: '{binary} serve'
+    ready_timeout_seconds: 45
+    ready_poll_interval_seconds: 1
+    auto_pull_missing_model: true
+    pull_command: '{binary} pull {model}'
+    pull_timeout_seconds: 3600
+  lmstudio_coder:
+    enabled: false
+    type: universal_model
+    protocol: openai_compatible
+    base_url: http://127.0.0.1:1234
+    endpoint: /v1/chat/completions
+    model: qwen2.5-coder-7b-instruct
+    timeout_seconds: 90
+    max_prompt_tokens: 12000
+    cache_enabled: true
+    response_format_json: true
+    model_tags:
+    - local
+    - code_generation
+    - python_generation
+    - adapter_generation
+    - structured_output
+    - json_generation
+    capabilities:
+    - code_generation
+    - python_generation
+    - adapter_generation
+    - structured_output
+    - json_generation
+    quality:
+      code_generation: 16
+      structured_output: 7
+    priority: 5
+  lmstudio:
+    enabled: false
+    type: universal_model
+    protocol: openai_compatible
+    base_url: http://127.0.0.1:1234
+    endpoint: /v1/chat/completions
+    model: local-model
+    timeout_seconds: 60
+    max_prompt_tokens: 12000
+    cache_enabled: true
+    response_format_json: true
+    model_tags:
+    - local
+    - reasoning
+    - json_generation
+    capabilities:
+    - reasoning
+    - json_generation
+policy:
+  require_real_provider: true
+  allow_placeholder_result: false
+  local_provider_order:
+  - ollama
+  api_provider_order: &id001
+  - openai
+  - claude
+  prefer_local_base_model: false
+  runtime_execution_policy:
+    default_mode: local_only
+    local_enabled: true
+    api_enabled: false
+    api_only_when_local_disabled: false
+    api_provider_order: *id001
+    local_provider_order:
+    - ollama
+    local_code_provider_order:
+    - ollama_coder_qwen25
+    - ollama_coder_deepseek
+    credential_recovery_enabled: true
+    source_of_truth: runtime_execution_policy
+  local_models_enabled: true
+  api_only_when_local_disabled: false
+  base_model_provider: ollama
+  base_model: qwen3:8b
+  local_fallback_provider: ollama
+  local_fallback_model: qwen3:4b
+  code_generation_provider: ollama_coder_qwen25
+  code_generation_model: qwen2.5-coder:7b
+  code_generation_fallback_provider: ollama
+  code_generation_fallback_model: qwen3:8b
+  external_provider_is_fallback: true
+role_model_preferences:
+  information_retrieval_agent:
+  - structured_extraction
+  - reasoning
+  workflow_planning_agent:
+  - workflow_planning
+  - reasoning
+  - json_generation
+  integration_builder_agent:
+  - reasoning
+  - structured_extraction
+  - json_generation
+  code_generation_agent:
+  - code_generation
+  - python_generation
+  - adapter_generation
+  - schema_repair
+  - structured_output
+  - json_generation
+  data_analysis_agent:
+  - structured_extraction
+  - reasoning
+  document_writer_agent:
+  - document_generation
+  - reasoning
+  human_interaction_agent:
+  - json_generation
+  vision_runtime_agent:
+  - vision
+  - screenshot_analysis
+  - ui_understanding
+  - reasoning
