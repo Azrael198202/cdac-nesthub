@@ -1,4 +1,0 @@
-{
-  "content": "{\n  \"parameters\": [\n    {\n      \"name\": \"location\",\n      \"label\": \"location\",\n      \"description\": \"the location for which weather information is requested\",\n      \"required\": true,\n      \"values\": []\n    },\n    {\n      \"name\": \"api_key\",\n      \"label\": \"api_key\",\n      \"description\": \"the API key for accessing the weather service\",\n      \"required\": true,\n      \"values\": []\n    }\n  ]\n}",
-  "latency_seconds": 27.218
-}

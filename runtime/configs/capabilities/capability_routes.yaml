@@ -1,3 +1,0 @@
-policy:
-  generate_missing_capability_spec: true
-  human_review_generated_spec: true

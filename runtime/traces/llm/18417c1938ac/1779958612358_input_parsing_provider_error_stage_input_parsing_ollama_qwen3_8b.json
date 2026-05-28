@@ -1,9 +1,0 @@
-{
-  "run_id": "18417c1938ac",
-  "node_id": "input_parsing",
-  "provider": "stage_input_parsing_ollama_qwen3_8b",
-  "provider_type": "universal_model",
-  "model": "qwen3:8b",
-  "elapsed_seconds": 58.12,
-  "error": "Parsed JSON is not an object"
-}

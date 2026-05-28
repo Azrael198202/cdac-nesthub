@@ -1,4 +1,0 @@
-enabled: true
-rules:
-- match: Do you agree
-  answer: Y

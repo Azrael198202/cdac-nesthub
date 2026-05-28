@@ -626,3 +626,8 @@ ai_core/knowledge/__pycache__/embedding_index.cpython-311.pyc
 ai_core/capabilities/__pycache__/capability_dispatcher.cpython-311.pyc
 ai_core/media/__pycache__/__init__.cpython-311.pyc
 ai_core/media/__pycache__/image_generation_service.cpython-311.pyc
+ai_core/dependencies/__pycache__/__init__.cpython-311.pyc
+ai_core/dependencies/__pycache__/runtime_dependency_installer.cpython-311.pyc
+ai_core/media/__pycache__/video_generation_service.cpython-311.pyc
+ai_core/media/providers/__pycache__/__init__.cpython-311.pyc
+ai_core/media/providers/__pycache__/generic_text_animation_provider.cpython-311.pyc
