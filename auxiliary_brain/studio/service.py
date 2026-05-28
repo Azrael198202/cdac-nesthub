@@ -17,7 +17,7 @@ from ai_core.artifacts.uploaded_artifact_contract import UploadedArtifactContrac
 from ai_core.artifacts.artifact_edit_service import ArtifactEditService
 from ai_core.commands import CommandSetService
 from ai_core.capabilities.capability_dispatcher import CapabilityDispatcher
-from ai_core.media import ImageGenerationService
+from ai_core.media import ImageGenerationService, VideoGenerationService
 from ai_core.context.execution_reuse_store import ExecutionReuseStore
 from ai_core.execution.parameter_resolution import ParameterResolutionPipeline, PreflightResolutionContext
 from auxiliary_brain.studio.instruction_workflow_planner import InstructionWorkflowPlanner
@@ -47,6 +47,7 @@ class AgentStudioService:
         self.runtime_semantic_planner = RuntimeSemanticPlanner()
         self.direct_capability_dispatcher = CapabilityDispatcher(handlers={
             "image_generation": self._handle_direct_image_generation,
+            "video_generation": self._handle_direct_video_generation,
         })
         self.store.ensure_workspace()
         self.community_id = self._ensure_community()
@@ -149,13 +150,52 @@ class AgentStudioService:
         material = provider_payload.get("material") if isinstance(provider_payload.get("material"), dict) else {}
         url = str(material.get("download_url") or "").strip()
         name = str(material.get("file_name") or "generated_image").strip() or "generated_image"
-        final_answer = f"Generated image: ![{name}]({url})\nDownload: [{name}]({url})" if url else "Generated image material is available."
+        final_answer = f"Generated image:\n![{name}]({url})\nDownload: [{name}]({url})" if url else "Generated image material is available."
         return {
             "status": "completed",
             "final_answer": final_answer,
             "workflow_results": {
                 "status": "completed",
                 "capability_type": "image_generation",
+                "generated_files": [material] if material else [],
+                "verified_result_material": material,
+                "provider_result": provider_payload,
+                "final_content": final_answer,
+            },
+        }
+
+
+    async def _handle_direct_video_generation(self, request: dict[str, Any]) -> dict[str, Any]:
+        text = str(request.get("text") or "").strip()
+        service = VideoGenerationService()
+        provider_payload = await service.generate(prompt=text, options={})
+        status = str(provider_payload.get("status") or ("completed" if provider_payload.get("ok") else "failed"))
+        if not provider_payload.get("ok"):
+            return {
+                "status": status,
+                "final_answer": str(provider_payload.get("message") or "Video generation provider setup is required."),
+                "pending_action": {
+                    "kind": "capability_provider_setup",
+                    "capability_type": "video_generation",
+                    "setup_actions": provider_payload.get("setup_actions") or [],
+                    "attempted": provider_payload.get("attempted") or [],
+                },
+                "workflow_results": {
+                    "status": status,
+                    "capability_type": "video_generation",
+                    "provider_result": provider_payload,
+                },
+            }
+        material = provider_payload.get("material") if isinstance(provider_payload.get("material"), dict) else {}
+        url = str(material.get("download_url") or "").strip()
+        name = str(material.get("file_name") or "generated_video").strip() or "generated_video"
+        final_answer = f"Generated video:\n[video: {name}]({url})\nDownload: [{name}]({url})" if url else "Generated video material is available."
+        return {
+            "status": "completed",
+            "final_answer": final_answer,
+            "workflow_results": {
+                "status": "completed",
+                "capability_type": "video_generation",
                 "generated_files": [material] if material else [],
                 "verified_result_material": material,
                 "provider_result": provider_payload,

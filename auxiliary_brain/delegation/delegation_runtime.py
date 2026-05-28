@@ -14,7 +14,7 @@ from auxiliary_brain.runtime import new_id
 from auxiliary_brain.delegation.task_mind_graph import TaskMindGraphBuilder
 from ai_core.config.paths import RUNTIME_DOWNLOADS
 from ai_core.knowledge.knowledge_service import KnowledgeService
-from ai_core.media import ImageGenerationService
+from ai_core.media import ImageGenerationService, VideoGenerationService
 from auxiliary_brain.parameters.agent_parameter_contract import AgentParameterContractService
 
 
@@ -33,6 +33,7 @@ class AgentDelegationRuntime:
         self.parameter_contract_service = AgentParameterContractService()
         self.knowledge_service = KnowledgeService()
         self.image_generation_service = ImageGenerationService()
+        self.video_generation_service = VideoGenerationService()
 
     async def execute_task(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
         selected = self._fresh_task_participants(self._select_participants(task_graph, participants))
@@ -1179,6 +1180,8 @@ class AgentDelegationRuntime:
         capability_type = str(profile.get("capability_type") or "").strip()
         if capability_type == "image_generation":
             return await self._execute_image_generation_capability(participant=participant, completed_results=completed_results, dependency_plan=dependency_plan)
+        if capability_type == "video_generation":
+            return await self._execute_video_generation_capability(participant=participant, completed_results=completed_results, dependency_plan=dependency_plan)
         if capability_type != "local_knowledge_retrieval":
             return None
         values = participant.get("runtime_parameters") if isinstance(participant.get("runtime_parameters"), dict) else {}
@@ -1277,7 +1280,7 @@ class AgentDelegationRuntime:
         material = payload.get("material") if isinstance(payload.get("material"), dict) else {}
         url = str(material.get("download_url") or "")
         name = str(material.get("file_name") or "generated_image")
-        final_answer = f"Generated image: ![{name}]({url})\nDownload: [{name}]({url})" if url else "Generated image material is available."
+        final_answer = f"Generated image:\n![{name}]({url})\nDownload: [{name}]({url})" if url else "Generated image material is available."
         return AgentExecutionResult(
             participant_id=self._participant_identity(participant),
             participant_name=self._participant_name(participant),
@@ -1287,6 +1290,67 @@ class AgentDelegationRuntime:
             workflow_results={
                 "status": "completed",
                 "capability_type": "image_generation",
+                "generated_files": [material] if material else [],
+                "verified_result_material": material,
+                "final_content": final_answer,
+            },
+            origin="auxiliary_brain",
+        )
+
+
+    async def _execute_video_generation_capability(self, *, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> AgentExecutionResult | None:
+        self._bind_dependency_outputs_to_participant(participant=participant, completed_results=completed_results, dependency_plan=dependency_plan)
+        prompt = self._first_scalar(self._value_for_field_role(participant, r"\b(prompt|description|instruction|text|scene|content)\b"))
+        if not prompt:
+            prompt = self._dependency_material_text(participant, completed_results, dependency_plan)
+        if not prompt:
+            prompt = self._participant_objective(participant)
+        if not str(prompt or "").strip():
+            return AgentExecutionResult(
+                participant_id=self._participant_identity(participant),
+                participant_name=self._participant_name(participant),
+                core_run_id=new_id("capability_missing_input"),
+                status="requires_input",
+                final_answer="",
+                workflow_results={"status": "requires_input", "capability_type": "video_generation"},
+                pending_action={
+                    "kind": "agent_parameter_collection",
+                    "message": "Runtime input is required before execution can continue.",
+                    "request": {"input_mode": "multi_value_list", "fields": self.parameter_contract_service.to_missing_input_fields(participant)},
+                },
+                missing_inputs=self.parameter_contract_service.to_missing_input_fields(participant),
+                origin="auxiliary_brain",
+            )
+        payload = await self.video_generation_service.generate(prompt=str(prompt), options={})
+        if not payload.get("ok"):
+            return AgentExecutionResult(
+                participant_id=self._participant_identity(participant),
+                participant_name=self._participant_name(participant),
+                core_run_id=new_id("video_generation_setup"),
+                status=str(payload.get("status") or "failed"),
+                final_answer=str(payload.get("message") or "Video generation provider setup is required."),
+                workflow_results={"status": payload.get("status") or "failed", "capability_type": "video_generation", "provider_result": payload},
+                pending_action={
+                    "kind": "capability_provider_setup",
+                    "capability_type": "video_generation",
+                    "setup_actions": payload.get("setup_actions") or [],
+                    "attempted": payload.get("attempted") or [],
+                },
+                origin="auxiliary_brain",
+            )
+        material = payload.get("material") if isinstance(payload.get("material"), dict) else {}
+        url = str(material.get("download_url") or "")
+        name = str(material.get("file_name") or "generated_video")
+        final_answer = f"Generated video:\n[video: {name}]({url})\nDownload: [{name}]({url})" if url else "Generated video material is available."
+        return AgentExecutionResult(
+            participant_id=self._participant_identity(participant),
+            participant_name=self._participant_name(participant),
+            core_run_id=str(material.get("download_id") or new_id("video_result")),
+            status="completed",
+            final_answer=final_answer,
+            workflow_results={
+                "status": "completed",
+                "capability_type": "video_generation",
                 "generated_files": [material] if material else [],
                 "verified_result_material": material,
                 "final_content": final_answer,

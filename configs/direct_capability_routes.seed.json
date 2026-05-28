@@ -13,15 +13,42 @@
       "confidence": 0.96,
       "threshold": 1.0,
       "match_any_token_sets": [
-        ["generate", "image"],
-        ["generate", "picture"],
-        ["generate", "illustration"],
-        ["generate", "visual"],
-        ["create", "image"],
-        ["create", "picture"],
-        ["create", "illustration"],
-        ["render", "image"],
-        ["draw", "image"]
+        [
+          "generate",
+          "image"
+        ],
+        [
+          "generate",
+          "picture"
+        ],
+        [
+          "generate",
+          "illustration"
+        ],
+        [
+          "generate",
+          "visual"
+        ],
+        [
+          "create",
+          "image"
+        ],
+        [
+          "create",
+          "picture"
+        ],
+        [
+          "create",
+          "illustration"
+        ],
+        [
+          "render",
+          "image"
+        ],
+        [
+          "draw",
+          "image"
+        ]
       ],
       "fallback_policy": {
         "allow_chat_fallback": false,
@@ -33,18 +60,55 @@
       }
     },
     {
-      "rule_id": "text_to_video_generation_reserved",
+      "rule_id": "text_to_video_generation",
       "enabled": true,
       "capability_type": "video_generation",
       "input_modality": "text",
       "output_modality": "video",
       "execution_mode": "direct_runtime_capability",
-      "confidence": 0.9,
+      "confidence": 0.96,
       "threshold": 1.0,
       "match_any_token_sets": [
-        ["generate", "video"],
-        ["create", "video"],
-        ["render", "video"]
+        [
+          "generate",
+          "video"
+        ],
+        [
+          "create",
+          "video"
+        ],
+        [
+          "render",
+          "video"
+        ],
+        [
+          "generate",
+          "animation"
+        ],
+        [
+          "create",
+          "animation"
+        ],
+        [
+          "render",
+          "animation"
+        ],
+        [
+          "make",
+          "animation"
+        ],
+        [
+          "make",
+          "video"
+        ],
+        [
+          "animate",
+          "scene"
+        ],
+        [
+          "animate",
+          "image"
+        ]
       ],
       "fallback_policy": {
         "allow_chat_fallback": false,

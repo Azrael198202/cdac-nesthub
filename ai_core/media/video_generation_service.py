@@ -1,0 +1,391 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import os
+import shutil
+import subprocess
+import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+from ai_core.config.paths import CONFIGS_DIR, RUNTIME_CONFIGS, RUNTIME_DIR, RUNTIME_DOWNLOADS
+from ai_core.media.image_generation_service import ImageGenerationService
+
+
+class VideoGenerationService(ImageGenerationService):
+    """Provider-routed video generation capability.
+
+    This keeps ai_core generic: the core knows only modality/capability routing,
+    provider protocols, and artifact contracts. Concrete animation/video behavior
+    is supplied by runtime configuration, generated provider records, workflows,
+    commands, or external endpoints.
+    """
+
+    capability_type = "video_generation"
+
+    async def generate(self, *, prompt: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
+        start_time = time.time()
+        prompt = str(prompt or "").strip()
+        options = options if isinstance(options, dict) else {}
+        if not prompt:
+            result = {"ok": False, "status": "requires_input", "missing_inputs": ["prompt"]}
+            self._record_execution_event(result=result, duration_seconds=time.time() - start_time, attempted=[])
+            return result
+
+        config = self._provider_config()
+        route, providers, stage_meta = self._route(config=config, options=options)
+        attempted: list[dict[str, Any]] = []
+        for provider_name in route:
+            provider = dict(providers.get(provider_name, {}) or {})
+            if not provider.get("enabled", True):
+                attempted.append({"provider": provider_name, "status": "skipped", "reason": "disabled"})
+                continue
+            if not self._media_provider_allowed(provider_name, provider):
+                attempted.append({"provider": provider_name, "status": "skipped", "reason": "not_allowed_by_runtime_source_policy"})
+                continue
+            result = await self._call_provider(provider_name=provider_name, provider=provider, prompt=prompt, options=options)
+            attempted.append(self._attempt_record(provider_name=provider_name, result=result))
+            if result.get("ok"):
+                material = self._persist_video(result, provider_name=provider_name, stage_meta=stage_meta)
+                final = {"ok": True, "status": "completed", "material": material, "attempted": attempted, "stage_policy": stage_meta}
+                self._record_execution_event(result=final, duration_seconds=time.time() - start_time, attempted=attempted)
+                return final
+        final = {
+            "ok": False,
+            "status": "requires_setup",
+            "message": self._setup_message(attempted),
+            "attempted": attempted,
+            "setup_actions": self._setup_actions(route=route, providers=providers, attempted=attempted),
+            "stage_policy": stage_meta,
+        }
+        self._record_execution_event(result=final, duration_seconds=time.time() - start_time, attempted=attempted)
+        return final
+
+    def _provider_config(self) -> dict[str, Any]:
+        self._ensure_runtime_video_config()
+        path = RUNTIME_CONFIGS / "models" / "providers.yaml"
+        data = self.loader.load_yaml(path)
+        config = data if isinstance(data, dict) else {}
+        seeded = self._video_seed_config()
+        if seeded:
+            config = self._merge_provider_config(config, seeded)
+        return config
+
+    def _ensure_runtime_video_config(self) -> None:
+        runtime_path = RUNTIME_CONFIGS / "media" / "video_generation.yaml"
+        if runtime_path.exists():
+            return
+        seed_path = CONFIGS_DIR / "video_generation.seed.yaml"
+        if not seed_path.exists():
+            return
+        runtime_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(seed_path, runtime_path)
+
+    def _video_seed_config(self) -> dict[str, Any]:
+        merged: dict[str, Any] = {}
+        for path in [CONFIGS_DIR / "video_generation.seed.yaml", RUNTIME_CONFIGS / "media" / "video_generation.yaml"]:
+            data = self.loader.load_yaml(path)
+            if not isinstance(data, dict) or not data:
+                continue
+            merged = self._merge_provider_config(merged, data)
+        return merged
+
+    def _route(self, *, config: dict[str, Any], options: dict[str, Any]) -> tuple[list[str], dict[str, Any], dict[str, Any]]:
+        providers = dict(config.get("providers") or {})
+        base_route = list(config.get("default_route") or [])
+        stage_route = list(options.get("provider_route") or base_route)
+        config2, route, meta = self.stage_policy.apply_to_route(
+            config=config,
+            route=stage_route,
+            node_id="video_generation",
+            adapter={"model_stage": "video_generation", "preferred_local_model": options.get("preferred_local_model")},
+            route_name="video_generation",
+            escalated=bool(options.get("force_external")),
+        )
+        providers = dict(config2.get("providers") or providers)
+        route = self.execution_policy.snapshot(provider_config=config2).filter_route(route or stage_route, providers)
+        if not route:
+            route = [name for name, provider in providers.items() if self._provider_can_generate_video(provider)]
+        for name, provider in providers.items():
+            if name not in route and self._provider_can_generate_video(provider) and self._media_provider_allowed(name, provider):
+                route.append(name)
+        selected_provider = str(options.get("selected_provider") or "").strip()
+        if selected_provider and selected_provider in providers:
+            route = [selected_provider] + [item for item in route if item != selected_provider]
+        else:
+            route = self._rank_route_by_observations(route, providers)
+        return route, providers, meta
+
+    def _provider_can_generate_video(self, provider: dict[str, Any]) -> bool:
+        text = " ".join(str(provider.get(k) or "") for k in ("type", "protocol", "role"))
+        caps = " ".join(str(x) for x in provider.get("capabilities", []) or [])
+        modalities = json.dumps(provider.get("modalities") or {}, ensure_ascii=False)
+        endpoint = bool(provider.get("video_generation_endpoint") or provider.get("video_endpoint"))
+        return "video_generation" in f"{text} {caps} {modalities}" or endpoint
+
+    async def _call_provider(self, *, provider_name: str, provider: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
+        protocol = str(provider.get("protocol") or provider.get("type") or "").strip()
+        if protocol in {"comfyui", "comfyui_runtime", "local_comfyui"}:
+            return await asyncio.to_thread(self._call_comfyui_video, provider_name, provider, prompt, options)
+        if protocol in {"python_function", "function"}:
+            return await asyncio.to_thread(self._call_python_function, provider, prompt, options)
+        if protocol in {"local_command", "command"}:
+            return await asyncio.to_thread(self._call_local_command, provider, prompt, options)
+        if protocol in {"generic_http_json", "openai_compatible_api", "openai_compatible_video", "http_json", "video_generation_http"} or provider.get("video_generation_endpoint") or provider.get("video_endpoint"):
+            return await asyncio.to_thread(self._call_http_json, provider_name, provider, prompt, options)
+        return {"ok": False, "status": "requires_setup", "reason": "unsupported_provider_protocol"}
+
+    def _call_comfyui_video(self, provider_name: str, provider: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
+        runtime = self._runtime_settings(provider)
+        endpoint = str(provider.get("base_url") or runtime.get("base_url") or "http://127.0.0.1:8188").rstrip("/")
+        ensure = self._ensure_comfyui_runtime(provider=provider, runtime=runtime, endpoint=endpoint)
+        if not ensure.get("ok"):
+            return ensure
+        assets = self._ensure_model_assets(provider=provider, runtime=runtime)
+        if not assets.get("ok"):
+            return assets
+        workflow = self._render_workflow(provider=provider, runtime=runtime, prompt=prompt, options=options)
+        if not workflow.get("ok"):
+            return workflow
+        queued = self._comfy_post_json(endpoint, "/prompt", {"prompt": workflow["workflow"]}, timeout=float(runtime.get("request_timeout_seconds") or 30))
+        prompt_id = str((queued or {}).get("prompt_id") or "")
+        if not prompt_id:
+            return {"ok": False, "status": "failed", "reason": "missing_prompt_id", "response": queued}
+        timeout_seconds = self._effective_generation_timeout(provider=provider, runtime=runtime, options=options)
+        history = self._wait_comfy_history(endpoint=endpoint, prompt_id=prompt_id, timeout=timeout_seconds)
+        if not history.get("ok"):
+            history.setdefault("timeout_seconds", timeout_seconds)
+            return history
+        video = self._extract_comfy_video(endpoint=endpoint, history=history["history"], target_dir=self._provider_temp_dir(provider_name))
+        if not video.get("ok"):
+            return video
+        return {"ok": True, "status": "completed", "file_path": video["file_path"], "provider_response": {"prompt_id": prompt_id}}
+
+    def _extract_comfy_video(self, *, endpoint: str, history: dict[str, Any], target_dir: Path) -> dict[str, Any]:
+        outputs = history.get("outputs") if isinstance(history.get("outputs"), dict) else {}
+        media_keys = ("videos", "video", "gifs", "animated", "animations", "files", "images")
+        valid_suffixes = {".mp4", ".webm", ".gif", ".mov", ".mkv"}
+        for output in outputs.values():
+            if not isinstance(output, dict):
+                continue
+            for key in media_keys:
+                items = output.get(key)
+                if isinstance(items, dict):
+                    items = [items]
+                if not isinstance(items, list):
+                    continue
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    filename = str(item.get("filename") or "").strip()
+                    if not filename:
+                        continue
+                    suffix = Path(filename).suffix.lower()
+                    if suffix not in valid_suffixes:
+                        continue
+                    params = urllib.parse.urlencode({
+                        "filename": filename,
+                        "subfolder": str(item.get("subfolder") or ""),
+                        "type": str(item.get("type") or "output"),
+                    })
+                    with urllib.request.urlopen(endpoint.rstrip("/") + "/view?" + params, timeout=180) as response:
+                        data = response.read()
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    target = target_dir / f"comfyui_video_{uuid4().hex[:8]}{suffix}"
+                    target.write_bytes(data)
+                    return {"ok": True, "status": "completed", "file_path": str(target)}
+        return {"ok": False, "status": "failed", "reason": "no_video_output"}
+
+    def _call_local_command(self, provider: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
+        command = provider.get("command") or provider.get("commands")
+        if isinstance(command, str):
+            command = [command]
+        if not isinstance(command, list) or not command:
+            return {"ok": False, "status": "requires_setup", "reason": "missing_command"}
+        timeout = float(provider.get("timeout_seconds") or options.get("timeout_seconds") or 600)
+        env = os.environ.copy()
+        env["AI_CORE_VIDEO_PROMPT"] = prompt
+        proc = subprocess.run([str(x) for x in command], input=prompt, text=True, capture_output=True, timeout=timeout, env=env)
+        if proc.returncode != 0:
+            return {"ok": False, "status": "failed", "stderr": proc.stderr[-1000:]}
+        output = (proc.stdout or "").strip()
+        try:
+            return self._normalize_provider_result(json.loads(output), provider=provider)
+        except Exception:
+            return self._normalize_provider_result({"file_path": output}, provider=provider)
+
+    def _call_http_json(self, provider_name: str, provider: dict[str, Any], prompt: str, options: dict[str, Any]) -> dict[str, Any]:
+        endpoint = str(provider.get("video_generation_endpoint") or provider.get("video_endpoint") or provider.get("endpoint") or "").strip()
+        if not endpoint:
+            base = str(provider.get("base_url") or "").rstrip("/")
+            path = str(provider.get("video_generation_path") or provider.get("path") or "").strip("/")
+            endpoint = f"{base}/{path}" if base and path else ""
+        if not endpoint:
+            return {"ok": False, "status": "requires_setup", "reason": "missing_endpoint"}
+        secret_key = str(provider.get("secret_key") or provider.get("api_key_env") or "").strip()
+        secret = os.getenv(secret_key) if secret_key else ""
+        if secret_key and not secret:
+            return {"ok": False, "status": "requires_setup", "reason": "missing_secret", "secret_key": secret_key}
+        payload = self._render_payload(provider=provider, prompt=prompt, options=options)
+        headers = {"Content-Type": "application/json"}
+        if secret:
+            headers[str(provider.get("authorization_header") or "Authorization")] = str(provider.get("authorization_prefix") or "Bearer ") + secret
+        req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers, method=str(provider.get("method") or "POST"))
+        timeout = float(provider.get("timeout_seconds") or options.get("timeout_seconds") or 600)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                raw = response.read()
+        except Exception as exc:
+            return {"ok": False, "status": "failed", "reason": "provider_request_failed", "endpoint": endpoint, "error": str(exc)[-1000:]}
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:
+            data = {"video_bytes": base64.b64encode(raw).decode("ascii")}
+        return self._normalize_provider_result(data, provider=provider)
+
+    def _normalize_provider_result(self, result: Any, provider: dict[str, Any] | None = None) -> dict[str, Any]:
+        provider = provider if isinstance(provider, dict) else {}
+        if not isinstance(result, dict):
+            return {"ok": False, "status": "failed", "reason": "invalid_provider_result"}
+        valid_suffixes = {".mp4", ".webm", ".gif", ".mov", ".mkv"}
+        for key in ("file_path", "path", "output_path", "video_path"):
+            value = result.get(key)
+            if value and Path(str(value)).exists() and Path(str(value)).suffix.lower() in valid_suffixes:
+                return {"ok": True, "status": "completed", "file_path": str(value)}
+        for key in ("video_base64", "video_bytes", "b64_json", "base64"):
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                return {"ok": True, "status": "completed", "video_base64": value.strip(), "suffix": str(result.get("suffix") or provider.get("default_suffix") or ".mp4")}
+        data = result.get("data")
+        if isinstance(data, list):
+            for item in data:
+                normalized = self._normalize_provider_result(item, provider=provider)
+                if normalized.get("ok"):
+                    return normalized
+        for key in ("url", "video_url", "download_url"):
+            if result.get(key):
+                if bool(provider.get("download_remote_url", True)):
+                    downloaded = self._download_remote_video(str(result.get(key) or ""), timeout=float(provider.get("download_timeout_seconds") or 1800))
+                    if downloaded.get("ok"):
+                        return downloaded
+                return {"ok": False, "status": "requires_setup", "reason": "remote_url_download_not_configured"}
+        return {"ok": False, "status": str(result.get("status") or "failed"), "reason": str(result.get("reason") or "no_video_material")}
+
+    def _download_remote_video(self, url: str, *, timeout: float) -> dict[str, Any]:
+        if not url.strip():
+            return {"ok": False, "status": "failed", "reason": "empty_remote_url"}
+        temp_dir = self._provider_temp_dir("remote_video")
+        parsed = urllib.parse.urlparse(url)
+        suffix = Path(parsed.path).suffix.lower()
+        if suffix not in {".mp4", ".webm", ".gif", ".mov", ".mkv"}:
+            suffix = ".mp4"
+        target = temp_dir / f"remote_{uuid4().hex[:12]}{suffix}"
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as response:
+                target.write_bytes(response.read())
+        except Exception as exc:
+            return {"ok": False, "status": "failed", "reason": "remote_url_download_failed", "error": str(exc)[-1000:]}
+        if target.stat().st_size <= 0:
+            return {"ok": False, "status": "failed", "reason": "remote_url_empty_file"}
+        return {"ok": True, "status": "completed", "file_path": str(target)}
+
+    def _effective_generation_timeout(self, *, provider: dict[str, Any], runtime: dict[str, Any], options: dict[str, Any]) -> float:
+        configured = options.get("generation_timeout_seconds") or runtime.get("generation_timeout_seconds") or provider.get("timeout_seconds") or options.get("timeout_seconds") or 900
+        try:
+            value = float(configured)
+        except Exception:
+            value = 900.0
+        if options.get("strict_timeout_seconds") is not None:
+            try:
+                return max(1.0, float(options.get("strict_timeout_seconds")))
+            except Exception:
+                return max(1.0, value)
+        floor = runtime.get("minimum_generation_timeout_seconds") or provider.get("minimum_generation_timeout_seconds") or 1800
+        try:
+            floor_value = float(floor)
+        except Exception:
+            floor_value = 1800.0
+        return max(value, floor_value)
+
+    def _setup_message(self, attempted: list[dict[str, Any]]) -> str:
+        if not attempted:
+            return "Video generation is recognized, but no video provider is available in the current runtime route."
+        parts = []
+        for item in attempted[:5]:
+            provider = str(item.get("provider") or "provider")
+            reason = str(item.get("reason") or item.get("status") or "not_ready")
+            parts.append(f"{provider}: {reason}")
+        return "Video generation provider setup is required. Attempted providers: " + "; ".join(parts) + "."
+
+    def _metrics_path(self) -> Path:
+        path = RUNTIME_DIR / "generated" / "media" / "video_generation_metrics.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _record_execution_event(self, *, result: dict[str, Any], duration_seconds: float, attempted: list[dict[str, Any]]) -> None:
+        try:
+            material = result.get("material") if isinstance(result.get("material"), dict) else {}
+            provider = str(material.get("provider") or "").strip()
+            if not provider and attempted:
+                provider = str(attempted[-1].get("provider") or "").strip()
+            event = {
+                "event_type": "capability_execution_metric",
+                "capability_type": "video_generation",
+                "provider": provider,
+                "ok": bool(result.get("ok")),
+                "status": str(result.get("status") or ""),
+                "duration_seconds": round(float(duration_seconds), 3),
+                "attempted": attempted[-5:] if isinstance(attempted, list) else [],
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            with self._metrics_path().open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
+    def _persist_video(self, result: dict[str, Any], *, provider_name: str, stage_meta: dict[str, Any]) -> dict[str, Any]:
+        download_id = f"video_{uuid4().hex[:12]}"
+        target_dir = RUNTIME_DOWNLOADS / download_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        source_path = result.get("file_path")
+        if source_path:
+            src = Path(str(source_path))
+            suffix = src.suffix if src.suffix.lower() in {".mp4", ".webm", ".gif", ".mov", ".mkv"} else ".mp4"
+            filename = f"generated_video{suffix}"
+            target = target_dir / filename
+            target.write_bytes(src.read_bytes())
+        else:
+            suffix = str(result.get("suffix") or ".mp4")
+            if not suffix.startswith("."):
+                suffix = "." + suffix
+            filename = f"generated_video{suffix}"
+            target = target_dir / filename
+            target.write_bytes(base64.b64decode(str(result.get("video_base64") or "")))
+        size = target.stat().st_size
+        download_url = f"/api/downloads/{download_id}/{filename}"
+        mime = "video/mp4"
+        if filename.lower().endswith(".webm"):
+            mime = "video/webm"
+        elif filename.lower().endswith(".gif"):
+            mime = "image/gif"
+        elif filename.lower().endswith(".mov"):
+            mime = "video/quicktime"
+        material = {
+            "type": "video",
+            "download_id": download_id,
+            "file_name": filename,
+            "file_path": str(target),
+            "download_url": download_url,
+            "preview_url": download_url,
+            "mime_type": mime,
+            "size": size,
+            "provider": provider_name,
+            "stage_policy": stage_meta,
+        }
+        (target_dir / "metadata.json").write_text(json.dumps(material, ensure_ascii=False, indent=2), encoding="utf-8")
+        return material
