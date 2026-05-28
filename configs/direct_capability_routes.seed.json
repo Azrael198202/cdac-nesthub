@@ -1,0 +1,59 @@
+{
+  "version": "1.0",
+  "scope": "direct_modality_capability_routes",
+  "description": "Policy-owned mappings from direct user requests to generic output capabilities. Core code only scores these declarations and dispatches registered handlers.",
+  "rules": [
+    {
+      "rule_id": "text_to_image_generation",
+      "enabled": true,
+      "capability_type": "image_generation",
+      "input_modality": "text",
+      "output_modality": "image",
+      "execution_mode": "direct_runtime_capability",
+      "confidence": 0.96,
+      "threshold": 1.0,
+      "match_any_token_sets": [
+        ["generate", "image"],
+        ["generate", "picture"],
+        ["generate", "illustration"],
+        ["generate", "visual"],
+        ["create", "image"],
+        ["create", "picture"],
+        ["create", "illustration"],
+        ["render", "image"],
+        ["draw", "image"]
+      ],
+      "fallback_policy": {
+        "allow_chat_fallback": false,
+        "return_setup_status_when_provider_missing": true
+      },
+      "metadata": {
+        "provider_selection": "runtime_configured",
+        "reserved_artifact_type": "image"
+      }
+    },
+    {
+      "rule_id": "text_to_video_generation_reserved",
+      "enabled": true,
+      "capability_type": "video_generation",
+      "input_modality": "text",
+      "output_modality": "video",
+      "execution_mode": "direct_runtime_capability",
+      "confidence": 0.9,
+      "threshold": 1.0,
+      "match_any_token_sets": [
+        ["generate", "video"],
+        ["create", "video"],
+        ["render", "video"]
+      ],
+      "fallback_policy": {
+        "allow_chat_fallback": false,
+        "return_setup_status_when_provider_missing": true
+      },
+      "metadata": {
+        "provider_selection": "runtime_configured",
+        "reserved_artifact_type": "video"
+      }
+    }
+  ]
+}

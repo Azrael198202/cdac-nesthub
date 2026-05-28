@@ -16,6 +16,8 @@ from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
 from ai_core.artifacts.uploaded_artifact_contract import UploadedArtifactContractBuilder
 from ai_core.artifacts.artifact_edit_service import ArtifactEditService
 from ai_core.commands import CommandSetService
+from ai_core.capabilities.capability_dispatcher import CapabilityDispatcher
+from ai_core.media import ImageGenerationService
 from ai_core.context.execution_reuse_store import ExecutionReuseStore
 from ai_core.execution.parameter_resolution import ParameterResolutionPipeline, PreflightResolutionContext
 from auxiliary_brain.studio.instruction_workflow_planner import InstructionWorkflowPlanner
@@ -43,20 +45,13 @@ class AgentStudioService:
         self.parameter_resolution_pipeline = ParameterResolutionPipeline()
         self.instruction_workflow_planner = InstructionWorkflowPlanner()
         self.runtime_semantic_planner = RuntimeSemanticPlanner()
+        self.direct_capability_dispatcher = CapabilityDispatcher(handlers={
+            "image_generation": self._handle_direct_image_generation,
+        })
         self.store.ensure_workspace()
         self.community_id = self._ensure_community()
 
     async def handle_message(self, message: str, provided_inputs: dict[str, Any] | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None, session_id: str | None = None) -> dict[str, Any]:
-        short_cached = self.execution_reuse_store.get_short_answer(message)
-        if short_cached:
-            return {
-                "action": "short_answer_cache",
-                "origin": "auxiliary_brain",
-                "status": "completed",
-                "final_answer": short_cached.get("answer"),
-                "memory_saved": False,
-                "context_trace": {"short_answer_cache": True, "llm_used": False, "planning_used": False},
-            }
         direct = self._direct_ephemeral_answer(message)
         if direct is not None:
             self.execution_reuse_store.save_short_answer(query=message, answer=direct, source="ephemeral_direct")
@@ -77,6 +72,28 @@ class AgentStudioService:
             return await self.create_participant(message, routed.name, uploaded_artifacts=uploaded_artifacts)
         if routed.action == "create_task":
             return self.create_task_graph(message, routed.name, uploaded_artifacts=uploaded_artifacts)
+
+        # Direct output-modality requests must be isolated from ordinary chat and
+        # from text-model preflight.  If a provider is missing, the user should
+        # see a capability setup/status result, not the generic chat fallback.
+        if routed.action == "chat":
+            direct_capability = await self.direct_capability_dispatcher.dispatch(
+                text=message,
+                context={"session_id": session_id, "surface": "agent_studio"},
+            )
+            if direct_capability is not None:
+                return direct_capability
+
+        short_cached = self.execution_reuse_store.get_short_answer(message)
+        if short_cached:
+            return {
+                "action": "short_answer_cache",
+                "origin": "auxiliary_brain",
+                "status": "completed",
+                "final_answer": short_cached.get("answer"),
+                "memory_saved": False,
+                "context_trace": {"short_answer_cache": True, "llm_used": False, "planning_used": False},
+            }
 
         # If the message is exactly a known task name, treat it as an execution
         # request. This keeps the UI natural: users can type `taskC` after
@@ -106,6 +123,39 @@ class AgentStudioService:
         if feedback.get("matched"):
             return await self.handle_feedback(message, feedback.get("target_task"))
         return await self.natural_conversation.reply(message, latest_task=self._latest_task_name(), session_id=session_id)
+
+
+    async def _handle_direct_image_generation(self, request: dict[str, Any]) -> dict[str, Any]:
+        text = str(request.get("text") or "").strip()
+        service = ImageGenerationService()
+        provider_payload = await service.generate(prompt=text, options={})
+        status = str(provider_payload.get("status") or ("completed" if provider_payload.get("ok") else "failed"))
+        if not provider_payload.get("ok"):
+            return {
+                "status": status,
+                "final_answer": str(provider_payload.get("message") or "Image generation provider setup is required."),
+                "workflow_results": {
+                    "status": status,
+                    "capability_type": "image_generation",
+                    "provider_result": provider_payload,
+                },
+            }
+        material = provider_payload.get("material") if isinstance(provider_payload.get("material"), dict) else {}
+        url = str(material.get("download_url") or "").strip()
+        name = str(material.get("file_name") or "generated_image").strip() or "generated_image"
+        final_answer = f"Generated image: ![{name}]({url})\nDownload: [{name}]({url})" if url else "Generated image material is available."
+        return {
+            "status": "completed",
+            "final_answer": final_answer,
+            "workflow_results": {
+                "status": "completed",
+                "capability_type": "image_generation",
+                "generated_files": [material] if material else [],
+                "verified_result_material": material,
+                "provider_result": provider_payload,
+                "final_content": final_answer,
+            },
+        }
 
     def _direct_ephemeral_answer(self, message: str) -> str | None:
         # No fixed phrase list is used here.  Ordinary conversation is routed by
