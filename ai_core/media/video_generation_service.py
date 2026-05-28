@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import time
+import traceback
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -35,60 +36,133 @@ class VideoGenerationService(ImageGenerationService):
         start_time = time.time()
         prompt = str(prompt or "").strip()
         options = options if isinstance(options, dict) else {}
-        if not prompt:
-            result = {"ok": False, "status": "requires_input", "missing_inputs": ["prompt"]}
-            self._record_execution_event(result=result, duration_seconds=time.time() - start_time, attempted=[])
-            return result
-
-        config = self._provider_config()
-        route, providers, stage_meta = self._route(config=config, options=options)
         attempted: list[dict[str, Any]] = []
-        for provider_name in route:
-            provider = dict(providers.get(provider_name, {}) or {})
-            if not provider.get("enabled", True):
-                attempted.append({"provider": provider_name, "status": "skipped", "reason": "disabled"})
-                continue
-            if not self._media_provider_allowed(provider_name, provider):
-                attempted.append({"provider": provider_name, "status": "skipped", "reason": "not_allowed_by_runtime_source_policy"})
-                continue
-            try:
-                result = await self._call_provider_with_dependency_recovery(provider_name=provider_name, provider=provider, prompt=prompt, options=options)
-            except Exception as exc:
-                result = {
-                    "ok": False,
-                    "status": "failed",
-                    "reason": "provider_exception",
-                    "error_type": exc.__class__.__name__,
-                    "error": str(exc)[-1000:],
-                }
-            attempted.append(self._attempt_record(provider_name=provider_name, result=result))
-            if result.get("ok"):
+        stage_meta: dict[str, Any] = {}
+        route: list[str] = []
+        providers: dict[str, Any] = {}
+
+        try:
+            if not prompt:
+                result = {"ok": False, "status": "requires_input", "missing_inputs": ["prompt"]}
+                self._record_execution_event(result=result, duration_seconds=time.time() - start_time, attempted=attempted)
+                self._record_diagnostic_event(
+                    level="info",
+                    reason="missing_prompt",
+                    result=result,
+                    attempted=attempted,
+                    duration_seconds=time.time() - start_time,
+                )
+                return result
+
+            config = self._provider_config()
+            route, providers, stage_meta = self._route(config=config, options=options)
+            self._record_diagnostic_event(
+                level="debug",
+                reason="video_generation_route_selected",
+                result={"ok": False, "status": "routing", "route": route, "provider_count": len(providers)},
+                attempted=attempted,
+                duration_seconds=time.time() - start_time,
+            )
+
+            for provider_name in route:
+                provider = dict(providers.get(provider_name, {}) or {})
+                if not provider.get("enabled", True):
+                    attempted.append({"provider": provider_name, "status": "skipped", "reason": "disabled"})
+                    continue
+                if not self._media_provider_allowed(provider_name, provider):
+                    attempted.append({"provider": provider_name, "status": "skipped", "reason": "not_allowed_by_runtime_source_policy"})
+                    continue
                 try:
-                    material = self._persist_video(result, provider_name=provider_name, stage_meta=stage_meta)
+                    result = await self._call_provider_with_dependency_recovery(provider_name=provider_name, provider=provider, prompt=prompt, options=options)
                 except Exception as exc:
-                    attempted.append({
-                        "provider": provider_name,
+                    result = {
+                        "ok": False,
                         "status": "failed",
-                        "reason": "artifact_persist_failed",
+                        "reason": "provider_exception",
                         "error_type": exc.__class__.__name__,
                         "error": str(exc)[-1000:],
-                    })
-                    continue
-                final = {"ok": True, "status": "completed", "material": material, "attempted": attempted, "stage_policy": stage_meta}
-                self._record_execution_event(result=final, duration_seconds=time.time() - start_time, attempted=attempted)
-                return final
-        final = {
-            "ok": False,
-            "status": "requires_setup",
-            "message": self._setup_message(attempted),
-            "attempted": attempted,
-            "setup_actions": self._setup_actions(route=route, providers=providers, attempted=attempted),
-            "interaction_request": self._first_missing_secret_action(attempted),
-            "stage_policy": stage_meta,
-            "artifact_metadata": artifact_metadata,
-        }
-        self._record_execution_event(result=final, duration_seconds=time.time() - start_time, attempted=attempted)
-        return final
+                        "traceback": traceback.format_exc(limit=8),
+                    }
+                attempt = self._attempt_record(provider_name=provider_name, result=result)
+                attempted.append(attempt)
+                self._record_diagnostic_event(
+                    level="info",
+                    reason=str(result.get("reason") or result.get("status") or "provider_result"),
+                    result=result,
+                    attempted=[attempt],
+                    duration_seconds=time.time() - start_time,
+                )
+                if result.get("ok"):
+                    try:
+                        material = self._persist_video(result, provider_name=provider_name, stage_meta=stage_meta)
+                    except Exception as exc:
+                        persist_attempt = {
+                            "provider": provider_name,
+                            "status": "failed",
+                            "reason": "artifact_persist_failed",
+                            "error_type": exc.__class__.__name__,
+                            "error": str(exc)[-1000:],
+                            "traceback": traceback.format_exc(limit=8),
+                        }
+                        attempted.append(persist_attempt)
+                        self._record_diagnostic_event(
+                            level="error",
+                            reason="artifact_persist_failed",
+                            result=persist_attempt,
+                            attempted=attempted,
+                            duration_seconds=time.time() - start_time,
+                        )
+                        continue
+                    final = {"ok": True, "status": "completed", "material": material, "attempted": attempted, "stage_policy": stage_meta}
+                    self._record_execution_event(result=final, duration_seconds=time.time() - start_time, attempted=attempted)
+                    self._record_diagnostic_event(
+                        level="info",
+                        reason="completed",
+                        result=final,
+                        attempted=attempted,
+                        duration_seconds=time.time() - start_time,
+                    )
+                    return final
+
+            final = {
+                "ok": False,
+                "status": "requires_setup",
+                "message": self._setup_message(attempted),
+                "attempted": attempted,
+                "setup_actions": self._setup_actions(route=route, providers=providers, attempted=attempted),
+                "interaction_request": self._first_missing_secret_action(attempted),
+                "stage_policy": stage_meta,
+            }
+            self._record_execution_event(result=final, duration_seconds=time.time() - start_time, attempted=attempted)
+            self._record_diagnostic_event(
+                level="warning",
+                reason="requires_setup",
+                result=final,
+                attempted=attempted,
+                duration_seconds=time.time() - start_time,
+            )
+            return final
+
+        except Exception as exc:
+            final = {
+                "ok": False,
+                "status": "failed",
+                "reason": "video_generation_unhandled_exception",
+                "error_type": exc.__class__.__name__,
+                "error": str(exc)[-1000:],
+                "traceback": traceback.format_exc(limit=12),
+                "attempted": attempted,
+                "stage_policy": stage_meta,
+            }
+            self._record_execution_event(result=final, duration_seconds=time.time() - start_time, attempted=attempted)
+            self._record_diagnostic_event(
+                level="error",
+                reason="video_generation_unhandled_exception",
+                result=final,
+                attempted=attempted,
+                duration_seconds=time.time() - start_time,
+            )
+            return final
 
     def _provider_config(self) -> dict[str, Any]:
         self._ensure_runtime_video_config()
@@ -662,6 +736,49 @@ class VideoGenerationService(ImageGenerationService):
             if not provider:
                 actions.append({"provider": provider_name, "kind": "register_provider", "message": "Register a provider record for this video generation route."})
         return actions
+
+    def _diagnostic_log_path(self) -> Path:
+        path = RUNTIME_DIR / "logs" / "video_generation_diagnostics.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _record_diagnostic_event(self, *, level: str, reason: str, result: dict[str, Any], attempted: list[dict[str, Any]], duration_seconds: float) -> None:
+        """Write traceable diagnostics for video generation failures.
+
+        This is intentionally generic: it records provider protocol/status/error
+        metadata and redacts large material fields. It does not inspect business
+        semantics or model-specific content.
+        """
+        try:
+            safe_result = dict(result or {})
+            for key in ("video_base64", "image_base64", "binary", "data"):
+                if key in safe_result:
+                    safe_result[key] = "<redacted>"
+            event = {
+                "event_type": "video_generation_diagnostic",
+                "capability_type": "video_generation",
+                "level": str(level or "info"),
+                "reason": str(reason or safe_result.get("reason") or safe_result.get("status") or "unknown"),
+                "ok": bool(safe_result.get("ok")),
+                "status": str(safe_result.get("status") or ""),
+                "duration_seconds": round(float(duration_seconds), 3),
+                "attempted": attempted[-10:] if isinstance(attempted, list) else [],
+                "result": safe_result,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            with self._diagnostic_log_path().open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
+    def _attempt_record(self, *, provider_name: str, result: dict[str, Any]) -> dict[str, Any]:
+        record = super()._attempt_record(provider_name=provider_name, result=result)
+        for key in ("error_type", "error", "traceback", "frame_count", "minimum_required_frames", "module", "package", "endpoint"):
+            value = result.get(key) if isinstance(result, dict) else None
+            if value:
+                text = str(value)
+                record[key] = text[-4000:] if key == "traceback" else text[-1000:]
+        return record
 
     def _metrics_path(self) -> Path:
         path = RUNTIME_DIR / "generated" / "media" / "video_generation_metrics.jsonl"

@@ -36,6 +36,24 @@ graph_visual_builder = GraphVisualStateBuilder()
 knowledge_service = KnowledgeService()
 
 
+def _write_api_error_log(*, area: str, exc: Exception, context: dict[str, Any] | None = None) -> None:
+    try:
+        path = Path("runtime") / "logs" / "api_errors.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        event = {
+            "event_type": "api_error",
+            "area": area,
+            "error_type": exc.__class__.__name__,
+            "error": str(exc)[-2000:],
+            "traceback": traceback.format_exc(limit=12),
+            "context": context or {},
+        }
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception:
+        return
+
+
 class ChatRequest(BaseModel):
     message: str
     local_model: str | None = None
@@ -540,6 +558,7 @@ async def agent_studio_message(req: AgentStudioRequest):
                 payload["session_boundary"] = session_store.boundary_status(active_session_id)
         return JSONResponse(payload)
     except Exception as exc:
+        _write_api_error_log(area="agent_studio_message", exc=exc, context={"session_id": req.session_id, "message_preview": str(req.message or "")[:300]})
         return JSONResponse(
             {
                 "ok": False,
@@ -548,6 +567,7 @@ async def agent_studio_message(req: AgentStudioRequest):
                     "type": exc.__class__.__name__,
                     "message": str(exc),
                 },
+                "diagnostic_log": "runtime/logs/api_errors.jsonl",
                 "traceback": traceback.format_exc(limit=8),
             },
             status_code=500,
