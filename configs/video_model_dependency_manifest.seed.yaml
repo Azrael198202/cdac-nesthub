@@ -1,0 +1,32 @@
+version: 1.0
+scope: video_generation
+kind: comfyui_video_model_dependency_manifest
+# This file is copied to runtime/configs/media/video_model_dependency_manifest.yaml.
+# Replace or extend profiles at runtime. ai_core only reads the generic contract:
+# model_assets, custom_nodes, and python_packages.
+default_profile: text_to_video
+profiles:
+  text_to_video:
+    description: Generic ComfyUI text-to-video dependency profile. Fill URLs or env vars for the workflow you choose.
+    model_assets: []
+    custom_nodes: []
+    python_packages: []
+  image_to_video:
+    description: Generic ComfyUI image-to-video dependency profile. Fill URLs or env vars for the workflow you choose.
+    model_assets: []
+    custom_nodes: []
+    python_packages: []
+examples:
+  model_asset:
+    name: example_checkpoint
+    target_subdir: models/checkpoints
+    file_name_env: AI_CORE_VIDEO_CHECKPOINT_FILE
+    url_env: AI_CORE_VIDEO_CHECKPOINT_URL
+    auto_download: true
+    timeout_seconds: 7200
+  custom_node:
+    name: example_custom_node
+    repository_env: AI_CORE_VIDEO_CUSTOM_NODE_REPOSITORY
+    target_dir: example_custom_node
+    auto_install: true
+    install_requirements: true

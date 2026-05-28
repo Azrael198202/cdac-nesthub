@@ -76,6 +76,16 @@ providers:
       clone_timeout_seconds: 600
     workflow_values:
       prompt: "{prompt}"
+      negative_prompt: "{negative_prompt}"
+      frame_count: "{frame_count}"
+      width: "{width}"
+      height: "{height}"
+      seed: "{seed}"
+    model_dependency_profile: text_to_video
+    model_dependency_manifest:
+      enabled: true
+      manifest_file: runtime/configs/media/video_model_dependency_manifest.yaml
+      profile: text_to_video
     setup_hints:
       - Set AI_CORE_VIDEO_WORKFLOW_TEMPLATE to a ComfyUI video workflow JSON file, for example AnimateDiff or another runtime-installed video workflow.
       - Install the workflow's custom nodes and model assets under the configured ComfyUI runtime.
