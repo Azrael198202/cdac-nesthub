@@ -1,1 +1,2 @@
-v14-generic-capability-acquisition-ui-config-secret
+v14-direct-agent-invocation-bridge
+patch: user-execution-mode-policy

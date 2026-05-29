@@ -102,6 +102,7 @@ class RuntimeRegisteredToolService:
                 "tool": self._public_tool_summary(spec),
             }
         payload = input_data if isinstance(input_data, dict) else {"input": input_data}
+        payload = self._apply_runtime_invocation_defaults(spec=spec, payload=payload, approval_confirmed=approval_confirmed)
         runtime_context = self.connection_store.runtime_context_for(tool_spec=spec, profile_id=profile_id)
         if runtime_context.get("connection") or runtime_context.get("secrets") or runtime_context.get("secret_refs"):
             payload = dict(payload)
@@ -150,6 +151,36 @@ class RuntimeRegisteredToolService:
 
     def list_profiles(self, tool_id: str | None = None) -> list[dict[str, Any]]:
         return self.connection_store.list_profiles(tool_id)
+
+
+    def _apply_runtime_invocation_defaults(self, *, spec: dict[str, Any], payload: Any, approval_confirmed: bool) -> dict[str, Any]:
+        """Apply registry-declared invocation defaults before execution.
+
+        Runtime acquisition may use mock or dry-run values during sandbox
+        verification, while the enabled runtime capability may need a different
+        user-execution default.  The core stays capability-agnostic: it only
+        reads defaults declared on the registered tool record and applies them
+        to missing input fields.
+        """
+        data = dict(payload) if isinstance(payload, dict) else {"input": payload}
+        policy = spec.get("runtime_execution_policy") if isinstance(spec.get("runtime_execution_policy"), dict) else {}
+        defaults: dict[str, Any] = {}
+        generic_defaults = policy.get("default_input_values")
+        if isinstance(generic_defaults, dict):
+            defaults.update(generic_defaults)
+        if approval_confirmed:
+            confirmed_defaults = policy.get("confirmed_input_values")
+            if isinstance(confirmed_defaults, dict):
+                defaults.update(confirmed_defaults)
+            user_defaults = policy.get("user_execution_input_values")
+            if isinstance(user_defaults, dict):
+                defaults.update(user_defaults)
+        for key, value in defaults.items():
+            if key == "_runtime":
+                continue
+            if key not in data or data.get(key) in (None, "", [], {}):
+                data[key] = value
+        return data
 
     def _approval_preview(self, input_data: Any) -> dict[str, Any]:
         if isinstance(input_data, dict):

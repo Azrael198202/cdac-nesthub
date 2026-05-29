@@ -112,6 +112,21 @@ class AgentStudioService:
         if routed.action == "chat" and bare_task_name:
             return await self.execute_task(bare_task_name, provided_inputs=provided_inputs, instruction=message)
 
+        # Direct invocation of an already-created participant must stay in the
+        # Agent/Task runtime instead of falling into the generic conversation
+        # pipeline.  The decision is generic: it matches the user's text
+        # against durable participant names, then creates a task-run wrapper so
+        # the existing missing-parameter form, approval, resume, and registered
+        # tool bridge are reused unchanged.
+        if routed.action == "chat":
+            direct_agent_response = await self._maybe_execute_direct_participant_invocation(
+                message,
+                provided_inputs=provided_inputs,
+                uploaded_artifacts=uploaded_artifacts,
+            )
+            if direct_agent_response is not None:
+                return direct_agent_response
+
         # Model-dependent paths must not enter the runtime if the selected
         # provider mode is impossible to satisfy. This prevents confusing late
         # failures such as input_parsing failing with "No real LLM provider is
@@ -770,6 +785,218 @@ class AgentStudioService:
             "path": str(path),
             "uploaded_artifacts": artifact_refs,
         }
+
+    async def _maybe_execute_direct_participant_invocation(
+        self,
+        message: str,
+        *,
+        provided_inputs: dict[str, Any] | None = None,
+        uploaded_artifacts: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Execute a one-off task when the text names an existing participant.
+
+        This is a generic bridge from natural language into the existing
+        Agent/Task execution path.  It does not infer what a capability does;
+        it only resolves a durable participant by name and delegates to the
+        same task execution pipeline used by saved tasks.
+        """
+        participant = self._find_participant_mentioned_in_message(message)
+        if not participant:
+            return None
+        task_name = self._create_direct_participant_task_graph(
+            message=message,
+            participant=participant,
+            provided_inputs=provided_inputs,
+            uploaded_artifacts=uploaded_artifacts,
+        )
+        return await self.execute_task(task_name, provided_inputs=provided_inputs, instruction=message)
+
+    def _find_participant_mentioned_in_message(self, message: str) -> dict[str, Any] | None:
+        text = str(message or "")
+        if not text.strip():
+            return None
+        participants = self.store.list_json("generated/agents")
+        candidates: list[tuple[int, dict[str, Any]]] = []
+        lowered = text.casefold()
+        for participant in participants:
+            if not isinstance(participant, dict):
+                continue
+            names = []
+            for key in ("display_name", "agent_name", "name", "role_name", "participant_id"):
+                value = str(participant.get(key) or "").strip()
+                if value and value not in names:
+                    names.append(value)
+            for name in names:
+                if self._contains_named_entity(lowered, name):
+                    candidates.append((len(name), participant))
+                    break
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    def _contains_named_entity(self, lowered_text: str, name: str) -> bool:
+        normalized_name = str(name or "").strip()
+        if not normalized_name:
+            return False
+        # Preserve exact multi-word identities while still allowing compact ids.
+        pattern = r"(?<![A-Za-z0-9_])" + re.escape(normalized_name.casefold()) + r"(?![A-Za-z0-9_])"
+        return re.search(pattern, lowered_text) is not None
+
+    def _create_direct_participant_task_graph(
+        self,
+        *,
+        message: str,
+        participant: dict[str, Any],
+        provided_inputs: dict[str, Any] | None = None,
+        uploaded_artifacts: list[dict[str, Any]] | None = None,
+    ) -> str:
+        graph_id = new_id("direct_agent_graph")
+        task_name = graph_id
+        participant_id = str(participant.get("participant_id") or participant.get("id") or "").strip()
+        participant_name = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant_id or "participant")
+        runtime_parameters: dict[str, Any] = {}
+        runtime_parameters.update(self._extract_runtime_parameters_from_instruction(message))
+        runtime_parameters.update(self._extract_participant_schema_parameters_from_instruction(message, participant))
+        if isinstance(provided_inputs, dict):
+            runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+        artifact_refs = uploaded_artifacts if isinstance(uploaded_artifacts, list) else []
+        task_graph = {
+            "graph_id": graph_id,
+            "task_name": task_name,
+            "community_id": self.community_id,
+            "instruction": str(message or ""),
+            "origin": "auxiliary_brain",
+            "status": "created",
+            "created_at": self._now(),
+            "execution_policy": "delegated_participant_execution_via_ai_core",
+            "selected_participant_ids": [participant_id] if participant_id else [],
+            "uploaded_artifacts": artifact_refs,
+            "parameter_contract": {
+                "contract_type": "task_runtime_parameter_contract",
+                "parameters": [],
+                "missing_information": [],
+                "runtime_scope": "task_run",
+            },
+            "runtime_parameters": runtime_parameters,
+            "tasks": [{
+                "task_id": f"{graph_id}_delegate_1",
+                "participant_id": participant_id,
+                "participant_display_name": participant_name,
+                "execution_owner": "ai_core",
+                "status": "pending",
+                "step_type": "participant_execution",
+                "depends_on": [],
+                "source_step_id": task_name,
+                "source_instruction_fragment": str(message or ""),
+                "capability_profile": participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {},
+                "input_contract": {
+                    "contract_type": "runtime_step_input_contract",
+                    "bound_from_upstream": [],
+                    "accepts_verified_material": False,
+                    "user_input_required_for_bound_material": False,
+                },
+                "output_contract": {
+                    "contract_type": "runtime_step_output_contract",
+                    "produces_verified_material": True,
+                    "planner_metadata_is_not_result_material": True,
+                },
+            }],
+            "workflow_planning": {
+                "mode": "direct_existing_participant_invocation",
+                "semantic_step_count": 1,
+                "generated_participant_ids": [],
+                "step_count": 1,
+                "coverage_status": "passed",
+            },
+            "instruction_coverage": {
+                "status": "passed",
+                "covered_actions": [{
+                    "step_id": task_name,
+                    "type": "participant_execution",
+                    "participant_id": participant_id,
+                }],
+                "uncovered_fragments": [],
+                "selected_participant_count": 1,
+                "generated_step_count": 0,
+                "planning_mode": "direct_existing_participant_invocation",
+            },
+            "final_synthesis_owner": "ai_core",
+        }
+        self.store.write_json(f"generated/tasks/{task_name}.json", task_graph)
+        return task_name
+
+    def _extract_participant_schema_parameters_from_instruction(self, instruction: str, participant: dict[str, Any]) -> dict[str, Any]:
+        """Extract values for fields declared by the participant contract.
+
+        This is field-name driven, not capability-specific.  It handles quoted
+        values and short unquoted values adjacent to declared parameter names so
+        a natural one-off invocation can prefill the same form fields that the
+        old Agent/Task parameter flow already exposes.
+        """
+        text = str(instruction or "")
+        contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}
+        params = contract.get("parameters") if isinstance(contract.get("parameters"), list) else []
+        names: list[str] = []
+        for param in params:
+            if not isinstance(param, dict):
+                continue
+            name = str(param.get("name") or param.get("parameter_name") or "").strip()
+            if name and name not in names:
+                names.append(name)
+        out: dict[str, Any] = {}
+        for name in names:
+            value = self._extract_named_value_from_instruction(text, name)
+            if value not in (None, "", [], {}):
+                out[name] = value
+                pid = str(participant.get("participant_id") or participant.get("id") or "").strip()
+                pname = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or "").strip()
+                safe_pname = re.sub(r"[^A-Za-z0-9_]+", "_", pname).strip("_")
+                if pid:
+                    out.setdefault(f"{pid}.{name}", value)
+                if pname:
+                    out.setdefault(f"{pname}.{name}", value)
+                if safe_pname:
+                    out.setdefault(f"{safe_pname}.{name}", value)
+        return out
+
+    def _extract_named_value_from_instruction(self, text: str, field_name: str) -> Any:
+        name = str(field_name or "").strip()
+        if not name:
+            return None
+        token_pattern = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])", flags=re.I)
+        candidates: list[str] = []
+        for match in token_pattern.finditer(text):
+            tail = text[match.end():].lstrip()
+            if not tail:
+                continue
+            if tail[0] in {"'", '"'}:
+                quote = tail[0]
+                closing = tail.find(quote, 1)
+                if closing > 0:
+                    value = tail[1:closing].strip()
+                    if value:
+                        candidates.append(value)
+                continue
+            # Stop before the next connector + declared-looking assignment, or
+            # at ordinary sentence/list delimiters.  This keeps extraction
+            # generic while preventing one field from swallowing following
+            # fields in a natural command.
+            stop_match = re.search(
+                r"\s+(?:with|and|using|for)\s+[A-Za-z_][A-Za-z0-9_]*\s+[\"']|"
+                r"\s+[A-Za-z_][A-Za-z0-9_]*\s+[\"']|"
+                r"[,;\n!?]",
+                tail,
+                flags=re.I,
+            )
+            value = tail[: stop_match.start()].strip() if stop_match else tail.strip()
+            value = value.strip().strip("'\"")
+            if value and len(value.split()) <= 6:
+                candidates.append(value)
+        if not candidates:
+            return None
+        return candidates[-1]
+
 
     async def execute_task(self, task_name: str | None, provided_inputs: dict[str, Any] | None = None, instruction: str | None = None) -> dict[str, Any]:
         if not task_name:
