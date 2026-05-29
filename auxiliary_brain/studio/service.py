@@ -584,14 +584,17 @@ class AgentStudioService:
         return runs[0]
 
     def snapshot(self) -> dict[str, Any]:
+        conversation_runs = self.store.list_json("traces/conversation_core")
+        agent_traces = self.store.list_json("traces/agent_delegation")
         return {
             "origin": "auxiliary_brain",
             "community_id": self.community_id,
             "participants": self.store.list_json("generated/agents"),
             "task_graphs": self.store.list_json("generated/tasks"),
             "task_runs": self.store.list_json("generated/results"),
+            "conversation_runs": conversation_runs,
             "deliveries": self.store.list_json("deliveries"),
-            "traces": self.store.list_json("traces/agent_delegation"),
+            "traces": agent_traces + conversation_runs,
         }
 
     async def create_participant(self, instruction: str, name: str | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:

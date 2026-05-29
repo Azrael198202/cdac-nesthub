@@ -2,20 +2,8 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "AI Core: main.py",
-      "type": "python",
-      "request": "launch",
-      "program": "${workspaceFolder}/main.py",
-      "console": "integratedTerminal",
-      "justMyCode": false,
-      "env": {
-        "PYTHONUNBUFFERED": "1",
-        "AI_CORE_DEBUG": "1"
-      }
-    },
-    {
-      "name": "AI Core: uvicorn reload",
-      "type": "python",
+      "name": "NestHub API - uvicorn main:app",
+      "type": "debugpy",
       "request": "launch",
       "module": "uvicorn",
       "args": [
@@ -24,24 +12,75 @@
         "127.0.0.1",
         "--port",
         "8000",
-        "--reload",
-        "--log-level",
-        "debug"
+        "--reload"
       ],
+      "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "justMyCode": false,
       "env": {
-        "PYTHONUNBUFFERED": "1",
-        "AI_CORE_DEBUG": "1"
+        "PYTHONPATH": "${workspaceFolder}",
+        "PYTHONUNBUFFERED": "1"
       }
     },
     {
-      "name": "AI Core: smoke_test",
-      "type": "python",
+      "name": "NestHub Main - main.py",
+      "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}/scripts/smoke_test.py",
+      "program": "${workspaceFolder}/main.py",
+      "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
-      "justMyCode": false
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Pytest - all tests",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": [
+        "-q"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Pytest - current file",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": [
+        "${file}",
+        "-q",
+        "-s"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Python - current file",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "PYTHONUNBUFFERED": "1"
+      }
     }
   ]
 }

@@ -43,48 +43,127 @@ class GenericWebResearchTool:
         self.trace_dir.mkdir(parents=True, exist_ok=True)
 
     async def search(self, *, query: str, max_results: int = 5, timeout_seconds: float = 20.0) -> dict[str, Any]:
-        """Best-effort generic web search using public HTML search pages.
+        """Best-effort generic web search with structured evidence output.
 
-        The exact search provider is not a business API connector; it is a
-        generic discovery mechanism. Failure is returned as structured data so
-        the runtime can escalate to an external model with web-search support.
+        This method is deliberately provider-neutral from the runtime point of
+        view.  It can use multiple no-key public discovery pages, normalizes the
+        heterogeneous HTML into the same result contract, and records each
+        attempt so verification can explain whether web retrieval really ran.
         """
         query = str(query or "").strip()
         if not query:
-            return self._record("search", {"status": "error", "error": "query is required", "results": []})
+            return self._record("search", {"status": "error", "error": "query is required", "results": [], "attempts": []})
 
-        # DuckDuckGo HTML endpoint is intentionally generic and requires no key.
-        # If blocked/unavailable, runtime can escalate through model route.
-        url = "https://duckduckgo.com/html/?q=" + quote_plus(query)
+        direct_url = query if self._safe_http_url(query) else ""
+        if direct_url:
+            return self._record("search", {
+                "status": "success",
+                "query": query,
+                "search_url": direct_url,
+                "results": [asdict(WebResearchResult(status="success", query=query, url=direct_url, title=direct_url, fetched_at=self._now()))],
+                "attempts": [{"provider": "direct_url", "status": "success", "url": direct_url}],
+            })
+
+        providers = self._search_provider_urls(query)
         results: list[dict[str, Any]] = []
-        try:
-            async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True, headers={"User-Agent": "AI-Core-Runtime/1.0"}) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-            soup = BeautifulSoup(response.text, "html.parser")
-            for item in soup.select(".result")[:max_results]:
-                a = item.select_one(".result__a")
-                snippet = item.select_one(".result__snippet")
-                href = a.get("href") if a else ""
-                results.append(asdict(WebResearchResult(
-                    status="success",
-                    query=query,
-                    url=self._normalize_search_url(str(href or "")),
-                    title=self._clean(a.get_text(" ") if a else ""),
-                    snippet=self._clean(snippet.get_text(" ") if snippet else ""),
-                    response_status=response.status_code,
-                    fetched_at=self._now(),
-                )))
-            return self._record("search", {"status": "success", "query": query, "search_url": url, "results": results})
-        except Exception as exc:
-            return self._record("search", {"status": "error", "query": query, "search_url": url, "error": str(exc), "results": results})
+        attempts: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        headers = self._http_headers()
+        per_attempt_timeout = max(3.0, float(timeout_seconds) / max(len(providers), 1))
+        async with httpx.AsyncClient(timeout=per_attempt_timeout, follow_redirects=True, headers=headers) as client:
+            for provider_name, url in providers:
+                try:
+                    response = await client.get(url)
+                    response.raise_for_status()
+                    extracted = self._extract_search_results(
+                        html_text=response.text or "",
+                        query=query,
+                        response_status=response.status_code,
+                        max_results=max_results,
+                    )
+                    kept = 0
+                    for item in extracted:
+                        item_url = str(item.get("url") or "").strip()
+                        if not item_url or item_url in seen_urls or not self._safe_http_url(item_url):
+                            continue
+                        seen_urls.add(item_url)
+                        results.append(item)
+                        kept += 1
+                        if len(results) >= max_results:
+                            break
+                    attempts.append({"provider": provider_name, "status": "success", "url": url, "kept_results": kept, "response_status": response.status_code})
+                    if len(results) >= max_results:
+                        break
+                except Exception as exc:
+                    attempts.append({"provider": provider_name, "status": "error", "url": url, "error": str(exc)})
+
+        status = "success" if results else "error"
+        payload: dict[str, Any] = {"status": status, "query": query, "search_url": providers[0][1], "results": results, "attempts": attempts}
+        if not results:
+            payload["error"] = "no search results collected"
+        return self._record("search", payload)
+
+    def _search_provider_urls(self, query: str) -> list[tuple[str, str]]:
+        encoded = quote_plus(query)
+        return [
+            ("primary_html_search", "https://duckduckgo.com/html/?q=" + encoded),
+            ("secondary_html_search", "https://html.duckduckgo.com/html/?q=" + encoded),
+        ]
+
+    def _extract_search_results(self, *, html_text: str, query: str, response_status: int, max_results: int) -> list[dict[str, Any]]:
+        soup = BeautifulSoup(html_text or "", "html.parser")
+        output: list[dict[str, Any]] = []
+
+        containers = soup.select(".result, .web-result, article, li")
+        if not containers:
+            containers = list(soup.find_all("a"))
+
+        for container in containers:
+            anchor = container.select_one("a.result__a") if hasattr(container, "select_one") else None
+            if anchor is None:
+                anchor = container if getattr(container, "name", "") == "a" else container.find("a", href=True)
+            if anchor is None or not anchor.get("href"):
+                continue
+            url = self._normalize_search_url(str(anchor.get("href") or ""))
+            if not self._safe_http_url(url) or self._is_search_navigation_url(url):
+                continue
+            title = self._clean(anchor.get_text(" ") or anchor.get("title") or url)
+            snippet_node = container.select_one(".result__snippet, .snippet, p") if hasattr(container, "select_one") else None
+            snippet = self._clean(snippet_node.get_text(" ") if snippet_node else container.get_text(" "))
+            if snippet == title:
+                snippet = ""
+            output.append(asdict(WebResearchResult(
+                status="success",
+                query=query,
+                url=url,
+                title=title[:300],
+                snippet=snippet[:600],
+                response_status=response_status,
+                fetched_at=self._now(),
+            )))
+            if len(output) >= max_results * 2:
+                break
+        return output
+
+    def _is_search_navigation_url(self, url: str) -> bool:
+        parsed = urlparse(url)
+        host = (parsed.netloc or "").casefold()
+        path = (parsed.path or "").casefold()
+        return ("duckduckgo" in host and path in {"/", "/html/", "/lite/"}) or path.startswith("/settings")
+
+    def _http_headers(self) -> dict[str, str]:
+        return {
+            "User-Agent": "Mozilla/5.0 (compatible; generic-runtime-evidence/1.0)",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,text/plain;q=0.7,*/*;q=0.5",
+            "Accept-Language": "en,ja,zh;q=0.8,*;q=0.5",
+        }
 
     async def fetch(self, *, url: str, timeout_seconds: float = 20.0, max_chars: int = 8000) -> dict[str, Any]:
         url = str(url or "").strip()
         if not self._safe_http_url(url):
             return self._record("fetch", {"status": "error", "url": url, "error": "Only http/https URLs are allowed."})
         try:
-            async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True, headers={"User-Agent": "AI-Core-Runtime/1.0"}) as client:
+            async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True, headers=self._http_headers()) as client:
                 response = await client.get(url)
                 response.raise_for_status()
             raw_html = response.text or ""

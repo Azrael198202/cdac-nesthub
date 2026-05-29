@@ -972,16 +972,67 @@ function toggleTracePanel(){
 async function refreshState(){ try{ const res=await fetch('/api/agent-studio/state'); const data=await res.json(); renderState(data); }catch(e){ console.error(e); }}
 function renderState(data){
   const ps=data.participants||[]; document.getElementById('participantCount').textContent=ps.length; const pbox=document.getElementById('participants'); pbox.innerHTML=''; if(!ps.length)pbox.innerHTML='<div class="empty">No participant.</div>'; ps.forEach(p=>{ const el=document.createElement('div'); el.className='item'; el.innerHTML=`<b>${escapeHtml(p.name||p.participant_id)}</b><div class="small">${escapeHtml(p.participant_id||'')}</div><span class="pill">${escapeHtml(p.status||'created')}</span><span class="pill">delegate_to_ai_core</span><div class="path">${escapeHtml(p._path||'')}</div>`; pbox.appendChild(el); });
-  const right=document.getElementById('rightPane'); const graphs=data.task_graphs||[]; const runs=data.task_runs||[]; const deliveries=data.deliveries||[]; const traces=data.traces||[]; document.getElementById('graphCount').textContent=graphs.length; right.innerHTML='';
+  const right=document.getElementById('rightPane'); const graphs=data.task_graphs||[]; const runs=data.task_runs||[]; const conversationRuns=data.conversation_runs||[]; const deliveries=data.deliveries||[]; const traces=data.traces||[]; document.getElementById('graphCount').textContent=graphs.length + conversationRuns.length; right.innerHTML='';
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Execution Flow</div>');
-  const latestRun = runs.length ? runs[0] : null;
-  if(latestRun){ right.appendChild(executionFlowCard(latestRun)); }
+  const latestRun = conversationRuns.length ? conversationRuns[0] : (runs.length ? runs[0] : null);
+  if(latestRun){ right.appendChild(conversationFlowCard(latestRun)); }
   else if(graphs.length){ right.appendChild(taskGraphFlowCard(graphs[0])); }
   else { right.insertAdjacentHTML('beforeend','<div class="empty">No execution flow yet.</div>'); }
+  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Conversation Workflow Runs</div>'); if(!conversationRuns.length) right.insertAdjacentHTML('beforeend','<div class="empty">No conversation workflow run.</div>'); conversationRuns.forEach(r=>right.appendChild(conversationRunCard(r)));
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Task Graphs</div>'); if(!graphs.length) right.insertAdjacentHTML('beforeend','<div class="empty">No task graph.</div>'); graphs.forEach(g=>right.appendChild(taskGraphCard(g)));
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Delegation Runs</div>'); if(!runs.length) right.insertAdjacentHTML('beforeend','<div class="empty">No run.</div>'); runs.forEach(r=>right.appendChild(runCard(r)));
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Deliveries</div>'); if(!deliveries.length) right.insertAdjacentHTML('beforeend','<div class="empty">No delivery.</div>'); deliveries.forEach(d=>right.appendChild(deliveryCard(d)));
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Runtime Traces</div>'); if(!traces.length) right.insertAdjacentHTML('beforeend','<div class="empty">No trace.</div>'); traces.forEach(t=>right.appendChild(compactJsonCard(t.trace_id||'trace', t)));
+}
+
+
+function conversationFlowCard(r){
+  const el=document.createElement('div');
+  el.className='item';
+  const events=Array.isArray(r.progress_events)?r.progress_events:[];
+  const results=r.results||{};
+  const verify=results.result_verification||{};
+  el.innerHTML='<div class="cardHeader"><b>'+escapeHtml(r.run_id||'conversation workflow')+'</b><span class="pill">'+escapeHtml((results.final_synthesis&&results.final_synthesis.status)||r.status||'completed')+'</span></div>';
+  const stages=['input_parsing','intent_recognition','context_awareness','workflow_planning','execution','result_verification','final_synthesis'];
+  if(events.length){
+    stages.forEach(stage=>{
+      const ev=events.filter(x=>x.stage===stage).slice(-1)[0];
+      el.appendChild(progressLine(stage, ev ? ev.status : (results[stage]?'completed':'waiting')));
+    });
+  } else { stages.forEach(stage=>el.appendChild(progressLine(stage, results[stage]?'completed':'waiting'))); }
+  const urls=Array.isArray(verify.source_urls)?verify.source_urls:[];
+  if(urls.length){
+    const src=document.createElement('div');
+    src.className='small';
+    src.innerHTML='<b>Evidence URLs:</b><br>'+urls.slice(0,8).map(u=>'<a href="'+escapeHtml(u)+'" target="_blank" rel="noreferrer">'+escapeHtml(u)+'</a>').join('<br>');
+    el.appendChild(src);
+  }
+  return el;
+}
+
+function conversationRunCard(r){
+  const results=r.results||{};
+  const intent=results.intent_recognition||{};
+  const plan=results.workflow_planning||{};
+  const execution=results.execution||{};
+  const verification=results.result_verification||{};
+  const urls=Array.isArray(verification.source_urls)?verification.source_urls:[];
+  const el=document.createElement('div');
+  el.className='item';
+  const signals=Array.isArray(intent.external_information_signals)?intent.external_information_signals:[];
+  el.innerHTML='<div class="cardHeader"><b>'+escapeHtml(r.run_id||'conversation run')+'</b><span class="pill">'+escapeHtml(verification.status||'completed')+'</span></div>'+
+    '<div class="small">intent: '+escapeHtml(intent.intent_type||'')+' / external: '+escapeHtml(intent.requires_external_information||intent.needs_external_execution||false)+' / gap: '+escapeHtml(intent.capability_gap_detected||false)+'</div>'+
+    '<div class="small">signals: '+escapeHtml(signals.join(', ')||'(none)')+'</div>'+
+    '<div class="small">locked: '+escapeHtml(JSON.stringify(plan.locked_execution||{}))+'</div>'+
+    '<div class="small">execution: '+escapeHtml(execution.execution_mode||'')+' / evidence: '+escapeHtml(verification.evidence_present||false)+' / sources: '+escapeHtml(urls.length)+'</div>';
+  if(urls.length){
+    const box=document.createElement('div');
+    box.className='detailsBox';
+    box.innerHTML='<details open><summary>Source URLs</summary><div class="pre compact">'+escapeHtml(urls.join('\n'))+'</div></details>';
+    el.appendChild(box);
+  }
+  el.appendChild(compactJsonCard('workflow_results', results));
+  return el;
 }
 
 function executionFlowCard(r){

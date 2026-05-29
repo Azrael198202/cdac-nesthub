@@ -642,3 +642,5 @@ ai_core/media/__pycache__/video_generation_service.cpython-313.pyc
 ai_core/media/__pycache__/video_generation_setup_wizard.cpython-311.pyc
 ai_core/media/__pycache__/video_generation_setup_wizard.cpython-313.pyc
 .DS_Store
+ai_core/media/providers/__pycache__/__init__.cpython-313.pyc
+ai_core/media/providers/__pycache__/generic_text_animation_provider.cpython-313.pyc

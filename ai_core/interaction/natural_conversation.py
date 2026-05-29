@@ -31,12 +31,16 @@ class NaturalConversationService:
             answer = "Please enter the content you want me to handle."
             return self._payload(answer, latest_task=latest_task, intent="empty_message")
 
-        # Direct conversation is intentionally outside task/graph execution.
-        # It may use a small model for user-facing wording, but it must not
-        # create workflow graphs or run the full cognitive pipeline.
-        answer = await self._model_answer(text)
-        if not answer:
-            answer = self._safe_fallback_answer(text)
+        # Agent Studio conversation now uses the generic ai_core conversation
+        # pipeline so external-information requests can pass through
+        # input_parsing -> intent_recognition -> context_awareness ->
+        # workflow_planning -> execution -> result_verification ->
+        # final_synthesis.  This remains domain-neutral: ai_core decides only
+        # capability/source policy, not business-specific behavior.
+        result = await self.core_runtime.run(text, latest_task=latest_task, session_id=session_id)
+        if isinstance(result, dict) and (result.get("final_answer") or result.get("message")):
+            return result
+        answer = self._safe_fallback_answer(text)
         return self._payload(answer, latest_task=latest_task, intent="general_chat", knowledge_used=False)
 
     def _payload(self, answer: str, *, latest_task: str | None, intent: str, knowledge_used: bool = False) -> dict[str, Any]:

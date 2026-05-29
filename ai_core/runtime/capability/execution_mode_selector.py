@@ -10,11 +10,35 @@ from ai_core.runtime.capability.semantic.semantic_capability_classifier import S
 
 
 class ExecutionModeSelector:
-    """Selects source mode from runtime/config contracts.
+    """Selects a generic execution source mode from runtime contracts.
 
-    Business/task vocabulary is not embedded in source code.  Optional routing
-    indicators live in JSON policy files and runtime-generated contracts.
+    Design boundary:
+    - ai_core owns only generic source-mode arbitration.
+    - Workflow/planning contracts are treated as locked decisions when present.
+    - Domain/task vocabulary belongs to runtime-generated contracts and config,
+      not this source file.
     """
+
+    METHOD_MODE_MAP = {
+        "web_search": "web_retrieval",
+        "api_call": "structured_provider",
+        "knowledge_base": "runtime_native",
+        "model_knowledge": "runtime_native",
+        "content_generation": "runtime_native",
+        "runtime_generated_tool": "runtime_native",
+        "existing_tool": "runtime_native",
+    }
+
+    STRATEGY_MODE_MAP = {
+        "web_evidence": "web_retrieval",
+        "web_retrieval": "web_retrieval",
+        "external_evidence": "web_retrieval",
+        "structured_provider": "structured_provider",
+        "api_call": "structured_provider",
+        "runtime_native": "runtime_native",
+        "local_knowledge": "runtime_native",
+        "knowledge_base": "runtime_native",
+    }
 
     def __init__(self) -> None:
         self.priority = SourcePriorityEngine()
@@ -22,33 +46,39 @@ class ExecutionModeSelector:
 
     def select(self, *, step: dict[str, Any], plan: dict[str, Any], state: dict[str, Any], capability: str) -> str:
         policy = self.policy_for(step=step, plan=plan, state=state, capability=capability)
-        strategy = self._strategy_values(step)
+        strategy = self._strategy_values(step, plan, state)
 
-        # v2.9.16: semantic runtime-local capability signals are allowed to
-        # override weak workflow strategy hints.  A model may propose a generic
-        # web/source strategy, but the runtime must make the final method
-        # decision from capability semantics and contracts.
+        # 1) Respect locked workflow contracts first.  The execution layer must
+        # not re-interpret a planning decision into another source family.
+        locked_mode = self._locked_mode(step, plan, state)
+        if locked_mode and self._mode_allowed(locked_mode, strategy, policy):
+            return locked_mode
+
+        # 2) Apply explicit source-mode contracts from planning/runtime policy.
+        explicit = self._explicit_mode(step, plan, state)
+        if explicit and self._mode_allowed(explicit, strategy, policy):
+            return explicit
+
+        # 3) Source-policy flags are generic and may require external evidence
+        # even when the semantic classifier is uncertain.
+        source_policy_mode = self._mode_from_source_policy(step, plan, state, policy)
+        if source_policy_mode and self._mode_allowed(source_policy_mode, strategy, policy):
+            return source_policy_mode
+
+        # 4) Execution strategy is still a planning-owned hint and should be
+        # evaluated before semantic text classification.
+        strategy_mode = self._mode_from_strategy(strategy, policy)
+        if strategy_mode and self._mode_allowed(strategy_mode, strategy, policy):
+            return strategy_mode
+
+        # 5) Semantic classification is a fallback, not an override of a locked
+        # plan. It remains config/taxonomy driven.
         classification = self.classifier.classify(step=step, plan=plan, state=state, capability=capability)
         category = str(classification.get("category") or "")
         semantic_mode = self._mode_from_category(category, policy)
-        if semantic_mode == "runtime_native" and not self._runtime_native_denied(semantic_mode, [], policy):
+        if semantic_mode and self._mode_allowed(semantic_mode, strategy, policy):
             return semantic_mode
 
-        strategy_mode = self._mode_from_strategy(strategy, policy)
-        if strategy_mode:
-            return strategy_mode
-
-        explicit = self._explicit_mode(step, plan, state)
-        if explicit and not self._runtime_native_denied(explicit, strategy, policy):
-            return explicit
-
-        mode = semantic_mode
-        if mode and not self._runtime_native_denied(mode, strategy, policy):
-            return mode
-
-        # Routing indicators are only applied to compact capability semantics, not
-        # to the full delegated prompt. This prevents generic wrapper phrases such
-        # as "primary runtime" from forcing runtime-native execution.
         text = self._contract_text([capability, step.get("step_type"), step.get("required_capability"), strategy])
         for rule in policy.get("routing_rules", []):
             if not isinstance(rule, dict):
@@ -59,22 +89,73 @@ class ExecutionModeSelector:
             indicators = [str(x).casefold() for x in rule.get("indicators", []) if str(x).strip()]
             if indicators and any(item in text for item in indicators):
                 mode = str(rule.get("execution_mode") or "").strip()
-                if mode:
+                if mode and self._mode_allowed(mode, strategy, policy):
                     return mode
 
         default = str(policy.get("unknown_capability_default") or "").strip()
-        if default and not self._runtime_native_denied(default, strategy, policy):
+        if default and self._mode_allowed(default, strategy, policy):
             return default
         for mode in self.priority.order(policy):
-            if mode != "runtime_native":
+            if self._mode_allowed(mode, strategy, policy):
                 return mode
         return self.priority.order(policy)[0]
 
+    def _locked_mode(self, *items: Any) -> str:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            method = str(item.get("execution_method") or "").strip()
+            if method in self.METHOD_MODE_MAP:
+                return self.METHOD_MODE_MAP[method]
+            decision = item.get("execution_decision") if isinstance(item.get("execution_decision"), dict) else {}
+            method = str(decision.get("execution_method") or decision.get("selected_method") or "").strip()
+            if method in self.METHOD_MODE_MAP:
+                return self.METHOD_MODE_MAP[method]
+            steps = item.get("planned_steps")
+            if isinstance(steps, list):
+                for step in steps:
+                    mode = self._locked_mode(step)
+                    if mode:
+                        return mode
+        return ""
+
+    def _mode_from_source_policy(self, *items: Any) -> str:
+        policy = items[-1] if items and isinstance(items[-1], dict) else {}
+        source_policies: list[dict[str, Any]] = []
+        for item in items[:-1]:
+            if not isinstance(item, dict):
+                continue
+            for key in ("source_policy", "execution_source_policy", "capability_policy"):
+                value = item.get(key)
+                if isinstance(value, dict):
+                    source_policies.append(value)
+            steps = item.get("planned_steps")
+            if isinstance(steps, list):
+                for step in steps:
+                    if isinstance(step, dict):
+                        for key in ("source_policy", "execution_source_policy", "capability_policy"):
+                            value = step.get(key)
+                            if isinstance(value, dict):
+                                source_policies.append(value)
+        for source_policy in source_policies:
+            if source_policy.get("requires_live_evidence") or source_policy.get("allow_external") is True:
+                preferred = source_policy.get("preferred_mode") or source_policy.get("execution_mode")
+                if isinstance(preferred, str) and preferred.strip():
+                    return preferred.strip()
+                for mode in self.priority.order(policy):
+                    if mode in {"structured_provider", "web_retrieval"}:
+                        return mode
+            if source_policy.get("allow_external") is False:
+                return "runtime_native"
+        return ""
 
     def _mode_from_strategy(self, strategy: list[str], policy: dict[str, Any]) -> str:
         normalized = {str(x).strip() for x in strategy if str(x).strip()}
         if not normalized:
             return ""
+        for value in normalized:
+            if value in self.STRATEGY_MODE_MAP:
+                return self.STRATEGY_MODE_MAP[value]
         for rule in policy.get("routing_rules", []):
             if not isinstance(rule, dict):
                 continue
@@ -84,6 +165,9 @@ class ExecutionModeSelector:
             if values and normalized.intersection(values):
                 return str(rule.get("execution_mode") or "").strip()
         return ""
+
+    def _mode_allowed(self, mode: str, strategy: list[str], policy: dict[str, Any]) -> bool:
+        return bool(mode) and not self._runtime_native_denied(mode, strategy, policy)
 
     def _runtime_native_denied(self, mode: str, strategy: list[str], policy: dict[str, Any]) -> bool:
         if mode != "runtime_native":
@@ -108,12 +192,15 @@ class ExecutionModeSelector:
             strategy = item.get("execution_strategy")
             if isinstance(strategy, list):
                 result.extend(str(x).strip() for x in strategy if str(x).strip())
+            method = item.get("execution_method")
+            if isinstance(method, str) and method.strip():
+                result.append(method.strip())
             steps = item.get("planned_steps")
             if isinstance(steps, list):
                 for step in steps:
                     if isinstance(step, dict):
                         result.extend(self._strategy_values(step))
-        return result
+        return list(dict.fromkeys(result))
 
     def _mode_from_category(self, category: str, policy: dict[str, Any]) -> str:
         if not category:
@@ -191,6 +278,7 @@ class ExecutionModeSelector:
 
     def _contract_text(self, values: list[Any]) -> str:
         parts: list[str] = []
+
         def walk(value: Any) -> None:
             if isinstance(value, str):
                 parts.append(value)
@@ -203,6 +291,7 @@ class ExecutionModeSelector:
             elif isinstance(value, list):
                 for item in value:
                     walk(item)
+
         for value in values:
             walk(value)
         return " ".join(parts).casefold()

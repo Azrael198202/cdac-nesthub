@@ -15,7 +15,7 @@ class CapabilityDispatcher:
 
     The dispatcher is intentionally policy-driven.  Core code only implements a
     generic rule scorer and a handler registry.  Capability trigger terms,
-    modality mappings, and future capability reservations live in configuration
+    modality mappings, and future capability placeholders live in configuration
     so source code does not become a collection of task-specific branches.
     """
 
