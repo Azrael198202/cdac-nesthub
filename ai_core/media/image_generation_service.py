@@ -803,7 +803,9 @@ class ImageGenerationService:
         # A ComfyUI child process must not inherit VSCode/debugpy/pydevd runner
         # state from the backend debug session. Inheriting those variables can
         # wrap ``python main.py`` with debugpy and make heavy imports such as
-        # torch/numpy exit with KeyboardInterrupt during startup.
+        # torch/numpy receive KeyboardInterrupt during startup. On Windows,
+        # debug adapters may also leak paths through PYTHONPATH, so remove only
+        # the debug-adapter entries while preserving ordinary application paths.
         blocked_prefixes = ("DEBUGPY", "PYDEVD", "VSCODE", "PYCHARM")
         blocked_names = {
             "PYTHONBREAKPOINT",
@@ -812,15 +814,28 @@ class ImageGenerationService:
             "DEBUGPY_LAUNCHER_PORT",
             "DEBUGPY_RUNNING",
         }
+        blocked_path_markers = ("debugpy", "pydevd", ".vscode", "ms-python")
         for key in list(env.keys()):
             upper = key.upper()
             if upper in blocked_names or any(upper.startswith(prefix) for prefix in blocked_prefixes):
                 env.pop(key, None)
+        pythonpath = env.get("PYTHONPATH")
+        if pythonpath:
+            safe_parts = [
+                part
+                for part in pythonpath.split(os.pathsep)
+                if part and not any(marker in part.lower() for marker in blocked_path_markers)
+            ]
+            if safe_parts:
+                env["PYTHONPATH"] = os.pathsep.join(safe_parts)
+            else:
+                env.pop("PYTHONPATH", None)
         env["PYTHONUNBUFFERED"] = "1"
         if force_cpu:
             env["CUDA_VISIBLE_DEVICES"] = ""
             env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
             env.setdefault("COMFYUI_FORCE_CPU", "1")
+            env.setdefault("PYTORCH_DISABLE_CUDA", "1")
         return env
 
     def _start_runtime_process(self, *, root: Path, runtime: dict[str, Any], force_cpu: bool = False) -> dict[str, Any]:
@@ -833,15 +848,28 @@ class ImageGenerationService:
         install = runtime.get("install") if isinstance(runtime.get("install"), dict) else {}
         if not isinstance(command, list) or not command:
             command = [self._runtime_python(root=root, runtime=runtime, install=install), "main.py", "--listen", str(runtime.get("host") or "127.0.0.1"), "--port", str(runtime.get("port") or "8188")]
-            if force_cpu and "--cpu" not in [str(x) for x in command]:
-                command.append("--cpu")
+        command = [str(x) for x in command]
+        # CPU fallback must apply even when a runtime config provides an
+        # explicit start_command.  Earlier builds only appended --cpu to the
+        # generated default command, so configured commands could still try GPU
+        # startup and exit before the port became healthy.
+        if force_cpu and "--cpu" not in command:
+            command.append("--cpu")
         env = self._comfyui_startup_env(force_cpu=force_cpu)
-        self._log_comfy_bootstrap_event("startup_begin", {"command": [str(x) for x in command], "root": str(root), "log_path": str(log_path), "force_cpu": force_cpu, "sanitized_debug_env": True})
+        creationflags = 0
+        if os.name == "nt":
+            creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        self._log_comfy_bootstrap_event("startup_begin", {"command": [str(x) for x in command], "root": str(root), "log_path": str(log_path), "force_cpu": force_cpu, "sanitized_debug_env": True, "isolated_process_group": bool(creationflags)})
         try:
+            # Keep each startup attempt readable. Previous traces caused false
+            # diagnosis because the tail contained an old debugpy stack even
+            # after a new isolated startup command had been issued.
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("", encoding="utf-8")
             with log_path.open("ab") as log:
-                proc = subprocess.Popen([str(x) for x in command], cwd=str(root), stdout=log, stderr=log, start_new_session=True, env=env)
+                proc = subprocess.Popen(command, cwd=str(root), stdout=log, stderr=log, start_new_session=(os.name != "nt"), creationflags=creationflags, env=env)
             (process_dir / "comfyui.pid").write_text(str(proc.pid), encoding="utf-8")
-            result = {"ok": True, "status": "starting", "pid": proc.pid, "log_path": str(log_path), "force_cpu": force_cpu}
+            result = {"ok": True, "status": "starting", "pid": proc.pid, "log_path": str(log_path), "force_cpu": force_cpu, "isolated_process_group": bool(creationflags)}
             self._log_comfy_bootstrap_event("startup_process_created", {**result, "root": str(root)})
             return result
         except Exception as exc:

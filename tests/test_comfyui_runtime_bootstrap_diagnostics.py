@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import os
 
 from ai_core.media.image_generation_service import ImageGenerationService
 
@@ -126,6 +127,7 @@ def test_comfyui_startup_forces_cpu_and_sanitizes_debug_env(tmp_path, monkeypatc
     monkeypatch.setenv("DEBUGPY_LAUNCHER_PORT", "12345")
     monkeypatch.setenv("PYDEVD_LOAD_VALUES_ASYNC", "1")
     monkeypatch.setenv("VSCODE_PID", "999")
+    monkeypatch.setenv("PYTHONPATH", "safe_path" + os.pathsep + r"C:\\Users\\hy\\.vscode\\extensions\\ms-python.debugpy")
 
     class FakeLog:
         def __enter__(self):
@@ -148,10 +150,12 @@ def test_comfyui_startup_forces_cpu_and_sanitizes_debug_env(tmp_path, monkeypatc
     class FakeProc:
         pid = 4321
 
-    def fake_popen(cmd, cwd=None, stdout=None, stderr=None, start_new_session=None, env=None):
+    def fake_popen(cmd, cwd=None, stdout=None, stderr=None, start_new_session=None, creationflags=0, env=None):
         captured["cmd"] = cmd
         captured["env"] = env
         captured["cwd"] = cwd
+        captured["start_new_session"] = start_new_session
+        captured["creationflags"] = creationflags
         return FakeProc()
 
     monkeypatch.setattr("subprocess.Popen", fake_popen)
@@ -162,6 +166,46 @@ def test_comfyui_startup_forces_cpu_and_sanitizes_debug_env(tmp_path, monkeypatc
     assert "DEBUGPY_LAUNCHER_PORT" not in captured["env"]
     assert "PYDEVD_LOAD_VALUES_ASYNC" not in captured["env"]
     assert "VSCODE_PID" not in captured["env"]
+    assert "debugpy" not in captured["env"].get("PYTHONPATH", "").lower()
+
+
+def test_comfyui_startup_appends_cpu_to_configured_command(tmp_path, monkeypatch):
+    service = ImageGenerationService()
+    root = tmp_path / "comfyui"
+    root.mkdir()
+    captured = {}
+
+    class FakeLog:
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def write(self, data):
+            return len(data)
+
+    original_open = Path.open
+    def fake_open(self, mode="r", *args, **kwargs):
+        if "b" in mode and self.name == "comfyui_startup.log":
+            return FakeLog()
+        return original_open(self, mode, *args, **kwargs)
+
+    class FakeProc:
+        pid = 4322
+
+    def fake_popen(cmd, cwd=None, stdout=None, stderr=None, start_new_session=None, creationflags=0, env=None):
+        captured["cmd"] = cmd
+        captured["creationflags"] = creationflags
+        return FakeProc()
+
+    monkeypatch.setattr(Path, "open", fake_open)
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    result = service._start_runtime_process(
+        root=root,
+        runtime={"start_command": ["python", "main.py", "--port", "8188"], "install": {"create_venv": False}},
+        force_cpu=True,
+    )
+    assert result["ok"] is True
+    assert captured["cmd"][-1] == "--cpu"
 
 
 def test_comfyui_force_cpu_when_preflight_reports_cpu_torch():
