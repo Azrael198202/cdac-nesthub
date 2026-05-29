@@ -374,11 +374,25 @@ class AgentParameterContractService:
             name = str(param.get("name") or "").strip()
             if not name:
                 continue
-            candidates = [f"{pid}.{name}", name]
+            participant_names = [
+                str(participant.get("display_name") or ""),
+                str(participant.get("agent_name") or ""),
+                str(participant.get("name") or ""),
+            ]
+            safe_participant_names = [self._safe_name(x) for x in participant_names if str(x).strip()]
+            candidates = [f"{pid}.{name}", f"{pid}_{name}", name]
+            for prefix in participant_names + safe_participant_names:
+                if prefix:
+                    candidates.extend([f"{prefix}.{name}", f"{prefix}_{name}"])
             value = None
+            lowered = {str(k).casefold(): k for k in provided.keys()}
             for key in candidates:
                 if key in provided:
                     value = provided[key]
+                    break
+                matched = lowered.get(str(key).casefold())
+                if matched is not None:
+                    value = provided[matched]
                     break
             values = self._normalize_list(value)
             if values:

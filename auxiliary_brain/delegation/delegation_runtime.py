@@ -17,6 +17,7 @@ from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.media import ImageGenerationService, VideoGenerationService
 from auxiliary_brain.parameters.agent_parameter_contract import AgentParameterContractService
 from ai_core.tools.runtime_registered_tool_service import RuntimeRegisteredToolService
+from ai_core.runtime.capability.registered_tool_parameter_bridge import RegisteredToolParameterBridge
 
 
 class AgentDelegationRuntime:
@@ -36,6 +37,7 @@ class AgentDelegationRuntime:
         self.image_generation_service = ImageGenerationService()
         self.video_generation_service = VideoGenerationService()
         self.registered_tool_service = RuntimeRegisteredToolService()
+        self.registered_tool_parameter_bridge = RegisteredToolParameterBridge()
 
     async def execute_task(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
         selected = self._fresh_task_participants(self._select_participants(task_graph, participants))
@@ -1238,8 +1240,9 @@ class AgentDelegationRuntime:
         if not tool_id:
             return None
         values = participant.get("runtime_parameters") if isinstance(participant.get("runtime_parameters"), dict) else {}
-        input_data = self._build_registered_tool_input(participant=participant, values=values)
-        missing = self._missing_registered_tool_inputs(participant=participant, input_data=input_data)
+        bridge_result = self.registered_tool_parameter_bridge.build_invocation(participant=participant, provided_values=values)
+        input_data = bridge_result.get("input_data") if isinstance(bridge_result.get("input_data"), dict) else {}
+        missing = bridge_result.get("missing") if isinstance(bridge_result.get("missing"), list) else []
         if missing:
             return AgentExecutionResult(
                 participant_id=self._participant_identity(participant),
@@ -1324,39 +1327,13 @@ class AgentDelegationRuntime:
         )
 
     def _build_registered_tool_input(self, *, participant: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
-        profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
-        summary = profile.get("tool_summary") if isinstance(profile.get("tool_summary"), dict) else {}
-        schema = summary.get("input_schema") if isinstance(summary.get("input_schema"), dict) else {}
-        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
-        out: dict[str, Any] = {}
-        for name, prop in properties.items():
-            if not isinstance(prop, dict):
-                prop = {}
-            raw = values.get(name)
-            if raw in (None, "", [], {}):
-                continue
-            if str(prop.get("type") or "") == "array":
-                if isinstance(raw, list):
-                    out[name] = raw
-                else:
-                    out[name] = [raw]
-            else:
-                if isinstance(raw, list):
-                    out[name] = self._first_scalar(raw)
-                else:
-                    out[name] = raw
-        return out
+        bridge_result = self.registered_tool_parameter_bridge.build_invocation(participant=participant, provided_values=values)
+        return bridge_result.get("input_data") if isinstance(bridge_result.get("input_data"), dict) else {}
 
     def _missing_registered_tool_inputs(self, *, participant: dict[str, Any], input_data: dict[str, Any]) -> list[str]:
-        profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
-        summary = profile.get("tool_summary") if isinstance(profile.get("tool_summary"), dict) else {}
-        schema = summary.get("input_schema") if isinstance(summary.get("input_schema"), dict) else {}
-        required = schema.get("required") if isinstance(schema.get("required"), list) else []
-        missing = []
-        for name in required:
-            if input_data.get(str(name)) in (None, "", [], {}):
-                missing.append(str(name))
-        return missing
+        bridge_result = self.registered_tool_parameter_bridge.build_invocation(participant=participant, provided_values=input_data)
+        missing = bridge_result.get("missing") if isinstance(bridge_result.get("missing"), list) else []
+        return [str(x) for x in missing]
 
     def _configuration_fields_for_registered_tool(self, result: dict[str, Any]) -> list[dict[str, Any]]:
         tool = result.get("tool") if isinstance(result.get("tool"), dict) else {}
