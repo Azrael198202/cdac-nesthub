@@ -655,3 +655,4 @@ ai_core/tools/__pycache__/runtime_registered_tool_service.cpython-313.pyc
 ai_core/capabilities/__pycache__/runtime_capability_gap_implementer.cpython-313.pyc
 ai_core/connections/__pycache__/__init__.cpython-313.pyc
 ai_core/connections/__pycache__/connection_profile_store.cpython-313.pyc
+tests/__pycache__/test_runtime_capability_acquisition_research_and_connected_action.cpython-313-pytest-9.0.2.pyc

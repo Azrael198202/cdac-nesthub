@@ -1,1 +1,1 @@
-v13.45-comfyui-cpu-startup-fallback
+v14-generic-capability-acquisition-ui-config-secret

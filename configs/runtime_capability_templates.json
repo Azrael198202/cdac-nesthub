@@ -217,6 +217,182 @@
           "content": "# configured_runtime_action_probe\n\nRuntime-generated capability artifact used to validate generic input, connection, secret, approval, sandbox validation, registry, and execution lifecycle support.\n"
         }
       ]
+    },
+    {
+      "template_id": "connected_message_delivery_adapter",
+      "description": "Runtime-generated connected action capability with input/config/secret/approval contracts. The concrete transport details are provided by generated schema and runtime profile, not ai_core.",
+      "match_terms": [
+        "send messages",
+        "external mail service",
+        "mail service",
+        "message service",
+        "send through external",
+        "external message",
+        "mail sender",
+        "send mail",
+        "send email",
+        "邮件",
+        "メール",
+        "メッセージ",
+        "send",
+        "messages",
+        "mail",
+        "service",
+        "external",
+        "generate connection schema",
+        "secret schema",
+        "approval policy"
+      ],
+      "required_terms": [
+        "send"
+      ],
+      "capabilities": [
+        "runtime_connected_action",
+        "external_message_delivery"
+      ],
+      "dependencies": [],
+      "entrypoint": {
+        "module": "tool.py",
+        "function": "run"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "prepare",
+              "verify"
+            ]
+          },
+          "message": {
+            "type": "object",
+            "properties": {
+              "targets": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "title": {
+                "type": "string"
+              },
+              "body": {
+                "type": "string"
+              },
+              "attachments": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              }
+            },
+            "required": [
+              "targets",
+              "title",
+              "body"
+            ]
+          }
+        },
+        "required": [
+          "message"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "data": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "connection_schema": {
+        "type": "object",
+        "properties": {
+          "service_endpoint": {
+            "type": "string"
+          },
+          "account_identifier": {
+            "type": "string"
+          },
+          "transport_mode": {
+            "type": "string"
+          },
+          "security_mode": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "service_endpoint",
+          "account_identifier",
+          "transport_mode"
+        ]
+      },
+      "secret_schema": {
+        "type": "object",
+        "properties": {
+          "primary_credential": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "primary_credential"
+        ]
+      },
+      "approval_policy": {
+        "required": true,
+        "reason": "runtime_generated_external_effect_possible",
+        "preview_fields": [
+          "message"
+        ]
+      },
+      "runtime_interface": {
+        "supports_connection_profile": true,
+        "supports_secret_refs": true,
+        "supports_approval": true
+      },
+      "verification_input": {
+        "mode": "verify",
+        "message": {
+          "targets": [
+            "sandbox@example.invalid"
+          ],
+          "title": "verification",
+          "body": "verification body"
+        },
+        "_runtime": {
+          "connection": {
+            "service_endpoint": "local-sandbox",
+            "account_identifier": "tester",
+            "transport_mode": "sandbox"
+          },
+          "secrets": {
+            "primary_credential": "hidden"
+          },
+          "secret_refs": {
+            "primary_credential": "runtime-secret-ref"
+          }
+        }
+      },
+      "verification_expectations": {
+        "status": "success"
+      },
+      "files": [
+        {
+          "path": "tool.py",
+          "content": "from __future__ import annotations\n\nfrom typing import Any\n\n\ndef _runtime_section(payload: dict[str, Any]) -> dict[str, Any]:\n    runtime = payload.get(\"_runtime\") if isinstance(payload.get(\"_runtime\"), dict) else {}\n    return runtime\n\n\ndef run(payload: dict[str, Any] | None = None) -> dict[str, Any]:\n    data = payload if isinstance(payload, dict) else {}\n    runtime = _runtime_section(data)\n    connection = runtime.get(\"connection\") if isinstance(runtime.get(\"connection\"), dict) else {}\n    secrets = runtime.get(\"secrets\") if isinstance(runtime.get(\"secrets\"), dict) else {}\n    secret_refs = runtime.get(\"secret_refs\") if isinstance(runtime.get(\"secret_refs\"), dict) else {}\n    mode = str(data.get(\"mode\") or \"prepare\").lower()\n    content = data.get(\"message\") if isinstance(data.get(\"message\"), dict) else {}\n    if not connection:\n        return {\n            \"status\": \"requires_configuration\",\n            \"data\": {\n                \"configured\": False,\n                \"reason\": \"runtime_connection_profile_missing\",\n            },\n        }\n    if not secrets and not secret_refs:\n        return {\n            \"status\": \"requires_configuration\",\n            \"data\": {\n                \"configured\": False,\n                \"reason\": \"runtime_secret_reference_missing\",\n            },\n        }\n    if mode == \"verify\":\n        return {\n            \"status\": \"success\",\n            \"data\": {\n                \"configured\": True,\n                \"secret_available\": bool(secrets or secret_refs),\n                \"connection_keys\": sorted(connection.keys()),\n                \"secret_keys\": sorted((secrets or secret_refs).keys()),\n                \"external_action_executed\": False,\n                \"verification_only\": True,\n            },\n        }\n    return {\n        \"status\": \"success\",\n        \"data\": {\n            \"configured\": True,\n            \"secret_available\": bool(secrets or secret_refs),\n            \"external_action_executed\": False,\n            \"delivery_prepared\": True,\n            \"message_summary\": {\n                \"target_count\": len(content.get(\"targets\") or []),\n                \"title_present\": bool(content.get(\"title\")),\n                \"body_present\": bool(content.get(\"body\")),\n            },\n        },\n        \"provenance\": {\n            \"secret_values_exposed\": False,\n            \"runtime_connection_profile_used\": bool(connection),\n        },\n    }\n"
+        },
+        {
+          "path": "test_tool.py",
+          "content": "from tool import run\n\n\ndef test_connected_message_adapter_requires_runtime_profile():\n    result = run({\"message\": {\"targets\": [\"a@example.invalid\"], \"title\": \"T\", \"body\": \"B\"}})\n    assert result[\"status\"] == \"requires_configuration\"\n\n\ndef test_connected_message_adapter_verifies_with_runtime_profile():\n    result = run({\n        \"mode\": \"verify\",\n        \"message\": {\"targets\": [\"a@example.invalid\"], \"title\": \"T\", \"body\": \"B\"},\n        \"_runtime\": {\n            \"connection\": {\"service_endpoint\": \"local-sandbox\", \"account_identifier\": \"tester\", \"transport_mode\": \"sandbox\"},\n            \"secrets\": {\"primary_credential\": \"hidden\"},\n            \"secret_refs\": {\"primary_credential\": \"runtime-secret-ref\"},\n        },\n    })\n    assert result[\"status\"] == \"success\"\n    assert result[\"data\"][\"configured\"] is True\n    assert result[\"data\"][\"external_action_executed\"] is False\n"
+        }
+      ]
     }
   ]
 }

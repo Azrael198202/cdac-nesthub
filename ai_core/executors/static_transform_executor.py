@@ -720,6 +720,8 @@ class StaticTransformExecutor:
         return candidates
 
     def _collect_missing(self, input_record: dict[str, Any], intent_record: dict[str, Any], known: dict[str, Any]) -> list[dict[str, Any]]:
+        if self._allows_research_to_resolve_missing(intent_record):
+            return []
         fields: list[Any] = []
         for record in (input_record, intent_record):
             for key in ("missing_information", "missing_fields", "required_missing", "missing_required"):
@@ -742,6 +744,17 @@ class StaticTransformExecutor:
             seen.add(name)
             normalized.append({"name": name, "label": label, "required": True})
         return normalized
+
+
+    def _allows_research_to_resolve_missing(self, intent_record: dict[str, Any]) -> bool:
+        if not isinstance(intent_record, dict):
+            return False
+        if bool(intent_record.get("capability_gap_detected")):
+            return True
+        intent_type = str(intent_record.get("intent_type") or intent_record.get("classified_intent") or "").casefold()
+        signals = intent_record.get("external_information_signals") if isinstance(intent_record.get("external_information_signals"), list) else []
+        signal_text = " ".join(str(x).casefold() for x in signals)
+        return ("capability_gap" in intent_type or "runtime_capability" in intent_type or "capability_gap" in signal_text) and bool(intent_record.get("requires_external_information") or intent_record.get("needs_external_execution"))
 
     def _action_type_for_method(self, method: str) -> str:
         for action_type, mapped_method in self.FIXED_ACTION_METHODS.items():

@@ -329,6 +329,8 @@ class WorkflowContractBuilder:
         return "ask_user"
 
     def has_missing_required_input(self, *, state: dict[str, Any], result: dict[str, Any]) -> bool:
+        if self.allows_research_to_resolve_missing(state=state, result=result):
+            return False
         for container in (result, state.get("results") if isinstance(state.get("results"), dict) else {}):
             for candidate in self.iter_nested_dicts(container, max_depth=6):
                 for key in ("missing_required", "missing_information", "blocking_missing_information", "missing_fields"):
@@ -337,6 +339,24 @@ class WorkflowContractBuilder:
                         return True
                     if isinstance(value, list) and any(v not in (None, "", [], {}) for v in value):
                         return True
+        return False
+
+
+    def allows_research_to_resolve_missing(self, *, state: dict[str, Any], result: dict[str, Any]) -> bool:
+        containers = [result]
+        results = state.get("results") if isinstance(state.get("results"), dict) else {}
+        containers.append(results)
+        for container in containers:
+            for candidate in self.iter_nested_dicts(container, max_depth=6):
+                if not isinstance(candidate, dict):
+                    continue
+                if bool(candidate.get("capability_gap_detected")):
+                    return True
+                intent_type = str(candidate.get("intent_type") or candidate.get("classified_intent") or "").casefold()
+                signals = candidate.get("external_information_signals") if isinstance(candidate.get("external_information_signals"), list) else []
+                signal_text = " ".join(str(x).casefold() for x in signals)
+                if ("capability_gap" in intent_type or "runtime_capability" in intent_type or "capability_gap" in signal_text) and bool(candidate.get("requires_external_information") or candidate.get("needs_external_execution")):
+                    return True
         return False
 
     def default_step(self, *, state: dict[str, Any], result: dict[str, Any], decision: dict[str, Any], slim_user_input: str) -> dict[str, Any]:
