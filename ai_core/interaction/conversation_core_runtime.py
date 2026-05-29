@@ -622,10 +622,14 @@ class ConversationCoreRuntime:
         sandbox validation passed, whether it was registered, and the next action.
         """
         urls = evidence.get("urls") if isinstance(evidence.get("urls"), list) else []
+        # Capability-acquisition status is an operational runtime report. Keep it
+        # in English so command-driven workflows remain stable even if the
+        # surrounding conversation contains CJK feedback or diagnostics.
+        lang = "en"
         if not urls:
             return (
-                "外部资料检索没有取得可验证材料，因此没有生成或注册工具。\n"
-                "请调整检索关键词或允许使用本地策略模板后重新执行。"
+                "No verified source material was retrieved, so no tool was generated or registered.\n"
+                "Next step: refine the search query, or allow a local policy-backed template and run again."
             )
         runtime_impl = implementation.get("runtime_implementation") if isinstance(implementation.get("runtime_implementation"), dict) else {}
         runtime_status = str(runtime_impl.get("status") or "not_requested")
@@ -634,36 +638,69 @@ class ConversationCoreRuntime:
         registration = runtime_impl.get("registration") if isinstance(runtime_impl.get("registration"), dict) else {}
         lines: list[str] = []
         if runtime_status in {"implemented_tested_registered", "implemented_tested_registered_verified"}:
-            lines.append("工具生成已完成：已完成资料检索、代码生成、沙箱验证、注册和验证运行。")
-            lines.append("下一步：在 Agent Studio 中填写连接配置和密钥后即可运行；涉及外部发送时需要用户确认。")
+            lines.extend(self._localized_capability_summary(lang, "success", source_count=len(urls), registered=True))
         elif runtime_status == "generated_but_validation_failed":
-            reason = self._runtime_validation_failure_summary(validation)
-            lines.append("工具代码已经生成，但沙箱验证未通过，因此没有注册。")
-            lines.append(f"原因：{reason}")
-            lines.append("下一步：修复验证环境或生成代码后重新执行验证。")
+            reason = self._runtime_validation_failure_summary(validation, language=lang)
+            lines.extend(self._localized_capability_summary(lang, "validation_failed", reason=reason, source_count=len(urls), registered=False))
         elif runtime_status == "generated_but_verification_failed":
-            reason = self._runtime_validation_failure_summary(verification)
-            lines.append("工具代码通过了基础沙箱检查，但验证运行失败，因此没有注册。")
-            lines.append(f"原因：{reason}")
-            lines.append("下一步：根据验证运行错误修复工具或配置后重新执行。")
+            reason = self._runtime_validation_failure_summary(verification, language=lang)
+            lines.extend(self._localized_capability_summary(lang, "verification_failed", reason=reason, source_count=len(urls), registered=False))
         elif runtime_status == "dependency_resolution_failed":
-            lines.append("工具生成前的依赖检查失败，因此没有注册。")
-            lines.append("下一步：检查依赖策略或改为无需外部依赖的实现后重新执行。")
+            lines.extend(self._localized_capability_summary(lang, "dependency_failed", source_count=len(urls), registered=False))
         elif runtime_status == "blocked":
-            reason = str(runtime_impl.get("reason") or "没有匹配到可安全生成的运行时模板")
-            lines.append("已取得资料，但运行时没有生成可注册工具。")
-            lines.append(f"原因：{reason}")
+            reason = str(runtime_impl.get("reason") or "no safe runtime template matched")
+            lines.extend(self._localized_capability_summary(lang, "blocked", reason=reason, source_count=len(urls), registered=False))
         else:
-            lines.append("已完成资料检索，但当前请求没有进入可注册工具的完整生成流程。")
-        if urls:
-            lines.append(f"已验证资料来源：{len(urls)} 个。")
-        if registration:
-            lines.append("注册状态：已更新运行时工具注册表。")
-        elif runtime_status not in {"implemented_tested_registered", "implemented_tested_registered_verified"}:
-            lines.append("注册状态：未注册。")
-        return "\n".join(lines).strip()
+            lines.extend(self._localized_capability_summary(lang, "incomplete", source_count=len(urls), registered=bool(registration)))
+        return "\n".join(line for line in lines if line).strip()
 
-    def _runtime_validation_failure_summary(self, validation: dict[str, Any]) -> str:
+    def _user_visible_language(self, text: str) -> str:
+        value = str(text or "")
+        # Keep this generic: choose Chinese only when the actual user request is
+        # predominantly CJK. Capability names or programming-language words must
+        # not force Chinese output.
+        cjk = sum(1 for ch in value if "\u4e00" <= ch <= "\u9fff")
+        ascii_letters = sum(1 for ch in value if ("a" <= ch.lower() <= "z"))
+        return "zh" if cjk > 0 and cjk >= max(3, ascii_letters // 3) else "en"
+
+    def _localized_capability_summary(
+        self,
+        language: str,
+        status: str,
+        *,
+        reason: str = "",
+        source_count: int = 0,
+        registered: bool = False,
+    ) -> list[str]:
+        # Capability acquisition is a runtime operation report. Keep it in
+        # English to avoid language drift when the original command is English
+        # but surrounding user feedback contains another language.
+        templates = {
+            "success": [
+                "Tool generation completed: source retrieval, code generation, sandbox validation, registration, and verification run all passed.",
+                "Next step: fill connection settings and secrets in Agent Studio. External side-effect execution still requires user approval.",
+            ],
+            "validation_failed": [
+                "Tool code was generated, but sandbox validation failed, so it was not registered.",
+                f"Reason: {reason}",
+                "Next step: fix the validation environment or regenerate the code, then rerun validation.",
+            ],
+            "verification_failed": [
+                "Tool code passed basic sandbox checks, but the verification run failed, so it was not registered.",
+                f"Reason: {reason}",
+                "Next step: fix the tool or runtime configuration according to the verification error, then rerun validation.",
+            ],
+            "dependency_failed": ["Dependency checks failed before tool generation, so nothing was registered."],
+            "blocked": ["Source material was retrieved, but the runtime did not generate a registrable tool.", f"Reason: {reason}"],
+            "incomplete": ["Source retrieval completed, but the request did not finish the full registrable-tool lifecycle."],
+        }
+        lines = list(templates.get(status, templates["incomplete"]))
+        if source_count:
+            lines.append(f"Verified source count: {source_count}.")
+        lines.append("Registration status: registered." if registered else "Registration status: not registered.")
+        return lines
+
+    def _runtime_validation_failure_summary(self, validation: dict[str, Any], *, language: str = "en") -> str:
         checks = validation.get("checks") if isinstance(validation.get("checks"), list) else []
         for check in checks:
             if not isinstance(check, dict):
@@ -674,17 +711,26 @@ class ConversationCoreRuntime:
             stderr = str(check.get("stderr") or check.get("error") or "").strip()
             lowered = stderr.casefold()
             if "debugpy" in lowered or "pydevd" in lowered or ".vscode" in lowered:
-                return f"{name} 在启动子进程时被 IDE/debugger 环境污染，未能真正执行到生成工具代码。"
+                interrupted = "keyboardinterrupt" in lowered or int(check.get("returncode") or 0) in {3221225786, -1073741510}
+                if interrupted:
+                    return (
+                        f"{name} subprocess was interrupted during Python startup while IDE/debugger subprocess debugging was active; "
+                        "the generated tool code itself was not reached."
+                    )
+                return (
+                    f"{name} started through IDE/debugger subprocess bootstrap instead of a clean isolated Python process; "
+                    "the generated tool code itself was not reached."
+                )
             if "syntaxerror" in lowered:
-                return f"{name} 发现生成代码存在语法错误。"
+                return f"{name} found a syntax error in the generated code."
             if "modulenotfounderror" in lowered:
-                return f"{name} 发现生成代码引用了不可用模块。"
+                return f"{name} found an unavailable module import."
             if stderr:
                 compact = " ".join(stderr.split())[:220]
-                return f"{name} 失败：{compact}"
-            return f"{name} 返回非零退出码。"
+                return f"{name} failed: {compact}"
+            return f"{name} returned a non-zero exit code."
         reason = str(validation.get("reason") or "sandbox_validation_failed").strip()
-        return reason or "沙箱验证未通过。"
+        return reason or "sandbox validation failed."
 
     def _implementation_requested(self, text: str) -> bool:
         value = " " + str(text or "").strip().casefold() + " "
@@ -692,7 +738,9 @@ class ConversationCoreRuntime:
             " acquire runtime capability ", " capability acquisition ", " acquire capability ",
             " generate implementation ", " generate tests ", " verify capability acquisition ",
             " implement ", " build ", " generate ", " create capability ", " add support ",
-            " register ", "实装", "实现", "生成", "注册", "構築", "実装", "登録",
+            " register ", " current runtime does not have ", " does not have this capability ",
+            " missing capability ", " capability gap ", " find a solution ",
+            "实装", "实现", "生成", "注册", "構築", "実装", "登録",
         )
         return any(marker in value for marker in markers)
 
@@ -842,7 +890,8 @@ class ConversationCoreRuntime:
             " register capability ", " verify capability acquisition ",
             " implement ", " add support ", " support ", " integrate ", " install ",
             " configure ", " generate code ", " fix ", " cannot handle ", " unable to ",
-            " not supported ", " how to build ", " how to create ", " how to implement ",
+            " not supported ", " does not have this capability ", " current runtime does not have ",
+            " missing capability ", " capability gap ", " how to build ", " how to create ", " how to implement ",
             "実装", "対応", "導入", "構築", "修正", "できない", "サポート",
             "实现", "实装", "支持", "接入", "集成", "安装", "配置", "修复", "无法处理", "不能处理", "怎么实现",
         )
