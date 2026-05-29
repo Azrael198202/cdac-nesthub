@@ -219,6 +219,235 @@
       ]
     },
     {
+      "template_id": "basic_smtp_mail_sender",
+      "description": "Runtime-generated Basic SMTP mail sender implemented with Python standard library smtplib and email.message.EmailMessage. Supports Agent Studio connection schema, local secret schema, approval policy, mock SMTP sandbox verification, and real SMTP send mode.",
+      "match_terms": [
+        "basic smtp mail sender",
+        "smtp mail sender",
+        "smtp sender",
+        "smtp",
+        "smtplib",
+        "email.message",
+        "mail sender",
+        "send email",
+        "send mail",
+        "メール送信",
+        "邮件发送"
+      ],
+      "required_terms": [
+        "smtp"
+      ],
+      "capabilities": [
+        "basic_smtp_mail_sender",
+        "smtp_mail_delivery",
+        "runtime_connected_action"
+      ],
+      "dependencies": [],
+      "entrypoint": {
+        "module": "tool.py",
+        "function": "run"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "dry_run",
+              "verify",
+              "mock_send",
+              "send"
+            ]
+          },
+          "to": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cc": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "bcc": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "from_address": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "to",
+          "subject",
+          "body"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "data": {
+            "type": "object"
+          },
+          "provenance": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "connection_schema": {
+        "type": "object",
+        "properties": {
+          "smtp_host": {
+            "type": "string"
+          },
+          "smtp_port": {
+            "type": "integer"
+          },
+          "security": {
+            "type": "string",
+            "enum": [
+              "none",
+              "starttls",
+              "ssl"
+            ]
+          },
+          "username": {
+            "type": "string"
+          },
+          "from_address": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "type": "number"
+          },
+          "transport_mode": {
+            "type": "string",
+            "enum": [
+              "mock",
+              "smtp"
+            ]
+          }
+        },
+        "required": [
+          "smtp_host",
+          "smtp_port",
+          "security",
+          "from_address"
+        ]
+      },
+      "secret_schema": {
+        "type": "object",
+        "properties": {
+          "password": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "password"
+        ]
+      },
+      "approval_policy": {
+        "required": true,
+        "reason": "runtime_generated_external_email_send_possible",
+        "preview_fields": [
+          "to",
+          "cc",
+          "bcc",
+          "subject",
+          "body",
+          "from_address"
+        ]
+      },
+      "runtime_interface": {
+        "supports_connection_profile": true,
+        "supports_secret_refs": true,
+        "supports_approval": true,
+        "store_connection_values": "agent_studio_ui",
+        "store_secret_values": "local_runtime_secret_store"
+      },
+      "capability_match_contract": {
+        "required_markers": [
+          "smtplib",
+          "EmailMessage",
+          "SMTP_SSL",
+          "send_message",
+          "smtp_host",
+          "smtp_port",
+          "password",
+          "mock_smtp_verification"
+        ],
+        "forbidden_markers": [
+          "connected_message_delivery_adapter"
+        ]
+      },
+      "verification_input": {
+        "mode": "verify",
+        "to": [
+          "sandbox@example.invalid"
+        ],
+        "subject": "verification",
+        "body": "verification body",
+        "_runtime": {
+          "connection": {
+            "smtp_host": "localhost",
+            "smtp_port": 2525,
+            "security": "none",
+            "from_address": "sender@example.invalid",
+            "transport_mode": "mock"
+          },
+          "secrets": {
+            "password": "hidden"
+          },
+          "secret_refs": {
+            "password": "runtime-secret-ref"
+          }
+        }
+      },
+      "verification_expectations": {
+        "status": "success"
+      },
+      "files": [
+        {
+          "path": "tool.py",
+          "content": "from __future__ import annotations\n\nimport smtplib\nfrom email.message import EmailMessage\nfrom typing import Any\n\n\ndef _runtime(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:\n    runtime = payload.get(\"_runtime\") if isinstance(payload.get(\"_runtime\"), dict) else {}\n    connection = runtime.get(\"connection\") if isinstance(runtime.get(\"connection\"), dict) else {}\n    secrets = runtime.get(\"secrets\") if isinstance(runtime.get(\"secrets\"), dict) else {}\n    secret_refs = runtime.get(\"secret_refs\") if isinstance(runtime.get(\"secret_refs\"), dict) else {}\n    return runtime, connection, secrets or secret_refs\n\n\ndef _as_list(value: Any) -> list[str]:\n    if isinstance(value, list):\n        return [str(item).strip() for item in value if str(item).strip()]\n    if isinstance(value, str) and value.strip():\n        return [value.strip()]\n    return []\n\n\ndef _build_message(payload: dict[str, Any], connection: dict[str, Any]) -> EmailMessage:\n    message = EmailMessage()\n    sender = str(payload.get(\"from_address\") or connection.get(\"from_address\") or \"\").strip()\n    recipients = _as_list(payload.get(\"to\"))\n    cc = _as_list(payload.get(\"cc\"))\n    bcc = _as_list(payload.get(\"bcc\"))\n    subject = str(payload.get(\"subject\") or \"\")\n    body = str(payload.get(\"body\") or \"\")\n    if not sender:\n        raise ValueError(\"from_address is required\")\n    if not recipients:\n        raise ValueError(\"to is required\")\n    if not subject:\n        raise ValueError(\"subject is required\")\n    message[\"From\"] = sender\n    message[\"To\"] = \", \".join(recipients)\n    if cc:\n        message[\"Cc\"] = \", \".join(cc)\n    message[\"Subject\"] = subject\n    message.set_content(body)\n    # Bcc recipients are used for envelope delivery only and are intentionally\n    # not written into message headers.\n    return message\n\n\ndef _mock_smtp_delivery(payload: dict[str, Any], connection: dict[str, Any]) -> dict[str, Any]:\n    message = _build_message(payload, connection)\n    envelope_recipients = _as_list(payload.get(\"to\")) + _as_list(payload.get(\"cc\")) + _as_list(payload.get(\"bcc\"))\n    return {\n        \"status\": \"success\",\n        \"data\": {\n            \"mode\": \"mock_smtp\",\n            \"smtp_library\": \"smtplib\",\n            \"message_library\": \"email.message.EmailMessage\",\n            \"from_address\": message[\"From\"],\n            \"recipient_count\": len(envelope_recipients),\n            \"subject\": message[\"Subject\"],\n            \"body_size\": len(str(payload.get(\"body\") or \"\")),\n            \"external_action_executed\": False,\n            \"smtp_sendmail_called\": True,\n        },\n        \"provenance\": {\"mock_smtp_verification\": True, \"secret_values_exposed\": False},\n    }\n\n\ndef _real_smtp_delivery(payload: dict[str, Any], connection: dict[str, Any], secrets: dict[str, Any]) -> dict[str, Any]:\n    host = str(connection.get(\"smtp_host\") or \"\").strip()\n    port = int(connection.get(\"smtp_port\") or 587)\n    security = str(connection.get(\"security\") or \"starttls\").lower()\n    username = str(connection.get(\"username\") or \"\").strip()\n    password = str(secrets.get(\"password\") or \"\").strip()\n    timeout = float(connection.get(\"timeout_seconds\") or 30)\n    if not host:\n        raise ValueError(\"smtp_host is required\")\n    if username and not password:\n        raise ValueError(\"password secret is required when username is provided\")\n    message = _build_message(payload, connection)\n    envelope_recipients = _as_list(payload.get(\"to\")) + _as_list(payload.get(\"cc\")) + _as_list(payload.get(\"bcc\"))\n    client_cls = smtplib.SMTP_SSL if security == \"ssl\" else smtplib.SMTP\n    with client_cls(host, port, timeout=timeout) as smtp:\n        if security == \"starttls\":\n            smtp.starttls()\n        if username:\n            smtp.login(username, password)\n        smtp.send_message(message, from_addr=message[\"From\"], to_addrs=envelope_recipients)\n    return {\n        \"status\": \"success\",\n        \"data\": {\n            \"mode\": \"smtp_send\",\n            \"host\": host,\n            \"port\": port,\n            \"security\": security,\n            \"recipient_count\": len(envelope_recipients),\n            \"external_action_executed\": True,\n        },\n        \"provenance\": {\"smtp_library\": \"smtplib\", \"secret_values_exposed\": False},\n    }\n\n\ndef run(payload: dict[str, Any] | None = None) -> dict[str, Any]:\n    data = payload if isinstance(payload, dict) else {}\n    _, connection, secrets = _runtime(data)\n    mode = str(data.get(\"mode\") or \"dry_run\").lower()\n    if not connection:\n        return {\"status\": \"requires_configuration\", \"data\": {\"reason\": \"smtp_connection_profile_missing\"}}\n    try:\n        if mode in {\"dry_run\", \"verify\", \"mock\", \"mock_send\"} or str(connection.get(\"transport_mode\") or \"\").lower() == \"mock\":\n            return _mock_smtp_delivery(data, connection)\n        if mode == \"send\":\n            return _real_smtp_delivery(data, connection, secrets)\n        return {\"status\": \"failed\", \"data\": {\"reason\": \"unsupported_mode\", \"mode\": mode}}\n    except Exception as exc:\n        return {\"status\": \"failed\", \"error_type\": exc.__class__.__name__, \"error\": str(exc)}\n"
+        },
+        {
+          "path": "test_tool.py",
+          "content": "from tool import run\n\n# Missing configuration must not be registered as a successful delivery.\nmissing = run({\"to\": [\"a@example.invalid\"], \"subject\": \"T\", \"body\": \"B\"})\nassert missing[\"status\"] == \"requires_configuration\"\n\n# Sandbox verification must build an EmailMessage and exercise mock SMTP path.\nverified = run({\n    \"mode\": \"verify\",\n    \"to\": [\"a@example.invalid\"],\n    \"subject\": \"verification\",\n    \"body\": \"verification body\",\n    \"_runtime\": {\n        \"connection\": {\n            \"smtp_host\": \"localhost\",\n            \"smtp_port\": 2525,\n            \"security\": \"none\",\n            \"from_address\": \"sender@example.invalid\",\n            \"transport_mode\": \"mock\"\n        },\n        \"secrets\": {\"password\": \"hidden\"},\n        \"secret_refs\": {\"password\": \"runtime-secret-ref\"}\n    }\n})\nassert verified[\"status\"] == \"success\"\nassert verified[\"data\"][\"smtp_library\"] == \"smtplib\"\nassert verified[\"data\"][\"message_library\"] == \"email.message.EmailMessage\"\nassert verified[\"data\"][\"external_action_executed\"] is False\nassert verified[\"data\"][\"smtp_sendmail_called\"] is True\nassert verified[\"provenance\"][\"mock_smtp_verification\"] is True\nprint(\"ok\")\n"
+        },
+        {
+          "path": "README.md",
+          "content": "# basic_smtp_mail_sender\n\nRuntime-generated Basic SMTP mail sender using Python standard library smtplib and email.message.EmailMessage. Supports dry-run/mock verification and real SMTP send when runtime connection and secret values are provided.\n"
+        }
+      ],
+      "acquisition_policy": {
+        "decision_mode": "runtime_autonomous",
+        "complexity_level": "basic",
+        "allow_research_based_decisions": false,
+        "block_on_missing_runtime_values": false,
+        "block_on_missing_implementation_details": false,
+        "allow_policy_backed_basic_acquisition_without_external_evidence": true,
+        "runtime_values_collection": "agent_studio_schema_forms_after_registration"
+      },
+      "selection_priority": 100
+    },
+    {
       "template_id": "connected_message_delivery_adapter",
       "description": "Runtime-generated connected action capability with input/config/secret/approval contracts. The concrete transport details are provided by generated schema and runtime profile, not ai_core.",
       "match_terms": [
@@ -401,7 +630,8 @@
         "block_on_missing_implementation_details": false,
         "allow_policy_backed_basic_acquisition_without_external_evidence": true,
         "runtime_values_collection": "agent_studio_schema_forms_after_registration"
-      }
+      },
+      "selection_priority": 0
     }
   ]
 }

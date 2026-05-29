@@ -74,6 +74,20 @@ class RuntimeCapabilityGapImplementer:
                 "generated_at": datetime.now(timezone.utc).isoformat(),
             }
         artifact = self._write_artifact(template=template, run_id=run_id, evidence=evidence, dependency_resolution=dependency_resolution)
+        capability_match = self._verify_capability_match(template=template, artifact=artifact, user_input=user_input)
+        if not capability_match.get("passed"):
+            return {
+                "status": "generated_but_capability_mismatch",
+                "template_id": template.get("template_id"),
+                "score": match.score,
+                "dependency_resolution": dependency_resolution,
+                "artifact": artifact,
+                "capability_match": capability_match,
+                "validation": None,
+                "verification_run": None,
+                "registration": None,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
         validation = self._validate_artifact(artifact)
         verification_run: dict[str, Any] | None = None
         registration: dict[str, Any] | None = None
@@ -99,6 +113,7 @@ class RuntimeCapabilityGapImplementer:
             "score": match.score,
             "dependency_resolution": dependency_resolution,
             "artifact": artifact if 'artifact' in locals() else None,
+            "capability_match": capability_match if 'capability_match' in locals() else None,
             "validation": validation if 'validation' in locals() else None,
             "verification_run": verification_run,
             "registration": registration,
@@ -124,6 +139,15 @@ class RuntimeCapabilityGapImplementer:
             if required and not all(str(term).casefold() in value for term in required):
                 continue
             score = sum(1 for term in terms if str(term).casefold() in value)
+            # Template selection remains contract-driven.  A template may declare
+            # a numeric priority to prefer a precise capability template over a
+            # broader fallback template when both match the same request.
+            try:
+                score += int(template.get("selection_priority") or 0)
+            except Exception:
+                pass
+            if required:
+                score += len(required) * 10
             if score <= 0:
                 continue
             candidate = TemplateMatch(template=template, score=score)
@@ -271,6 +295,46 @@ class RuntimeCapabilityGapImplementer:
         manifest_path = tool_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"tool_id": safe_id, "tool_dir": str(tool_dir), "test_dir": str(tests_dir), "manifest_path": str(manifest_path), "written_files": written, "test_files": test_files}
+
+
+    def _verify_capability_match(self, *, template: dict[str, Any], artifact: dict[str, Any], user_input: str) -> dict[str, Any]:
+        """Verify that the generated artifact really implements the matched capability.
+
+        This is intentionally contract-driven. ai_core does not know concrete
+        capability domains. A runtime template may declare
+        marker strings that must appear in generated files/schemas before the
+        artifact is allowed to proceed to sandbox validation and registration.
+        """
+        contract = template.get("capability_match_contract") if isinstance(template.get("capability_match_contract"), dict) else {}
+        if not contract:
+            return {"passed": True, "status": "not_required", "checks": []}
+        tool_dir = Path(str(artifact.get("tool_dir") or ""))
+        checks: list[dict[str, Any]] = []
+        combined_parts: list[str] = [str(template.get("template_id") or ""), str(template.get("description") or ""), user_input or ""]
+        if tool_dir.exists():
+            for path in sorted(tool_dir.rglob("*")):
+                if path.is_file() and path.suffix.lower() in {".py", ".json", ".md", ".txt", ".yaml", ".yml"}:
+                    try:
+                        combined_parts.append(path.read_text(encoding="utf-8", errors="ignore"))
+                    except Exception:
+                        continue
+        combined = "\n".join(combined_parts).casefold()
+        required_markers = contract.get("required_markers") if isinstance(contract.get("required_markers"), list) else []
+        forbidden_markers = contract.get("forbidden_markers") if isinstance(contract.get("forbidden_markers"), list) else []
+        missing = [str(marker) for marker in required_markers if str(marker).casefold() not in combined]
+        present_forbidden = [str(marker) for marker in forbidden_markers if str(marker).casefold() in combined]
+        checks.append({"name": "required_markers", "passed": not missing, "missing": missing})
+        checks.append({"name": "forbidden_markers", "passed": not present_forbidden, "present": present_forbidden})
+        passed = not missing and not present_forbidden
+        report = {
+            "passed": passed,
+            "status": "completed" if passed else "failed",
+            "checks": checks,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if tool_dir.exists():
+            (tool_dir / "capability_match_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return report
 
     def _validate_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]:
         tool_dir = Path(str(artifact.get("tool_dir") or ""))
