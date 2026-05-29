@@ -22,6 +22,7 @@ from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStor
 from ai_core.context.session_memory_store import SessionMemoryStore
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.config.paths import RUNTIME_DOWNLOADS
+from ai_core.tools.runtime_registered_tool_service import RuntimeRegisteredToolService
 from ai_core.graph.graph_visualization import GraphVisualStateBuilder
 
 import traceback
@@ -34,6 +35,7 @@ model_selection_store = UserModelSelectionStore()
 session_store = SessionMemoryStore()
 graph_visual_builder = GraphVisualStateBuilder()
 knowledge_service = KnowledgeService()
+registered_tool_service = RuntimeRegisteredToolService()
 
 
 def _write_api_error_log(*, area: str, exc: Exception, context: dict[str, Any] | None = None) -> None:
@@ -66,6 +68,12 @@ class ConversationFeedbackRequest(BaseModel):
     rating: str
     note: str | None = None
 
+
+
+
+class RegisteredToolExecuteRequest(BaseModel):
+    tool_id: str
+    input_data: Any | None = None
 
 class AgentStudioRequest(BaseModel):
     message: str
@@ -544,6 +552,27 @@ async def agent_studio_session_snapshot(session_id: str, limit: int = 20):
 @app.post("/api/agent-studio/sessions/{session_id}/rename")
 async def agent_studio_rename_session(session_id: str, payload: dict[str, Any]):
     return JSONResponse({"ok": True, "session": session_store.rename_session(session_id, str(payload.get("title") or ""))})
+
+
+
+@app.get("/api/agent-studio/runtime-tools")
+async def agent_studio_runtime_tools():
+    return JSONResponse({"ok": True, "tools": registered_tool_service.list_tools()})
+
+
+@app.post("/api/agent-studio/runtime-tools/execute")
+async def agent_studio_execute_runtime_tool(req: RegisteredToolExecuteRequest):
+    try:
+        payload = registered_tool_service.execute_tool(
+            tool_id=req.tool_id,
+            input_data=req.input_data if req.input_data is not None else {},
+            run_id="agent_studio_registered_tool",
+        )
+        status = 200 if payload.get("ok") else 400
+        return JSONResponse(payload, status_code=status)
+    except Exception as exc:
+        _write_api_error_log(area="agent_studio_execute_runtime_tool", exc=exc, context={"tool_id": req.tool_id})
+        return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
 
 @app.get("/api/agent-studio/state")
 async def agent_studio_state():

@@ -972,13 +972,16 @@ function toggleTracePanel(){
 async function refreshState(){ try{ const res=await fetch('/api/agent-studio/state'); const data=await res.json(); renderState(data); }catch(e){ console.error(e); }}
 function renderState(data){
   const ps=data.participants||[]; document.getElementById('participantCount').textContent=ps.length; const pbox=document.getElementById('participants'); pbox.innerHTML=''; if(!ps.length)pbox.innerHTML='<div class="empty">No participant.</div>'; ps.forEach(p=>{ const el=document.createElement('div'); el.className='item'; el.innerHTML=`<b>${escapeHtml(p.name||p.participant_id)}</b><div class="small">${escapeHtml(p.participant_id||'')}</div><span class="pill">${escapeHtml(p.status||'created')}</span><span class="pill">delegate_to_ai_core</span><div class="path">${escapeHtml(p._path||'')}</div>`; pbox.appendChild(el); });
-  const right=document.getElementById('rightPane'); const graphs=data.task_graphs||[]; const runs=data.task_runs||[]; const conversationRuns=data.conversation_runs||[]; const deliveries=data.deliveries||[]; const traces=data.traces||[]; document.getElementById('graphCount').textContent=graphs.length + conversationRuns.length; right.innerHTML='';
+  const right=document.getElementById('rightPane'); const graphs=data.task_graphs||[]; const runs=data.task_runs||[]; const conversationRuns=data.conversation_runs||[]; const runtimeToolRuns=data.runtime_tool_runs||[]; const deliveries=data.deliveries||[]; const traces=data.traces||[]; document.getElementById('graphCount').textContent=graphs.length + conversationRuns.length; right.innerHTML='';
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Execution Flow</div>');
   const latestRun = conversationRuns.length ? conversationRuns[0] : (runs.length ? runs[0] : null);
   if(latestRun){ right.appendChild(conversationFlowCard(latestRun)); }
   else if(graphs.length){ right.appendChild(taskGraphFlowCard(graphs[0])); }
   else { right.insertAdjacentHTML('beforeend','<div class="empty">No execution flow yet.</div>'); }
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Conversation Workflow Runs</div>'); if(!conversationRuns.length) right.insertAdjacentHTML('beforeend','<div class="empty">No conversation workflow run.</div>'); conversationRuns.forEach(r=>right.appendChild(conversationRunCard(r)));
+  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Results</div>'); if(!latestRun && !runtimeToolRuns.length) right.insertAdjacentHTML('beforeend','<div class="empty">No runtime result yet.</div>'); if(latestRun) right.appendChild(resultSummaryCard(latestRun)); runtimeToolRuns.forEach(r=>right.appendChild(runtimeToolRunCard(r)));
+  const runtimeTools=data.runtime_tools||[];
+  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Runtime Registry</div>'); if(!runtimeTools.length) right.insertAdjacentHTML('beforeend','<div class="empty">No registered runtime tool.</div>'); runtimeTools.forEach(t=>right.appendChild(runtimeToolCard(t)));
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Task Graphs</div>'); if(!graphs.length) right.insertAdjacentHTML('beforeend','<div class="empty">No task graph.</div>'); graphs.forEach(g=>right.appendChild(taskGraphCard(g)));
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Delegation Runs</div>'); if(!runs.length) right.insertAdjacentHTML('beforeend','<div class="empty">No run.</div>'); runs.forEach(r=>right.appendChild(runCard(r)));
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Deliveries</div>'); if(!deliveries.length) right.insertAdjacentHTML('beforeend','<div class="empty">No delivery.</div>'); deliveries.forEach(d=>right.appendChild(deliveryCard(d)));
@@ -1008,6 +1011,85 @@ function conversationFlowCard(r){
     el.appendChild(src);
   }
   return el;
+}
+
+
+
+function resultSummaryCard(r){
+  const el=document.createElement('div');
+  el.className='item';
+  const results=r.results||{};
+  const execution=results.execution||{};
+  const impl=execution.capability_implementation||{};
+  const runtimeImpl=impl.runtime_implementation||{};
+  const reg=runtimeImpl.registration||{};
+  const verification=results.result_verification||{};
+  el.innerHTML='<div class="cardHeader"><b>Latest workflow result</b><span class="pill">'+escapeHtml(verification.status||r.status||'completed')+'</span></div>'+
+    '<div class="small">actual execution: '+escapeHtml(verification.actual_execution_mode||execution.execution_mode||'')+'</div>'+
+    '<div class="small">runtime implementation: '+escapeHtml(verification.runtime_implementation_status||runtimeImpl.status||'not_applicable')+'</div>'+
+    '<div class="small">registered: '+escapeHtml(verification.runtime_capability_registered||false)+'</div>';
+  if(reg.tool_record){
+    el.insertAdjacentHTML('beforeend','<div class="small">registered tool: '+escapeHtml(reg.tool_record.tool_id||'')+'</div>');
+  }
+  const details=document.createElement('details');
+  details.className='detailsBox';
+  details.innerHTML='<summary>Show result JSON</summary><div class="pre compact"></div>';
+  details.querySelector('.pre').textContent=renderJson(results);
+  el.appendChild(details);
+  return el;
+}
+
+function runtimeToolRunCard(r){
+  const el=document.createElement('div');
+  el.className='item';
+  const result=r.result||{};
+  const data=result.data||{};
+  el.innerHTML='<div class="cardHeader"><b>Runtime tool run: '+escapeHtml(r.tool_id||'tool')+'</b><span class="pill">'+escapeHtml(r.status||result.status||'')+'</span></div>'+
+    '<div class="small">row_count: '+escapeHtml(data.row_count!==undefined?data.row_count:'')+'</div>'+
+    '<div class="small">trace: '+escapeHtml((result.provenance&&result.provenance.trace_id)||'')+'</div>';
+  const details=document.createElement('details');
+  details.className='detailsBox';
+  details.innerHTML='<summary>Show tool output JSON</summary><div class="pre compact"></div>';
+  details.querySelector('.pre').textContent=renderJson(r);
+  el.appendChild(details);
+  return el;
+}
+
+function runtimeToolCard(t){
+  const el=document.createElement('div');
+  el.className='item';
+  const caps=Array.isArray(t.capabilities)?t.capabilities:[];
+  const executable=!!t.executable;
+  el.innerHTML='<div class="cardHeader"><b>'+escapeHtml(t.tool_id||t.name||'runtime tool')+'</b><span class="pill">'+escapeHtml(executable?'executable':'not executable')+'</span></div>'+
+    '<div class="small">capability: '+escapeHtml(t.capability||'')+'</div>'+
+    '<div class="small">capabilities: '+escapeHtml(caps.join(', ')||'(none)')+'</div>'+
+    '<div class="small">status: '+escapeHtml(t.status||'')+' / sandbox: '+escapeHtml((t.verification&&t.verification.sandbox_verification)||false)+'</div>';
+  const btn=document.createElement('button');
+  btn.className='btn primary';
+  btn.style.marginTop='8px';
+  btn.textContent='Run registered tool';
+  btn.disabled=!executable;
+  btn.onclick=()=>executeRuntimeTool(t.tool_id||t.name||'');
+  el.appendChild(btn);
+  const details=document.createElement('details');
+  details.className='detailsBox';
+  details.innerHTML='<summary>Show raw JSON</summary><div class="pre compact"></div>';
+  details.querySelector('.pre').textContent=renderJson(t);
+  el.appendChild(details);
+  return el;
+}
+
+async function executeRuntimeTool(toolId){
+  if(!toolId){ return; }
+  const raw=prompt('Input JSON for '+toolId, '{"text":"| Name | Value |\\n| --- | --- |\\n| Alpha | 1 |"}');
+  if(raw===null){ return; }
+  let inputData={};
+  try{ inputData=raw.trim()?JSON.parse(raw):{}; }
+  catch(e){ alert('Invalid JSON input.'); return; }
+  const res=await fetch('/api/agent-studio/runtime-tools/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:toolId,input_data:inputData})});
+  const data=await res.json();
+  addMessage('assistant', data.ok ? ('Runtime tool executed:\n'+renderJson(data.result)) : ('Runtime tool execution failed:\n'+renderJson(data)), data.ok?'final':'error');
+  refreshState();
 }
 
 function conversationRunCard(r){

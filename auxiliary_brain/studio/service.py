@@ -10,6 +10,7 @@ from auxiliary_brain.storage import JsonStore
 from auxiliary_brain.studio.command_router import StudioCommandRouter
 from ai_core.runtime.adaptation import FeedbackClassifier, ModelUpgradeController, RerunStrategy
 from ai_core.interaction.natural_conversation import NaturalConversationService
+from ai_core.tools.runtime_registered_tool_service import RuntimeRegisteredToolService
 from ai_core.runtime.modeling.model_runtime_preflight import ModelRuntimePreflight
 from auxiliary_brain.parameters.agent_parameter_contract import AgentParameterContractService
 from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
@@ -46,6 +47,7 @@ class AgentStudioService:
         self.parameter_resolution_pipeline = ParameterResolutionPipeline()
         self.instruction_workflow_planner = InstructionWorkflowPlanner()
         self.runtime_semantic_planner = RuntimeSemanticPlanner()
+        self.registered_tool_service = RuntimeRegisteredToolService()
         self.direct_capability_dispatcher = CapabilityDispatcher(handlers={
             "image_generation": self._handle_direct_image_generation,
             "video_generation": self._handle_direct_video_generation,
@@ -598,6 +600,8 @@ class AgentStudioService:
     def snapshot(self) -> dict[str, Any]:
         conversation_runs = self.store.list_json("traces/conversation_core")
         agent_traces = self.store.list_json("traces/agent_delegation")
+        runtime_tool_runs = self.registered_tool_service.list_tool_runs()
+        runtime_execution_traces = self.registered_tool_service.list_execution_traces()
         return {
             "origin": "auxiliary_brain",
             "community_id": self.community_id,
@@ -605,8 +609,11 @@ class AgentStudioService:
             "task_graphs": self.store.list_json("generated/tasks"),
             "task_runs": self.store.list_json("generated/results"),
             "conversation_runs": conversation_runs,
+            "runtime_tools": self.registered_tool_service.list_tools(),
+            "runtime_tool_runs": runtime_tool_runs,
+            "runtime_execution_traces": runtime_execution_traces,
             "deliveries": self.store.list_json("deliveries"),
-            "traces": agent_traces + conversation_runs,
+            "traces": agent_traces + conversation_runs + runtime_execution_traces,
         }
 
     async def create_participant(self, instruction: str, name: str | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:

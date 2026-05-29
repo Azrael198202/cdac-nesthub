@@ -133,3 +133,101 @@ def test_capability_gap_success_creates_runtime_candidate_artifact(tmp_path, mon
     assert implementation["source_urls"] == ["https://example.invalid/guide"]
     assert implementation["artifact_path"]
     assert (tmp_path / "capability_gap_resolutions" / "test_run_001.json").exists()
+
+
+def test_runtime_capability_gap_can_implement_test_and_register_from_template(tmp_path, monkeypatch):
+    from pathlib import Path
+    import json
+    from ai_core.capabilities import runtime_capability_gap_implementer as module
+    from ai_core.capabilities.runtime_capability_gap_implementer import RuntimeCapabilityGapImplementer
+
+    root = tmp_path
+    monkeypatch.setattr(module, "RUNTIME_GENERATED", root / "generated")
+    monkeypatch.setattr(module, "RUNTIME_REGISTRY", root / "registry")
+    template_path = root / "templates.json"
+    tool_code = """
+from __future__ import annotations
+
+def run(input_data=None, **kwargs):
+    text = '' if input_data is None else str(input_data)
+    return {'status': 'completed', 'length': len(text)}
+""".strip()
+    test_code = """
+from tool import run
+assert run('abc')['length'] == 3
+print('ok')
+""".strip()
+    template_path.write_text(json.dumps({
+        "templates": [{
+            "template_id": "generic_test_capability",
+            "match_terms": ["generic-test"],
+            "required_terms": [],
+            "capabilities": ["generic_test_capability"],
+            "entrypoint": {"module": "tool.py", "function": "run"},
+            "files": [
+                {"path": "tool.py", "content": tool_code},
+                {"path": "test_tool.py", "content": test_code},
+            ],
+        }]
+    }), encoding="utf-8")
+    impl = RuntimeCapabilityGapImplementer(template_path=template_path)
+    result = impl.implement_if_requested(
+        user_input="please implement generic-test capability",
+        evidence={"urls": ["https://example.invalid/source"]},
+        run_id="test_run",
+        allow_implementation=True,
+    )
+    assert result["status"] == "implemented_tested_registered"
+    assert result["validation"]["passed"] is True
+    registry_path = Path(result["registration"]["registry_path"])
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert "generic_test_capability" in registry
+    assert Path(result["artifact"]["test_dir"]).exists()
+    assert Path(result["artifact"]["test_dir"], "test_report.json").exists()
+    module_registry = json.loads((root / "registry" / "module_registry.json").read_text(encoding="utf-8"))
+    assert "generic_test_capability" in module_registry
+
+
+def test_locked_execution_overrides_incomplete_selected_step():
+    from ai_core.interaction.conversation_core_runtime import ConversationCoreRuntime
+
+    runtime = ConversationCoreRuntime()
+    selected = runtime._selected_step({
+        "locked_execution": {"execution_method": "web_search", "capability": "web_retrieval"},
+        "planned_steps": [{"step_id": "s1", "execution_ready": True, "execution_method": "model_response", "capability": "stable_synthesis"}],
+    })
+    assert selected["execution_method"] == "web_search"
+    assert selected["capability"] == "web_retrieval"
+
+
+def test_registered_runtime_tool_service_executes_sandbox_verified_tool(tmp_path):
+    import json
+    from ai_core.tools.runtime_registered_tool_service import RuntimeRegisteredToolService
+
+    tool_dir = tmp_path / "tool"
+    tool_dir.mkdir()
+    tool_file = tool_dir / "tool.py"
+    tool_file.write_text("""
+def run(input_data=None, **kwargs):
+    text = (input_data or {}).get('text', '') if isinstance(input_data, dict) else str(input_data or '')
+    return {'status': 'completed', 'data': {'text': text, 'length': len(text)}}
+""".strip(), encoding="utf-8")
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps({
+        "generic_registered_tool": {
+            "tool_id": "generic_registered_tool",
+            "status": "enabled",
+            "capability": "generic_runtime_execution",
+            "capabilities": ["generic_runtime_execution"],
+            "implementation": {"type": "python_module", "module_path": str(tool_file), "function": "run"},
+            "verification": {"sandbox_verification": True},
+        }
+    }), encoding="utf-8")
+    service = RuntimeRegisteredToolService(registry_path=registry_path)
+    tools = service.list_tools()
+    assert tools[0]["executable"] is True
+    result = service.execute_tool(tool_id="generic_registered_tool", input_data={"text": "abc"})
+    assert result["ok"] is True
+    assert result["result"]["data"]["length"] == 3
+    assert service.list_tool_runs()
+    assert service.list_execution_traces()

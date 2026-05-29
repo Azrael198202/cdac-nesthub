@@ -12,6 +12,7 @@ from ai_core.context.vector_memory_store import VectorMemoryStore
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.llm.provider_router import ProviderRouter
 from ai_core.research.web_research_tool import GenericWebResearchTool
+from ai_core.capabilities.runtime_capability_gap_implementer import RuntimeCapabilityGapImplementer
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 
 
@@ -31,6 +32,7 @@ class ConversationCoreRuntime:
         self.sessions = SessionMemoryStore()
         self.vector_memory = VectorMemoryStore()
         self.web_research = GenericWebResearchTool()
+        self.capability_implementer = RuntimeCapabilityGapImplementer()
 
     async def run(self, message: str, *, latest_task: str | None = None, session_id: str | None = None) -> dict[str, Any]:
         run_id = "conversation_core_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
@@ -413,6 +415,13 @@ class ConversationCoreRuntime:
                     material=material,
                     run_id=run_id,
                 )
+                runtime_impl = self.capability_implementer.implement_if_requested(
+                    user_input=text,
+                    evidence=evidence,
+                    run_id=run_id,
+                    allow_implementation=self._implementation_requested(text),
+                )
+                implementation["runtime_implementation"] = runtime_impl
                 material = self._capability_gap_answer_material(
                     user_input=text,
                     evidence=evidence,
@@ -563,17 +572,38 @@ class ConversationCoreRuntime:
                 self._external_retrieval_failure_material(evidence)
                 + "\n\nCapability gap status: blocked_without_verified_evidence. No implementation was generated or registered."
             )
+        runtime_impl = implementation.get("runtime_implementation") if isinstance(implementation.get("runtime_implementation"), dict) else {}
+        runtime_status = str(runtime_impl.get("status") or "not_requested")
+        if runtime_status == "implemented_tested_registered":
+            headline = "Capability gap resolution completed. Runtime capability was implemented, sandbox-tested, and registered."
+        elif runtime_status in {"blocked", "generated_but_validation_failed"}:
+            headline = "Capability gap resolution collected verified material, but implementation was not registered."
+        else:
+            headline = "Capability gap resolution completed with verified external material; implementation was not requested or no matching runtime template was available."
         lines = [
-            "Capability gap resolution completed with verified external material.",
+            headline,
             "",
             "Implementation lifecycle:",
         ]
         for item in implementation.get("lifecycle", []):
             lines.append(f"- {item}")
         lines.append("")
-        lines.append("Registered candidate artifact:")
+        lines.append("Resolution artifact:")
         lines.append(str(implementation.get("artifact_path") or "runtime_generated_candidate_record"))
         lines.append("")
+        if runtime_impl:
+            lines.append("Runtime implementation status:")
+            lines.append(f"- status: {runtime_status}")
+            artifact = runtime_impl.get("artifact") if isinstance(runtime_impl.get("artifact"), dict) else {}
+            validation = runtime_impl.get("validation") if isinstance(runtime_impl.get("validation"), dict) else {}
+            registration = runtime_impl.get("registration") if isinstance(runtime_impl.get("registration"), dict) else {}
+            if artifact.get("tool_dir"):
+                lines.append(f"- artifact_dir: {artifact.get('tool_dir')}")
+            if validation:
+                lines.append(f"- sandbox_validation_passed: {bool(validation.get('passed'))}")
+            if registration:
+                lines.append(f"- registry_path: {registration.get('registry_path')}")
+            lines.append("")
         lines.append("Source URLs:")
         for url in urls:
             lines.append(f"- {url}")
@@ -581,6 +611,15 @@ class ConversationCoreRuntime:
             lines.append("\nEvidence summary material:")
             lines.append(material)
         return "\n".join(lines).strip()
+
+
+    def _implementation_requested(self, text: str) -> bool:
+        value = " " + str(text or "").strip().casefold() + " "
+        markers = (
+            " implement ", " build ", " generate ", " create capability ", " add support ",
+            " register ", "实装", "实现", "生成", "注册", "構築", "実装", "登録",
+        )
+        return any(marker in value for marker in markers)
 
     def _external_retrieval_failure_material(self, evidence: dict[str, Any]) -> str:
         attempts = evidence.get("attempts") if isinstance(evidence.get("attempts"), list) else []
@@ -603,17 +642,31 @@ class ConversationCoreRuntime:
 
     def _selected_step(self, plan: dict[str, Any]) -> dict[str, Any]:
         steps = plan.get("planned_steps") if isinstance(plan.get("planned_steps"), list) else []
+        selected: dict[str, Any] = {}
         for step in steps:
             if isinstance(step, dict) and step.get("execution_ready", True):
-                return step
-        return {}
+                selected = dict(step)
+                break
+        locked = plan.get("locked_execution") if isinstance(plan.get("locked_execution"), dict) else {}
+        if locked:
+            # workflow_planning is the only layer allowed to lock execution.
+            # execution/result_verification must obey it even if an LLM-produced
+            # planned step is incomplete or inconsistent.
+            selected.update({k: v for k, v in locked.items() if v is not None})
+        return selected
 
     def _result_verification(self, execution: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
         selected = self._selected_step(plan)
         expects_web = str(selected.get("execution_method") or "") == "web_search" or str(selected.get("capability") or "") == "web_retrieval"
         evidence = execution.get("evidence") if isinstance(execution.get("evidence"), dict) else {}
         urls = evidence.get("urls") if isinstance(evidence.get("urls"), list) else []
+        runtime_impl = None
+        capability_impl = execution.get("capability_implementation") if isinstance(execution.get("capability_implementation"), dict) else {}
+        if isinstance(capability_impl, dict):
+            runtime_impl = capability_impl.get("runtime_implementation") if isinstance(capability_impl.get("runtime_implementation"), dict) else None
         passed = bool(execution.get("answer_material")) and (not expects_web or bool(urls))
+        if runtime_impl and runtime_impl.get("status") == "generated_but_validation_failed":
+            passed = False
         return {
             "status": "completed" if passed else "failed",
             "passed": passed,
@@ -626,6 +679,8 @@ class ConversationCoreRuntime:
             "source_count": len(urls),
             "source_urls": urls,
             "capability_gap_resolution": bool(execution.get("capability_gap_resolution")),
+            "runtime_implementation_status": runtime_impl.get("status") if runtime_impl else "not_applicable",
+            "runtime_capability_registered": bool((runtime_impl or {}).get("registration")),
             "safe_implementation_policy": "external_code_not_executed_without_validation" if execution.get("capability_gap_resolution") else "not_applicable",
         }
 

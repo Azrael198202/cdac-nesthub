@@ -1,0 +1,45 @@
+{
+  "version": "1.0",
+  "templates": [
+    {
+      "template_id": "structured_text_table_parser",
+      "description": "Dependency-free parser for pipe-delimited text table structures generated outside ai_core.",
+      "match_terms": [
+        "markdown table",
+        "markdown tables",
+        "parse markdown",
+        "parse tables",
+        "table parser",
+        "tables",
+        "表格",
+        "テーブル"
+      ],
+      "required_terms": [
+        "table"
+      ],
+      "capabilities": [
+        "structured_text_table_extraction",
+        "markdown_table_parsing",
+        "pipe_delimited_table_parsing"
+      ],
+      "entrypoint": {
+        "module": "tool.py",
+        "function": "run"
+      },
+      "files": [
+        {
+          "path": "tool.py",
+          "content": "from __future__ import annotations\n\nfrom typing import Any\n\n\ndef parse_text_table(text: str) -> list[dict[str, Any]]:\n    \"\"\"Parse pipe-delimited text table rows into dictionaries.\n\n    The function is deliberately dependency-free so it can run in a sandboxed\n    runtime. It ignores separator rows and returns an empty list when no valid\n    header/data rows are present.\n    \"\"\"\n    lines = [line.strip() for line in str(text or \"\").splitlines() if \"|\" in line]\n    rows: list[list[str]] = []\n    for line in lines:\n        cells = [cell.strip() for cell in line.strip().strip(\"|\").split(\"|\")]\n        if len(cells) < 2:\n            continue\n        if all(cell and set(cell) <= set(\"-: \") for cell in cells):\n            continue\n        rows.append(cells)\n    if len(rows) < 2:\n        return []\n    header = rows[0]\n    output: list[dict[str, Any]] = []\n    for row in rows[1:]:\n        item: dict[str, Any] = {}\n        for index, name in enumerate(header):\n            key = name or f\"column_{index + 1}\"\n            item[key] = row[index] if index < len(row) else \"\"\n        output.append(item)\n    return output\n\n\ndef run(input_data: Any = None, **kwargs: Any) -> dict[str, Any]:\n    if isinstance(input_data, dict):\n        text = input_data.get(\"text\") or input_data.get(\"content\") or \"\"\n    elif input_data is None:\n        text = kwargs.get(\"text\") or kwargs.get(\"content\") or \"\"\n    else:\n        text = str(input_data)\n    rows = parse_text_table(str(text or \"\"))\n    return {\n        \"status\": \"completed\",\n        \"row_count\": len(rows),\n        \"rows\": rows,\n    }\n"
+        },
+        {
+          "path": "test_tool.py",
+          "content": "from tool import run\n\nsample = \"\"\"\n| Name | Value |\n| --- | --- |\n| Alpha | 1 |\n| Beta | 2 |\n\"\"\"\nresult = run({\"text\": sample})\nassert result[\"status\"] == \"completed\"\nassert result[\"row_count\"] == 2\nassert result[\"rows\"][0][\"Name\"] == \"Alpha\"\nassert result[\"rows\"][1][\"Value\"] == \"2\"\nprint(\"ok\")\n"
+        },
+        {
+          "path": "README.md",
+          "content": "# structured_text_table_parser\n\nRuntime-generated capability artifact. It parses pipe-delimited text table structures into JSON-like rows and is registered only after sandbox validation succeeds.\n"
+        }
+      ]
+    }
+  ]
+}
