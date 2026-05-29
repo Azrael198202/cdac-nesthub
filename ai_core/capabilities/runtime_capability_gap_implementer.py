@@ -75,6 +75,14 @@ class RuntimeCapabilityGapImplementer:
             }
         artifact = self._write_artifact(template=template, run_id=run_id, evidence=evidence, dependency_resolution=dependency_resolution)
         validation = self._validate_artifact(artifact)
+        cleanliness = self._validate_generated_artifact_cleanliness(template=template, artifact=artifact)
+        if not cleanliness.get("passed"):
+            validation = {
+                "passed": False,
+                "status": "failed",
+                "reason": "generated_artifact_cleanliness_failed",
+                "checks": (validation.get("checks") if isinstance(validation, dict) else []) + [cleanliness],
+            }
         verification_run: dict[str, Any] | None = None
         registration: dict[str, Any] | None = None
         if validation.get("passed"):
@@ -173,6 +181,34 @@ class RuntimeCapabilityGapImplementer:
         except Exception:
             return False
 
+    def _clean_subprocess_env(self, *, pythonpath: str | None = None) -> dict[str, str]:
+        """Return a stable validation environment for generated artifacts.
+
+        VS Code/debugpy and similar launchers can inject PYTHONPATH, pydevd,
+        or debugger bootstrap variables into child Python processes.  Generated
+        capability validation must be isolated from the IDE runtime; otherwise
+        a valid generated tool may fail before its own code is even compiled.
+        """
+        blocked_prefixes = ("PYDEVD", "DEBUGPY", "VSCODE", "PYCHARM")
+        blocked_names = {
+            "PYTHONPATH",
+            "PYTHONHOME",
+            "PYTHONSTARTUP",
+            "PYTHONBREAKPOINT",
+            "PYDEVD_LOAD_VALUES_ASYNC",
+        }
+        clean: dict[str, str] = {}
+        for key, value in os.environ.items():
+            upper = key.upper()
+            if upper in blocked_names or any(upper.startswith(prefix) for prefix in blocked_prefixes):
+                continue
+            clean[key] = value
+        if pythonpath:
+            clean["PYTHONPATH"] = pythonpath
+        clean.setdefault("PYTHONNOUSERSITE", "1")
+        clean.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+        return clean
+
     def _pip_install(self, package_name: str) -> dict[str, Any]:
         try:
             proc = subprocess.run(
@@ -252,8 +288,9 @@ class RuntimeCapabilityGapImplementer:
         py_files = [str(p) for p in tool_dir.rglob("*.py")]
         if py_files:
             proc = subprocess.run(
-                [sys.executable, "-m", "py_compile", *py_files],
+                [sys.executable, "-I", "-m", "py_compile", *py_files],
                 cwd=str(tool_dir),
+                env=self._clean_subprocess_env(),
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -270,10 +307,15 @@ class RuntimeCapabilityGapImplementer:
         if legacy_test_file.exists() and legacy_test_file not in test_candidates:
             test_candidates.append(legacy_test_file)
         for test_file in test_candidates:
+            runner = (
+                "import runpy, sys; "
+                f"sys.path.insert(0, {json.dumps(str(tool_dir))}); "
+                f"runpy.run_path({json.dumps(str(test_file))}, run_name='__main__')"
+            )
             proc = subprocess.run(
-                [sys.executable, str(test_file)],
+                [sys.executable, "-I", "-c", runner],
                 cwd=str(tool_dir),
-                env={**os.environ, "PYTHONPATH": str(tool_dir)},
+                env=self._clean_subprocess_env(),
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -284,6 +326,39 @@ class RuntimeCapabilityGapImplementer:
             self._write_test_report(artifact, check)
             if proc.returncode != 0:
                 return {"passed": False, "status": "failed", "checks": checks}
+        return {"passed": True, "status": "completed", "checks": checks}
+
+
+    def _validate_generated_artifact_cleanliness(self, *, template: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
+        """Validate that generated files only contain declared template material.
+
+        The core cannot know business domains, so this check is structural rather
+        than keyword-based.  It prevents accidental runtime pollution by checking
+        that written files are inside the artifact directory, that no file is
+        empty when it is an executable Python module, and that every generated
+        file path was explicitly declared by the selected runtime template.
+        Concrete business terms are still controlled outside ai_core by the
+        runtime template registry and generated schemas.
+        """
+        tool_dir = Path(str(artifact.get("tool_dir") or ""))
+        declared = {self._safe_relative_path(str(item.get("path") or "")) for item in (template.get("files") if isinstance(template.get("files"), list) else []) if isinstance(item, dict)}
+        declared.discard("")
+        checks: list[dict[str, Any]] = []
+        for written in artifact.get("written_files") if isinstance(artifact.get("written_files"), list) else []:
+            path = Path(str(written))
+            try:
+                path.relative_to(tool_dir)
+            except Exception:
+                checks.append({"name": "artifact_path_boundary", "passed": False, "path": str(path)})
+                return {"passed": False, "status": "failed", "checks": checks}
+            rel = str(path.relative_to(tool_dir))
+            if rel not in declared:
+                checks.append({"name": "declared_template_file", "passed": False, "path": rel})
+                return {"passed": False, "status": "failed", "checks": checks}
+            if path.suffix == ".py" and not path.read_text(encoding="utf-8").strip():
+                checks.append({"name": "non_empty_python_module", "passed": False, "path": rel})
+                return {"passed": False, "status": "failed", "checks": checks}
+        checks.append({"name": "generated_artifact_cleanliness", "passed": True, "declared_file_count": len(declared)})
         return {"passed": True, "status": "completed", "checks": checks}
 
     def _execute_verification_run(self, *, template: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:

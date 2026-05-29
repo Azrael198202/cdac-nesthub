@@ -432,13 +432,13 @@ class ConversationCoreRuntime:
             }
             implementation = None
             if capability_gap:
-                implementation = self._capability_gap_resolution_artifact(
-                    user_input=text,
-                    query=query,
-                    evidence=evidence,
-                    material=material,
-                    run_id=run_id,
-                )
+                # Capability acquisition must not be blocked merely because the
+                # web search adapter returned no verified URLs.  For basic,
+                # policy-backed templates, the runtime implementer may still
+                # generate, sandbox-test, verify, and register a capability
+                # using only the local generated template contract.  This keeps
+                # ai_core generic: the concrete fields and behavior still come
+                # from runtime capability templates, not from fixed core logic.
                 runtime_impl = self.capability_implementer.implement_if_requested(
                     user_input=text,
                     evidence=evidence,
@@ -449,6 +449,13 @@ class ConversationCoreRuntime:
                     evidence["urls"] = ["runtime-policy://basic-generated-capability-contract"]
                     evidence["source_count"] = 1
                     evidence["source_note"] = "Policy-backed basic acquisition used because external retrieval did not provide source URLs."
+                implementation = self._capability_gap_resolution_artifact(
+                    user_input=text,
+                    query=query,
+                    evidence=evidence,
+                    material=material,
+                    run_id=run_id,
+                )
                 implementation["runtime_implementation"] = runtime_impl
                 material = self._capability_gap_answer_material(
                     user_input=text,
@@ -712,9 +719,23 @@ class ConversationCoreRuntime:
         capability_impl = execution.get("capability_implementation") if isinstance(execution.get("capability_implementation"), dict) else {}
         if isinstance(capability_impl, dict):
             runtime_impl = capability_impl.get("runtime_implementation") if isinstance(capability_impl.get("runtime_implementation"), dict) else None
-        passed = bool(execution.get("answer_material")) and (not expects_web or bool(urls))
+        policy = selected.get("source_policy") if isinstance(selected.get("source_policy"), dict) else {}
+        try:
+            min_sources = int(policy.get("min_sources") or (1 if expects_web else 0))
+        except Exception:
+            min_sources = 1 if expects_web else 0
+        min_sources = max(0, min_sources)
+        fetched_count = int(evidence.get("fetched_count") or 0) if isinstance(evidence.get("fetched_count"), int) else 0
+        source_requirement_met = (not expects_web) or (len(urls) >= min_sources and (fetched_count > 0 or evidence.get("source_note")))
+        passed = bool(execution.get("answer_material")) and source_requirement_met
+        failure_reasons: list[str] = []
+        if expects_web and len(urls) < min_sources:
+            failure_reasons.append("minimum_source_count_not_met")
+        if expects_web and len(urls) >= min_sources and fetched_count <= 0 and not evidence.get("source_note"):
+            failure_reasons.append("source_fetch_not_verified")
         if runtime_impl and runtime_impl.get("status") in {"generated_but_validation_failed", "generated_but_verification_failed", "dependency_resolution_failed"}:
             passed = False
+            failure_reasons.append(str(runtime_impl.get("status")))
         return {
             "status": "completed" if passed else "failed",
             "passed": passed,
@@ -724,6 +745,10 @@ class ConversationCoreRuntime:
             "actual_capability": execution.get("capability") or execution.get("execution_mode"),
             "evidence_required": expects_web,
             "evidence_present": bool(urls),
+            "minimum_source_count": min_sources,
+            "minimum_source_count_met": len(urls) >= min_sources,
+            "source_fetch_verified": bool(fetched_count > 0 or evidence.get("source_note") or not expects_web),
+            "failure_reasons": failure_reasons,
             "source_count": len(urls),
             "source_urls": urls,
             "capability_gap_resolution": bool(execution.get("capability_gap_resolution")),

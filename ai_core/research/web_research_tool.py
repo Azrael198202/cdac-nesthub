@@ -54,14 +54,19 @@ class GenericWebResearchTool:
         if not query:
             return self._record("search", {"status": "error", "error": "query is required", "results": [], "attempts": []})
 
-        direct_url = query if self._safe_http_url(query) else ""
-        if direct_url:
+        direct_urls = self._extract_safe_urls(query)
+        if direct_urls:
+            results = [
+                asdict(WebResearchResult(status="success", query=query, url=url, title=url, fetched_at=self._now()))
+                for url in direct_urls[:max_results]
+            ]
+            exact_direct_url = len(results) == 1 and str(query or "").strip() == results[0].get("url")
             return self._record("search", {
                 "status": "success",
                 "query": query,
-                "search_url": direct_url,
-                "results": [asdict(WebResearchResult(status="success", query=query, url=direct_url, title=direct_url, fetched_at=self._now()))],
-                "attempts": [{"provider": "direct_url", "status": "success", "url": direct_url}],
+                "search_url": direct_urls[0],
+                "results": results,
+                "attempts": [{"provider": "direct_url" if exact_direct_url else "direct_url_extraction", "status": "success", "url": direct_urls[0], "url_count": len(results)}],
             })
 
         providers = self._search_provider_urls(query)
@@ -102,6 +107,28 @@ class GenericWebResearchTool:
         if not results:
             payload["error"] = "no search results collected"
         return self._record("search", payload)
+
+
+    def _extract_safe_urls(self, value: str) -> list[str]:
+        """Extract safe http(s) URLs from mixed user text.
+
+        Users often provide a URL together with instructions.  Treating only an
+        exact URL as direct evidence makes the execution layer fall back to
+        generic search unnecessarily.  This extractor remains domain-neutral: it
+        only recognizes syntactically safe web URLs, normalizes trailing
+        punctuation, and preserves first-seen order.
+        """
+        candidates = re.findall(r"https?://[^\s<>'\"]+", str(value or ""))
+        output: list[str] = []
+        seen: set[str] = set()
+        for raw in candidates:
+            url = raw.rstrip(".,);]}>\"'、。")
+            if self._safe_http_url(url) and url not in seen:
+                seen.add(url)
+                output.append(url)
+        if not output and self._safe_http_url(str(value or "").strip()):
+            output.append(str(value or "").strip())
+        return output
 
     def _search_provider_urls(self, query: str) -> list[tuple[str, str]]:
         encoded = quote_plus(query)
