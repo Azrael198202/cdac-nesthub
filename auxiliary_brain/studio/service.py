@@ -120,14 +120,26 @@ class AgentStudioService:
 
         if routed.action == "execute_task":
             return await self.execute_task(routed.name, provided_inputs=provided_inputs, instruction=message)
+
+        # Capability-gap / external-evidence requests can contain negative
+        # wording such as "does not have", "missing", or "cannot handle".
+        # Those words must not be treated as feedback about a previous run.
+        # Give the generic ai_core conversation pipeline priority so it can
+        # perform input_parsing -> intent_recognition -> workflow_planning ->
+        # web_retrieval -> result_verification -> final_synthesis.
+        core_pipeline_requested = self.natural_conversation.needs_core_conversation_pipeline(message)
+        if routed.action == "feedback_adaptation" and core_pipeline_requested:
+            return await self.natural_conversation.reply(message, latest_task=self._latest_task_name(), session_id=session_id)
+
         if routed.action == "feedback_adaptation":
             return await self.handle_feedback(message, routed.name)
         artifact_edit = await self._maybe_handle_artifact_edit_message(message, uploaded_artifacts=uploaded_artifacts)
         if artifact_edit is not None:
             return artifact_edit
-        feedback = self.feedback_classifier.classify(message, fallback_target=self._latest_task_name())
-        if feedback.get("matched"):
-            return await self.handle_feedback(message, feedback.get("target_task"))
+        if not core_pipeline_requested:
+            feedback = self.feedback_classifier.classify(message, fallback_target=self._latest_task_name())
+            if feedback.get("matched"):
+                return await self.handle_feedback(message, feedback.get("target_task"))
         return await self.natural_conversation.reply(message, latest_task=self._latest_task_name(), session_id=session_id)
 
 

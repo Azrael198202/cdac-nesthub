@@ -25,6 +25,21 @@ class NaturalConversationService:
         self.model_selection = UserModelSelectionStore()
         self.core_runtime = ConversationCoreRuntime()
 
+    def needs_core_conversation_pipeline(self, message: str) -> bool:
+        """Return whether this message should bypass feedback routing and enter
+        the generic conversation pipeline.
+
+        This protects capability-gap and source-backed requests from being
+        misclassified as feedback merely because they contain negative wording
+        such as "does not have" or "missing".  The decision remains
+        domain-neutral and delegates the actual signal detection to
+        ConversationCoreRuntime.
+        """
+        try:
+            return bool(self.core_runtime._generic_external_signal(message))
+        except Exception:
+            return False
+
     async def reply(self, message: str, *, latest_task: str | None = None, session_id: str | None = None) -> dict[str, Any]:
         text = str(message or "").strip()
         if not text:

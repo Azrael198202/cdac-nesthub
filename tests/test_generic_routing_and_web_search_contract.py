@@ -75,3 +75,61 @@ def test_capability_gap_query_adds_generic_implementation_context():
     assert "implementation" in query
     assert "official" in query
     assert "validation" in query
+
+
+def test_capability_gap_request_is_not_feedback_adaptation():
+    from ai_core.interaction.natural_conversation import NaturalConversationService
+    from ai_core.runtime.adaptation import FeedbackClassifier
+
+    text = "I need to read files from an external site. Current runtime does not have this capability. Find a solution."
+    conversation = NaturalConversationService()
+    assert conversation.needs_core_conversation_pipeline(text) is True
+    feedback = FeedbackClassifier().classify(text, fallback_target="taskMissing")
+    assert feedback.get("matched") is True
+    # AgentStudioService must preempt this generic negative wording and route it
+    # to the core conversation pipeline before handle_feedback is called.
+
+import asyncio
+
+
+def test_capability_gap_offline_failure_does_not_fallback_to_generic_assistant():
+    from ai_core.interaction.conversation_core_runtime import ConversationCoreRuntime
+
+    runtime = ConversationCoreRuntime()
+    evidence = {
+        "query": "generic capability gap query",
+        "attempts": [{"provider": "test_provider", "status": "error", "error": "network unavailable"}],
+    }
+    material = runtime._capability_gap_answer_material(
+        user_input="Implement the missing operation.",
+        evidence=evidence,
+        implementation={"status": "blocked_without_verified_evidence"},
+        material="",
+    )
+    assert "blocked_without_verified_evidence" in material
+    assert "No implementation was generated or registered" in material
+    assert "AI runtime assistant" not in material
+
+
+def test_capability_gap_success_creates_runtime_candidate_artifact(tmp_path, monkeypatch):
+    from ai_core.interaction import conversation_core_runtime as module
+    from ai_core.interaction.conversation_core_runtime import ConversationCoreRuntime
+
+    monkeypatch.setattr(module, "RUNTIME_GENERATED", tmp_path)
+    runtime = ConversationCoreRuntime()
+    evidence = {
+        "query": "generic capability gap query",
+        "urls": ["https://example.invalid/guide"],
+        "attempts": [],
+    }
+    implementation = runtime._capability_gap_resolution_artifact(
+        user_input="Implement the missing operation.",
+        query="generic capability gap query",
+        evidence=evidence,
+        material="safe source excerpt",
+        run_id="test_run_001",
+    )
+    assert implementation["status"] == "implementation_candidate_created"
+    assert implementation["source_urls"] == ["https://example.invalid/guide"]
+    assert implementation["artifact_path"]
+    assert (tmp_path / "capability_gap_resolutions" / "test_run_001.json").exists()

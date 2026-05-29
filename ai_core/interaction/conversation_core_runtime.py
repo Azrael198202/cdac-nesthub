@@ -6,7 +6,7 @@ from typing import Any
 import json
 import re
 
-from ai_core.config.paths import RUNTIME_TRACES
+from ai_core.config.paths import RUNTIME_TRACES, RUNTIME_GENERATED
 from ai_core.context.session_memory_store import SessionMemoryStore
 from ai_core.context.vector_memory_store import VectorMemoryStore
 from ai_core.knowledge.knowledge_service import KnowledgeService
@@ -393,24 +393,43 @@ class ConversationCoreRuntime:
                 if isinstance(doc, dict) and doc.get("status") == "success":
                     fetched.append(doc)
             material = self._web_answer_material(search, fetched)
+            evidence = {
+                "query": query,
+                "original_user_input": text,
+                "search_status": search.get("status"),
+                "source_count": len(evidence_items),
+                "fetched_count": len(fetched),
+                "urls": [str(x.get("url") or "") for x in evidence_items if isinstance(x, dict) and x.get("url")],
+                "results": evidence_items,
+                "fetched_documents": fetched,
+                "attempts": search.get("attempts") if isinstance(search.get("attempts"), list) else [],
+            }
+            implementation = None
+            if capability_gap:
+                implementation = self._capability_gap_resolution_artifact(
+                    user_input=text,
+                    query=query,
+                    evidence=evidence,
+                    material=material,
+                    run_id=run_id,
+                )
+                material = self._capability_gap_answer_material(
+                    user_input=text,
+                    evidence=evidence,
+                    implementation=implementation,
+                    material=material,
+                )
+            elif not material and not evidence_items:
+                material = self._external_retrieval_failure_material(evidence)
             return {
-                "status": "completed" if evidence_items else "no_material",
+                "status": "completed" if evidence_items else "blocked_no_external_material",
                 "execution_mode": "capability_gap_resolution" if capability_gap else "web_search",
                 "capability": "web_retrieval",
                 "answer_material": material,
                 "external_evidence_used": bool(evidence_items),
                 "capability_gap_resolution": capability_gap,
-                "evidence": {
-                    "query": query,
-                    "original_user_input": text,
-                    "search_status": search.get("status"),
-                    "source_count": len(evidence_items),
-                    "fetched_count": len(fetched),
-                    "urls": [str(x.get("url") or "") for x in evidence_items if isinstance(x, dict) and x.get("url")],
-                    "results": evidence_items,
-                    "fetched_documents": fetched,
-                    "attempts": search.get("attempts") if isinstance(search.get("attempts"), list) else [],
-                },
+                "capability_implementation": implementation,
+                "evidence": evidence,
                 "knowledge_used": False,
             }
         kb = context.get("knowledge_answer") if isinstance(context.get("knowledge_answer"), dict) else None
@@ -482,6 +501,105 @@ class ConversationCoreRuntime:
             "message": final_answer,
             "user_facing": True,
         }
+
+
+    def _capability_gap_resolution_artifact(
+        self,
+        *,
+        user_input: str,
+        query: str,
+        evidence: dict[str, Any],
+        material: str,
+        run_id: str,
+    ) -> dict[str, Any]:
+        """Create a generic, non-executing capability implementation record.
+
+        The core does not hard-code a concrete feature.  It records the
+        discovered evidence and a safe implementation lifecycle so a runtime
+        generated adapter/tool can be created outside ai_core after evidence is
+        verified.  If source material is missing, the record is explicitly
+        blocked and no implementation is claimed.
+        """
+        urls = evidence.get("urls") if isinstance(evidence.get("urls"), list) else []
+        base = {
+            "run_id": run_id,
+            "status": "implementation_candidate_created" if urls else "blocked_without_verified_evidence",
+            "user_input": str(user_input or ""),
+            "resolution_query": query,
+            "source_urls": urls,
+            "evidence_required": True,
+            "safe_execution_policy": "do_not_execute_external_code_without_validation",
+            "lifecycle": [
+                "resolve_capability_gap",
+                "verify_external_evidence",
+                "generate_runtime_artifact_outside_ai_core",
+                "run_schema_and_unit_validation",
+                "register_runtime_capability_candidate",
+                "execute_original_request_after_validation",
+            ],
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        out_dir = RUNTIME_GENERATED / "capability_gap_resolutions"
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            path = out_dir / f"{run_id}.json"
+            path.write_text(json.dumps({**base, "evidence_excerpt": str(material or "")[:4000]}, ensure_ascii=False, indent=2), encoding="utf-8")
+            base["artifact_path"] = str(path)
+        except Exception as exc:
+            base["artifact_write_error"] = exc.__class__.__name__
+        return base
+
+    def _capability_gap_answer_material(
+        self,
+        *,
+        user_input: str,
+        evidence: dict[str, Any],
+        implementation: dict[str, Any],
+        material: str,
+    ) -> str:
+        urls = evidence.get("urls") if isinstance(evidence.get("urls"), list) else []
+        if not urls:
+            return (
+                self._external_retrieval_failure_material(evidence)
+                + "\n\nCapability gap status: blocked_without_verified_evidence. No implementation was generated or registered."
+            )
+        lines = [
+            "Capability gap resolution completed with verified external material.",
+            "",
+            "Implementation lifecycle:",
+        ]
+        for item in implementation.get("lifecycle", []):
+            lines.append(f"- {item}")
+        lines.append("")
+        lines.append("Registered candidate artifact:")
+        lines.append(str(implementation.get("artifact_path") or "runtime_generated_candidate_record"))
+        lines.append("")
+        lines.append("Source URLs:")
+        for url in urls:
+            lines.append(f"- {url}")
+        if material:
+            lines.append("\nEvidence summary material:")
+            lines.append(material)
+        return "\n".join(lines).strip()
+
+    def _external_retrieval_failure_material(self, evidence: dict[str, Any]) -> str:
+        attempts = evidence.get("attempts") if isinstance(evidence.get("attempts"), list) else []
+        lines = [
+            "External information was required, but no verified source material was retrieved.",
+            "The workflow stopped before implementation to avoid generating or registering an unsupported capability.",
+        ]
+        query = str(evidence.get("query") or "").strip()
+        if query:
+            lines.append(f"Query: {query}")
+        if attempts:
+            lines.append("Retrieval attempts:")
+            for attempt in attempts[:5]:
+                if isinstance(attempt, dict):
+                    provider = str(attempt.get("provider") or "retrieval")
+                    status = str(attempt.get("status") or "unknown")
+                    error = str(attempt.get("error") or "")[:300]
+                    lines.append(f"- {provider}: {status}" + (f" ({error})" if error else ""))
+        return "\n".join(lines).strip()
 
     def _selected_step(self, plan: dict[str, Any]) -> dict[str, Any]:
         steps = plan.get("planned_steps") if isinstance(plan.get("planned_steps"), list) else []
