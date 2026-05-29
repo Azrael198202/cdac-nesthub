@@ -16,6 +16,7 @@ from ai_core.config.paths import RUNTIME_DOWNLOADS
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.media import ImageGenerationService, VideoGenerationService
 from auxiliary_brain.parameters.agent_parameter_contract import AgentParameterContractService
+from ai_core.tools.runtime_registered_tool_service import RuntimeRegisteredToolService
 
 
 class AgentDelegationRuntime:
@@ -34,6 +35,7 @@ class AgentDelegationRuntime:
         self.knowledge_service = KnowledgeService()
         self.image_generation_service = ImageGenerationService()
         self.video_generation_service = VideoGenerationService()
+        self.registered_tool_service = RuntimeRegisteredToolService()
 
     async def execute_task(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
         selected = self._fresh_task_participants(self._select_participants(task_graph, participants))
@@ -1178,6 +1180,8 @@ class AgentDelegationRuntime:
     ) -> AgentExecutionResult | None:
         profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
         capability_type = str(profile.get("capability_type") or "").strip()
+        if capability_type == "runtime_registered_tool":
+            return await self._execute_registered_tool_capability(participant=participant, task_name=task_name)
         if capability_type == "image_generation":
             return await self._execute_image_generation_capability(participant=participant, completed_results=completed_results, dependency_plan=dependency_plan)
         if capability_type == "video_generation":
@@ -1227,6 +1231,165 @@ class AgentDelegationRuntime:
             },
             origin="auxiliary_brain",
         )
+
+    async def _execute_registered_tool_capability(self, *, participant: dict[str, Any], task_name: str) -> AgentExecutionResult | None:
+        profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+        tool_id = str(profile.get("tool_id") or "").strip()
+        if not tool_id:
+            return None
+        values = participant.get("runtime_parameters") if isinstance(participant.get("runtime_parameters"), dict) else {}
+        input_data = self._build_registered_tool_input(participant=participant, values=values)
+        missing = self._missing_registered_tool_inputs(participant=participant, input_data=input_data)
+        if missing:
+            return AgentExecutionResult(
+                participant_id=self._participant_identity(participant),
+                participant_name=self._participant_name(participant),
+                core_run_id=new_id("registered_tool_missing_input"),
+                status="requires_input",
+                final_answer="",
+                workflow_results={"status": "requires_input", "capability_type": "runtime_registered_tool", "tool_id": tool_id},
+                pending_action={
+                    "kind": "agent_parameter_collection",
+                    "message": "Runtime input is required before execution can continue.",
+                    "request": {"input_mode": "multi_value_list", "fields": self.parameter_contract_service.to_missing_input_fields(participant)},
+                },
+                missing_inputs=self.parameter_contract_service.to_missing_input_fields(participant),
+                origin="auxiliary_brain",
+            )
+        execution_policy = profile.get("execution_policy") if isinstance(profile.get("execution_policy"), dict) else {}
+        approval_policy = execution_policy.get("approval_policy") if isinstance(execution_policy.get("approval_policy"), dict) else {}
+        approval_confirmed = bool(values.get("approval_confirmed") or values.get("confirm") or values.get("confirmed"))
+        result = self.registered_tool_service.execute_tool(
+            tool_id=tool_id,
+            input_data=input_data,
+            run_id=new_id("registered_tool_run"),
+            profile_id=str(values.get("profile_id") or "default"),
+            approval_confirmed=approval_confirmed,
+        )
+        status = str(result.get("status") or "").strip()
+        if status == "requires_configuration":
+            fields = self._configuration_fields_for_registered_tool(result)
+            return AgentExecutionResult(
+                participant_id=self._participant_identity(participant),
+                participant_name=self._participant_name(participant),
+                core_run_id=new_id("registered_tool_config_required"),
+                status="requires_input",
+                final_answer="",
+                workflow_results={"status": "requires_configuration", "tool_id": tool_id, "configuration_status": result.get("configuration_status")},
+                pending_action={
+                    "kind": "runtime_tool_configuration",
+                    "tool_id": tool_id,
+                    "message": "Runtime-declared configuration or secret values are required before this capability can execute.",
+                    "request": {"input_mode": "runtime_tool_profile", "fields": fields},
+                },
+                missing_inputs=fields,
+                origin="auxiliary_brain",
+            )
+        if status == "requires_human_confirmation":
+            preview = result.get("preview") if isinstance(result.get("preview"), dict) else {}
+            return AgentExecutionResult(
+                participant_id=self._participant_identity(participant),
+                participant_name=self._participant_name(participant),
+                core_run_id=new_id("registered_tool_approval_required"),
+                status="paused",
+                final_answer="",
+                workflow_results={"status": "requires_human_confirmation", "tool_id": tool_id, "preview": preview},
+                pending_action={
+                    "kind": "runtime_tool_human_confirmation",
+                    "tool_id": tool_id,
+                    "message": "This runtime-generated capability requires confirmation before execution.",
+                    "approval_policy": approval_policy or result.get("approval_policy"),
+                    "preview": preview,
+                    "request": {"input_mode": "confirmation", "fields": [{"field": f"{self._participant_identity(participant)}.approval_confirmed", "name": f"{self._participant_identity(participant)}.approval_confirmed", "label": "Confirm execution", "input_type": "boolean", "required": True}]},
+                },
+                missing_inputs=[],
+                origin="auxiliary_brain",
+            )
+        ok = bool(result.get("ok"))
+        final_answer = self._registered_tool_final_answer(result)
+        return AgentExecutionResult(
+            participant_id=self._participant_identity(participant),
+            participant_name=self._participant_name(participant),
+            core_run_id=new_id("registered_tool_result"),
+            status="completed" if ok else "failed",
+            final_answer=final_answer,
+            workflow_results={
+                "status": "completed" if ok else "failed",
+                "capability_type": "runtime_registered_tool",
+                "tool_id": tool_id,
+                "input_keys": sorted(input_data.keys()),
+                "tool_execution": result,
+            },
+            origin="auxiliary_brain",
+        )
+
+    def _build_registered_tool_input(self, *, participant: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
+        profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+        summary = profile.get("tool_summary") if isinstance(profile.get("tool_summary"), dict) else {}
+        schema = summary.get("input_schema") if isinstance(summary.get("input_schema"), dict) else {}
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        out: dict[str, Any] = {}
+        for name, prop in properties.items():
+            if not isinstance(prop, dict):
+                prop = {}
+            raw = values.get(name)
+            if raw in (None, "", [], {}):
+                continue
+            if str(prop.get("type") or "") == "array":
+                if isinstance(raw, list):
+                    out[name] = raw
+                else:
+                    out[name] = [raw]
+            else:
+                if isinstance(raw, list):
+                    out[name] = self._first_scalar(raw)
+                else:
+                    out[name] = raw
+        return out
+
+    def _missing_registered_tool_inputs(self, *, participant: dict[str, Any], input_data: dict[str, Any]) -> list[str]:
+        profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+        summary = profile.get("tool_summary") if isinstance(profile.get("tool_summary"), dict) else {}
+        schema = summary.get("input_schema") if isinstance(summary.get("input_schema"), dict) else {}
+        required = schema.get("required") if isinstance(schema.get("required"), list) else []
+        missing = []
+        for name in required:
+            if input_data.get(str(name)) in (None, "", [], {}):
+                missing.append(str(name))
+        return missing
+
+    def _configuration_fields_for_registered_tool(self, result: dict[str, Any]) -> list[dict[str, Any]]:
+        tool = result.get("tool") if isinstance(result.get("tool"), dict) else {}
+        fields: list[dict[str, Any]] = []
+        for group_name in ("connection_schema", "secret_schema"):
+            schema = tool.get(group_name) if isinstance(tool.get(group_name), dict) else {}
+            properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+            required = {str(x) for x in schema.get("required", [])} if isinstance(schema.get("required"), list) else set()
+            for name, prop in properties.items():
+                prop = prop if isinstance(prop, dict) else {}
+                fields.append({
+                    "kind": "runtime_tool_configuration_required",
+                    "field": f"{group_name}.{name}",
+                    "name": f"{group_name}.{name}",
+                    "parameter_name": str(name),
+                    "label": str(prop.get("title") or name),
+                    "message": str(prop.get("description") or f"Provide {name}."),
+                    "input_type": "secret" if group_name == "secret_schema" else str(prop.get("type") or "string"),
+                    "required": str(name) in required,
+                    "configuration_group": group_name,
+                })
+        return fields
+
+    def _registered_tool_final_answer(self, result: dict[str, Any]) -> str:
+        if not isinstance(result, dict):
+            return "Runtime tool execution returned no structured result."
+        tool_id = str(result.get("tool_id") or "runtime tool")
+        if result.get("ok"):
+            return f"Runtime capability executed successfully: {tool_id}."
+        error = result.get("error") if isinstance(result.get("error"), dict) else {}
+        message = str(error.get("message") or result.get("status") or "Runtime capability execution failed.")
+        return f"Runtime capability execution failed: {tool_id}. {message}"
+
 
 
     async def _execute_image_generation_capability(self, *, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> AgentExecutionResult | None:

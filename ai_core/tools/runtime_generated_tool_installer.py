@@ -7,6 +7,8 @@ from typing import Any
 
 from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_REGISTRY
 from ai_core.tools.runtime_tool_artifact_validator import RuntimeToolArtifactValidator
+from ai_core.runtime.capability.acquisition_gate import RuntimeCapabilityAcquisitionGate
+from ai_core.sandbox.verified_sandbox_runtime import VerifiedSandboxRuntime
 
 
 class RuntimeGeneratedToolInstaller:
@@ -28,6 +30,8 @@ class RuntimeGeneratedToolInstaller:
         if not self.registry_path.exists():
             self.registry_path.write_text("{}", encoding="utf-8")
         self.validator = RuntimeToolArtifactValidator()
+        self.acquisition_gate = RuntimeCapabilityAcquisitionGate()
+        self.sandbox_runtime = VerifiedSandboxRuntime()
 
     def install_from_step(
         self,
@@ -126,6 +130,51 @@ class RuntimeGeneratedToolInstaller:
         if not validation.get("valid"):
             raise ValueError("Generated runtime tool artifact failed validation: " + "; ".join(validation.get("errors", [])))
 
+        sandbox_artifact = self._build_sandbox_artifact(
+            target_dir=target_dir,
+            written_files=written_files,
+            manifest=manifest,
+            callable_name=callable_name,
+            module_file_name=module_file_name,
+            source_artifact=artifact,
+            capability=capability,
+            user_input=user_input,
+        )
+        pre_gate = self.acquisition_gate.evaluate_before_validation(
+            requested_capability=capability,
+            user_input=user_input,
+            template={},
+            artifact=sandbox_artifact,
+            dependency_resolution={"passed": True, "status": "installer_prechecked"},
+        )
+        if not pre_gate.get("passed"):
+            self.acquisition_gate.write_report(artifact_dir=target_dir, report={"pre_validation": pre_gate})
+            raise ValueError("Generated runtime tool artifact failed acquisition gate: " + str(pre_gate.get("reason")))
+
+        sandbox_result = self.sandbox_runtime.verify_tool_artifact(
+            artifact=sandbox_artifact,
+            test_input=self._verification_input(manifest=manifest, artifact=artifact),
+            allow_network=bool(artifact.get("uses_network") and artifact.get("allow_network_verification")),
+            timeout_seconds=int(artifact.get("verification_timeout_seconds") or 60),
+        )
+        registration_gate = self.acquisition_gate.evaluate_before_registration(
+            pre_validation_decision=pre_gate,
+            validation={"passed": bool(sandbox_result.get("safe_to_register")), "mode": sandbox_result.get("mode"), "checks": sandbox_result.get("checks", [])},
+            verification_run={"passed": bool(sandbox_result.get("safe_to_register")), "sandbox_result": sandbox_result},
+            sandbox_result=sandbox_result,
+        )
+        self.acquisition_gate.write_report(artifact_dir=target_dir, report={"pre_validation": pre_gate, "sandbox": sandbox_result, "registration": registration_gate})
+        if not registration_gate.get("safe_to_register"):
+            raise ValueError("Generated runtime tool artifact blocked before registry enablement: " + str(registration_gate.get("reason")))
+
+        manifest["verification"] = {
+            **(manifest.get("verification") if isinstance(manifest.get("verification"), dict) else {}),
+            "sandbox_verification": True,
+            "execution_verification": True,
+            "registration_gate": registration_gate,
+            "sandbox_result": sandbox_result,
+        }
+
         manifest_path = target_dir / "tool.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -152,6 +201,44 @@ class RuntimeGeneratedToolInstaller:
         }
         self.registry_path.write_text(json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
         return registry[tool_id]
+
+    def _build_sandbox_artifact(
+        self,
+        *,
+        target_dir: Path,
+        written_files: dict[str, str],
+        manifest: dict[str, Any],
+        callable_name: str,
+        module_file_name: str,
+        source_artifact: dict[str, Any],
+        capability: str,
+        user_input: str,
+    ) -> dict[str, Any]:
+        files: dict[str, str] = {}
+        for relative_name, absolute_path in written_files.items():
+            path = Path(absolute_path)
+            if path.exists():
+                files[str(relative_name)] = path.read_text(encoding="utf-8", errors="ignore")
+        sandbox_manifest = dict(manifest)
+        sandbox_manifest["implementation"] = {"module_path": module_file_name, "function": callable_name}
+        if isinstance(source_artifact.get("capability_match_contract"), dict):
+            sandbox_manifest["capability_match_contract"] = source_artifact.get("capability_match_contract")
+        return {
+            "tool_id": manifest.get("tool_id"),
+            "capability": capability,
+            "manifest": sandbox_manifest,
+            "files": files,
+            "artifact_dir": str(target_dir),
+            "source_user_input": user_input,
+            "capability_match_contract": source_artifact.get("capability_match_contract") if isinstance(source_artifact.get("capability_match_contract"), dict) else None,
+        }
+
+    def _verification_input(self, *, manifest: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
+        for source in (artifact, manifest):
+            value = source.get("verification_input") if isinstance(source, dict) else None
+            if isinstance(value, dict):
+                return value
+        return {}
 
     def _extract_artifact(self, step: dict[str, Any]) -> dict[str, Any] | None:
         for key in [

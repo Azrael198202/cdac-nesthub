@@ -24,6 +24,7 @@ from ai_core.context.execution_reuse_store import ExecutionReuseStore
 from ai_core.execution.parameter_resolution import ParameterResolutionPipeline, PreflightResolutionContext
 from auxiliary_brain.studio.instruction_workflow_planner import InstructionWorkflowPlanner
 from auxiliary_brain.studio.runtime_semantic_planner import RuntimeSemanticPlanner
+from ai_core.runtime.capability.registered_tool_agent_binder import RegisteredToolAgentBinder
 
 
 class AgentStudioService:
@@ -48,6 +49,7 @@ class AgentStudioService:
         self.instruction_workflow_planner = InstructionWorkflowPlanner()
         self.runtime_semantic_planner = RuntimeSemanticPlanner()
         self.registered_tool_service = RuntimeRegisteredToolService()
+        self.registered_tool_agent_binder = RegisteredToolAgentBinder()
         self.direct_capability_dispatcher = CapabilityDispatcher(handlers={
             "image_generation": self._handle_direct_image_generation,
             "video_generation": self._handle_direct_video_generation,
@@ -642,6 +644,12 @@ class AgentStudioService:
         # so each task execution must collect fresh runtime parameters unless
         # the task instruction explicitly supplies them.
         schema_contract = self._parameter_contract_schema_only(parameter_contract)
+        capability_binding = self.registered_tool_agent_binder.bind(
+            instruction=instruction,
+            participant_name=participant_name,
+        )
+        if capability_binding:
+            schema_contract = capability_binding.get("parameter_contract") or schema_contract
         payload = {
             "participant_id": participant_id,
             "name": participant_name,
@@ -657,7 +665,17 @@ class AgentStudioService:
             "origin": "auxiliary_brain",
             "status": "created",
             "created_at": self._now(),
-            "execution_policy": "delegate_to_ai_core",
+            "execution_policy": "runtime_registered_tool" if capability_binding else "delegate_to_ai_core",
+            "capability_profile": {
+                "capability_type": "runtime_registered_tool",
+                "tool_id": capability_binding.get("tool_id"),
+                "capability": capability_binding.get("capability"),
+                "capabilities": capability_binding.get("capabilities") or [],
+                "binding_status": capability_binding.get("binding_status"),
+                "match_score": capability_binding.get("match_score"),
+                "tool_summary": capability_binding.get("tool_summary") or {},
+                "execution_policy": capability_binding.get("execution_policy") or {},
+            } if capability_binding else {},
             "uploaded_artifacts": artifact_refs,
             "artifact_policy": {
                 "bind_uploaded_artifacts_to_agent": bool(artifact_refs),
@@ -676,6 +694,8 @@ class AgentStudioService:
             "display_name": participant_name,
             "path": str(path),
             "uploaded_artifacts": artifact_refs,
+            "capability_profile": payload.get("capability_profile") or {},
+            "bound_tool_id": (payload.get("capability_profile") or {}).get("tool_id"),
         }
 
     def create_task_graph(self, instruction: str, name: str | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:

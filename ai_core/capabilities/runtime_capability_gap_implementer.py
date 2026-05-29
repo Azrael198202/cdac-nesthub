@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ai_core.config.paths import CONFIGS_DIR, RUNTIME_GENERATED, RUNTIME_REGISTRY
+from ai_core.runtime.capability.acquisition_gate import RuntimeCapabilityAcquisitionGate
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class RuntimeCapabilityGapImplementer:
         self.generated_tests_dir = RUNTIME_GENERATED / "tests"
         self.registry_path = RUNTIME_REGISTRY / "tool_registry.json"
         self.module_registry_path = RUNTIME_REGISTRY / "module_registry.json"
+        self.acquisition_gate = RuntimeCapabilityAcquisitionGate()
 
     def implement_if_requested(
         self,
@@ -74,15 +76,25 @@ class RuntimeCapabilityGapImplementer:
                 "generated_at": datetime.now(timezone.utc).isoformat(),
             }
         artifact = self._write_artifact(template=template, run_id=run_id, evidence=evidence, dependency_resolution=dependency_resolution)
+        pre_gate = self.acquisition_gate.evaluate_before_validation(
+            requested_capability=str(template.get("template_id") or ""),
+            user_input=user_input,
+            template=template,
+            artifact=artifact,
+            dependency_resolution=dependency_resolution,
+        )
+        self.acquisition_gate.write_report(artifact_dir=artifact.get("tool_dir"), report={"pre_validation": pre_gate})
         capability_match = self._verify_capability_match(template=template, artifact=artifact, user_input=user_input)
-        if not capability_match.get("passed"):
+        if not pre_gate.get("passed") or not capability_match.get("passed"):
+            status = str(pre_gate.get("status") or "generated_but_capability_mismatch")
             return {
-                "status": "generated_but_capability_mismatch",
+                "status": status,
                 "template_id": template.get("template_id"),
                 "score": match.score,
                 "dependency_resolution": dependency_resolution,
                 "artifact": artifact,
                 "capability_match": capability_match,
+                "acquisition_gate": pre_gate,
                 "validation": None,
                 "verification_run": None,
                 "registration": None,
@@ -91,22 +103,28 @@ class RuntimeCapabilityGapImplementer:
         validation = self._validate_artifact(artifact)
         verification_run: dict[str, Any] | None = None
         registration: dict[str, Any] | None = None
+        registration_gate: dict[str, Any] | None = None
         if validation.get("passed"):
             verification_run = self._execute_verification_run(template=template, artifact=artifact)
-            if verification_run.get("passed"):
-                registration = self._register_artifact(
-                    template=template,
-                    artifact=artifact,
-                    validation=validation,
-                    verification_run=verification_run,
-                    dependency_resolution=dependency_resolution,
-                    evidence=evidence,
-                )
-                status = "implemented_tested_registered"
-            else:
-                status = "generated_but_verification_failed"
+        registration_gate = self.acquisition_gate.evaluate_before_registration(
+            pre_validation_decision=pre_gate,
+            validation=validation,
+            verification_run=verification_run or {},
+        )
+        self.acquisition_gate.write_report(artifact_dir=artifact.get("tool_dir"), report={"pre_validation": pre_gate, "registration": registration_gate})
+        if registration_gate.get("safe_to_register"):
+            registration = self._register_artifact(
+                template=template,
+                artifact=artifact,
+                validation=validation,
+                verification_run=verification_run or {},
+                dependency_resolution=dependency_resolution,
+                evidence=evidence,
+                acquisition_gate=registration_gate,
+            )
+            status = "implemented_tested_registered"
         else:
-            status = "generated_but_validation_failed"
+            status = str(registration_gate.get("status") or "generated_but_validation_failed")
         return {
             "status": status,
             "template_id": template.get("template_id"),
@@ -114,6 +132,7 @@ class RuntimeCapabilityGapImplementer:
             "dependency_resolution": dependency_resolution,
             "artifact": artifact if 'artifact' in locals() else None,
             "capability_match": capability_match if 'capability_match' in locals() else None,
+            "acquisition_gate": registration_gate if 'registration_gate' in locals() else pre_gate if 'pre_gate' in locals() else None,
             "validation": validation if 'validation' in locals() else None,
             "verification_run": verification_run,
             "registration": registration,
@@ -372,9 +391,20 @@ class RuntimeCapabilityGapImplementer:
         combined_parts: list[str] = [str(template.get("template_id") or ""), str(template.get("description") or ""), user_input or ""]
         if tool_dir.exists():
             for path in sorted(tool_dir.rglob("*")):
+                if path.name in {"capability_match_report.json", "acquisition_gate_report.json", "verification_report.json", "test_report.json"}:
+                    continue
                 if path.is_file() and path.suffix.lower() in {".py", ".json", ".md", ".txt", ".yaml", ".yml"}:
                     try:
-                        combined_parts.append(path.read_text(encoding="utf-8", errors="ignore"))
+                        text = path.read_text(encoding="utf-8", errors="ignore")
+                        if path.name == "manifest.json":
+                            try:
+                                payload = json.loads(text or "{}")
+                                if isinstance(payload, dict):
+                                    payload.pop("capability_match_contract", None)
+                                    text = json.dumps(payload, ensure_ascii=False)
+                            except Exception:
+                                pass
+                        combined_parts.append(text)
                     except Exception:
                         continue
         combined = "\n".join(combined_parts).casefold()
@@ -522,6 +552,7 @@ class RuntimeCapabilityGapImplementer:
         verification_run: dict[str, Any],
         dependency_resolution: dict[str, Any],
         evidence: dict[str, Any],
+        acquisition_gate: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         RUNTIME_REGISTRY.mkdir(parents=True, exist_ok=True)
         registry = self._load_registry(self.registry_path)
@@ -551,6 +582,7 @@ class RuntimeCapabilityGapImplementer:
             "verification": {
                 "sandbox_verification": bool(validation.get("passed")),
                 "execution_verification": bool(verification_run.get("passed")),
+                "registration_gate": acquisition_gate or {},
                 "checks": validation.get("checks", []),
                 "verification_run": verification_run,
                 "test_dir": artifact.get("test_dir"),
