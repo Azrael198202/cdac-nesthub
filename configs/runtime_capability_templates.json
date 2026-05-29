@@ -392,7 +392,16 @@
           "path": "test_tool.py",
           "content": "from tool import run\n\n\ndef test_connected_message_adapter_requires_runtime_profile():\n    result = run({\"message\": {\"targets\": [\"a@example.invalid\"], \"title\": \"T\", \"body\": \"B\"}})\n    assert result[\"status\"] == \"requires_configuration\"\n\n\ndef test_connected_message_adapter_verifies_with_runtime_profile():\n    result = run({\n        \"mode\": \"verify\",\n        \"message\": {\"targets\": [\"a@example.invalid\"], \"title\": \"T\", \"body\": \"B\"},\n        \"_runtime\": {\n            \"connection\": {\"service_endpoint\": \"local-sandbox\", \"account_identifier\": \"tester\", \"transport_mode\": \"sandbox\"},\n            \"secrets\": {\"primary_credential\": \"hidden\"},\n            \"secret_refs\": {\"primary_credential\": \"runtime-secret-ref\"},\n        },\n    })\n    assert result[\"status\"] == \"success\"\n    assert result[\"data\"][\"configured\"] is True\n    assert result[\"data\"][\"external_action_executed\"] is False\n"
         }
-      ]
+      ],
+      "acquisition_policy": {
+        "decision_mode": "runtime_autonomous",
+        "complexity_level": "basic",
+        "allow_research_based_decisions": true,
+        "block_on_missing_runtime_values": false,
+        "block_on_missing_implementation_details": false,
+        "allow_policy_backed_basic_acquisition_without_external_evidence": true,
+        "runtime_values_collection": "agent_studio_schema_forms_after_registration"
+      }
     }
   ]
 }

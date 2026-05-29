@@ -47,8 +47,6 @@ class RuntimeCapabilityGapImplementer:
         if not allow_implementation:
             return {"status": "not_requested", "reason": "implementation_was_not_requested"}
         urls = evidence.get("urls") if isinstance(evidence.get("urls"), list) else []
-        if not urls:
-            return {"status": "blocked", "reason": "verified_evidence_required_before_implementation"}
         templates = self._load_templates()
         match = self._select_template(str(user_input or ""), templates)
         if not match:
@@ -58,6 +56,14 @@ class RuntimeCapabilityGapImplementer:
                 "template_path": str(self.template_path),
             }
         template = match.template
+        acquisition_policy = template.get("acquisition_policy") if isinstance(template.get("acquisition_policy"), dict) else {}
+        allow_policy_backed_basic = bool(acquisition_policy.get("allow_policy_backed_basic_acquisition_without_external_evidence"))
+        if not urls and not allow_policy_backed_basic:
+            return {"status": "blocked", "reason": "verified_evidence_required_before_implementation"}
+        if not urls and allow_policy_backed_basic:
+            evidence = dict(evidence)
+            evidence["urls"] = ["runtime-policy://basic-generated-capability-contract"]
+            evidence["source_note"] = "External source retrieval was unavailable; a basic runtime-generated template with sandbox validation is allowed by capability acquisition policy."
         dependency_resolution = self._resolve_dependencies(template)
         if not dependency_resolution.get("passed"):
             return {

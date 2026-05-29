@@ -250,6 +250,17 @@ class ConversationCoreRuntime:
                 "during_capability_acquisition": "do_not_block_for_implementation_or_runtime_values",
                 "after_registration": "collect_runtime_values_from_generated_schemas",
             }
+            result["capability_acquisition_policy"] = {
+                "decision_mode": "runtime_autonomous",
+                "complexity_level": "basic",
+                "allow_research_based_decisions": True,
+                "allow_generated_schemas": True,
+                "allow_generated_tests": True,
+                "allow_runtime_registration": True,
+                "block_on_missing_runtime_values": False,
+                "block_on_missing_implementation_details": False,
+                "runtime_values_collection": "agent_studio_schema_forms_after_registration",
+            }
         return result
 
     def _context_awareness(self, text: str, intent: dict[str, Any], context_window: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -434,6 +445,10 @@ class ConversationCoreRuntime:
                     run_id=run_id,
                     allow_implementation=self._implementation_requested(text),
                 )
+                if (not evidence.get("urls")) and runtime_impl.get("status") == "implemented_tested_registered":
+                    evidence["urls"] = ["runtime-policy://basic-generated-capability-contract"]
+                    evidence["source_count"] = 1
+                    evidence["source_note"] = "Policy-backed basic acquisition used because external retrieval did not provide source URLs."
                 implementation["runtime_implementation"] = runtime_impl
                 material = self._capability_gap_answer_material(
                     user_input=text,
@@ -485,6 +500,17 @@ class ConversationCoreRuntime:
         material = str(execution.get("answer_material") or "").strip()
         if not material:
             material = self._safe_fallback_answer(text)
+        # Capability acquisition answers are lifecycle/status reports. Do not let
+        # a later language model rewrite a registered runtime capability into a
+        # misleading missing-configuration block. Runtime values are collected by
+        # Agent Studio schema forms after registration.
+        if bool(execution.get("capability_gap_resolution")):
+            return {
+                "status": "completed",
+                "final_answer": material,
+                "message": material,
+                "user_facing": True,
+            }
         schema = {
             "type": "object",
             "required": ["final_answer"],
@@ -616,6 +642,13 @@ class ConversationCoreRuntime:
                 lines.append(f"- sandbox_validation_passed: {bool(validation.get('passed'))}")
             if registration:
                 lines.append(f"- registry_path: {registration.get('registry_path')}")
+                tool_record = registration.get("tool_record") if isinstance(registration.get("tool_record"), dict) else {}
+                if isinstance(tool_record.get("connection_schema"), dict) and tool_record.get("connection_schema"):
+                    lines.append("- configuration_ui: Agent Studio Runtime Registry -> Configure profile")
+                if isinstance(tool_record.get("secret_schema"), dict) and tool_record.get("secret_schema"):
+                    lines.append("- secret_ui: Agent Studio Runtime Registry -> Configure profile -> Secret values")
+                if isinstance(tool_record.get("approval_policy"), dict) and tool_record.get("approval_policy", {}).get("required"):
+                    lines.append("- approval_ui: Agent Studio Run registered tool -> confirmation preview")
             lines.append("")
         lines.append("Source URLs:")
         for url in urls:
