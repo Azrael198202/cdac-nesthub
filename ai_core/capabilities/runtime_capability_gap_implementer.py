@@ -5,13 +5,10 @@ import json
 import os
 import subprocess
 import sys
-import sysconfig
-import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
-from contextlib import nullcontext
 
 from ai_core.config.paths import CONFIGS_DIR, RUNTIME_GENERATED, RUNTIME_REGISTRY
 
@@ -78,14 +75,6 @@ class RuntimeCapabilityGapImplementer:
             }
         artifact = self._write_artifact(template=template, run_id=run_id, evidence=evidence, dependency_resolution=dependency_resolution)
         validation = self._validate_artifact(artifact)
-        cleanliness = self._validate_generated_artifact_cleanliness(template=template, artifact=artifact)
-        if not cleanliness.get("passed"):
-            validation = {
-                "passed": False,
-                "status": "failed",
-                "reason": "generated_artifact_cleanliness_failed",
-                "checks": (validation.get("checks") if isinstance(validation, dict) else []) + [cleanliness],
-            }
         verification_run: dict[str, Any] | None = None
         registration: dict[str, Any] | None = None
         if validation.get("passed"):
@@ -184,145 +173,43 @@ class RuntimeCapabilityGapImplementer:
         except Exception:
             return False
 
-    def _validation_python_executable(self) -> str:
-        """Pick a real Python interpreter for generated-artifact validation.
-
-        IDE launchers can make ``sys.executable`` behave like a debugger
-        bootstrap process.  Candidate interpreters are self-tested with the same
-        minimal environment used for validation; any candidate that starts
-        debugpy/pydevd is rejected before generated code is validated.
-        """
-        candidates: list[str] = []
-        for candidate in (
-            str(getattr(sys, "_base_executable", "") or ""),
-            str(sys.executable or ""),
-            str(Path(str(sysconfig.get_config_var("BINDIR") or "")) / ("python.exe" if os.name == "nt" else "python")) if sysconfig.get_config_var("BINDIR") else "",
-            str(shutil.which("python") or ""),
-            str(shutil.which("python3") or ""),
-        ):
-            value = candidate.strip()
-            if value and value not in candidates:
-                candidates.append(value)
-        for candidate in candidates:
-            lowered = candidate.casefold()
-            if "debugpy" in lowered or "pydevd" in lowered or "vscode" in lowered or "pycharm" in lowered:
-                continue
-            if self._python_candidate_is_clean(candidate):
-                return candidate
-        return sys.executable
-
-    def _python_candidate_is_clean(self, candidate: str) -> bool:
-        try:
-            with self._skip_debugger_subprocess_patch():
-                proc = subprocess.run(
-                    [candidate, "-I", "-c", "import sys; print(sys.executable)"],
-                    env=self._clean_subprocess_env(minimal=True),
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=10,
-                )
-        except Exception:
-            return False
-        combined = (str(proc.stdout or "") + "\n" + str(proc.stderr or "")).casefold()
-        if proc.returncode != 0:
-            return False
-        return not any(token in combined for token in ("debugpy", "pydevd", ".vscode", "vscode", "pycharm"))
-
-    def _skip_debugger_subprocess_patch(self):
-        """Disable debugger subprocess argument injection around validation launches.
-
-        VS Code/debugpy can monkey-patch subprocess.Popen when its launch
-        configuration has subprocess debugging enabled.  Cleaning environment
-        variables alone is not enough in that case because the parent process can
-        rewrite child command arguments before process creation.  pydevd exposes
-        a context manager for this exact situation; when it is unavailable this
-        method becomes a harmless no-op.
-        """
-        try:
-            import pydevd  # type: ignore
-            cm = getattr(pydevd, "skip_subprocess_arg_patch", None)
-            if callable(cm):
-                return cm()
-        except Exception:
-            pass
-        try:
-            from _pydev_bundle import pydev_monkey  # type: ignore
-            cm = getattr(pydev_monkey, "skip_subprocess_arg_patch", None)
-            if callable(cm):
-                return cm()
-        except Exception:
-            pass
-        return nullcontext()
-
-    def _clean_subprocess_env(self, *, pythonpath: str | None = None, minimal: bool = True) -> dict[str, str]:
+    def _clean_subprocess_env(self, *, pythonpath: str | None = None) -> dict[str, str]:
         """Return a stable validation environment for generated artifacts.
 
-        The default is intentionally minimal.  Copying the parent environment is
-        not safe when the parent was launched by VS Code/debugpy, because hidden
-        debugger bootstrap variables can force children to start pydevd before
-        the requested ``-m py_compile`` or test command runs.
+        VS Code/debugpy and similar launchers can inject PYTHONPATH, pydevd,
+        or debugger bootstrap variables into child Python processes.  Generated
+        capability validation must be isolated from the IDE runtime; otherwise
+        a valid generated tool may fail before its own code is even compiled.
         """
-        keep_names = {
-            "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR",
-            "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "PROGRAMDATA",
-        }
-        blocked_prefixes = ("PYDEVD", "DEBUGPY", "VSCODE", "PYCHARM", "PTVSD")
+        blocked_prefixes = ("PYDEVD", "DEBUGPY", "VSCODE", "PYCHARM")
         blocked_names = {
-            "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONBREAKPOINT",
-            "PYDEVD_LOAD_VALUES_ASYNC", "PYDEV_DEBUG", "PYDEVD_USE_FRAME_EVAL",
-            "DEBUGPY_LAUNCHER_PORT", "DEBUGPY_RUNNING", "PTVSD_LAUNCHER_PORT",
-            "PYDEVD_SUBPROCESS_NOTIFY", "PYDEVD_SUBPROCESS_DEBUG",
+            "PYTHONPATH",
+            "PYTHONHOME",
+            "PYTHONSTARTUP",
+            "PYTHONBREAKPOINT",
+            "PYDEVD_LOAD_VALUES_ASYNC",
         }
-        blocked_value_tokens = ("debugpy", "pydevd", ".vscode", "vscode", "pycharm", "ptvsd")
         clean: dict[str, str] = {}
         for key, value in os.environ.items():
             upper = key.upper()
-            value_text = str(value or "")
             if upper in blocked_names or any(upper.startswith(prefix) for prefix in blocked_prefixes):
                 continue
-            if any(token in value_text.casefold() for token in blocked_value_tokens):
-                continue
-            if minimal and upper not in keep_names:
-                continue
-            clean[key] = value_text
+            clean[key] = value
         if pythonpath:
             clean["PYTHONPATH"] = pythonpath
-        clean["PYTHONNOUSERSITE"] = "1"
-        clean["PYTHONDONTWRITEBYTECODE"] = "1"
-        clean["PYTHONSAFEPATH"] = "1"
-        clean["PYTHONIOENCODING"] = "utf-8"
-        # Defensive flags for pydevd-compatible debuggers. They are harmless
-        # for normal Python processes and prevent accidental child auto-attach
-        # in IDE-driven runtime validation.
-        clean["PYDEVD_DISABLE_SUBPROCESS"] = "1"
-        clean["PYDEVD_SUBPROCESS_NOTIFY"] = "0"
+        clean.setdefault("PYTHONNOUSERSITE", "1")
+        clean.setdefault("PYTHONDONTWRITEBYTECODE", "1")
         return clean
-
-    def _run_validation_subprocess(self, args: list[str], *, cwd: Path, timeout: int = 30) -> subprocess.CompletedProcess[str]:
-        command = [self._validation_python_executable(), *args]
-        with self._skip_debugger_subprocess_patch():
-            return subprocess.run(
-                command,
-                cwd=str(cwd),
-                env=self._clean_subprocess_env(minimal=True),
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=timeout,
-            )
 
     def _pip_install(self, package_name: str) -> dict[str, Any]:
         try:
-            with self._skip_debugger_subprocess_patch():
-                proc = subprocess.run(
-                    [self._validation_python_executable(), "-I", "-m", "pip", "install", package_name],
-                    env=self._clean_subprocess_env(minimal=True),
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=120,
-                )
+            proc = subprocess.run(
+                [sys.executable, "-m", "pip", "install", package_name],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=120,
+            )
             return {"returncode": proc.returncode, "stdout": proc.stdout[-3000:], "stderr": proc.stderr[-3000:]}
         except Exception as exc:
             return {"returncode": 1, "error_type": exc.__class__.__name__, "stderr": str(exc)[:2000], "stdout": ""}
@@ -392,7 +279,15 @@ class RuntimeCapabilityGapImplementer:
         checks: list[dict[str, Any]] = []
         py_files = [str(p) for p in tool_dir.rglob("*.py")]
         if py_files:
-            proc = self._run_validation_subprocess(["-I", "-m", "py_compile", *py_files], cwd=tool_dir, timeout=30)
+            proc = subprocess.run(
+                [sys.executable, "-I", "-m", "py_compile", *py_files],
+                cwd=str(tool_dir),
+                env=self._clean_subprocess_env(),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
             checks.append({"name": "python_compile", "returncode": proc.returncode, "stdout": proc.stdout[-2000:], "stderr": proc.stderr[-2000:]})
             if proc.returncode != 0:
                 return {"passed": False, "status": "failed", "checks": checks}
@@ -409,45 +304,20 @@ class RuntimeCapabilityGapImplementer:
                 f"sys.path.insert(0, {json.dumps(str(tool_dir))}); "
                 f"runpy.run_path({json.dumps(str(test_file))}, run_name='__main__')"
             )
-            proc = self._run_validation_subprocess(["-I", "-c", runner], cwd=tool_dir, timeout=30)
+            proc = subprocess.run(
+                [sys.executable, "-I", "-c", runner],
+                cwd=str(tool_dir),
+                env=self._clean_subprocess_env(),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
             check = {"name": "unit_test", "test_file": str(test_file), "returncode": proc.returncode, "stdout": proc.stdout[-2000:], "stderr": proc.stderr[-2000:]}
             checks.append(check)
             self._write_test_report(artifact, check)
             if proc.returncode != 0:
                 return {"passed": False, "status": "failed", "checks": checks}
-        return {"passed": True, "status": "completed", "checks": checks}
-
-
-    def _validate_generated_artifact_cleanliness(self, *, template: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
-        """Validate that generated files only contain declared template material.
-
-        The core cannot know business domains, so this check is structural rather
-        than keyword-based.  It prevents accidental runtime pollution by checking
-        that written files are inside the artifact directory, that no file is
-        empty when it is an executable Python module, and that every generated
-        file path was explicitly declared by the selected runtime template.
-        Concrete business terms are still controlled outside ai_core by the
-        runtime template registry and generated schemas.
-        """
-        tool_dir = Path(str(artifact.get("tool_dir") or ""))
-        declared = {self._safe_relative_path(str(item.get("path") or "")) for item in (template.get("files") if isinstance(template.get("files"), list) else []) if isinstance(item, dict)}
-        declared.discard("")
-        checks: list[dict[str, Any]] = []
-        for written in artifact.get("written_files") if isinstance(artifact.get("written_files"), list) else []:
-            path = Path(str(written))
-            try:
-                path.relative_to(tool_dir)
-            except Exception:
-                checks.append({"name": "artifact_path_boundary", "passed": False, "path": str(path)})
-                return {"passed": False, "status": "failed", "checks": checks}
-            rel = str(path.relative_to(tool_dir))
-            if rel not in declared:
-                checks.append({"name": "declared_template_file", "passed": False, "path": rel})
-                return {"passed": False, "status": "failed", "checks": checks}
-            if path.suffix == ".py" and not path.read_text(encoding="utf-8").strip():
-                checks.append({"name": "non_empty_python_module", "passed": False, "path": rel})
-                return {"passed": False, "status": "failed", "checks": checks}
-        checks.append({"name": "generated_artifact_cleanliness", "passed": True, "declared_file_count": len(declared)})
         return {"passed": True, "status": "completed", "checks": checks}
 
     def _execute_verification_run(self, *, template: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:

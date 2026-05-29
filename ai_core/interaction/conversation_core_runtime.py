@@ -445,11 +445,10 @@ class ConversationCoreRuntime:
                     run_id=run_id,
                     allow_implementation=self._implementation_requested(text),
                 )
-                if runtime_impl.get("status") == "implemented_tested_registered" and self._policy_backed_runtime_source_needed(evidence):
+                if (not evidence.get("urls")) and runtime_impl.get("status") == "implemented_tested_registered":
                     evidence["urls"] = ["runtime-policy://basic-generated-capability-contract"]
                     evidence["source_count"] = 1
                     evidence["source_note"] = "Policy-backed basic acquisition used because external retrieval did not provide source URLs."
-                    evidence["policy_backed_basic_acquisition"] = True
                 implementation = self._capability_gap_resolution_artifact(
                     user_input=text,
                     query=query,
@@ -466,9 +465,8 @@ class ConversationCoreRuntime:
                 )
             elif not material and not evidence_items:
                 material = self._external_retrieval_failure_material(evidence)
-            execution_completed = bool(evidence_items or fetched or material or (implementation and isinstance(implementation.get("runtime_implementation"), dict) and implementation["runtime_implementation"].get("status") == "implemented_tested_registered"))
             return {
-                "status": "completed" if execution_completed else "blocked_no_external_material",
+                "status": "completed" if evidence_items else "blocked_no_external_material",
                 "execution_mode": "capability_gap_resolution" if capability_gap else "web_search",
                 "capability": "web_retrieval",
                 "answer_material": material,
@@ -614,123 +612,59 @@ class ConversationCoreRuntime:
         implementation: dict[str, Any],
         material: str,
     ) -> str:
-        """Build a concise user-facing capability-acquisition summary.
-
-        Full source excerpts, local paths, lifecycle internals, registry files, and
-        traces stay in runtime logs / Agent Studio diagnostics. The final answer
-        only states what the user needs: whether the tool was generated, whether
-        sandbox validation passed, whether it was registered, and the next action.
-        """
         urls = evidence.get("urls") if isinstance(evidence.get("urls"), list) else []
-        # Capability-acquisition status is an operational runtime report. Keep it
-        # in English so command-driven workflows remain stable even if the
-        # surrounding conversation contains CJK feedback or diagnostics.
-        lang = "en"
         if not urls:
             return (
-                "No verified source material was retrieved, so no tool was generated or registered.\n"
-                "Next step: refine the search query, or allow a local policy-backed template and run again."
+                self._external_retrieval_failure_material(evidence)
+                + "\n\nCapability gap status: blocked_without_verified_evidence. No implementation was generated or registered."
             )
         runtime_impl = implementation.get("runtime_implementation") if isinstance(implementation.get("runtime_implementation"), dict) else {}
         runtime_status = str(runtime_impl.get("status") or "not_requested")
-        validation = runtime_impl.get("validation") if isinstance(runtime_impl.get("validation"), dict) else {}
-        verification = runtime_impl.get("verification_run") if isinstance(runtime_impl.get("verification_run"), dict) else {}
-        registration = runtime_impl.get("registration") if isinstance(runtime_impl.get("registration"), dict) else {}
-        lines: list[str] = []
         if runtime_status in {"implemented_tested_registered", "implemented_tested_registered_verified"}:
-            lines.extend(self._localized_capability_summary(lang, "success", source_count=len(urls), registered=True))
-        elif runtime_status == "generated_but_validation_failed":
-            reason = self._runtime_validation_failure_summary(validation, language=lang)
-            lines.extend(self._localized_capability_summary(lang, "validation_failed", reason=reason, source_count=len(urls), registered=False))
-        elif runtime_status == "generated_but_verification_failed":
-            reason = self._runtime_validation_failure_summary(verification, language=lang)
-            lines.extend(self._localized_capability_summary(lang, "verification_failed", reason=reason, source_count=len(urls), registered=False))
-        elif runtime_status == "dependency_resolution_failed":
-            lines.extend(self._localized_capability_summary(lang, "dependency_failed", source_count=len(urls), registered=False))
-        elif runtime_status == "blocked":
-            reason = str(runtime_impl.get("reason") or "no safe runtime template matched")
-            lines.extend(self._localized_capability_summary(lang, "blocked", reason=reason, source_count=len(urls), registered=False))
+            headline = "Capability gap resolution completed. Runtime capability was implemented, sandbox-tested, registered, and verified by execution."
+        elif runtime_status in {"blocked", "generated_but_validation_failed"}:
+            headline = "Capability gap resolution collected verified material, but implementation was not registered."
         else:
-            lines.extend(self._localized_capability_summary(lang, "incomplete", source_count=len(urls), registered=bool(registration)))
-        return "\n".join(line for line in lines if line).strip()
+            headline = "Capability gap resolution completed with verified external material; implementation was not requested or no matching runtime template was available."
+        lines = [
+            headline,
+            "",
+            "Implementation lifecycle:",
+        ]
+        for item in implementation.get("lifecycle", []):
+            lines.append(f"- {item}")
+        lines.append("")
+        lines.append("Resolution artifact:")
+        lines.append(str(implementation.get("artifact_path") or "runtime_generated_candidate_record"))
+        lines.append("")
+        if runtime_impl:
+            lines.append("Runtime implementation status:")
+            lines.append(f"- status: {runtime_status}")
+            artifact = runtime_impl.get("artifact") if isinstance(runtime_impl.get("artifact"), dict) else {}
+            validation = runtime_impl.get("validation") if isinstance(runtime_impl.get("validation"), dict) else {}
+            registration = runtime_impl.get("registration") if isinstance(runtime_impl.get("registration"), dict) else {}
+            if artifact.get("tool_dir"):
+                lines.append(f"- artifact_dir: {artifact.get('tool_dir')}")
+            if validation:
+                lines.append(f"- sandbox_validation_passed: {bool(validation.get('passed'))}")
+            if registration:
+                lines.append(f"- registry_path: {registration.get('registry_path')}")
+                tool_record = registration.get("tool_record") if isinstance(registration.get("tool_record"), dict) else {}
+                if isinstance(tool_record.get("connection_schema"), dict) and tool_record.get("connection_schema"):
+                    lines.append("- configuration_ui: Agent Studio Runtime Registry -> Configure profile")
+                if isinstance(tool_record.get("secret_schema"), dict) and tool_record.get("secret_schema"):
+                    lines.append("- secret_ui: Agent Studio Runtime Registry -> Configure profile -> Secret values")
+                if isinstance(tool_record.get("approval_policy"), dict) and tool_record.get("approval_policy", {}).get("required"):
+                    lines.append("- approval_ui: Agent Studio Run registered tool -> confirmation preview")
+            lines.append("")
+        lines.append("Source URLs:")
+        for url in urls:
+            lines.append(f"- {url}")
+        if material:
+            lines.append("\nEvidence summary material:")
+            lines.append(material)
+        return "\n".join(lines).strip()
 
-    def _user_visible_language(self, text: str) -> str:
-        value = str(text or "")
-        # Keep this generic: choose Chinese only when the actual user request is
-        # predominantly CJK. Capability names or programming-language words must
-        # not force Chinese output.
-        cjk = sum(1 for ch in value if "\u4e00" <= ch <= "\u9fff")
-        ascii_letters = sum(1 for ch in value if ("a" <= ch.lower() <= "z"))
-        return "zh" if cjk > 0 and cjk >= max(3, ascii_letters // 3) else "en"
-
-    def _localized_capability_summary(
-        self,
-        language: str,
-        status: str,
-        *,
-        reason: str = "",
-        source_count: int = 0,
-        registered: bool = False,
-    ) -> list[str]:
-        # Capability acquisition is a runtime operation report. Keep it in
-        # English to avoid language drift when the original command is English
-        # but surrounding user feedback contains another language.
-        templates = {
-            "success": [
-                "Tool generation completed: source retrieval, code generation, sandbox validation, registration, and verification run all passed.",
-                "Next step: fill connection settings and secrets in Agent Studio. External side-effect execution still requires user approval.",
-            ],
-            "validation_failed": [
-                "Tool code was generated, but sandbox validation failed, so it was not registered.",
-                f"Reason: {reason}",
-                "Next step: fix the validation environment or regenerate the code, then rerun validation.",
-            ],
-            "verification_failed": [
-                "Tool code passed basic sandbox checks, but the verification run failed, so it was not registered.",
-                f"Reason: {reason}",
-                "Next step: fix the tool or runtime configuration according to the verification error, then rerun validation.",
-            ],
-            "dependency_failed": ["Dependency checks failed before tool generation, so nothing was registered."],
-            "blocked": ["Source material was retrieved, but the runtime did not generate a registrable tool.", f"Reason: {reason}"],
-            "incomplete": ["Source retrieval completed, but the request did not finish the full registrable-tool lifecycle."],
-        }
-        lines = list(templates.get(status, templates["incomplete"]))
-        if source_count:
-            lines.append(f"Verified source count: {source_count}.")
-        lines.append("Registration status: registered." if registered else "Registration status: not registered.")
-        return lines
-
-    def _runtime_validation_failure_summary(self, validation: dict[str, Any], *, language: str = "en") -> str:
-        checks = validation.get("checks") if isinstance(validation.get("checks"), list) else []
-        for check in checks:
-            if not isinstance(check, dict):
-                continue
-            if int(check.get("returncode") or 0) == 0:
-                continue
-            name = str(check.get("name") or "validation").strip() or "validation"
-            stderr = str(check.get("stderr") or check.get("error") or "").strip()
-            lowered = stderr.casefold()
-            if "debugpy" in lowered or "pydevd" in lowered or ".vscode" in lowered:
-                interrupted = "keyboardinterrupt" in lowered or int(check.get("returncode") or 0) in {3221225786, -1073741510}
-                if interrupted:
-                    return (
-                        f"{name} subprocess was interrupted during Python startup while IDE/debugger subprocess debugging was active; "
-                        "the generated tool code itself was not reached."
-                    )
-                return (
-                    f"{name} started through IDE/debugger subprocess bootstrap instead of a clean isolated Python process; "
-                    "the generated tool code itself was not reached."
-                )
-            if "syntaxerror" in lowered:
-                return f"{name} found a syntax error in the generated code."
-            if "modulenotfounderror" in lowered:
-                return f"{name} found an unavailable module import."
-            if stderr:
-                compact = " ".join(stderr.split())[:220]
-                return f"{name} failed: {compact}"
-            return f"{name} returned a non-zero exit code."
-        reason = str(validation.get("reason") or "sandbox_validation_failed").strip()
-        return reason or "sandbox validation failed."
 
     def _implementation_requested(self, text: str) -> bool:
         value = " " + str(text or "").strip().casefold() + " "
@@ -738,9 +672,7 @@ class ConversationCoreRuntime:
             " acquire runtime capability ", " capability acquisition ", " acquire capability ",
             " generate implementation ", " generate tests ", " verify capability acquisition ",
             " implement ", " build ", " generate ", " create capability ", " add support ",
-            " register ", " current runtime does not have ", " does not have this capability ",
-            " missing capability ", " capability gap ", " find a solution ",
-            "实装", "实现", "生成", "注册", "構築", "実装", "登録",
+            " register ", "实装", "实现", "生成", "注册", "構築", "実装", "登録",
         )
         return any(marker in value for marker in markers)
 
@@ -787,33 +719,9 @@ class ConversationCoreRuntime:
         capability_impl = execution.get("capability_implementation") if isinstance(execution.get("capability_implementation"), dict) else {}
         if isinstance(capability_impl, dict):
             runtime_impl = capability_impl.get("runtime_implementation") if isinstance(capability_impl.get("runtime_implementation"), dict) else None
-        policy = selected.get("source_policy") if isinstance(selected.get("source_policy"), dict) else {}
-        try:
-            min_sources = int(policy.get("min_sources") or (1 if expects_web else 0))
-        except Exception:
-            min_sources = 1 if expects_web else 0
-        min_sources = max(0, min_sources)
-        fetched_count = int(evidence.get("fetched_count") or 0) if isinstance(evidence.get("fetched_count"), int) else 0
-        policy_backed_runtime_success = bool(
-            expects_web
-            and evidence.get("policy_backed_basic_acquisition")
-            and runtime_impl
-            and runtime_impl.get("status") == "implemented_tested_registered"
-        )
-        source_requirement_met = (
-            (not expects_web)
-            or policy_backed_runtime_success
-            or (len(urls) >= min_sources and (fetched_count > 0 or evidence.get("source_note")))
-        )
-        passed = bool(execution.get("answer_material")) and source_requirement_met
-        failure_reasons: list[str] = []
-        if expects_web and not policy_backed_runtime_success and len(urls) < min_sources:
-            failure_reasons.append("minimum_source_count_not_met")
-        if expects_web and not policy_backed_runtime_success and len(urls) >= min_sources and fetched_count <= 0 and not evidence.get("source_note"):
-            failure_reasons.append("source_fetch_not_verified")
+        passed = bool(execution.get("answer_material")) and (not expects_web or bool(urls))
         if runtime_impl and runtime_impl.get("status") in {"generated_but_validation_failed", "generated_but_verification_failed", "dependency_resolution_failed"}:
             passed = False
-            failure_reasons.append(str(runtime_impl.get("status")))
         return {
             "status": "completed" if passed else "failed",
             "passed": passed,
@@ -823,11 +731,6 @@ class ConversationCoreRuntime:
             "actual_capability": execution.get("capability") or execution.get("execution_mode"),
             "evidence_required": expects_web,
             "evidence_present": bool(urls),
-            "minimum_source_count": min_sources,
-            "minimum_source_count_met": bool(policy_backed_runtime_success or len(urls) >= min_sources),
-            "source_fetch_verified": bool(policy_backed_runtime_success or fetched_count > 0 or evidence.get("source_note") or not expects_web),
-            "policy_backed_runtime_source_used": policy_backed_runtime_success,
-            "failure_reasons": failure_reasons,
             "source_count": len(urls),
             "source_urls": urls,
             "capability_gap_resolution": bool(execution.get("capability_gap_resolution")),
@@ -890,8 +793,7 @@ class ConversationCoreRuntime:
             " register capability ", " verify capability acquisition ",
             " implement ", " add support ", " support ", " integrate ", " install ",
             " configure ", " generate code ", " fix ", " cannot handle ", " unable to ",
-            " not supported ", " does not have this capability ", " current runtime does not have ",
-            " missing capability ", " capability gap ", " how to build ", " how to create ", " how to implement ",
+            " not supported ", " how to build ", " how to create ", " how to implement ",
             "実装", "対応", "導入", "構築", "修正", "できない", "サポート",
             "实现", "实装", "支持", "接入", "集成", "安装", "配置", "修复", "无法处理", "不能处理", "怎么实现",
         )
@@ -904,51 +806,12 @@ class ConversationCoreRuntime:
         has_discovery = any(marker in value for marker in discovery_markers)
         return bool(has_action and (has_discovery or self._external_information_signals(text)))
 
-    def _policy_backed_runtime_source_needed(self, evidence: dict[str, Any]) -> bool:
-        urls = evidence.get("urls") if isinstance(evidence.get("urls"), list) else []
-        return not any(str(url or "").startswith("http://") or str(url or "").startswith("https://") for url in urls)
-
     def _capability_gap_query(self, text: str) -> str:
         base = str(text or "").strip()
-        compact = self._compact_external_research_query(base)
-        suffix = "implementation official documentation example safe integration validation"
-        lower = compact.casefold()
-        if all(token not in lower for token in ("documentation", "docs", "official", "guide", "example")):
-            compact = (compact + " " + suffix).strip()
-        return compact[:500].strip() or (base[:500].strip() + " " + suffix).strip()
-
-    def _compact_external_research_query(self, text: str) -> str:
-        lines = [line.strip(" -\t") for line in str(text or "").splitlines() if line.strip()]
-        kept: list[str] = []
-        low_value_markers = (
-            "acquire runtime capability", "runtime autonomous acquisition", "capability acquisition is complete",
-            "implementation generated", "sandbox test passed", "registry updated", "verification run completed",
-            "store connection values", "store secret values", "agent studio ui", "local runtime secret store",
-            "do not block", "register the capability", "after sandbox validation",
-        )
-        high_value_markers = (
-            "runtime language", "complexity level", "standard library", "prefer ", "official",
-            "documentation", "example", "safe integration", "validation", "input schema",
-            "connection schema", "secret schema", "approval policy", "dry-run", "mock",
-        )
-        for line in lines:
-            folded = line.casefold()
-            if any(marker in folded for marker in low_value_markers):
-                continue
-            if any(marker in folded for marker in high_value_markers) or len(kept) < 2:
-                kept.append(line.rstrip("."))
-        query = " ".join(kept)
-        query = re.sub(r"\b(Step|Constraints?)\s*:?", " ", query, flags=re.IGNORECASE)
-        query = re.sub(r"\s+", " ", query).strip()
-        words: list[str] = []
-        seen: set[str] = set()
-        for word in query.split():
-            key = word.casefold().strip(".,:;()[]{}")
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            words.append(word)
-        return " ".join(words)
+        suffix = " implementation guide official documentation example safe integration validation"
+        if any(token in base.casefold() for token in ("documentation", "docs", "official", "guide", "example")):
+            return base
+        return (base + suffix).strip()
 
     async def _direct_answer(self, text: str, parsed: dict[str, Any], intent: dict[str, Any], context: dict[str, Any], plan: dict[str, Any], run_id: str) -> str:
         schema = {
