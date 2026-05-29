@@ -115,3 +115,58 @@ def test_comfyui_torch_repair_uses_cpu_index_by_default_on_windows_safe_profile(
     install_cmd = commands[-1]
     assert "--index-url" in install_cmd
     assert "https://download.pytorch.org/whl/cpu" in install_cmd
+
+
+def test_comfyui_startup_forces_cpu_and_sanitizes_debug_env(tmp_path, monkeypatch):
+    service = ImageGenerationService()
+    root = tmp_path / "comfyui"
+    root.mkdir()
+    captured = {}
+
+    monkeypatch.setenv("DEBUGPY_LAUNCHER_PORT", "12345")
+    monkeypatch.setenv("PYDEVD_LOAD_VALUES_ASYNC", "1")
+    monkeypatch.setenv("VSCODE_PID", "999")
+
+    class FakeLog:
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def write(self, data):
+            return len(data)
+        def flush(self):
+            return None
+
+    def fake_open(self, mode="r", *args, **kwargs):
+        if "b" in mode and "a" in mode and self.name == "comfyui_startup.log":
+            return FakeLog()
+        return original_open(self, mode, *args, **kwargs)
+
+    original_open = Path.open
+    monkeypatch.setattr(Path, "open", fake_open)
+
+    class FakeProc:
+        pid = 4321
+
+    def fake_popen(cmd, cwd=None, stdout=None, stderr=None, start_new_session=None, env=None):
+        captured["cmd"] = cmd
+        captured["env"] = env
+        captured["cwd"] = cwd
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    result = service._start_runtime_process(root=root, runtime={"install": {"create_venv": False}}, force_cpu=True)
+    assert result["ok"] is True
+    assert "--cpu" in captured["cmd"]
+    assert captured["env"].get("CUDA_VISIBLE_DEVICES") == ""
+    assert "DEBUGPY_LAUNCHER_PORT" not in captured["env"]
+    assert "PYDEVD_LOAD_VALUES_ASYNC" not in captured["env"]
+    assert "VSCODE_PID" not in captured["env"]
+
+
+def test_comfyui_force_cpu_when_preflight_reports_cpu_torch():
+    service = ImageGenerationService()
+    assert service._should_force_comfyui_cpu(
+        runtime={},
+        preflight={"preflight": {"torch_version": "2.12.0+cpu", "cuda_available": False}},
+    ) is True

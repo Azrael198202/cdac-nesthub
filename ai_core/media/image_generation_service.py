@@ -383,7 +383,8 @@ class ImageGenerationService:
             if not repaired_preflight.get("ok"):
                 return repaired_preflight
 
-        started = self._start_runtime_process(root=root, runtime=runtime)
+        force_cpu = self._should_force_comfyui_cpu(runtime=runtime, preflight=preflight)
+        started = self._start_runtime_process(root=root, runtime=runtime, force_cpu=force_cpu)
         if not started.get("ok"):
             return started
         wait_seconds = float(runtime.get("startup_timeout_seconds") or 120)
@@ -784,7 +785,45 @@ class ImageGenerationService:
         self._log_comfy_bootstrap_event("install_completed", result)
         return result
 
-    def _start_runtime_process(self, *, root: Path, runtime: dict[str, Any]) -> dict[str, Any]:
+    def _should_force_comfyui_cpu(self, *, runtime: dict[str, Any], preflight: dict[str, Any]) -> bool:
+        if runtime.get("force_cpu") is True:
+            return True
+        if str(os.getenv("AI_CORE_COMFYUI_FORCE_CPU") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            return True
+        parsed = preflight.get("preflight") if isinstance(preflight.get("preflight"), dict) else {}
+        if parsed and parsed.get("cuda_available") is False:
+            return True
+        version = str(parsed.get("torch_version") or "").lower()
+        if "+cpu" in version:
+            return True
+        return False
+
+    def _comfyui_startup_env(self, *, force_cpu: bool) -> dict[str, str]:
+        env = dict(os.environ)
+        # A ComfyUI child process must not inherit VSCode/debugpy/pydevd runner
+        # state from the backend debug session. Inheriting those variables can
+        # wrap ``python main.py`` with debugpy and make heavy imports such as
+        # torch/numpy exit with KeyboardInterrupt during startup.
+        blocked_prefixes = ("DEBUGPY", "PYDEVD", "VSCODE", "PYCHARM")
+        blocked_names = {
+            "PYTHONBREAKPOINT",
+            "PYDEVD_USE_FRAME_EVAL",
+            "PYDEVD_LOAD_VALUES_ASYNC",
+            "DEBUGPY_LAUNCHER_PORT",
+            "DEBUGPY_RUNNING",
+        }
+        for key in list(env.keys()):
+            upper = key.upper()
+            if upper in blocked_names or any(upper.startswith(prefix) for prefix in blocked_prefixes):
+                env.pop(key, None)
+        env["PYTHONUNBUFFERED"] = "1"
+        if force_cpu:
+            env["CUDA_VISIBLE_DEVICES"] = ""
+            env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+            env.setdefault("COMFYUI_FORCE_CPU", "1")
+        return env
+
+    def _start_runtime_process(self, *, root: Path, runtime: dict[str, Any], force_cpu: bool = False) -> dict[str, Any]:
         process_dir = RUNTIME_DIR / "processes"
         process_dir.mkdir(parents=True, exist_ok=True)
         log_path = self._comfy_named_log_path("comfyui_startup.log")
@@ -794,12 +833,15 @@ class ImageGenerationService:
         install = runtime.get("install") if isinstance(runtime.get("install"), dict) else {}
         if not isinstance(command, list) or not command:
             command = [self._runtime_python(root=root, runtime=runtime, install=install), "main.py", "--listen", str(runtime.get("host") or "127.0.0.1"), "--port", str(runtime.get("port") or "8188")]
-        self._log_comfy_bootstrap_event("startup_begin", {"command": [str(x) for x in command], "root": str(root), "log_path": str(log_path)})
+            if force_cpu and "--cpu" not in [str(x) for x in command]:
+                command.append("--cpu")
+        env = self._comfyui_startup_env(force_cpu=force_cpu)
+        self._log_comfy_bootstrap_event("startup_begin", {"command": [str(x) for x in command], "root": str(root), "log_path": str(log_path), "force_cpu": force_cpu, "sanitized_debug_env": True})
         try:
             with log_path.open("ab") as log:
-                proc = subprocess.Popen([str(x) for x in command], cwd=str(root), stdout=log, stderr=log, start_new_session=True)
+                proc = subprocess.Popen([str(x) for x in command], cwd=str(root), stdout=log, stderr=log, start_new_session=True, env=env)
             (process_dir / "comfyui.pid").write_text(str(proc.pid), encoding="utf-8")
-            result = {"ok": True, "status": "starting", "pid": proc.pid, "log_path": str(log_path)}
+            result = {"ok": True, "status": "starting", "pid": proc.pid, "log_path": str(log_path), "force_cpu": force_cpu}
             self._log_comfy_bootstrap_event("startup_process_created", {**result, "root": str(root)})
             return result
         except Exception as exc:
