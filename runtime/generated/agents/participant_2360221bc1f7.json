@@ -1,0 +1,32 @@
+{
+  "participant_id": "participant_2360221bc1f7",
+  "name": "Provide file download link",
+  "agent_name": "Provide file download link",
+  "display_name": "Provide file download link",
+  "role_name": "Provide file download link",
+  "instruction": "Return generated file link\nReturn the generated file download link.",
+  "execution_objective": "Return generated file link\nReturn the generated file download link.",
+  "definition_instruction": "Return the generated file download link.",
+  "parameter_contract": {
+    "contract_type": "generated_intermediate_step_contract",
+    "parameters": [],
+    "missing_information": [],
+    "runtime_scope": "task_run"
+  },
+  "capability_profile": {},
+  "runtime_parameters": {},
+  "missing_information": [],
+  "origin": "auxiliary_brain",
+  "status": "created",
+  "execution_policy": "delegate_to_ai_core",
+  "generated_by": "semantic_workflow_planning",
+  "depends_on": [
+    "participant_e2b89a750244"
+  ],
+  "input_from": [
+    "participant_e2b89a750244"
+  ],
+  "workflow_step_type": "semantic_intermediate_step",
+  "source_step_id": "step3",
+  "created_at": "2026-05-29T01:12:06.068748+00:00"
+}

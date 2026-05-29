@@ -1,0 +1,36 @@
+{
+  "delivery_id": "delivery_5fb569578a08",
+  "origin": "auxiliary_brain",
+  "upstream_origin": "ai_core",
+  "task_name": "taskKnowledgeFile",
+  "run_id": "delegation_run_366065a4a384",
+  "final_answer": "Generated file: [lw.pptx](/api/downloads/download_accff6fa1de9/lw.pptx)",
+  "generated_files": [
+    {
+      "type": "file",
+      "download_id": "download_accff6fa1de9",
+      "file_name": "lw.pptx",
+      "file_path": "E:\\pw\\cdac-nesthub\\runtime\\downloads\\download_accff6fa1de9\\lw.pptx",
+      "download_url": "/api/downloads/download_accff6fa1de9/lw.pptx",
+      "mime_type": "application/octet-stream",
+      "size": 361,
+      "source_material": "verified_upstream_or_runtime_input"
+    }
+  ],
+  "synthesis": {
+    "origin": "ai_core",
+    "core_run_id": "f2b736d5ae1e",
+    "status": "completed",
+    "final_answer": "Generated file: [lw.pptx](/api/downloads/download_accff6fa1de9/lw.pptx)",
+    "workflow_results": {
+      "delegated_synthesis": {
+        "status": "completed",
+        "participant_count": 1,
+        "used_participant_count": 1,
+        "omitted_participant_count": 0,
+        "failed_participant_count": 0
+      }
+    }
+  },
+  "created_at": "2026-05-29T01:12:47.439383+00:00"
+}

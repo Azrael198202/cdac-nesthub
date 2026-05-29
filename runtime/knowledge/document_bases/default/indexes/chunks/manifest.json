@@ -1,0 +1,6 @@
+{
+  "index_name": "chunks",
+  "embedding_provider": "local_hash_ngram_256",
+  "indexed_count": 7,
+  "updated_at": "2026-05-29T01:10:53.395825"
+}

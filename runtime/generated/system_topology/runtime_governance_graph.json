@@ -1,0 +1,119 @@
+{
+  "version": "2.8.15-seed",
+  "generated_by": "deterministic_seed",
+  "capability_semantic_graph": {
+    "runtime_state_observation": {
+      "preferred_modes": [
+        "runtime_native"
+      ],
+      "fallback_modes": [],
+      "trust_policy": {
+        "runtime_native_verified": true
+      }
+    },
+    "structured_external_observation": {
+      "preferred_modes": [
+        "structured_provider",
+        "web_retrieval"
+      ],
+      "fallback_modes": [
+        "web_retrieval"
+      ],
+      "trust_policy": {
+        "requires_external_evidence": true
+      }
+    },
+    "web_retrieval": {
+      "preferred_modes": [
+        "web_retrieval"
+      ],
+      "fallback_modes": [
+        "structured_provider"
+      ],
+      "trust_policy": {
+        "requires_source_material": true
+      }
+    },
+    "tool_generation": {
+      "preferred_modes": [
+        "tool_generation",
+        "mcp_orchestration"
+      ],
+      "fallback_modes": [
+        "web_retrieval"
+      ],
+      "trust_policy": {
+        "requires_validation": true
+      }
+    },
+    "mcp_orchestration": {
+      "preferred_modes": [
+        "mcp_orchestration",
+        "tool_generation"
+      ],
+      "fallback_modes": [
+        "web_retrieval"
+      ],
+      "trust_policy": {
+        "requires_capability_manifest": true
+      }
+    },
+    "artifact_generation": {
+      "preferred_modes": [
+        "specialized_model",
+        "tool_generation"
+      ],
+      "fallback_modes": [
+        "strong_reasoning"
+      ],
+      "trust_policy": {
+        "requires_artifact_validation": true
+      }
+    }
+  },
+  "execution_mode_rules": {
+    "runtime_native_requires_semantic_category": [
+      "runtime_state_observation"
+    ],
+    "web_evidence_strategy_requires_non_native": true,
+    "unknown_external_information_requires_discovery": true
+  },
+  "model_role_defaults": {
+    "low_structured_json": [
+      "ollama",
+      "local_light"
+    ],
+    "medium_planning": [
+      "ollama",
+      "local_capable"
+    ],
+    "semantic_governance": [
+      "openai",
+      "strong_reasoning"
+    ],
+    "code_generation": [
+      "qwen_coder",
+      "claude_sonnet",
+      "openai"
+    ],
+    "artifact_generation": [
+      "openai",
+      "claude_sonnet"
+    ],
+    "unknown_capability_discovery": [
+      "openai",
+      "claude_sonnet"
+    ]
+  },
+  "bootstrap_note": "Fast boot used seed topology. No LLM/provider/model startup was performed.",
+  "bootstrap_source": "seed_fast_boot",
+  "fast_boot": true,
+  "bootstrapped_at": "2026-05-29T01:06:55.170831+00:00",
+  "provider_inventory_snapshot": {
+    "providers": {},
+    "routes": {},
+    "default_route": [],
+    "policy": {}
+  },
+  "updated_at": "2026-05-29T01:06:55.173830+00:00"
+}

@@ -1,0 +1,67 @@
+0.01s - Debugger warning: It seems that frozen modules are being used, which may
+0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+0.00s - to python to disable frozen modules.
+0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+[32m[INFO][0m setup plugin alembic.autogenerate.schemas
+[32m[INFO][0m setup plugin alembic.autogenerate.tables
+[32m[INFO][0m setup plugin alembic.autogenerate.types
+[32m[INFO][0m setup plugin alembic.autogenerate.constraints
+[32m[INFO][0m setup plugin alembic.autogenerate.defaults
+[32m[INFO][0m setup plugin alembic.autogenerate.comments
+[32m[INFO][0m Found comfy_kitchen backend triton: {'available': False, 'disabled': True, 'unavailable_reason': "ImportError: No module named 'triton'", 'capabilities': []}
+[32m[INFO][0m Found comfy_kitchen backend eager: {'available': True, 'disabled': False, 'unavailable_reason': None, 'capabilities': ['apply_rope', 'apply_rope1', 'dequantize_mxfp8', 'dequantize_nvfp4', 'dequantize_per_tensor_fp8', 'gemv_awq_w4a16', 'quantize_mxfp8', 'quantize_nvfp4', 'quantize_per_tensor_fp8', 'quantize_svdquant_w4a4', 'scaled_mm_mxfp8', 'scaled_mm_nvfp4', 'scaled_mm_svdquant_w4a4', 'stochastic_rounding_fp8']}
+[32m[INFO][0m Found comfy_kitchen backend cuda: {'available': False, 'disabled': True, 'unavailable_reason': 'CUDA not available on this system', 'capabilities': []}
+[32m[INFO][0m Checkpoint files will always be loaded safely.
+[32m[INFO][0m Total VRAM 130428 MB, total RAM 130428 MB
+[32m[INFO][0m pytorch version: 2.12.0+cpu
+[32m[INFO][0m Set vram state to: DISABLED
+[32m[INFO][0m Device: cpu
+[32m[INFO][0m Using sub quadratic optimization for attention, if you have memory or speed issues try using: --use-split-cross-attention
+[32m[INFO][0m Python version: 3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)]
+[32m[INFO][0m ComfyUI version: 0.22.0
+[32m[INFO][0m comfy-aimdo version: 0.4.5
+[32m[INFO][0m comfy-kitchen version: 0.2.9
+[1m[33m[WARNING][0m ****** User settings have been changed to be stored on the server instead of browser storage. ******
+[1m[33m[WARNING][0m ****** For multi-user setups add the --multi-user CLI argument to enable multiple user profiles. ******
+[32m[INFO][0m comfyui-frontend-package version: 1.44.19
+[32m[INFO][0m comfyui-workflow-templates version: 0.9.85
+[32m[INFO][0m comfyui-embedded-docs version: 0.5.1
+[32m[INFO][0m comfy-kitchen version: 0.2.9
+[32m[INFO][0m comfy-aimdo version: 0.4.5
+[32m[INFO][0m [Prompt Server] web root: E:\pw\cdac-nesthub\runtime\external_runtimes\comfyui\.venv\Lib\site-packages\comfyui_frontend_package\static
+[32m[INFO][0m Asset seeder disabled
+[32m[INFO][0m 
+Import times for custom nodes:
+[32m[INFO][0m    0.0 seconds: E:\pw\cdac-nesthub\runtime\external_runtimes\comfyui\custom_nodes\websocket_image_save.py
+[32m[INFO][0m 
+[32m[INFO][0m Context impl SQLiteImpl.
+[32m[INFO][0m Will assume non-transactional DDL.
+[32m[INFO][0m Context impl SQLiteImpl.
+[32m[INFO][0m Will assume non-transactional DDL.
+[32m[INFO][0m Running upgrade  -> 0001_assets, Initial assets schema
+Revision ID: 0001_assets
+Revises: None
+Create Date: 2025-12-10 00:00:00
+[32m[INFO][0m Running upgrade 0001_assets -> 0002_merge_to_asset_references, Merge AssetInfo and AssetCacheState into unified asset_references table.
+[32m[INFO][0m Running upgrade 0002_merge_to_asset_references -> 0003_add_metadata_job_id, Add system_metadata and job_id columns to asset_references.
+Change preview_id FK from assets.id to asset_references.id.
+[32m[INFO][0m Database upgraded from None to 0003_add_metadata_job_id
+[32m[INFO][0m Starting server
+
+[32m[INFO][0m Using RAM pressure cache.
+[32m[INFO][0m To see the GUI go to: http://127.0.0.1:8188
+[32m[INFO][0m got prompt
+[32m[INFO][0m model weight dtype torch.float32, manual cast: None
+[32m[INFO][0m model_type EPS
+[32m[INFO][0m Using split attention in VAE
+[32m[INFO][0m Using split attention in VAE
+[32m[INFO][0m VAE load device: cpu, offload device: cpu, dtype: torch.float32
+[32m[INFO][0m Requested to load SDXLClipModel
+[32m[INFO][0m loaded completely;  1560.80 MB loaded, full load: True
+[32m[INFO][0m CLIP/text encoder model load device: cpu, offload device: cpu, current: cpu, dtype: torch.float16
+[32m[INFO][0m Requested to load SDXL
+[32m[INFO][0m loaded completely;  9794.10 MB loaded, full load: True
+  0%|          | 0/4 [00:00<?, ?it/s] 25%|██▌       | 1/4 [00:02<00:07,  2.59s/it] 50%|█████     | 2/4 [00:05<00:05,  2.57s/it] 75%|███████▌  | 3/4 [00:07<00:02,  2.55s/it]100%|██████████| 4/4 [00:10<00:00,  2.55s/it]100%|██████████| 4/4 [00:10<00:00,  2.55s/it]
+[32m[INFO][0m Requested to load AutoencoderKL
+[32m[INFO][0m loaded completely;  319.11 MB loaded, full load: True
+[32m[INFO][0m [32mPrompt executed in 17.92 seconds[0m
