@@ -642,3 +642,4 @@ ai_core/media/__pycache__/video_generation_service.cpython-313.pyc
 ai_core/media/__pycache__/video_generation_setup_wizard.cpython-311.pyc
 ai_core/media/__pycache__/video_generation_setup_wizard.cpython-313.pyc
 .DS_Store
+runtime/execution_graphs/comfyui/
