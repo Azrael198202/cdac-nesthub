@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -233,7 +234,7 @@ class ImageGenerationService:
             "status": result.get("status") or result.get("ok"),
             "reason": result.get("reason"),
         }
-        for key in ("endpoint", "root", "secret_key", "stderr"):
+        for key in ("endpoint", "root", "secret_key", "stderr", "log_path", "startup_log_tail", "missing_files", "returncode"):
             value = result.get(key)
             if value:
                 record[key] = str(value)[-1000:] if key == "stderr" else value
@@ -350,15 +351,32 @@ class ImageGenerationService:
 
     def _ensure_comfyui_runtime(self, *, provider: dict[str, Any], runtime: dict[str, Any], endpoint: str) -> dict[str, Any]:
         if self._comfy_healthy(endpoint, float(runtime.get("health_timeout_seconds") or 2)):
+            self._log_comfy_bootstrap_event("health_check", {"ok": True, "endpoint": endpoint, "reason": "already_running"})
             return {"ok": True, "status": "ready"}
         if not bool(runtime.get("auto_start", True)):
-            return {"ok": False, "status": "requires_setup", "reason": "runtime_not_running", "endpoint": endpoint}
+            result = {"ok": False, "status": "requires_setup", "reason": "runtime_not_running", "endpoint": endpoint}
+            self._log_comfy_bootstrap_event("health_check", result)
+            return result
         root = self._resolve_runtime_root(runtime)
         install = runtime.get("install") if isinstance(runtime.get("install"), dict) else {}
-        if not (root / "main.py").exists():
-            installed = self._install_runtime(root=root, install=install)
+        integrity = self._comfyui_runtime_integrity(root)
+        if not integrity.get("ok"):
+            self._log_comfy_bootstrap_event("integrity_check", {**integrity, "root": str(root)})
+            installed = self._install_runtime(root=root, install=install, integrity=integrity)
             if not installed.get("ok"):
                 return installed
+            integrity = self._comfyui_runtime_integrity(root)
+            if not integrity.get("ok"):
+                result = {
+                    "ok": False,
+                    "status": "requires_setup",
+                    "reason": "runtime_install_incomplete",
+                    "root": str(root),
+                    "missing_files": integrity.get("missing_files", []),
+                    "log_path": str(self._comfy_bootstrap_log_path()),
+                }
+                self._log_comfy_bootstrap_event("install_incomplete", result)
+                return result
         started = self._start_runtime_process(root=root, runtime=runtime)
         if not started.get("ok"):
             return started
@@ -366,9 +384,123 @@ class ImageGenerationService:
         deadline = time.time() + wait_seconds
         while time.time() < deadline:
             if self._comfy_healthy(endpoint, float(runtime.get("health_timeout_seconds") or 3)):
-                return {"ok": True, "status": "ready", "started": True}
+                result = {"ok": True, "status": "ready", "started": True, "pid": started.get("pid")}
+                self._log_comfy_bootstrap_event("startup_ready", {**result, "endpoint": endpoint, "root": str(root)})
+                return result
+            if started.get("pid") and not self._process_alive(int(started.get("pid"))):
+                result = {
+                    "ok": False,
+                    "status": "requires_setup",
+                    "reason": "runtime_exited_during_startup",
+                    "endpoint": endpoint,
+                    "root": str(root),
+                    "pid": started.get("pid"),
+                    "startup_log_tail": self._tail_file(Path(str(started.get("log_path") or "")), limit=4000),
+                    "log_path": str(started.get("log_path") or ""),
+                }
+                self._log_comfy_bootstrap_event("startup_exit", result)
+                return result
             time.sleep(2)
-        return {"ok": False, "status": "requires_setup", "reason": "runtime_start_timeout", "endpoint": endpoint, "root": str(root)}
+        result = {
+            "ok": False,
+            "status": "requires_setup",
+            "reason": "runtime_start_timeout",
+            "endpoint": endpoint,
+            "root": str(root),
+            "startup_timeout_seconds": wait_seconds,
+            "startup_log_tail": self._tail_file(Path(str(started.get("log_path") or "")), limit=4000),
+            "log_path": str(started.get("log_path") or ""),
+        }
+        self._log_comfy_bootstrap_event("startup_timeout", result)
+        return result
+
+    def _comfyui_runtime_integrity(self, root: Path) -> dict[str, Any]:
+        required = ["main.py", "requirements.txt"]
+        missing = [name for name in required if not (root / name).exists()]
+        if not root.exists():
+            return {"ok": False, "reason": "runtime_root_missing", "missing_files": required}
+        if missing:
+            return {"ok": False, "reason": "runtime_root_incomplete", "missing_files": missing}
+        return {"ok": True, "reason": "runtime_root_complete"}
+
+    def _repair_incomplete_runtime_root(self, *, root: Path, install: dict[str, Any]) -> dict[str, Any]:
+        if install.get("repair_incomplete") is False:
+            return {"ok": False, "status": "requires_setup", "reason": "runtime_root_incomplete", "root": str(root), "missing_files": self._comfyui_runtime_integrity(root).get("missing_files", [])}
+        try:
+            safe_parent = (RUNTIME_DIR / "external_runtimes").resolve()
+            resolved = root.resolve()
+            allow_external = bool(install.get("allow_external_runtime_cleanup", False))
+            if safe_parent not in [resolved, *resolved.parents] and not allow_external:
+                result = {"ok": False, "status": "requires_setup", "reason": "runtime_root_incomplete_manual_cleanup_required", "root": str(root), "safe_parent": str(safe_parent)}
+                self._log_comfy_bootstrap_event("repair_refused", result)
+                return result
+            marker = root.with_name(root.name + f".incomplete.{int(time.time())}")
+            if marker.exists():
+                shutil.rmtree(marker, ignore_errors=True)
+            root.rename(marker)
+            self._log_comfy_bootstrap_event("repair_renamed_incomplete_root", {"ok": True, "from": str(root), "to": str(marker)})
+            return {"ok": True, "status": "repaired", "old_root": str(marker)}
+        except Exception as exc:
+            result = {"ok": False, "status": "requires_setup", "reason": "runtime_root_repair_failed", "error_type": exc.__class__.__name__, "error": str(exc)[-2000:], "root": str(root)}
+            self._log_comfy_bootstrap_event("repair_failed", result)
+            return result
+
+    def _comfy_logs_dir(self) -> Path:
+        path = RUNTIME_DIR / "logs"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _comfy_bootstrap_log_path(self) -> Path:
+        return self._comfy_logs_dir() / "comfyui_bootstrap.jsonl"
+
+    def _comfy_named_log_path(self, name: str) -> Path:
+        return self._comfy_logs_dir() / name
+
+    def _append_text_log(self, path: Path, text: str) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8", errors="replace") as fh:
+                fh.write("\n" + "=" * 80 + "\n")
+                fh.write(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + "\n")
+                fh.write(text or "")
+                fh.write("\n")
+        except Exception:
+            return
+
+    def _log_comfy_bootstrap_event(self, stage: str, payload: dict[str, Any]) -> None:
+        try:
+            event = {
+                "event_type": "comfyui_bootstrap",
+                "stage": stage,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                **(payload if isinstance(payload, dict) else {}),
+            }
+            # Keep command diagnostics useful without leaking unlimited output.
+            for key in ("stderr", "stdout", "error", "startup_log_tail"):
+                if key in event and event[key] is not None:
+                    event[key] = str(event[key])[-4000:]
+            with self._comfy_bootstrap_log_path().open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
+    def _tail_file(self, path: Path, *, limit: int = 4000) -> str:
+        try:
+            if not path or not path.exists():
+                return ""
+            data = path.read_bytes()[-limit:]
+            return data.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    def _process_alive(self, pid: int) -> bool:
+        try:
+            if pid <= 0:
+                return False
+            os.kill(pid, 0)
+            return True
+        except Exception:
+            return False
 
     def _resolve_runtime_root(self, runtime: dict[str, Any]) -> Path:
         root = self._resolve_config_value(str(runtime.get("root") or "").strip())
@@ -409,46 +541,103 @@ class ImageGenerationService:
             return {"ok": False, "status": "requires_setup", "reason": "runtime_venv_create_failed", "stderr": create.stderr[-1000:], "root": str(root)}
         return {"ok": True, "python": str(python_path), "venv": True}
 
-    def _install_runtime(self, *, root: Path, install: dict[str, Any]) -> dict[str, Any]:
+    def _install_runtime(self, *, root: Path, install: dict[str, Any], integrity: dict[str, Any] | None = None) -> dict[str, Any]:
         if not bool(install.get("enabled", True)):
-            return {"ok": False, "status": "requires_setup", "reason": "runtime_missing", "root": str(root)}
+            result = {"ok": False, "status": "requires_setup", "reason": "runtime_missing", "root": str(root)}
+            self._log_comfy_bootstrap_event("install_disabled", result)
+            return result
         repo = str(install.get("repository") or "https://github.com/comfyanonymous/ComfyUI.git").strip()
         root.parent.mkdir(parents=True, exist_ok=True)
+        self._log_comfy_bootstrap_event("install_begin", {"root": str(root), "repository": repo, "integrity": integrity or {}})
+        if root.exists() and not self._comfyui_runtime_integrity(root).get("ok"):
+            repaired = self._repair_incomplete_runtime_root(root=root, install=install)
+            if not repaired.get("ok"):
+                return repaired
         if not root.exists():
             git = shutil.which("git")
             if not git:
-                return {"ok": False, "status": "requires_setup", "reason": "git_not_available", "root": str(root)}
-            clone = subprocess.run([git, "clone", "--depth", "1", repo, str(root)], text=True, capture_output=True, timeout=float(install.get("clone_timeout_seconds") or 600))
+                result = {"ok": False, "status": "requires_setup", "reason": "git_not_available", "root": str(root)}
+                self._log_comfy_bootstrap_event("git_missing", result)
+                return result
+            clone_log = self._comfy_named_log_path("comfyui_clone.log")
+            cmd = [git, "clone", "--depth", "1", repo, str(root)]
+            self._log_comfy_bootstrap_event("git_clone_start", {"command": cmd, "root": str(root), "log_path": str(clone_log)})
+            try:
+                clone = subprocess.run(cmd, text=True, capture_output=True, timeout=float(install.get("clone_timeout_seconds") or 1800))
+            except Exception as exc:
+                result = {
+                    "ok": False,
+                    "status": "requires_setup",
+                    "reason": "runtime_clone_exception",
+                    "error_type": exc.__class__.__name__,
+                    "error": str(exc)[-2000:],
+                    "root": str(root),
+                    "log_path": str(clone_log),
+                }
+                self._append_text_log(clone_log, traceback.format_exc())
+                self._log_comfy_bootstrap_event("git_clone_exception", result)
+                return result
+            self._append_text_log(clone_log, "STDOUT:\n" + (clone.stdout or "") + "\nSTDERR:\n" + (clone.stderr or ""))
             if clone.returncode != 0:
-                return {"ok": False, "status": "requires_setup", "reason": "runtime_clone_failed", "stderr": clone.stderr[-1000:], "root": str(root)}
+                result = {"ok": False, "status": "requires_setup", "reason": "runtime_clone_failed", "returncode": clone.returncode, "stderr": (clone.stderr or "")[-4000:], "root": str(root), "log_path": str(clone_log)}
+                self._log_comfy_bootstrap_event("git_clone_failed", result)
+                return result
+            self._log_comfy_bootstrap_event("git_clone_completed", {"ok": True, "root": str(root), "log_path": str(clone_log)})
+        integrity_after_clone = self._comfyui_runtime_integrity(root)
+        if not integrity_after_clone.get("ok"):
+            result = {"ok": False, "status": "requires_setup", "reason": "runtime_clone_incomplete", "root": str(root), "missing_files": integrity_after_clone.get("missing_files", []), "log_path": str(self._comfy_bootstrap_log_path())}
+            self._log_comfy_bootstrap_event("git_clone_incomplete", result)
+            return result
         py = self._ensure_runtime_python(root=root, install=install)
+        self._log_comfy_bootstrap_event("python_ready", {**py, "root": str(root)})
         if not py.get("ok"):
             return py
         if bool(install.get("install_requirements", True)):
             req = root / "requirements.txt"
             if req.exists():
-                pip = subprocess.run([str(py["python"]), "-m", "pip", "install", "-r", str(req)], text=True, capture_output=True, timeout=float(install.get("pip_timeout_seconds") or 1800))
+                pip_log = self._comfy_named_log_path("comfyui_install.log")
+                cmd = [str(py["python"]), "-m", "pip", "install", "-r", str(req)]
+                self._log_comfy_bootstrap_event("pip_install_start", {"command": cmd, "root": str(root), "log_path": str(pip_log)})
+                try:
+                    pip = subprocess.run(cmd, text=True, capture_output=True, timeout=float(install.get("pip_timeout_seconds") or 3600))
+                except Exception as exc:
+                    result = {"ok": False, "status": "requires_setup", "reason": "runtime_dependency_install_exception", "error_type": exc.__class__.__name__, "error": str(exc)[-2000:], "root": str(root), "log_path": str(pip_log)}
+                    self._append_text_log(pip_log, traceback.format_exc())
+                    self._log_comfy_bootstrap_event("pip_install_exception", result)
+                    return result
+                self._append_text_log(pip_log, "STDOUT:\n" + (pip.stdout or "") + "\nSTDERR:\n" + (pip.stderr or ""))
                 if pip.returncode != 0:
-                    return {"ok": False, "status": "requires_setup", "reason": "runtime_dependency_install_failed", "stderr": pip.stderr[-1000:], "root": str(root)}
-        return {"ok": True, "status": "installed", "root": str(root), "python": str(py.get("python"))}
+                    result = {"ok": False, "status": "requires_setup", "reason": "runtime_dependency_install_failed", "returncode": pip.returncode, "stderr": (pip.stderr or "")[-4000:], "root": str(root), "log_path": str(pip_log)}
+                    self._log_comfy_bootstrap_event("pip_install_failed", result)
+                    return result
+                self._log_comfy_bootstrap_event("pip_install_completed", {"ok": True, "root": str(root), "log_path": str(pip_log)})
+        result = {"ok": True, "status": "installed", "root": str(root), "python": str(py.get("python")), "log_path": str(self._comfy_bootstrap_log_path())}
+        self._log_comfy_bootstrap_event("install_completed", result)
+        return result
 
     def _start_runtime_process(self, *, root: Path, runtime: dict[str, Any]) -> dict[str, Any]:
         process_dir = RUNTIME_DIR / "processes"
         process_dir.mkdir(parents=True, exist_ok=True)
-        log_path = process_dir / "comfyui.log"
+        log_path = self._comfy_named_log_path("comfyui_startup.log")
         command = runtime.get("start_command")
         if isinstance(command, str):
             command = [command]
         install = runtime.get("install") if isinstance(runtime.get("install"), dict) else {}
         if not isinstance(command, list) or not command:
             command = [self._runtime_python(root=root, runtime=runtime, install=install), "main.py", "--listen", str(runtime.get("host") or "127.0.0.1"), "--port", str(runtime.get("port") or "8188")]
+        self._log_comfy_bootstrap_event("startup_begin", {"command": [str(x) for x in command], "root": str(root), "log_path": str(log_path)})
         try:
             with log_path.open("ab") as log:
                 proc = subprocess.Popen([str(x) for x in command], cwd=str(root), stdout=log, stderr=log, start_new_session=True)
             (process_dir / "comfyui.pid").write_text(str(proc.pid), encoding="utf-8")
-            return {"ok": True, "status": "starting", "pid": proc.pid, "log_path": str(log_path)}
+            result = {"ok": True, "status": "starting", "pid": proc.pid, "log_path": str(log_path)}
+            self._log_comfy_bootstrap_event("startup_process_created", {**result, "root": str(root)})
+            return result
         except Exception as exc:
-            return {"ok": False, "status": "requires_setup", "reason": "runtime_start_failed", "error": str(exc), "root": str(root)}
+            result = {"ok": False, "status": "requires_setup", "reason": "runtime_start_failed", "error_type": exc.__class__.__name__, "error": str(exc), "root": str(root), "log_path": str(log_path)}
+            self._append_text_log(log_path, traceback.format_exc())
+            self._log_comfy_bootstrap_event("startup_exception", result)
+            return result
 
     def _comfy_healthy(self, endpoint: str, timeout: float) -> bool:
         try:
