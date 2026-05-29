@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -181,13 +182,37 @@ class RuntimeCapabilityGapImplementer:
         except Exception:
             return False
 
+    def _validation_python_executable(self) -> str:
+        """Pick a real Python interpreter for generated-artifact validation.
+
+        IDE launchers can make ``sys.executable`` point at, or behave like, a
+        debugger bootstrap process. Validation must run with a clean interpreter
+        so generated tools are judged by their own code, not by the parent IDE.
+        """
+        candidates = [
+            str(getattr(sys, "_base_executable", "") or ""),
+            str(sys.executable or ""),
+            str(shutil.which("python") or ""),
+            str(shutil.which("python3") or ""),
+        ]
+        for candidate in candidates:
+            value = candidate.strip()
+            if not value:
+                continue
+            lowered = value.casefold()
+            if "debugpy" in lowered or "pydevd" in lowered or "vscode" in lowered:
+                continue
+            return value
+        return sys.executable
+
     def _clean_subprocess_env(self, *, pythonpath: str | None = None) -> dict[str, str]:
         """Return a stable validation environment for generated artifacts.
 
         VS Code/debugpy and similar launchers can inject PYTHONPATH, pydevd,
-        or debugger bootstrap variables into child Python processes.  Generated
-        capability validation must be isolated from the IDE runtime; otherwise
-        a valid generated tool may fail before its own code is even compiled.
+        debugger bootstrap variables, or debugger paths into child Python
+        processes. Generated capability validation must be isolated from the IDE
+        runtime; otherwise a valid generated tool may fail before its own code is
+        even compiled.
         """
         blocked_prefixes = ("PYDEVD", "DEBUGPY", "VSCODE", "PYCHARM")
         blocked_names = {
@@ -196,18 +221,39 @@ class RuntimeCapabilityGapImplementer:
             "PYTHONSTARTUP",
             "PYTHONBREAKPOINT",
             "PYDEVD_LOAD_VALUES_ASYNC",
+            "PYDEV_DEBUG",
+            "PYDEVD_USE_FRAME_EVAL",
         }
+        blocked_value_tokens = ("debugpy", "pydevd", ".vscode", "vscode", "pycharm")
+        path_like_names = {"PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC"}
         clean: dict[str, str] = {}
         for key, value in os.environ.items():
             upper = key.upper()
+            value_text = str(value or "")
             if upper in blocked_names or any(upper.startswith(prefix) for prefix in blocked_prefixes):
                 continue
-            clean[key] = value
+            if upper not in path_like_names and any(token in value_text.casefold() for token in blocked_value_tokens):
+                continue
+            clean[key] = value_text
         if pythonpath:
             clean["PYTHONPATH"] = pythonpath
-        clean.setdefault("PYTHONNOUSERSITE", "1")
-        clean.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+        clean["PYTHONNOUSERSITE"] = "1"
+        clean["PYTHONDONTWRITEBYTECODE"] = "1"
+        clean["PYTHONSAFEPATH"] = "1"
+        clean.setdefault("PYTHONIOENCODING", "utf-8")
         return clean
+
+    def _run_validation_subprocess(self, args: list[str], *, cwd: Path, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+        command = [self._validation_python_executable(), *args]
+        return subprocess.run(
+            command,
+            cwd=str(cwd),
+            env=self._clean_subprocess_env(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
 
     def _pip_install(self, package_name: str) -> dict[str, Any]:
         try:
@@ -287,15 +333,7 @@ class RuntimeCapabilityGapImplementer:
         checks: list[dict[str, Any]] = []
         py_files = [str(p) for p in tool_dir.rglob("*.py")]
         if py_files:
-            proc = subprocess.run(
-                [sys.executable, "-I", "-m", "py_compile", *py_files],
-                cwd=str(tool_dir),
-                env=self._clean_subprocess_env(),
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=30,
-            )
+            proc = self._run_validation_subprocess(["-I", "-m", "py_compile", *py_files], cwd=tool_dir, timeout=30)
             checks.append({"name": "python_compile", "returncode": proc.returncode, "stdout": proc.stdout[-2000:], "stderr": proc.stderr[-2000:]})
             if proc.returncode != 0:
                 return {"passed": False, "status": "failed", "checks": checks}
@@ -312,15 +350,7 @@ class RuntimeCapabilityGapImplementer:
                 f"sys.path.insert(0, {json.dumps(str(tool_dir))}); "
                 f"runpy.run_path({json.dumps(str(test_file))}, run_name='__main__')"
             )
-            proc = subprocess.run(
-                [sys.executable, "-I", "-c", runner],
-                cwd=str(tool_dir),
-                env=self._clean_subprocess_env(),
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=30,
-            )
+            proc = self._run_validation_subprocess(["-I", "-c", runner], cwd=tool_dir, timeout=30)
             check = {"name": "unit_test", "test_file": str(test_file), "returncode": proc.returncode, "stdout": proc.stdout[-2000:], "stderr": proc.stderr[-2000:]}
             checks.append(check)
             self._write_test_report(artifact, check)

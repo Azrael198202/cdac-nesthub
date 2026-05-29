@@ -614,59 +614,77 @@ class ConversationCoreRuntime:
         implementation: dict[str, Any],
         material: str,
     ) -> str:
+        """Build a concise user-facing capability-acquisition summary.
+
+        Full source excerpts, local paths, lifecycle internals, registry files, and
+        traces stay in runtime logs / Agent Studio diagnostics. The final answer
+        only states what the user needs: whether the tool was generated, whether
+        sandbox validation passed, whether it was registered, and the next action.
+        """
         urls = evidence.get("urls") if isinstance(evidence.get("urls"), list) else []
         if not urls:
             return (
-                self._external_retrieval_failure_material(evidence)
-                + "\n\nCapability gap status: blocked_without_verified_evidence. No implementation was generated or registered."
+                "外部资料检索没有取得可验证材料，因此没有生成或注册工具。\n"
+                "请调整检索关键词或允许使用本地策略模板后重新执行。"
             )
         runtime_impl = implementation.get("runtime_implementation") if isinstance(implementation.get("runtime_implementation"), dict) else {}
         runtime_status = str(runtime_impl.get("status") or "not_requested")
+        validation = runtime_impl.get("validation") if isinstance(runtime_impl.get("validation"), dict) else {}
+        verification = runtime_impl.get("verification_run") if isinstance(runtime_impl.get("verification_run"), dict) else {}
+        registration = runtime_impl.get("registration") if isinstance(runtime_impl.get("registration"), dict) else {}
+        lines: list[str] = []
         if runtime_status in {"implemented_tested_registered", "implemented_tested_registered_verified"}:
-            headline = "Capability gap resolution completed. Runtime capability was implemented, sandbox-tested, registered, and verified by execution."
-        elif runtime_status in {"blocked", "generated_but_validation_failed"}:
-            headline = "Capability gap resolution collected verified material, but implementation was not registered."
+            lines.append("工具生成已完成：已完成资料检索、代码生成、沙箱验证、注册和验证运行。")
+            lines.append("下一步：在 Agent Studio 中填写连接配置和密钥后即可运行；涉及外部发送时需要用户确认。")
+        elif runtime_status == "generated_but_validation_failed":
+            reason = self._runtime_validation_failure_summary(validation)
+            lines.append("工具代码已经生成，但沙箱验证未通过，因此没有注册。")
+            lines.append(f"原因：{reason}")
+            lines.append("下一步：修复验证环境或生成代码后重新执行验证。")
+        elif runtime_status == "generated_but_verification_failed":
+            reason = self._runtime_validation_failure_summary(verification)
+            lines.append("工具代码通过了基础沙箱检查，但验证运行失败，因此没有注册。")
+            lines.append(f"原因：{reason}")
+            lines.append("下一步：根据验证运行错误修复工具或配置后重新执行。")
+        elif runtime_status == "dependency_resolution_failed":
+            lines.append("工具生成前的依赖检查失败，因此没有注册。")
+            lines.append("下一步：检查依赖策略或改为无需外部依赖的实现后重新执行。")
+        elif runtime_status == "blocked":
+            reason = str(runtime_impl.get("reason") or "没有匹配到可安全生成的运行时模板")
+            lines.append("已取得资料，但运行时没有生成可注册工具。")
+            lines.append(f"原因：{reason}")
         else:
-            headline = "Capability gap resolution completed with verified external material; implementation was not requested or no matching runtime template was available."
-        lines = [
-            headline,
-            "",
-            "Implementation lifecycle:",
-        ]
-        for item in implementation.get("lifecycle", []):
-            lines.append(f"- {item}")
-        lines.append("")
-        lines.append("Resolution artifact:")
-        lines.append(str(implementation.get("artifact_path") or "runtime_generated_candidate_record"))
-        lines.append("")
-        if runtime_impl:
-            lines.append("Runtime implementation status:")
-            lines.append(f"- status: {runtime_status}")
-            artifact = runtime_impl.get("artifact") if isinstance(runtime_impl.get("artifact"), dict) else {}
-            validation = runtime_impl.get("validation") if isinstance(runtime_impl.get("validation"), dict) else {}
-            registration = runtime_impl.get("registration") if isinstance(runtime_impl.get("registration"), dict) else {}
-            if artifact.get("tool_dir"):
-                lines.append(f"- artifact_dir: {artifact.get('tool_dir')}")
-            if validation:
-                lines.append(f"- sandbox_validation_passed: {bool(validation.get('passed'))}")
-            if registration:
-                lines.append(f"- registry_path: {registration.get('registry_path')}")
-                tool_record = registration.get("tool_record") if isinstance(registration.get("tool_record"), dict) else {}
-                if isinstance(tool_record.get("connection_schema"), dict) and tool_record.get("connection_schema"):
-                    lines.append("- configuration_ui: Agent Studio Runtime Registry -> Configure profile")
-                if isinstance(tool_record.get("secret_schema"), dict) and tool_record.get("secret_schema"):
-                    lines.append("- secret_ui: Agent Studio Runtime Registry -> Configure profile -> Secret values")
-                if isinstance(tool_record.get("approval_policy"), dict) and tool_record.get("approval_policy", {}).get("required"):
-                    lines.append("- approval_ui: Agent Studio Run registered tool -> confirmation preview")
-            lines.append("")
-        lines.append("Source URLs:")
-        for url in urls:
-            lines.append(f"- {url}")
-        if material:
-            lines.append("\nEvidence summary material:")
-            lines.append(material)
+            lines.append("已完成资料检索，但当前请求没有进入可注册工具的完整生成流程。")
+        if urls:
+            lines.append(f"已验证资料来源：{len(urls)} 个。")
+        if registration:
+            lines.append("注册状态：已更新运行时工具注册表。")
+        elif runtime_status not in {"implemented_tested_registered", "implemented_tested_registered_verified"}:
+            lines.append("注册状态：未注册。")
         return "\n".join(lines).strip()
 
+    def _runtime_validation_failure_summary(self, validation: dict[str, Any]) -> str:
+        checks = validation.get("checks") if isinstance(validation.get("checks"), list) else []
+        for check in checks:
+            if not isinstance(check, dict):
+                continue
+            if int(check.get("returncode") or 0) == 0:
+                continue
+            name = str(check.get("name") or "validation").strip() or "validation"
+            stderr = str(check.get("stderr") or check.get("error") or "").strip()
+            lowered = stderr.casefold()
+            if "debugpy" in lowered or "pydevd" in lowered or ".vscode" in lowered:
+                return f"{name} 在启动子进程时被 IDE/debugger 环境污染，未能真正执行到生成工具代码。"
+            if "syntaxerror" in lowered:
+                return f"{name} 发现生成代码存在语法错误。"
+            if "modulenotfounderror" in lowered:
+                return f"{name} 发现生成代码引用了不可用模块。"
+            if stderr:
+                compact = " ".join(stderr.split())[:220]
+                return f"{name} 失败：{compact}"
+            return f"{name} 返回非零退出码。"
+        reason = str(validation.get("reason") or "sandbox_validation_failed").strip()
+        return reason or "沙箱验证未通过。"
 
     def _implementation_requested(self, text: str) -> bool:
         value = " " + str(text or "").strip().casefold() + " "
