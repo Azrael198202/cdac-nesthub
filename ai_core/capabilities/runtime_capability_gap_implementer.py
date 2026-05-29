@@ -225,6 +225,65 @@ class RuntimeCapabilityGapImplementer:
         clean.setdefault("PYTHONDONTWRITEBYTECODE", "1")
         return clean
 
+    def _python_executable_candidates(self) -> list[str]:
+        """Return Python executables suitable for sandbox validation.
+
+        The active process may be launched under an IDE/debugger wrapper.  For
+        generated capability validation we prefer the base interpreter and fall
+        back to common launcher names.  Duplicates are removed while preserving
+        order.
+        """
+        candidates: list[str] = []
+        base_executable = getattr(sys, "_base_executable", None)
+        for item in [base_executable, sys.executable, "python", "python3"]:
+            value = str(item or "").strip()
+            if value and value not in candidates:
+                candidates.append(value)
+        return candidates
+
+    def _run_isolated_python(self, args: list[str], *, cwd: Path, timeout: int = 30, pythonpath: str | None = None) -> dict[str, Any]:
+        """Run a generated-artifact validation command with debugger isolation.
+
+        A failure caused by debugger bootstrap, not by generated code, should
+        not be treated as a capability validation failure until every candidate
+        interpreter has been tried.  The returned payload keeps every attempt so
+        the devil-checker can distinguish a real implementation failure from an
+        environment failure.
+        """
+        attempts: list[dict[str, Any]] = []
+        for exe in self._python_executable_candidates():
+            try:
+                proc = subprocess.run(
+                    [exe, "-I", *args],
+                    cwd=str(cwd),
+                    env=self._clean_subprocess_env(pythonpath=pythonpath),
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=timeout,
+                )
+                attempt = {
+                    "executable": exe,
+                    "returncode": proc.returncode,
+                    "stdout": proc.stdout[-2000:],
+                    "stderr": proc.stderr[-2000:],
+                }
+                attempts.append(attempt)
+                if proc.returncode == 0:
+                    return {**attempt, "attempts": attempts}
+                stderr_l = (proc.stderr or "").casefold()
+                environment_failure = any(
+                    marker in stderr_l
+                    for marker in ["debugpy", "pydevd", "keyboardinterrupt", "_bz2", "pythonhome", "pythonpath"]
+                )
+                if not environment_failure:
+                    return {**attempt, "attempts": attempts}
+            except Exception as exc:
+                attempts.append({"executable": exe, "returncode": -1, "stdout": "", "stderr": f"{exc.__class__.__name__}: {exc}"})
+                continue
+        last = attempts[-1] if attempts else {"executable": "", "returncode": -1, "stdout": "", "stderr": "no_python_executable_available"}
+        return {**last, "attempts": attempts}
+
     def _pip_install(self, package_name: str) -> dict[str, Any]:
         try:
             proc = subprocess.run(
@@ -343,17 +402,15 @@ class RuntimeCapabilityGapImplementer:
         checks: list[dict[str, Any]] = []
         py_files = [str(p) for p in tool_dir.rglob("*.py")]
         if py_files:
-            proc = subprocess.run(
-                [sys.executable, "-I", "-m", "py_compile", *py_files],
-                cwd=str(tool_dir),
-                env=self._clean_subprocess_env(),
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=30,
-            )
-            checks.append({"name": "python_compile", "returncode": proc.returncode, "stdout": proc.stdout[-2000:], "stderr": proc.stderr[-2000:]})
-            if proc.returncode != 0:
+            proc = self._run_isolated_python(["-m", "py_compile", *py_files], cwd=tool_dir, timeout=30)
+            checks.append({
+                "name": "python_compile",
+                "returncode": proc.get("returncode"),
+                "stdout": str(proc.get("stdout") or "")[-2000:],
+                "stderr": str(proc.get("stderr") or "")[-2000:],
+                "attempts": proc.get("attempts", []),
+            })
+            if proc.get("returncode") != 0:
                 return {"passed": False, "status": "failed", "checks": checks}
         test_candidates: list[Path] = []
         test_dir = Path(str(artifact.get("test_dir") or ""))
@@ -368,19 +425,18 @@ class RuntimeCapabilityGapImplementer:
                 f"sys.path.insert(0, {json.dumps(str(tool_dir))}); "
                 f"runpy.run_path({json.dumps(str(test_file))}, run_name='__main__')"
             )
-            proc = subprocess.run(
-                [sys.executable, "-I", "-c", runner],
-                cwd=str(tool_dir),
-                env=self._clean_subprocess_env(),
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=30,
-            )
-            check = {"name": "unit_test", "test_file": str(test_file), "returncode": proc.returncode, "stdout": proc.stdout[-2000:], "stderr": proc.stderr[-2000:]}
+            proc = self._run_isolated_python(["-c", runner], cwd=tool_dir, timeout=30)
+            check = {
+                "name": "unit_test",
+                "test_file": str(test_file),
+                "returncode": proc.get("returncode"),
+                "stdout": str(proc.get("stdout") or "")[-2000:],
+                "stderr": str(proc.get("stderr") or "")[-2000:],
+                "attempts": proc.get("attempts", []),
+            }
             checks.append(check)
             self._write_test_report(artifact, check)
-            if proc.returncode != 0:
+            if proc.get("returncode") != 0:
                 return {"passed": False, "status": "failed", "checks": checks}
         return {"passed": True, "status": "completed", "checks": checks}
 

@@ -445,10 +445,12 @@ class ConversationCoreRuntime:
                     run_id=run_id,
                     allow_implementation=self._implementation_requested(text),
                 )
+                policy_backed_registration = False
                 if (not evidence.get("urls")) and runtime_impl.get("status") == "implemented_tested_registered":
                     evidence["urls"] = ["runtime-policy://basic-generated-capability-contract"]
                     evidence["source_count"] = 1
                     evidence["source_note"] = "Policy-backed basic acquisition used because external retrieval did not provide source URLs."
+                    policy_backed_registration = True
                 implementation = self._capability_gap_resolution_artifact(
                     user_input=text,
                     query=query,
@@ -465,12 +467,17 @@ class ConversationCoreRuntime:
                 )
             elif not material and not evidence_items:
                 material = self._external_retrieval_failure_material(evidence)
+            runtime_registered = False
+            if implementation and isinstance(implementation.get("runtime_implementation"), dict):
+                runtime_registered = implementation["runtime_implementation"].get("status") == "implemented_tested_registered"
+            completed = bool(evidence_items) or runtime_registered
             return {
-                "status": "completed" if evidence_items else "blocked_no_external_material",
+                "status": "completed" if completed else "blocked_no_external_material",
                 "execution_mode": "capability_gap_resolution" if capability_gap else "web_search",
                 "capability": "web_retrieval",
                 "answer_material": material,
                 "external_evidence_used": bool(evidence_items),
+                "policy_backed_runtime_registration": bool(runtime_registered and not evidence_items),
                 "capability_gap_resolution": capability_gap,
                 "capability_implementation": implementation,
                 "evidence": evidence,
