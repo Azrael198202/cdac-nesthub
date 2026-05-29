@@ -30,6 +30,43 @@ class WorkflowContractBuilder:
     def fixed_action_types(self) -> list[str]:
         return list(ACTION_TO_METHOD.keys())
 
+    def is_runtime_capability_acquisition_context(self, *, state: dict[str, Any], result: dict[str, Any] | None = None, text: str = "") -> bool:
+        """Return True when upstream structure says this run is acquiring a runtime capability.
+
+        This guard is intentionally generic.  In capability acquisition, uploaded
+        artifacts from a previous run must not force the current workflow into
+        the uploaded-artifact path.  The generated capability may later declare
+        input/config/secret schemas, but acquisition itself should proceed through
+        research/implementation/validation/registration.
+        """
+        haystacks: list[str] = [str(text or "").casefold()]
+        for container in (state, result or {}, state.get("results") if isinstance(state.get("results"), dict) else {}):
+            if not isinstance(container, dict):
+                continue
+            for candidate in self.iter_nested_dicts(container, max_depth=6):
+                if not isinstance(candidate, dict):
+                    continue
+                if bool(candidate.get("capability_gap_detected")):
+                    return True
+                for key in ("intent_type", "classified_intent", "response_mode", "execution_mode"):
+                    value = str(candidate.get(key) or "").casefold()
+                    if value:
+                        haystacks.append(value)
+                signals = candidate.get("external_information_signals")
+                if isinstance(signals, list):
+                    haystacks.append(" ".join(str(x).casefold() for x in signals))
+                policy = candidate.get("capability_acquisition_policy")
+                if isinstance(policy, dict) and policy:
+                    return True
+        joined = " ".join(haystacks)
+        return any(marker in joined for marker in (
+            "runtime capability acquisition",
+            "acquire runtime capability",
+            "acquire capability",
+            "capability_gap",
+            "capability gap",
+        ))
+
     def normalize_workflow_result(self, *, result: dict[str, Any], state: dict[str, Any], slim_user_input: str = "") -> dict[str, Any]:
         if not isinstance(result, dict):
             result = {}
@@ -37,7 +74,8 @@ class WorkflowContractBuilder:
         # search the whole generic record for the first valid execution
         # decision and the deepest valid planned_steps before falling back.
         decision = self.extract_execution_decision(result)
-        artifact_decision = self.artifact_forced_decision(state, slim_user_input)
+        capability_acquisition_context = self.is_runtime_capability_acquisition_context(state=state, result=result, text=slim_user_input)
+        artifact_decision = {} if capability_acquisition_context else self.artifact_forced_decision(state, slim_user_input)
         if artifact_decision.get("selected_action_type"):
             decision = artifact_decision
         if not decision.get("selected_action_type"):
@@ -319,6 +357,8 @@ class WorkflowContractBuilder:
         """
         if self.has_missing_required_input(state=state, result=result):
             return "ask_user"
+        if self.is_runtime_capability_acquisition_context(state=state, result=result):
+            return "generate_complex_tool"
         if self.referenced_artifacts_for_state(state, ""):
             return "use_uploaded_file"
         if self.extract_execution_instruction(result):
@@ -486,7 +526,10 @@ class WorkflowContractBuilder:
         if not params["known"]:
             params["known"] = self.collect_known_parameters(state)
         out["parameters"] = params
-        artifact_refs = decision.get("artifact_refs") if isinstance(decision.get("artifact_refs"), list) else self.referenced_artifacts_for_state(state, str(out.get("objective") or ""))
+        if self.is_runtime_capability_acquisition_context(state=state, result=out, text=str(out.get("objective") or "")):
+            artifact_refs = []
+        else:
+            artifact_refs = decision.get("artifact_refs") if isinstance(decision.get("artifact_refs"), list) else self.referenced_artifacts_for_state(state, str(out.get("objective") or ""))
         if artifact_refs:
             existing_refs = out.get("uploaded_artifacts") if isinstance(out.get("uploaded_artifacts"), list) else []
             out["uploaded_artifacts"] = existing_refs or artifact_refs

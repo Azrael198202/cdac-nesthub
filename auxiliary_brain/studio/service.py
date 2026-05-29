@@ -473,6 +473,16 @@ class AgentStudioService:
         """
         text = str(message or "")
         lowered = text.casefold()
+        # Runtime capability acquisition is handled by ai_core.  It must not be
+        # routed into artifact edit just because the request contains words like
+        # generate/build/create or a previous uploaded artifact exists.
+        if any(marker in lowered for marker in (
+            "acquire runtime capability",
+            "runtime capability acquisition",
+            "acquire capability",
+            "capability acquisition",
+        )):
+            return False
         file_ref = bool(re.search(r"\b[\w .()\-]+\.[A-Za-z0-9]{1,12}\b", text))
         edit_words = (
             "change", "modify", "update", "edit", "rewrite", "refactor", "convert", "replace", "regenerate",

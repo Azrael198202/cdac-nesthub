@@ -658,3 +658,7 @@ ai_core/connections/__pycache__/connection_profile_store.cpython-313.pyc
 tests/__pycache__/test_runtime_capability_acquisition_research_and_connected_action.cpython-313-pytest-9.0.2.pyc
 tests/__pycache__/test_capability_acquisition_prompt_not_blocked.cpython-313-pytest-9.0.2.pyc
 tests/__pycache__/test_connected_action_policy_backed_acquisition.cpython-313-pytest-9.0.2.pyc
+ai_core/capabilities/__pycache__/runtime_capability_gap_implementer.cpython-311.pyc
+ai_core/connections/__pycache__/__init__.cpython-311.pyc
+ai_core/connections/__pycache__/connection_profile_store.cpython-311.pyc
+ai_core/tools/__pycache__/runtime_registered_tool_service.cpython-311.pyc
