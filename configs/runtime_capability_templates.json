@@ -220,7 +220,7 @@
     },
     {
       "template_id": "connected_message_delivery_adapter",
-      "description": "Runtime-generated connected action capability with input/config/secret/approval contracts. The concrete transport details are provided by generated schema and runtime profile, not ai_core.",
+      "description": "Runtime-generated standard-library connected message delivery capability. Transport-specific code lives in the runtime template registry, not ai_core.",
       "match_terms": [
         "send messages",
         "external mail service",
@@ -241,14 +241,19 @@
         "external",
         "generate connection schema",
         "secret schema",
-        "approval policy"
+        "approval policy",
+        "smtp",
+        "smtplib",
+        "email.message",
+        "basic smtp",
+        "smtp mail sender",
+        "message sender"
       ],
-      "required_terms": [
-        "send"
-      ],
+      "required_terms": [],
       "capabilities": [
         "runtime_connected_action",
-        "external_message_delivery"
+        "external_message_delivery",
+        "smtp_message_delivery"
       ],
       "dependencies": [],
       "entrypoint": {
@@ -262,7 +267,9 @@
             "type": "string",
             "enum": [
               "prepare",
-              "verify"
+              "verify",
+              "dry_run",
+              "send"
             ]
           },
           "message": {
@@ -280,10 +287,19 @@
               "body": {
                 "type": "string"
               },
-              "attachments": {
+              "sender": {
+                "type": "string"
+              },
+              "cc": {
                 "type": "array",
                 "items": {
-                  "type": "object"
+                  "type": "string"
+                }
+              },
+              "bcc": {
+                "type": "array",
+                "items": {
+                  "type": "string"
                 }
               }
             },
@@ -292,6 +308,9 @@
               "title",
               "body"
             ]
+          },
+          "approved": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -315,47 +334,61 @@
       "connection_schema": {
         "type": "object",
         "properties": {
-          "service_endpoint": {
+          "server_host": {
             "type": "string"
           },
-          "account_identifier": {
-            "type": "string"
-          },
-          "transport_mode": {
-            "type": "string"
+          "server_port": {
+            "type": "integer"
           },
           "security_mode": {
+            "type": "string",
+            "enum": [
+              "plain",
+              "starttls",
+              "ssl",
+              "sandbox"
+            ]
+          },
+          "username": {
+            "type": "string"
+          },
+          "default_sender": {
             "type": "string"
           }
         },
         "required": [
-          "service_endpoint",
-          "account_identifier",
-          "transport_mode"
+          "server_host",
+          "server_port",
+          "security_mode",
+          "default_sender"
         ]
       },
       "secret_schema": {
         "type": "object",
         "properties": {
-          "primary_credential": {
+          "password": {
             "type": "string"
           }
         },
         "required": [
-          "primary_credential"
+          "password"
         ]
       },
       "approval_policy": {
         "required": true,
-        "reason": "runtime_generated_external_effect_possible",
+        "reason": "external_side_effect_possible",
         "preview_fields": [
-          "message"
+          "message.targets",
+          "message.title",
+          "message.body"
         ]
       },
       "runtime_interface": {
         "supports_connection_profile": true,
         "supports_secret_refs": true,
-        "supports_approval": true
+        "supports_approval": true,
+        "connection_values_ui": "Agent Studio Runtime Registry",
+        "secret_values_store": "local_runtime_secret_store"
       },
       "verification_input": {
         "mode": "verify",
@@ -368,15 +401,17 @@
         },
         "_runtime": {
           "connection": {
-            "service_endpoint": "local-sandbox",
-            "account_identifier": "tester",
-            "transport_mode": "sandbox"
+            "server_host": "localhost",
+            "server_port": 1025,
+            "security_mode": "sandbox",
+            "username": "tester",
+            "default_sender": "sender@example.invalid"
           },
           "secrets": {
-            "primary_credential": "hidden"
+            "password": "hidden"
           },
           "secret_refs": {
-            "primary_credential": "runtime-secret-ref"
+            "password": "runtime-secret-ref"
           }
         }
       },
@@ -386,11 +421,11 @@
       "files": [
         {
           "path": "tool.py",
-          "content": "from __future__ import annotations\n\nfrom typing import Any\n\n\ndef _runtime_section(payload: dict[str, Any]) -> dict[str, Any]:\n    runtime = payload.get(\"_runtime\") if isinstance(payload.get(\"_runtime\"), dict) else {}\n    return runtime\n\n\ndef run(payload: dict[str, Any] | None = None) -> dict[str, Any]:\n    data = payload if isinstance(payload, dict) else {}\n    runtime = _runtime_section(data)\n    connection = runtime.get(\"connection\") if isinstance(runtime.get(\"connection\"), dict) else {}\n    secrets = runtime.get(\"secrets\") if isinstance(runtime.get(\"secrets\"), dict) else {}\n    secret_refs = runtime.get(\"secret_refs\") if isinstance(runtime.get(\"secret_refs\"), dict) else {}\n    mode = str(data.get(\"mode\") or \"prepare\").lower()\n    content = data.get(\"message\") if isinstance(data.get(\"message\"), dict) else {}\n    if not connection:\n        return {\n            \"status\": \"requires_configuration\",\n            \"data\": {\n                \"configured\": False,\n                \"reason\": \"runtime_connection_profile_missing\",\n            },\n        }\n    if not secrets and not secret_refs:\n        return {\n            \"status\": \"requires_configuration\",\n            \"data\": {\n                \"configured\": False,\n                \"reason\": \"runtime_secret_reference_missing\",\n            },\n        }\n    if mode == \"verify\":\n        return {\n            \"status\": \"success\",\n            \"data\": {\n                \"configured\": True,\n                \"secret_available\": bool(secrets or secret_refs),\n                \"connection_keys\": sorted(connection.keys()),\n                \"secret_keys\": sorted((secrets or secret_refs).keys()),\n                \"external_action_executed\": False,\n                \"verification_only\": True,\n            },\n        }\n    return {\n        \"status\": \"success\",\n        \"data\": {\n            \"configured\": True,\n            \"secret_available\": bool(secrets or secret_refs),\n            \"external_action_executed\": False,\n            \"delivery_prepared\": True,\n            \"message_summary\": {\n                \"target_count\": len(content.get(\"targets\") or []),\n                \"title_present\": bool(content.get(\"title\")),\n                \"body_present\": bool(content.get(\"body\")),\n            },\n        },\n        \"provenance\": {\n            \"secret_values_exposed\": False,\n            \"runtime_connection_profile_used\": bool(connection),\n        },\n    }\n"
+          "content": "from __future__ import annotations\n\nimport smtplib\nfrom email.message import EmailMessage\nfrom typing import Any\n\n\ndef _runtime_section(payload: dict[str, Any]) -> dict[str, Any]:\n    runtime = payload.get(\"_runtime\") if isinstance(payload.get(\"_runtime\"), dict) else {}\n    return runtime\n\n\ndef _as_list(value: Any) -> list[str]:\n    if isinstance(value, list):\n        return [str(item).strip() for item in value if str(item).strip()]\n    if isinstance(value, str) and value.strip():\n        return [value.strip()]\n    return []\n\n\ndef _build_message(content: dict[str, Any], connection: dict[str, Any]) -> EmailMessage:\n    sender = str(content.get(\"sender\") or connection.get(\"default_sender\") or \"\").strip()\n    targets = _as_list(content.get(\"targets\"))\n    title = str(content.get(\"title\") or \"\").strip()\n    body = str(content.get(\"body\") or \"\")\n    if not sender:\n        raise ValueError(\"sender or runtime connection default_sender is required\")\n    if not targets:\n        raise ValueError(\"message.targets is required\")\n    if not title:\n        raise ValueError(\"message.title is required\")\n    msg = EmailMessage()\n    msg[\"From\"] = sender\n    msg[\"To\"] = \", \".join(targets)\n    cc = _as_list(content.get(\"cc\"))\n    if cc:\n        msg[\"Cc\"] = \", \".join(cc)\n    msg[\"Subject\"] = title\n    msg.set_content(body)\n    return msg\n\n\ndef run(payload: dict[str, Any] | None = None) -> dict[str, Any]:\n    data = payload if isinstance(payload, dict) else {}\n    runtime = _runtime_section(data)\n    connection = runtime.get(\"connection\") if isinstance(runtime.get(\"connection\"), dict) else {}\n    secrets = runtime.get(\"secrets\") if isinstance(runtime.get(\"secrets\"), dict) else {}\n    secret_refs = runtime.get(\"secret_refs\") if isinstance(runtime.get(\"secret_refs\"), dict) else {}\n    content = data.get(\"message\") if isinstance(data.get(\"message\"), dict) else {}\n    mode = str(data.get(\"mode\") or \"prepare\").lower()\n    if not connection:\n        return {\"status\": \"requires_configuration\", \"data\": {\"configured\": False, \"reason\": \"runtime_connection_profile_missing\"}}\n    if not secrets and not secret_refs:\n        return {\"status\": \"requires_configuration\", \"data\": {\"configured\": False, \"reason\": \"runtime_secret_reference_missing\"}}\n    try:\n        msg = _build_message(content, connection)\n    except Exception as exc:\n        return {\"status\": \"failed\", \"error\": {\"type\": exc.__class__.__name__, \"message\": str(exc)}}\n    recipients = _as_list(content.get(\"targets\")) + _as_list(content.get(\"cc\")) + _as_list(content.get(\"bcc\"))\n    security_mode = str(connection.get(\"security_mode\") or \"sandbox\").lower()\n    if mode in {\"verify\", \"dry_run\", \"prepare\"} or security_mode == \"sandbox\":\n        return {\"status\": \"success\", \"data\": {\"configured\": True, \"message_constructed\": True, \"recipient_count\": len(recipients), \"external_action_executed\": False, \"verification_only\": mode == \"verify\"}, \"provenance\": {\"secret_values_exposed\": False}}\n    if mode == \"send\" and not bool(data.get(\"approved\")):\n        return {\"status\": \"requires_approval\", \"data\": {\"external_action_executed\": False, \"preview\": {\"recipient_count\": len(recipients), \"title\": str(content.get(\"title\") or \"\")}}}\n    host = str(connection.get(\"server_host\") or \"\").strip()\n    port = int(connection.get(\"server_port\") or (465 if security_mode == \"ssl\" else 587))\n    username = str(connection.get(\"username\") or \"\").strip()\n    password = str(secrets.get(\"password\") or \"\")\n    try:\n        client_cls = smtplib.SMTP_SSL if security_mode == \"ssl\" else smtplib.SMTP\n        with client_cls(host, port, timeout=20) as client:\n            if security_mode == \"starttls\":\n                client.starttls()\n            if username and password:\n                client.login(username, password)\n            client.send_message(msg, to_addrs=recipients)\n        return {\"status\": \"success\", \"data\": {\"external_action_executed\": True, \"recipient_count\": len(recipients)}, \"provenance\": {\"secret_values_exposed\": False}}\n    except Exception as exc:\n        return {\"status\": \"failed\", \"error\": {\"type\": exc.__class__.__name__, \"message\": str(exc)}, \"data\": {\"external_action_executed\": False}}\n"
         },
         {
           "path": "test_tool.py",
-          "content": "from tool import run\n\n\ndef test_connected_message_adapter_requires_runtime_profile():\n    result = run({\"message\": {\"targets\": [\"a@example.invalid\"], \"title\": \"T\", \"body\": \"B\"}})\n    assert result[\"status\"] == \"requires_configuration\"\n\n\ndef test_connected_message_adapter_verifies_with_runtime_profile():\n    result = run({\n        \"mode\": \"verify\",\n        \"message\": {\"targets\": [\"a@example.invalid\"], \"title\": \"T\", \"body\": \"B\"},\n        \"_runtime\": {\n            \"connection\": {\"service_endpoint\": \"local-sandbox\", \"account_identifier\": \"tester\", \"transport_mode\": \"sandbox\"},\n            \"secrets\": {\"primary_credential\": \"hidden\"},\n            \"secret_refs\": {\"primary_credential\": \"runtime-secret-ref\"},\n        },\n    })\n    assert result[\"status\"] == \"success\"\n    assert result[\"data\"][\"configured\"] is True\n    assert result[\"data\"][\"external_action_executed\"] is False\n"
+          "content": "from tool import run\n\n\ndef test_requires_runtime_profile():\n    result = run({\"message\": {\"targets\": [\"a@example.invalid\"], \"title\": \"T\", \"body\": \"B\"}})\n    assert result[\"status\"] == \"requires_configuration\"\n\n\ndef test_verify_constructs_message_without_external_delivery():\n    result = run({\n        \"mode\": \"verify\",\n        \"message\": {\"targets\": [\"a@example.invalid\"], \"title\": \"T\", \"body\": \"B\"},\n        \"_runtime\": {\n            \"connection\": {\"server_host\": \"localhost\", \"server_port\": 1025, \"security_mode\": \"sandbox\", \"username\": \"tester\", \"default_sender\": \"sender@example.invalid\"},\n            \"secrets\": {\"password\": \"hidden\"},\n            \"secret_refs\": {\"password\": \"runtime-secret-ref\"},\n        },\n    })\n    assert result[\"status\"] == \"success\"\n    assert result[\"data\"][\"configured\"] is True\n    assert result[\"data\"][\"message_constructed\"] is True\n    assert result[\"data\"][\"external_action_executed\"] is False\n\n\ndef test_send_requires_approval_before_external_action():\n    result = run({\n        \"mode\": \"send\",\n        \"message\": {\"targets\": [\"a@example.invalid\"], \"title\": \"T\", \"body\": \"B\"},\n        \"_runtime\": {\n            \"connection\": {\"server_host\": \"localhost\", \"server_port\": 1025, \"security_mode\": \"plain\", \"username\": \"tester\", \"default_sender\": \"sender@example.invalid\"},\n            \"secrets\": {\"password\": \"hidden\"},\n            \"secret_refs\": {\"password\": \"runtime-secret-ref\"},\n        },\n    })\n    assert result[\"status\"] == \"requires_approval\"\n    assert result[\"data\"][\"external_action_executed\"] is False\n"
         }
       ],
       "acquisition_policy": {
