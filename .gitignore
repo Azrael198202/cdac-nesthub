@@ -644,3 +644,14 @@ ai_core/media/__pycache__/video_generation_setup_wizard.cpython-313.pyc
 .DS_Store
 ai_core/media/providers/__pycache__/__init__.cpython-313.pyc
 ai_core/media/providers/__pycache__/generic_text_animation_provider.cpython-313.pyc
+tests/__pycache__/test_comfyui_runtime_bootstrap_diagnostics.cpython-313-pytest-9.0.2.pyc
+tests/__pycache__/test_conversation_and_graph_runtime_fix.cpython-313-pytest-9.0.2.pyc
+tests/__pycache__/test_direct_capability_dispatch.cpython-313-pytest-9.0.2.pyc
+tests/__pycache__/test_generic_connection_secret_lifecycle.cpython-313-pytest-9.0.2.pyc
+tests/__pycache__/test_generic_routing_and_web_search_contract.cpython-313-pytest-9.0.2.pyc
+tests/__pycache__/test_runtime_capability_acquisition_lifecycle.cpython-313-pytest-9.0.2.pyc
+tests/__pycache__/test_video_generation_setup_wizard.cpython-313-pytest-9.0.2.pyc
+ai_core/tools/__pycache__/runtime_registered_tool_service.cpython-313.pyc
+ai_core/capabilities/__pycache__/runtime_capability_gap_implementer.cpython-313.pyc
+ai_core/connections/__pycache__/__init__.cpython-313.pyc
+ai_core/connections/__pycache__/connection_profile_store.cpython-313.pyc

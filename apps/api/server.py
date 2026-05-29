@@ -74,6 +74,15 @@ class ConversationFeedbackRequest(BaseModel):
 class RegisteredToolExecuteRequest(BaseModel):
     tool_id: str
     input_data: Any | None = None
+    profile_id: str | None = None
+    approval_confirmed: bool = False
+
+
+class RuntimeToolProfileRequest(BaseModel):
+    tool_id: str
+    profile_id: str | None = None
+    config: dict[str, Any] | None = None
+    secrets: dict[str, Any] | None = None
 
 class AgentStudioRequest(BaseModel):
     message: str
@@ -560,6 +569,27 @@ async def agent_studio_runtime_tools():
     return JSONResponse({"ok": True, "tools": registered_tool_service.list_tools()})
 
 
+@app.get("/api/agent-studio/runtime-tool-profiles")
+async def agent_studio_runtime_tool_profiles(tool_id: str | None = None):
+    return JSONResponse({"ok": True, "profiles": registered_tool_service.list_profiles(tool_id)})
+
+
+@app.post("/api/agent-studio/runtime-tool-profiles")
+async def agent_studio_save_runtime_tool_profile(req: RuntimeToolProfileRequest):
+    try:
+        payload = registered_tool_service.configure_tool_profile(
+            tool_id=req.tool_id,
+            profile_id=req.profile_id or "default",
+            config=req.config if req.config is not None else {},
+            secrets=req.secrets if req.secrets is not None else {},
+        )
+        status = 200 if payload.get("ok") else 400
+        return JSONResponse(payload, status_code=status)
+    except Exception as exc:
+        _write_api_error_log(area="agent_studio_save_runtime_tool_profile", exc=exc, context={"tool_id": req.tool_id})
+        return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
+
+
 @app.post("/api/agent-studio/runtime-tools/execute")
 async def agent_studio_execute_runtime_tool(req: RegisteredToolExecuteRequest):
     try:
@@ -567,6 +597,8 @@ async def agent_studio_execute_runtime_tool(req: RegisteredToolExecuteRequest):
             tool_id=req.tool_id,
             input_data=req.input_data if req.input_data is not None else {},
             run_id="agent_studio_registered_tool",
+            profile_id=req.profile_id or "default",
+            approval_confirmed=bool(req.approval_confirmed),
         )
         status = 200 if payload.get("ok") else 400
         return JSONResponse(payload, status_code=status)

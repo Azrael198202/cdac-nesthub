@@ -40,6 +40,183 @@
           "content": "# structured_text_table_parser\n\nRuntime-generated capability artifact. It parses pipe-delimited text table structures into JSON-like rows and is registered only after sandbox validation succeeds.\n"
         }
       ]
+    },
+    {
+      "template_id": "docx_text_extractor",
+      "description": "Dependency-free extractor for Office Open XML text document package content generated outside ai_core.",
+      "match_terms": [
+        "docx",
+        "docx files",
+        "word document",
+        "word documents",
+        "extract text",
+        "text extraction",
+        "document extraction",
+        "文档",
+        "ドキュメント"
+      ],
+      "required_terms": [
+        "docx"
+      ],
+      "capabilities": [
+        "document_text_extraction",
+        "packaged_document_text_extraction",
+        "docx_text_extraction"
+      ],
+      "entrypoint": {
+        "module": "tool.py",
+        "function": "run"
+      },
+      "dependencies": [],
+      "verification_input": {
+        "docx_base64": "UEsDBBQAAAAAALQlvVyaxphxOgEAADoBAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbDw/eG1sIHZlcnNpb249IjEuMCIgZW5jb2Rpbmc9IlVURi04Ij8+PFR5cGVzIHhtbG5zPSJodHRwOi8vc2NoZW1hcy5vcGVueG1sZm9ybWF0cy5vcmcvcGFja2FnZS8yMDA2L2NvbnRlbnQtdHlwZXMiPjxEZWZhdWx0IEV4dGVuc2lvbj0ieG1sIiBDb250ZW50VHlwZT0iYXBwbGljYXRpb24veG1sIi8+PE92ZXJyaWRlIFBhcnROYW1lPSIvd29yZC9kb2N1bWVudC54bWwiIENvbnRlbnRUeXBlPSJhcHBsaWNhdGlvbi92bmQub3BlbnhtbGZvcm1hdHMtb2ZmaWNlZG9jdW1lbnQud29yZHByb2Nlc3NpbmdtbC5kb2N1bWVudC5tYWluK3htbCIvPjwvVHlwZXM+UEsDBBQAAAAAALQlvVzeYhedAgEAAAIBAAARAAAAd29yZC9kb2N1bWVudC54bWw8P3htbCB2ZXJzaW9uPSIxLjAiIGVuY29kaW5nPSJVVEYtOCIgc3RhbmRhbG9uZT0ieWVzIj8+Cjx3OmRvY3VtZW50IHhtbG5zOnc9Imh0dHA6Ly9zY2hlbWFzLm9wZW54bWxmb3JtYXRzLm9yZy93b3JkcHJvY2Vzc2luZ21sLzIwMDYvbWFpbiI+PHc6Ym9keT48dzpwPjx3OnI+PHc6dD5BbHBoYSBkb2N1bWVudDwvdzp0PjwvdzpyPjwvdzpwPjx3OnA+PHc6cj48dzp0PkJldGEgbGluZTwvdzp0PjwvdzpyPjwvdzpwPjwvdzpib2R5Pjwvdzpkb2N1bWVudD5QSwECFAMUAAAAAAC0Jb1cmsaYcToBAAA6AQAAEwAAAAAAAAAAAAAAgAEAAAAAW0NvbnRlbnRfVHlwZXNdLnhtbFBLAQIUAxQAAAAAALQlvVzeYhedAgEAAAIBAAARAAAAAAAAAAAAAACAAWsBAAB3b3JkL2RvY3VtZW50LnhtbFBLBQYAAAAAAgACAIAAAACcAgAAAAA="
+      },
+      "verification_expectations": {
+        "status": "completed",
+        "paragraph_count": 2
+      },
+      "files": [
+        {
+          "path": "tool.py",
+          "content": "from __future__ import annotations\n\nimport base64\nimport io\nimport zipfile\nimport xml.etree.ElementTree as ET\nfrom pathlib import Path\nfrom typing import Any\n\n\ndef _read_bytes(input_data: dict[str, Any]) -> bytes:\n    if input_data.get(\"bytes_base64\"):\n        return base64.b64decode(str(input_data.get(\"bytes_base64\")))\n    if input_data.get(\"docx_base64\"):\n        return base64.b64decode(str(input_data.get(\"docx_base64\")))\n    path_value = input_data.get(\"path\") or input_data.get(\"file_path\")\n    if path_value:\n        return Path(str(path_value)).read_bytes()\n    raw = input_data.get(\"bytes\")\n    if isinstance(raw, bytes):\n        return raw\n    raise ValueError(\"DOCX input requires path, file_path, bytes, bytes_base64, or docx_base64.\")\n\n\ndef extract_docx_text_from_bytes(data: bytes) -> str:\n    with zipfile.ZipFile(io.BytesIO(data)) as archive:\n        xml_bytes = archive.read(\"word/document.xml\")\n    root = ET.fromstring(xml_bytes)\n    namespace = \"{http://schemas.openxmlformats.org/wordprocessingml/2006/main}\"\n    paragraphs: list[str] = []\n    for paragraph in root.iter(namespace + \"p\"):\n        parts: list[str] = []\n        for node in paragraph.iter(namespace + \"t\"):\n            if node.text:\n                parts.append(node.text)\n        if parts:\n            paragraphs.append(\"\".join(parts))\n    return \"\\n\".join(paragraphs).strip()\n\n\ndef run(input_data: Any = None, **kwargs: Any) -> dict[str, Any]:\n    payload = input_data if isinstance(input_data, dict) else {}\n    payload = {**payload, **kwargs}\n    try:\n        data = _read_bytes(payload)\n        text = extract_docx_text_from_bytes(data)\n        paragraphs = [line for line in text.splitlines() if line.strip()]\n        return {\n            \"status\": \"completed\",\n            \"text\": text,\n            \"paragraph_count\": len(paragraphs),\n            \"character_count\": len(text),\n        }\n    except Exception as exc:\n        return {\n            \"status\": \"failed\",\n            \"error\": {\"type\": exc.__class__.__name__, \"message\": str(exc)},\n            \"text\": \"\",\n            \"paragraph_count\": 0,\n            \"character_count\": 0,\n        }\n"
+        },
+        {
+          "path": "test_tool.py",
+          "content": "from tool import run\n\nSAMPLE_DOCX_BASE64 = \"UEsDBBQAAAAAALQlvVyaxphxOgEAADoBAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbDw/eG1sIHZlcnNpb249IjEuMCIgZW5jb2Rpbmc9IlVURi04Ij8+PFR5cGVzIHhtbG5zPSJodHRwOi8vc2NoZW1hcy5vcGVueG1sZm9ybWF0cy5vcmcvcGFja2FnZS8yMDA2L2NvbnRlbnQtdHlwZXMiPjxEZWZhdWx0IEV4dGVuc2lvbj0ieG1sIiBDb250ZW50VHlwZT0iYXBwbGljYXRpb24veG1sIi8+PE92ZXJyaWRlIFBhcnROYW1lPSIvd29yZC9kb2N1bWVudC54bWwiIENvbnRlbnRUeXBlPSJhcHBsaWNhdGlvbi92bmQub3BlbnhtbGZvcm1hdHMtb2ZmaWNlZG9jdW1lbnQud29yZHByb2Nlc3NpbmdtbC5kb2N1bWVudC5tYWluK3htbCIvPjwvVHlwZXM+UEsDBBQAAAAAALQlvVzeYhedAgEAAAIBAAARAAAAd29yZC9kb2N1bWVudC54bWw8P3htbCB2ZXJzaW9uPSIxLjAiIGVuY29kaW5nPSJVVEYtOCIgc3RhbmRhbG9uZT0ieWVzIj8+Cjx3OmRvY3VtZW50IHhtbG5zOnc9Imh0dHA6Ly9zY2hlbWFzLm9wZW54bWxmb3JtYXRzLm9yZy93b3JkcHJvY2Vzc2luZ21sLzIwMDYvbWFpbiI+PHc6Ym9keT48dzpwPjx3OnI+PHc6dD5BbHBoYSBkb2N1bWVudDwvdzp0PjwvdzpyPjwvdzpwPjx3OnA+PHc6cj48dzp0PkJldGEgbGluZTwvdzp0PjwvdzpyPjwvdzpwPjwvdzpib2R5Pjwvdzpkb2N1bWVudD5QSwECFAMUAAAAAAC0Jb1cmsaYcToBAAA6AQAAEwAAAAAAAAAAAAAAgAEAAAAAW0NvbnRlbnRfVHlwZXNdLnhtbFBLAQIUAxQAAAAAALQlvVzeYhedAgEAAAIBAAARAAAAAAAAAAAAAACAAWsBAAB3b3JkL2RvY3VtZW50LnhtbFBLBQYAAAAAAgACAIAAAACcAgAAAAA=\"\n\nresult = run({\"docx_base64\": SAMPLE_DOCX_BASE64})\nassert result[\"status\"] == \"completed\"\nassert \"Alpha document\" in result[\"text\"]\nassert \"Beta line\" in result[\"text\"]\nassert result[\"paragraph_count\"] == 2\nprint(\"ok\")\n"
+        },
+        {
+          "path": "README.md",
+          "content": "# docx_text_extractor\n\nRuntime-generated capability artifact. It extracts paragraph text from DOCX package content using only Python standard library modules, then registers only after sandbox validation and execution verification succeed.\n"
+        }
+      ]
+    },
+    {
+      "template_id": "configured_runtime_action_probe",
+      "description": "Generic runtime-generated capability that declares input, connection, secret, and approval contracts for lifecycle validation.",
+      "match_terms": [
+        "configured runtime capability",
+        "connection",
+        "secret",
+        "profile",
+        "approval",
+        "connected capability",
+        "external action",
+        "能力",
+        "连接",
+        "密钥"
+      ],
+      "required_terms": [
+        "capability"
+      ],
+      "capabilities": [
+        "configured_runtime_action",
+        "runtime_connection_contract",
+        "runtime_secret_contract"
+      ],
+      "entrypoint": {
+        "module": "tool.py",
+        "function": "run"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "payload"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "data": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "status",
+          "data"
+        ]
+      },
+      "connection_schema": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "type": "string"
+          },
+          "account": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "endpoint",
+          "account"
+        ]
+      },
+      "secret_schema": {
+        "type": "object",
+        "properties": {
+          "credential": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "credential"
+        ]
+      },
+      "approval_policy": {
+        "required": true,
+        "mode": "explicit_runtime_confirmation",
+        "preview_fields": [
+          "payload"
+        ]
+      },
+      "runtime_interface": {
+        "profile_required": true,
+        "secret_refs_only_in_registry": true,
+        "dynamic_form_source": "runtime_declared_schema"
+      },
+      "verification_input": {
+        "payload": {
+          "sample": "ok"
+        },
+        "_runtime": {
+          "connection": {
+            "endpoint": "local",
+            "account": "tester"
+          },
+          "secrets": {
+            "credential": "verification-secret"
+          },
+          "secret_refs": {
+            "credential": "ref"
+          }
+        }
+      },
+      "verification_expectations": {
+        "status": "completed",
+        "configured": true,
+        "secret_available": true
+      },
+      "files": [
+        {
+          "path": "tool.py",
+          "content": "from __future__ import annotations\n\nfrom typing import Any\n\n\ndef run(input_data: Any = None, **kwargs: Any) -> dict[str, Any]:\n    payload = input_data if isinstance(input_data, dict) else {}\n    payload = {**payload, **kwargs}\n    runtime = payload.get('_runtime') if isinstance(payload.get('_runtime'), dict) else {}\n    connection = runtime.get('connection') if isinstance(runtime.get('connection'), dict) else {}\n    secrets = runtime.get('secrets') if isinstance(runtime.get('secrets'), dict) else {}\n    configured = bool(connection)\n    secret_available = bool(secrets)\n    return {\n        'status': 'completed' if configured and secret_available else 'failed',\n        'data': {\n            'configured': configured,\n            'secret_available': secret_available,\n            'received_keys': sorted([str(k) for k in payload.keys() if k != '_runtime']),\n            'connection_keys': sorted([str(k) for k in connection.keys()]),\n            'secret_keys': sorted([str(k) for k in secrets.keys()]),\n        },\n        'configured': configured,\n        'secret_available': secret_available,\n    }\n"
+        },
+        {
+          "path": "test_tool.py",
+          "content": "from tool import run\n\nresult = run({'payload': {'sample':'ok'}, '_runtime': {'connection': {'endpoint':'local', 'account':'tester'}, 'secrets': {'credential':'secret'}}})\nassert result['status'] == 'completed'\nassert result['data']['configured'] is True\nassert result['data']['secret_available'] is True\nassert 'credential' in result['data']['secret_keys']\nprint('ok')\n"
+        },
+        {
+          "path": "README.md",
+          "content": "# configured_runtime_action_probe\n\nRuntime-generated capability artifact used to validate generic input, connection, secret, approval, sandbox validation, registry, and execution lifecycle support.\n"
+        }
+      ]
     }
   ]
 }

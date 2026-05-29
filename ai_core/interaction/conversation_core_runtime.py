@@ -574,8 +574,8 @@ class ConversationCoreRuntime:
             )
         runtime_impl = implementation.get("runtime_implementation") if isinstance(implementation.get("runtime_implementation"), dict) else {}
         runtime_status = str(runtime_impl.get("status") or "not_requested")
-        if runtime_status == "implemented_tested_registered":
-            headline = "Capability gap resolution completed. Runtime capability was implemented, sandbox-tested, and registered."
+        if runtime_status in {"implemented_tested_registered", "implemented_tested_registered_verified"}:
+            headline = "Capability gap resolution completed. Runtime capability was implemented, sandbox-tested, registered, and verified by execution."
         elif runtime_status in {"blocked", "generated_but_validation_failed"}:
             headline = "Capability gap resolution collected verified material, but implementation was not registered."
         else:
@@ -665,7 +665,7 @@ class ConversationCoreRuntime:
         if isinstance(capability_impl, dict):
             runtime_impl = capability_impl.get("runtime_implementation") if isinstance(capability_impl.get("runtime_implementation"), dict) else None
         passed = bool(execution.get("answer_material")) and (not expects_web or bool(urls))
-        if runtime_impl and runtime_impl.get("status") == "generated_but_validation_failed":
+        if runtime_impl and runtime_impl.get("status") in {"generated_but_validation_failed", "generated_but_verification_failed", "dependency_resolution_failed"}:
             passed = False
         return {
             "status": "completed" if passed else "failed",

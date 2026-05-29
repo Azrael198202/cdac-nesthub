@@ -1044,8 +1044,10 @@ function runtimeToolRunCard(r){
   el.className='item';
   const result=r.result||{};
   const data=result.data||{};
+  const keys=Object.keys(data||{}).slice(0,4);
   el.innerHTML='<div class="cardHeader"><b>Runtime tool run: '+escapeHtml(r.tool_id||'tool')+'</b><span class="pill">'+escapeHtml(r.status||result.status||'')+'</span></div>'+
-    '<div class="small">row_count: '+escapeHtml(data.row_count!==undefined?data.row_count:'')+'</div>'+
+    '<div class="small">data keys: '+escapeHtml(keys.join(', ')||'(none)')+'</div>'+
+    '<div class="small">profile: '+escapeHtml(r.profile_id||'default')+'</div>'+
     '<div class="small">trace: '+escapeHtml((result.provenance&&result.provenance.trace_id)||'')+'</div>';
   const details=document.createElement('details');
   details.className='detailsBox';
@@ -1060,17 +1062,35 @@ function runtimeToolCard(t){
   el.className='item';
   const caps=Array.isArray(t.capabilities)?t.capabilities:[];
   const executable=!!t.executable;
+  const cfg=t.configuration_status||{};
+  const profiles=Array.isArray(t.profiles)?t.profiles:[];
+  const approval=t.approval_policy||{};
   el.innerHTML='<div class="cardHeader"><b>'+escapeHtml(t.tool_id||t.name||'runtime tool')+'</b><span class="pill">'+escapeHtml(executable?'executable':'not executable')+'</span></div>'+
     '<div class="small">capability: '+escapeHtml(t.capability||'')+'</div>'+
     '<div class="small">capabilities: '+escapeHtml(caps.join(', ')||'(none)')+'</div>'+
-    '<div class="small">status: '+escapeHtml(t.status||'')+' / sandbox: '+escapeHtml((t.verification&&t.verification.sandbox_verification)||false)+'</div>';
+    '<div class="small">status: '+escapeHtml(t.status||'')+' / sandbox: '+escapeHtml((t.verification&&t.verification.sandbox_verification)||false)+'</div>'+
+    '<div class="small">configuration: '+escapeHtml(cfg.configured?'ready':'needs setup')+'</div>'+
+    '<div class="small">approval required: '+escapeHtml(!!approval.required)+'</div>'+
+    '<div class="small">profiles: '+escapeHtml(profiles.map(p=>p.profile_id).join(', ')||'(none)')+'</div>';
+  const configureBtn=document.createElement('button');
+  configureBtn.className='btn';
+  configureBtn.style.marginTop='8px';
+  configureBtn.textContent='Configure profile';
+  configureBtn.onclick=()=>configureRuntimeToolProfile(t);
+  el.appendChild(configureBtn);
   const btn=document.createElement('button');
   btn.className='btn primary';
   btn.style.marginTop='8px';
+  btn.style.marginLeft='6px';
   btn.textContent='Run registered tool';
   btn.disabled=!executable;
-  btn.onclick=()=>executeRuntimeTool(t.tool_id||t.name||'');
+  btn.onclick=()=>executeRuntimeTool(t);
   el.appendChild(btn);
+  const schemaDetails=document.createElement('details');
+  schemaDetails.className='detailsBox';
+  schemaDetails.innerHTML='<summary>Runtime interface schemas</summary><div class="pre compact"></div>';
+  schemaDetails.querySelector('.pre').textContent=renderJson({input_schema:t.input_schema||{},connection_schema:t.connection_schema||{},secret_schema:t.secret_schema||{},approval_policy:t.approval_policy||{}});
+  el.appendChild(schemaDetails);
   const details=document.createElement('details');
   details.className='detailsBox';
   details.innerHTML='<summary>Show raw JSON</summary><div class="pre compact"></div>';
@@ -1079,16 +1099,54 @@ function runtimeToolCard(t){
   return el;
 }
 
-async function executeRuntimeTool(toolId){
+function sampleForSchema(schema){
+  const props=(schema&&schema.properties)||{};
+  const out={};
+  Object.keys(props).forEach(k=>{
+    const type=props[k]&&props[k].type;
+    if(type==='number'||type==='integer') out[k]=0;
+    else if(type==='boolean') out[k]=false;
+    else if(type==='array') out[k]=[];
+    else if(type==='object') out[k]={};
+    else out[k]='';
+  });
+  return out;
+}
+
+async function configureRuntimeToolProfile(tool){
+  const toolId=tool.tool_id||tool.name||'';
   if(!toolId){ return; }
-  const raw=prompt('Input JSON for '+toolId, '{"text":"| Name | Value |\\n| --- | --- |\\n| Alpha | 1 |"}');
+  const profileId=prompt('Profile id', 'default');
+  if(profileId===null){ return; }
+  const configRaw=prompt('Connection/config JSON. Secret values must not be placed here.', JSON.stringify(sampleForSchema(tool.connection_schema||{}), null, 2));
+  if(configRaw===null){ return; }
+  const secretRaw=prompt('Secret JSON. Values are stored in the runtime secret store and only references are kept in the profile.', JSON.stringify(sampleForSchema(tool.secret_schema||{}), null, 2));
+  if(secretRaw===null){ return; }
+  let config={}, secrets={};
+  try{ config=configRaw.trim()?JSON.parse(configRaw):{}; secrets=secretRaw.trim()?JSON.parse(secretRaw):{}; }
+  catch(e){ alert('Invalid JSON.'); return; }
+  const res=await fetch('/api/agent-studio/runtime-tool-profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:toolId,profile_id:profileId||'default',config,secrets})});
+  const data=await res.json();
+  addMessage('assistant', data.ok ? ('Runtime profile configured:\n'+renderJson(data.profile)) : ('Runtime profile setup failed:\n'+renderJson(data)), data.ok?'final':'error');
+  refreshState();
+}
+
+async function executeRuntimeTool(tool){
+  const toolId=typeof tool==='string'?tool:(tool.tool_id||tool.name||'');
+  if(!toolId){ return; }
+  const inputSchema=typeof tool==='object'?(tool.input_schema||{}):{};
+  const profileId=prompt('Profile id', 'default');
+  if(profileId===null){ return; }
+  const raw=prompt('Input JSON for '+toolId, JSON.stringify(sampleForSchema(inputSchema), null, 2));
   if(raw===null){ return; }
   let inputData={};
   try{ inputData=raw.trim()?JSON.parse(raw):{}; }
   catch(e){ alert('Invalid JSON input.'); return; }
-  const res=await fetch('/api/agent-studio/runtime-tools/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:toolId,input_data:inputData})});
+  let approvalConfirmed=false;
+  if(tool&&tool.approval_policy&&tool.approval_policy.required){ approvalConfirmed=confirm('This runtime-generated capability declares a human approval requirement. Execute now?'); if(!approvalConfirmed){ return; }}
+  const res=await fetch('/api/agent-studio/runtime-tools/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:toolId,input_data:inputData,profile_id:profileId||'default',approval_confirmed:approvalConfirmed})});
   const data=await res.json();
-  addMessage('assistant', data.ok ? ('Runtime tool executed:\n'+renderJson(data.result)) : ('Runtime tool execution failed:\n'+renderJson(data)), data.ok?'final':'error');
+  addMessage('assistant', data.ok ? ('Runtime tool executed:\n'+renderJson(data.result)) : ('Runtime tool execution requires action or failed:\n'+renderJson(data)), data.ok?'final':'error');
   refreshState();
 }
 

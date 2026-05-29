@@ -5,20 +5,22 @@ from pathlib import Path
 from typing import Any
 
 from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_REGISTRY, RUNTIME_TRACES
+from ai_core.connections.connection_profile_store import ConnectionProfileStore
 from ai_core.tools.generic_tool_runner import GenericToolRunner
 
 
 class RuntimeRegisteredToolService:
     """Generic service for listing and executing runtime-registered tools.
 
-    The service does not know what any tool does. It only reads the runtime
-    registry, checks that a record is executable, and invokes the declared
-    implementation with generic input data.
+    The service does not know what any tool does. It reads runtime-declared
+    schemas, checks profile/secret readiness generically, enforces declared
+    approval policies, and invokes the registered implementation.
     """
 
-    def __init__(self, *, registry_path: Path | None = None) -> None:
+    def __init__(self, *, registry_path: Path | None = None, connection_store: ConnectionProfileStore | None = None) -> None:
         self.registry_path = registry_path or (RUNTIME_REGISTRY / "tool_registry.json")
         self.runner = GenericToolRunner()
+        self.connection_store = connection_store or ConnectionProfileStore()
 
     def list_tools(self) -> list[dict[str, Any]]:
         registry = self._load_registry()
@@ -29,6 +31,8 @@ class RuntimeRegisteredToolService:
             item = dict(spec)
             item.setdefault("tool_id", str(tool_id))
             item["executable"] = self._is_executable(item)
+            item["configuration_status"] = self.connection_store.missing_requirements(tool_spec=item, profile_id="default")
+            item["profiles"] = self.connection_store.list_profiles(str(item.get("tool_id") or tool_id))
             tools.append(item)
         tools.sort(key=lambda x: (not bool(x.get("executable")), str(x.get("tool_id") or "")))
         return tools
@@ -42,18 +46,72 @@ class RuntimeRegisteredToolService:
         out.setdefault("tool_id", str(tool_id))
         return out
 
-    def execute_tool(self, *, tool_id: str, input_data: Any, run_id: str = "agent_studio_tool_run") -> dict[str, Any]:
+    def configure_tool_profile(
+        self,
+        *,
+        tool_id: str,
+        profile_id: str = "default",
+        config: dict[str, Any] | None = None,
+        secrets: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        spec = self.get_tool(tool_id)
+        if spec is None:
+            return {"ok": False, "status": "failed", "error": {"code": "tool_not_found", "message": "Runtime tool is not registered."}}
+        profile = self.connection_store.upsert_profile(
+            tool_id=str(spec.get("tool_id") or tool_id),
+            profile_id=profile_id or "default",
+            config=config if isinstance(config, dict) else {},
+            secrets=secrets if isinstance(secrets, dict) else {},
+            secret_schema=spec.get("secret_schema") if isinstance(spec.get("secret_schema"), dict) else {},
+            metadata={"source": "agent_studio_runtime_profile"},
+        )
+        return {"ok": True, "status": "configured", "profile": profile, "configuration_status": self.connection_store.missing_requirements(tool_spec=spec, profile_id=profile_id or "default")}
+
+    def execute_tool(
+        self,
+        *,
+        tool_id: str,
+        input_data: Any,
+        run_id: str = "agent_studio_tool_run",
+        profile_id: str = "default",
+        approval_confirmed: bool = False,
+    ) -> dict[str, Any]:
         spec = self.get_tool(tool_id)
         if spec is None:
             return {"ok": False, "status": "failed", "error": {"code": "tool_not_found", "message": "Runtime tool is not registered."}}
         if not self._is_executable(spec):
             return {"ok": False, "status": "failed", "error": {"code": "tool_not_executable", "message": "Runtime tool record is not executable."}, "tool": spec}
+        profile_id = profile_id or "default"
+        missing = self.connection_store.missing_requirements(tool_spec=spec, profile_id=profile_id)
+        if not missing.get("configured"):
+            return {
+                "ok": False,
+                "status": "requires_configuration",
+                "error": {"code": "runtime_configuration_required", "message": "Runtime-declared configuration or secret values are missing."},
+                "configuration_status": missing,
+                "tool": self._public_tool_summary(spec),
+            }
+        approval = spec.get("approval_policy") if isinstance(spec.get("approval_policy"), dict) else {}
+        if bool(approval.get("required")) and not approval_confirmed:
+            return {
+                "ok": False,
+                "status": "requires_human_confirmation",
+                "error": {"code": "human_confirmation_required", "message": "This runtime-generated capability requires confirmation before execution."},
+                "approval_policy": approval,
+                "preview": self._approval_preview(input_data),
+                "tool": self._public_tool_summary(spec),
+            }
         payload = input_data if isinstance(input_data, dict) else {"input": input_data}
+        runtime_context = self.connection_store.runtime_context_for(tool_spec=spec, profile_id=profile_id)
+        if runtime_context.get("connection") or runtime_context.get("secrets") or runtime_context.get("secret_refs"):
+            payload = dict(payload)
+            payload["_runtime"] = runtime_context
         result = self.runner.run_tool(spec, payload, run_id=run_id, node_id="agent_studio_registered_tool", step_id=str(tool_id), capability=str(spec.get("capability") or ""))
         out = {
             "ok": str(result.get("status") or "").lower() in {"success", "ok", "executed"},
             "status": result.get("status"),
             "tool_id": tool_id,
+            "profile_id": profile_id,
             "result": result,
             "tool": self._public_tool_summary(spec),
         }
@@ -89,6 +147,15 @@ class RuntimeRegisteredToolService:
                     continue
         items.sort(key=lambda x: str(x.get("finished_at") or x.get("started_at") or ""), reverse=True)
         return items[:limit]
+
+    def list_profiles(self, tool_id: str | None = None) -> list[dict[str, Any]]:
+        return self.connection_store.list_profiles(tool_id)
+
+    def _approval_preview(self, input_data: Any) -> dict[str, Any]:
+        if isinstance(input_data, dict):
+            preview = {k: ("***" if str(k).lower() in {"secret", "secrets", "credential", "credentials"} else v) for k, v in input_data.items() if k != "_runtime"}
+            return {"input": preview}
+        return {"input": input_data}
 
     def _persist_tool_result(self, payload: dict[str, Any]) -> None:
         from datetime import datetime, timezone
@@ -130,5 +197,10 @@ class RuntimeRegisteredToolService:
             "capability": spec.get("capability"),
             "capabilities": spec.get("capabilities") if isinstance(spec.get("capabilities"), list) else [],
             "status": spec.get("status"),
+            "input_schema": spec.get("input_schema") if isinstance(spec.get("input_schema"), dict) else {},
+            "output_schema": spec.get("output_schema") if isinstance(spec.get("output_schema"), dict) else {},
+            "connection_schema": spec.get("connection_schema") if isinstance(spec.get("connection_schema"), dict) else {},
+            "secret_schema": spec.get("secret_schema") if isinstance(spec.get("secret_schema"), dict) else {},
+            "approval_policy": spec.get("approval_policy") if isinstance(spec.get("approval_policy"), dict) else {},
             "verification": spec.get("verification") if isinstance(spec.get("verification"), dict) else {},
         }

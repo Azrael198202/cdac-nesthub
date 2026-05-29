@@ -68,7 +68,7 @@ class GenericToolRunner:
             component_type="runtime_tool",
             component_id=str(tool_spec.get("tool_id") or tool_spec.get("name") or path.stem),
             capability=capability or self._first_capability(tool_spec),
-            input_data=input_data,
+            input_data=self._redact_runtime_sensitive(input_data),
             artifact=tool_spec,
         )
 
@@ -111,6 +111,28 @@ class GenericToolRunner:
             result = self._error("tool_execution_failed", str(exc))
             trace = self.provenance.finish(trace, output=result, status="error", error=result.get("error"))
             return self.provenance.attach(result, trace)
+
+    def _redact_runtime_sensitive(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            redacted: dict[str, Any] = {}
+            for key, item in value.items():
+                key_text = str(key).lower()
+                if key_text in {"secrets", "secret", "credential", "credentials"}:
+                    if isinstance(item, dict):
+                        redacted[key] = {str(k): "***" for k in item.keys()}
+                    else:
+                        redacted[key] = "***"
+                elif key_text == "_runtime" and isinstance(item, dict):
+                    nested = dict(item)
+                    if isinstance(nested.get("secrets"), dict):
+                        nested["secrets"] = {str(k): "***" for k in nested["secrets"].keys()}
+                    redacted[key] = self._redact_runtime_sensitive(nested)
+                else:
+                    redacted[key] = self._redact_runtime_sensitive(item)
+            return redacted
+        if isinstance(value, list):
+            return [self._redact_runtime_sensitive(x) for x in value]
+        return value
 
     def _normalize_tool_output(self, output: dict[str, Any], *, source: str) -> dict[str, Any]:
         raw_status = str(output.get("status", "")).lower().strip()
