@@ -68,6 +68,12 @@ class AgentDelegationRuntime:
             "task_mind_graph": task_mind_graph,
             "graph_self_check": dependency_plan.get("self_check") if isinstance(dependency_plan, dict) else {},
             "repair_plan": (dependency_plan.get("self_check") or {}).get("repair_plan") if isinstance(dependency_plan, dict) and isinstance(dependency_plan.get("self_check"), dict) else [],
+            # Keep task-run parameters in the durable run payload.  They are
+            # needed when a runtime-registered capability pauses for approval:
+            # the approval resume must re-create the same registered-tool
+            # invocation without asking the old primary-runtime checkpoint to
+            # restore it.  This is task-run state, not persisted agent state.
+            "runtime_parameters": task_graph.get("runtime_parameters") if isinstance(task_graph.get("runtime_parameters"), dict) else {},
         }
         self._record_progress(run_payload, "prepare", "Preparing delegation run", "running")
         self._record_global_mind_graph_progress(run_payload, task_mind_graph)
@@ -328,6 +334,186 @@ class AgentDelegationRuntime:
 
 
 
+
+    async def _resume_registered_tool_confirmation(
+        self,
+        *,
+        run_payload: dict[str, Any],
+        task_graph: dict[str, Any],
+        participants: list[dict[str, Any]],
+        provided_inputs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Resume a runtime-registered tool approval using the same tool path.
+
+        Registered-tool capabilities are executed by the auxiliary layer through
+        RuntimeRegisteredToolService, not by a primary-runtime checkpoint.  When
+        one pauses for human confirmation, the durable state needed for resume
+        is the task-run parameter set plus the participant/tool binding.  This
+        method rebuilds that invocation through the existing Agent/Task
+        parameter contract and the RegisteredToolParameterBridge, then calls the
+        same registered tool executor with approval_confirmed=true.
+        """
+        run_id = str(run_payload.get("run_id") or new_id("delegation_run"))
+        task_name = str(task_graph.get("task_name") or run_payload.get("task_name") or "task")
+        task_instruction = str(task_graph.get("instruction") or "")
+        community_id = str(task_graph.get("community_id") or run_payload.get("community_id") or "default")
+        runtime_parameters: dict[str, Any] = {}
+        if isinstance(task_graph.get("runtime_parameters"), dict):
+            runtime_parameters.update(task_graph.get("runtime_parameters") or {})
+        if isinstance(run_payload.get("runtime_parameters"), dict):
+            runtime_parameters.update(run_payload.get("runtime_parameters") or {})
+        if isinstance(provided_inputs, dict):
+            runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+        pending = run_payload.get("pending_action") if isinstance(run_payload.get("pending_action"), dict) else {}
+        tool_id = str(pending.get("tool_id") or "").strip()
+
+        # The approval field may be participant-scoped by the UI.  Convert any
+        # affirmative value into the generic runtime flag consumed by the
+        # registered tool executor.  This keeps the old Agent/Task form system
+        # intact while avoiding primary-runtime checkpoint resume for tool-only
+        # approvals.
+        if self._submitted_confirmation(runtime_parameters):
+            runtime_parameters["approval_confirmed"] = True
+
+        selected = self._fresh_task_participants(participants)
+        self._apply_task_runtime_parameters_to_selected(selected, runtime_parameters)
+        task_mind_graph = self._build_task_mind_graph(task_graph, selected)
+        dependency_plan = task_mind_graph.get("agent_relation_analysis") or self._build_participant_dependency_plan(task_graph, selected)
+        run_payload.update({
+            "status": "resuming",
+            "current_stage": "resuming_registered_tool_confirmation",
+            "runtime_parameters": runtime_parameters,
+            "participant_dependency_plan": dependency_plan,
+            "task_mind_graph": task_mind_graph,
+        })
+        self._clear_waiting_fields(run_payload)
+        self._record_progress(run_payload, "registered_tool_confirmation_resume", "Resuming registered tool confirmation", "running")
+
+        agent_results: list[AgentExecutionResult] = []
+        updated_payloads: list[dict[str, Any]] = []
+        existing_by_participant = {
+            str(item.get("participant_id") or ""): item
+            for item in (run_payload.get("agent_results") or [])
+            if isinstance(item, dict)
+        }
+        resumed_any = False
+        for index, participant in enumerate(self._participants_in_mind_graph_order(selected, task_mind_graph)):
+            pid = self._participant_identity(participant)
+            profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+            participant_tool_id = str(profile.get("tool_id") or "").strip()
+            existing = existing_by_participant.get(pid)
+            should_resume = bool(participant_tool_id) and (not tool_id or participant_tool_id == tool_id)
+            if not should_resume and isinstance(existing, dict):
+                try:
+                    restored = AgentExecutionResult(**existing)
+                    agent_results.append(restored)
+                    updated_payloads.append(self._sanitize_result_payload(restored.__dict__))
+                except Exception:
+                    updated_payloads.append(existing)
+                continue
+            if not should_resume:
+                continue
+            self._record_progress(run_payload, f"participant_{index + 1}_registered_tool_resume", f"Resuming registered tool participant: {self._participant_name(participant)}", "running")
+            result = await self._execute_registered_tool_capability(participant=participant, task_name=task_name)
+            if result is None:
+                result = AgentExecutionResult(
+                    participant_id=pid,
+                    participant_name=self._participant_name(participant),
+                    core_run_id=new_id("registered_tool_resume_failed"),
+                    status="failed",
+                    final_answer="Registered tool capability binding was not available during resume.",
+                    workflow_results={"status": "failed", "reason": "registered_tool_binding_missing"},
+                    origin="auxiliary_brain",
+                )
+            resumed_any = True
+            agent_results.append(result)
+            result_payload = self._sanitize_result_payload(result.__dict__)
+            updated_payloads.append(result_payload)
+            self._record_progress(run_payload, f"participant_{index + 1}_registered_tool_resume_complete", f"Registered tool participant resumed: {result.participant_name}", "completed" if result.status == "completed" else result.status)
+            if result.status in {"requires_key", "requires_input", "paused"}:
+                run_payload.update({
+                    "status": result.status,
+                    "current_stage": "waiting_for_required_input",
+                    "pending_action": result.pending_action,
+                    "missing_inputs": result.missing_inputs or [],
+                    "agent_results": updated_payloads,
+                    "completed_at": self._now(),
+                })
+                self._record_progress(run_payload, "waiting_input", "Waiting for required input", "waiting")
+                self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+                return run_payload
+
+        if not resumed_any:
+            run_payload.update({
+                "status": "failed",
+                "current_stage": "failed",
+                "message": "No registered tool participant matched the approval request.",
+                "completed_at": self._now(),
+            })
+            self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+            return run_payload
+
+        run_payload["agent_results"] = self._dedupe_result_payloads(updated_payloads)
+        agent_results = self._to_agent_results(run_payload["agent_results"])
+        synthesis_results = self._terminal_results_for_synthesis(agent_results, task_mind_graph)
+        run_payload["synthesis_input_policy"] = {
+            "mode": "terminal_graph_outputs",
+            "source_result_count": len(agent_results),
+            "synthesis_result_count": len(synthesis_results),
+        }
+        self._record_progress(run_payload, "final_synthesis", "Primary runtime synthesizing delegated results", "running")
+        synthesis = await self.primary_client.synthesize_delegated_results(
+            task_name=task_name,
+            task_instruction=task_instruction,
+            agent_results=synthesis_results,
+            shared_context={"community_id": community_id, "task_mind_graph": task_mind_graph},
+        )
+        self._record_progress(run_payload, "final_synthesis_complete", "Final synthesis completed", "completed")
+        delivery_id = new_id("delivery")
+        delivery_payload = {
+            "delivery_id": delivery_id,
+            "origin": "auxiliary_brain",
+            "upstream_origin": "ai_core",
+            "task_name": task_name,
+            "run_id": run_id,
+            "final_answer": synthesis.get("final_answer"),
+            "generated_files": self._collect_generated_files(agent_results),
+            "synthesis": synthesis,
+            "created_at": self._now(),
+        }
+        delivery_path = self.store.write_json(f"deliveries/{delivery_id}.json", delivery_payload)
+        final_status = str(synthesis.get("status") or "")
+        failed_statuses = {"failed", "completed_with_no_participant_result", "partial_failed", "no_usable_result"}
+        run_payload.update({
+            "status": "failed" if final_status in failed_statuses else "completed",
+            "current_stage": "failed" if final_status in failed_statuses else "completed",
+            "completed_at": self._now(),
+            "synthesis": synthesis,
+            "delivery": str(delivery_path),
+        })
+        self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+        return run_payload
+
+    def _submitted_confirmation(self, values: dict[str, Any]) -> bool:
+        if not isinstance(values, dict):
+            return False
+        for key, value in values.items():
+            tail = str(key or "").split(".")[-1].split("_")[-1].casefold()
+            if tail not in {"approval_confirmed", "confirmed", "confirm", "approved", "approval"}:
+                continue
+            if isinstance(value, bool):
+                if value:
+                    return True
+                continue
+            if isinstance(value, list):
+                if any(self._submitted_confirmation({"approval_confirmed": item}) for item in value):
+                    return True
+                continue
+            if str(value).strip().casefold() in {"true", "1", "yes", "y", "on", "confirmed", "approve", "approved"}:
+                return True
+        return False
+
+
     def _blocked_dependency_ids(self, *, participant_id: str, completed_results: list[Any], dependency_plan: dict[str, Any]) -> list[str]:
         participants = dependency_plan.get("participants") if isinstance(dependency_plan, dict) else {}
         plan = participants.get(participant_id) if isinstance(participants, dict) else {}
@@ -456,6 +642,13 @@ class AgentDelegationRuntime:
             task_graph = dict(task_graph)
             task_graph["runtime_parameters"] = runtime_parameters
             return await self._execute_task_with_selected(task_graph, selected)
+        if str(pending.get("kind") or "") == "runtime_tool_human_confirmation":
+            return await self._resume_registered_tool_confirmation(
+                run_payload=run_payload,
+                task_graph=task_graph,
+                participants=selected,
+                provided_inputs=provided_inputs,
+            )
         task_mind_graph = self._build_task_mind_graph(task_graph, selected)
         dependency_plan = task_mind_graph.get("agent_relation_analysis") or self._build_participant_dependency_plan(task_graph, selected)
         run_payload["participant_dependency_plan"] = dependency_plan
