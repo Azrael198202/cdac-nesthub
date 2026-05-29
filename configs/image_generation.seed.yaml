@@ -24,6 +24,8 @@ providers:
       startup_timeout_seconds: 180
       health_timeout_seconds: 3
       request_timeout_seconds: 30
+      preflight_enabled: true
+      preflight_timeout_seconds: 180
       generation_timeout_seconds: 900
       minimum_generation_timeout_seconds: 900
       create_venv: true
@@ -37,6 +39,20 @@ providers:
         clone_timeout_seconds: 600
         venv_timeout_seconds: 600
         pip_timeout_seconds: 1800
+        preflight_enabled: true
+        preflight_timeout_seconds: 180
+        auto_repair_torch: true
+        torch_repair:
+          enabled: true
+          profile: cpu
+          packages:
+            - torch
+            - torchvision
+            - torchaudio
+          cpu_index_url: https://download.pytorch.org/whl/cpu
+          cuda_index_url: https://download.pytorch.org/whl/cu121
+          cuda124_index_url: https://download.pytorch.org/whl/cu124
+          timeout_seconds: 3600
     model_assets:
       - target_subdir: models/checkpoints
         file_name: sd_xl_turbo_1.0_fp16.safetensors

@@ -1,1 +1,1 @@
-v13.35-runtime-failure-diagnostics
+v13.44-comfyui-preflight-torch-auto-repair

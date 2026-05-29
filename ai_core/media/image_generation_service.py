@@ -377,6 +377,12 @@ class ImageGenerationService:
                 }
                 self._log_comfy_bootstrap_event("install_incomplete", result)
                 return result
+        preflight = self._run_comfyui_preflight(root=root, runtime=runtime)
+        if not preflight.get("ok"):
+            repaired_preflight = self._repair_comfyui_preflight_failure(root=root, runtime=runtime, preflight=preflight)
+            if not repaired_preflight.get("ok"):
+                return repaired_preflight
+
         started = self._start_runtime_process(root=root, runtime=runtime)
         if not started.get("ok"):
             return started
@@ -540,6 +546,169 @@ class ImageGenerationService:
         if create.returncode != 0:
             return {"ok": False, "status": "requires_setup", "reason": "runtime_venv_create_failed", "stderr": create.stderr[-1000:], "root": str(root)}
         return {"ok": True, "python": str(python_path), "venv": True}
+
+
+    def _run_comfyui_preflight(self, *, root: Path, runtime: dict[str, Any]) -> dict[str, Any]:
+        """Validate the Python runtime before starting ComfyUI.
+
+        This catches Windows/PyTorch DLL/CUDA problems at a deterministic
+        preflight stage instead of waiting for a generic startup timeout.
+        """
+        install = runtime.get("install") if isinstance(runtime.get("install"), dict) else {}
+        if install.get("preflight_enabled", runtime.get("preflight_enabled", True)) is False:
+            result = {"ok": True, "status": "skipped", "reason": "preflight_disabled"}
+            self._log_comfy_bootstrap_event("preflight_skipped", result)
+            return result
+        py = self._runtime_python(root=root, runtime=runtime, install=install)
+        log_path = self._comfy_named_log_path("comfyui_preflight.log")
+        timeout = float(install.get("preflight_timeout_seconds") or runtime.get("preflight_timeout_seconds") or 180)
+        script = (
+            "import json, os, platform, sys\n"
+            "result={'python': sys.version.split()[0], 'platform': platform.platform(), 'ok': True}\n"
+            "try:\n"
+            "    import torch\n"
+            "    result['torch_version']=getattr(torch, '__version__', None)\n"
+            "    try:\n"
+            "        result['cuda_available']=bool(torch.cuda.is_available())\n"
+            "        result['cuda_version']=getattr(torch.version, 'cuda', None)\n"
+            "        result['device']=torch.cuda.get_device_name(0) if result['cuda_available'] else None\n"
+            "    except Exception as cuda_exc:\n"
+            "        result['cuda_check_error_type']=cuda_exc.__class__.__name__\n"
+            "        result['cuda_check_error']=str(cuda_exc)[-1000:]\n"
+            "    print(json.dumps(result, ensure_ascii=False))\n"
+            "except BaseException as exc:\n"
+            "    result['ok']=False\n"
+            "    result['reason']='torch_import_failed'\n"
+            "    result['error_type']=exc.__class__.__name__\n"
+            "    result['error']=str(exc)[-2000:]\n"
+            "    print(json.dumps(result, ensure_ascii=False))\n"
+            "    raise SystemExit(42)\n"
+        )
+        cmd = [str(py), "-c", script]
+        self._log_comfy_bootstrap_event("preflight_start", {"command": cmd, "root": str(root), "log_path": str(log_path), "timeout_seconds": timeout})
+        try:
+            completed = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            text = "STDOUT:\n" + (exc.stdout or "") + "\nSTDERR:\n" + (exc.stderr or "")
+            self._append_text_log(log_path, text)
+            result = {
+                "ok": False,
+                "status": "requires_setup",
+                "reason": "torch_preflight_timeout",
+                "error_type": "TimeoutExpired",
+                "timeout_seconds": timeout,
+                "root": str(root),
+                "python": str(py),
+                "log_path": str(log_path),
+            }
+            self._log_comfy_bootstrap_event("preflight_timeout", result)
+            return result
+        except Exception as exc:
+            self._append_text_log(log_path, traceback.format_exc())
+            result = {
+                "ok": False,
+                "status": "requires_setup",
+                "reason": "torch_preflight_exception",
+                "error_type": exc.__class__.__name__,
+                "error": str(exc)[-2000:],
+                "root": str(root),
+                "python": str(py),
+                "log_path": str(log_path),
+            }
+            self._log_comfy_bootstrap_event("preflight_exception", result)
+            return result
+        self._append_text_log(log_path, "STDOUT:\n" + (completed.stdout or "") + "\nSTDERR:\n" + (completed.stderr or ""))
+        parsed: dict[str, Any] = {}
+        for line in reversed((completed.stdout or "").splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                candidate = json.loads(line)
+                if isinstance(candidate, dict):
+                    parsed = candidate
+                    break
+            except Exception:
+                continue
+        if completed.returncode != 0 or parsed.get("ok") is False:
+            result = {
+                "ok": False,
+                "status": "requires_setup",
+                "reason": parsed.get("reason") or "torch_preflight_failed",
+                "returncode": completed.returncode,
+                "stdout": (completed.stdout or "")[-4000:],
+                "stderr": (completed.stderr or "")[-4000:],
+                "root": str(root),
+                "python": str(py),
+                "log_path": str(log_path),
+                **({"preflight": parsed} if parsed else {}),
+            }
+            self._log_comfy_bootstrap_event("preflight_failed", result)
+            return result
+        result = {"ok": True, "status": "ready", "reason": "torch_preflight_passed", "root": str(root), "python": str(py), "log_path": str(log_path), "preflight": parsed}
+        self._log_comfy_bootstrap_event("preflight_passed", result)
+        return result
+
+    def _repair_comfyui_preflight_failure(self, *, root: Path, runtime: dict[str, Any], preflight: dict[str, Any]) -> dict[str, Any]:
+        install = runtime.get("install") if isinstance(runtime.get("install"), dict) else {}
+        repair = install.get("torch_repair") if isinstance(install.get("torch_repair"), dict) else {}
+        if repair.get("enabled", install.get("auto_repair_torch", True)) is False:
+            return preflight
+        reason = str(preflight.get("reason") or "")
+        repairable_reasons = {"torch_import_failed", "torch_preflight_timeout", "torch_preflight_failed", "torch_preflight_exception"}
+        if reason not in repairable_reasons:
+            return preflight
+        repaired = self._repair_torch_installation(root=root, runtime=runtime, install=install, repair=repair, preflight=preflight)
+        if not repaired.get("ok"):
+            return repaired
+        after = self._run_comfyui_preflight(root=root, runtime={**runtime, "preflight_enabled": True})
+        if after.get("ok"):
+            self._log_comfy_bootstrap_event("preflight_repair_completed", {"ok": True, "root": str(root), "repair": repaired, "preflight": after})
+            return after
+        result = {**after, "reason": "torch_preflight_failed_after_repair", "repair": repaired}
+        self._log_comfy_bootstrap_event("preflight_repair_failed", result)
+        return result
+
+    def _repair_torch_installation(self, *, root: Path, runtime: dict[str, Any], install: dict[str, Any], repair: dict[str, Any], preflight: dict[str, Any]) -> dict[str, Any]:
+        py = self._runtime_python(root=root, runtime=runtime, install=install)
+        log_path = self._comfy_named_log_path("comfyui_torch_repair.log")
+        timeout = float(repair.get("timeout_seconds") or install.get("torch_repair_timeout_seconds") or 3600)
+        profile = str(repair.get("profile") or os.getenv("AI_CORE_COMFYUI_TORCH_PROFILE") or ("cpu" if os.name == "nt" else "cpu")).strip().lower()
+        if profile in {"cuda", "cuda121", "cu121"}:
+            index_url = str(repair.get("cuda_index_url") or "https://download.pytorch.org/whl/cu121")
+        elif profile in {"cuda124", "cu124"}:
+            index_url = str(repair.get("cuda124_index_url") or "https://download.pytorch.org/whl/cu124")
+        else:
+            index_url = str(repair.get("cpu_index_url") or "https://download.pytorch.org/whl/cpu")
+            profile = "cpu"
+        packages = repair.get("packages") if isinstance(repair.get("packages"), list) else ["torch", "torchvision", "torchaudio"]
+        packages = [str(x) for x in packages if str(x).strip()]
+        if not packages:
+            packages = ["torch", "torchvision", "torchaudio"]
+        uninstall_cmd = [str(py), "-m", "pip", "uninstall", "-y", "torch", "torchvision", "torchaudio"]
+        install_cmd = [str(py), "-m", "pip", "install", *packages, "--index-url", index_url]
+        self._log_comfy_bootstrap_event("torch_repair_start", {"root": str(root), "profile": profile, "index_url": index_url, "packages": packages, "log_path": str(log_path), "preflight_reason": preflight.get("reason")})
+        try:
+            uninstall = subprocess.run(uninstall_cmd, text=True, capture_output=True, timeout=min(timeout, 1200))
+            self._append_text_log(log_path, "UNINSTALL COMMAND:\n" + " ".join(uninstall_cmd) + "\nSTDOUT:\n" + (uninstall.stdout or "") + "\nSTDERR:\n" + (uninstall.stderr or ""))
+        except Exception as exc:
+            self._append_text_log(log_path, "UNINSTALL EXCEPTION:\n" + traceback.format_exc())
+            self._log_comfy_bootstrap_event("torch_repair_uninstall_exception", {"error_type": exc.__class__.__name__, "error": str(exc)[-2000:], "log_path": str(log_path)})
+        try:
+            installed = subprocess.run(install_cmd, text=True, capture_output=True, timeout=timeout)
+        except Exception as exc:
+            result = {"ok": False, "status": "requires_setup", "reason": "torch_repair_exception", "error_type": exc.__class__.__name__, "error": str(exc)[-2000:], "root": str(root), "log_path": str(log_path)}
+            self._append_text_log(log_path, "INSTALL EXCEPTION:\n" + traceback.format_exc())
+            self._log_comfy_bootstrap_event("torch_repair_exception", result)
+            return result
+        self._append_text_log(log_path, "INSTALL COMMAND:\n" + " ".join(install_cmd) + "\nSTDOUT:\n" + (installed.stdout or "") + "\nSTDERR:\n" + (installed.stderr or ""))
+        if installed.returncode != 0:
+            result = {"ok": False, "status": "requires_setup", "reason": "torch_repair_failed", "returncode": installed.returncode, "stderr": (installed.stderr or "")[-4000:], "root": str(root), "log_path": str(log_path)}
+            self._log_comfy_bootstrap_event("torch_repair_failed", result)
+            return result
+        result = {"ok": True, "status": "repaired", "reason": "torch_repair_completed", "profile": profile, "index_url": index_url, "packages": packages, "root": str(root), "log_path": str(log_path)}
+        self._log_comfy_bootstrap_event("torch_repair_completed", result)
+        return result
 
     def _install_runtime(self, *, root: Path, install: dict[str, Any], integrity: dict[str, Any] | None = None) -> dict[str, Any]:
         if not bool(install.get("enabled", True)):
