@@ -236,7 +236,20 @@ class ConversationCoreRuntime:
         if capability_gap:
             result["capability_gap_detected"] = True
             result["capability_gap_reason"] = result.get("capability_gap_reason") or "current_runtime_may_need_external_implementation_knowledge"
-            result["intent_type"] = result.get("intent_type") or "capability_gap_resolution"
+            result["intent_type"] = "capability_gap_resolution"
+            result["response_mode"] = result.get("response_mode") or "external_solution_guidance"
+            # Missing protocol/library/auth/config details are implementation knowledge or
+            # runtime values for generated schemas.  They must not block capability
+            # acquisition.  Actual user-specific values are collected after registration
+            # by dynamic UI forms generated from the registered schema.
+            raw_missing = result.get("missing_information") if isinstance(result.get("missing_information"), list) else []
+            if raw_missing:
+                result["research_resolvable_missing_information"] = raw_missing
+            result["missing_information"] = []
+            result["user_value_collection_policy"] = {
+                "during_capability_acquisition": "do_not_block_for_implementation_or_runtime_values",
+                "after_registration": "collect_runtime_values_from_generated_schemas",
+            }
         return result
 
     def _context_awareness(self, text: str, intent: dict[str, Any], context_window: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -616,6 +629,8 @@ class ConversationCoreRuntime:
     def _implementation_requested(self, text: str) -> bool:
         value = " " + str(text or "").strip().casefold() + " "
         markers = (
+            " acquire runtime capability ", " capability acquisition ", " acquire capability ",
+            " generate implementation ", " generate tests ", " verify capability acquisition ",
             " implement ", " build ", " generate ", " create capability ", " add support ",
             " register ", "实装", "实现", "生成", "注册", "構築", "実装", "登録",
         )
@@ -733,6 +748,9 @@ class ConversationCoreRuntime:
         # a way to handle or implement an operation rather than merely answer.
         value = " " + str(text or "").strip().casefold() + " "
         action_markers = (
+            " acquire runtime capability ", " runtime capability ", " capability acquisition ",
+            " acquire capability ", " generate implementation ", " generate tests ",
+            " register capability ", " verify capability acquisition ",
             " implement ", " add support ", " support ", " integrate ", " install ",
             " configure ", " generate code ", " fix ", " cannot handle ", " unable to ",
             " not supported ", " how to build ", " how to create ", " how to implement ",

@@ -41,6 +41,8 @@
   <section class="panel"><h2>Generated Participants <span id="participantCount" class="small"></span></h2><div class="scroll" id="participants"></div></section>
   <section class="panel" id="tracePanel"><h2><span>Workflow / Results / Traces <span id="graphCount" class="small"></span></span><button id="traceToggleBtn" class="copyBtn" onclick="toggleTracePanel()">&gt;&gt;</button></h2><div class="scroll" id="rightPane"></div></section>
 </main>
+
+<div id="runtimeSchemaModal" class="modalBackdrop"><div class="modal"><h3 id="runtimeSchemaTitle">Runtime setup</h3><div class="small" id="runtimeSchemaSummary"></div><div id="runtimeSchemaFields"></div><div class="modalActions"><button class="btn" onclick="closeRuntimeSchemaModal()">Cancel</button><button class="btn primary" onclick="submitRuntimeSchemaModal()">Submit</button></div></div></div>
 <div id="missingInputModal" class="modalBackdrop"><div class="modal"><h3>Required input</h3><div class="small" id="missingInputSummary"></div><div id="missingInputFields"></div><div class="modalActions"><button class="btn" onclick="closeMissingInputModal()">Cancel</button><button id="skipCredentialBtn" class="btn" style="display:none" onclick="skipCredentialAndContinue()">Continue without this key</button><button class="btn primary" onclick="submitMissingInputs()">Submit & Continue</button></div></div></div>
 
 <div id="artifactEditModal" class="modalBackdrop"><div class="modal"><h3 id="artifactEditTitle">Edit uploaded artifact</h3><div class="small" id="artifactEditSummary"></div><label class="fieldLabel">Modification request / feedback</label><textarea id="artifactEditInstruction" class="fieldInput area" placeholder="Describe how the uploaded file should be modified."></textarea><div id="artifactEditPreviewWrap" style="display:none"><label class="fieldLabel">Draft preview</label><textarea id="artifactEditPreview" class="fieldInput area" style="min-height:260px" spellcheck="false"></textarea><div class="row"><a id="artifactEditDownload" class="btn" href="#" target="_blank">Download draft</a></div></div><div class="modalActions"><button class="btn" onclick="cancelArtifactEdit()">Cancel</button><button class="btn" id="artifactEditReviseBtn" style="display:none" onclick="reviseArtifactEdit()">Modify again</button><button class="btn primary" id="artifactEditConfirmBtn" style="display:none" onclick="confirmArtifactEdit()">Confirm replacement</button><button class="btn primary" id="artifactEditCreateBtn" onclick="createArtifactEditProposal()">Generate modified file</button></div></div></div>
@@ -1099,6 +1101,55 @@ function runtimeToolCard(t){
   return el;
 }
 
+
+let runtimeSchemaModalState=null;
+function closeRuntimeSchemaModal(){ document.getElementById('runtimeSchemaModal').classList.remove('show'); runtimeSchemaModalState=null; }
+function schemaFieldsFromObject(schema, prefix, kind){
+  const props=(schema&&schema.properties)||{};
+  const required=Array.isArray(schema&&schema.required)?schema.required:[];
+  return Object.keys(props).map(name=>{
+    const spec=props[name]||{};
+    const type=String(spec.type||'string');
+    return {
+      kind:kind,
+      field:prefix?prefix+'.'+name:name,
+      raw_name:name,
+      label:String(spec.title||name),
+      message:String(spec.description||('Please provide '+name+'.')),
+      input_type: kind==='runtime_secret_value' ? 'password' : (type==='object'?'textarea':(type==='array'?'textarea':'text')),
+      required: required.includes(name),
+      placeholder: type==='array'?'[]':(type==='object'?'{}':'')
+    };
+  });
+}
+function openRuntimeSchemaModal(title, summary, fieldGroups, onSubmit){
+  const modal=document.getElementById('runtimeSchemaModal');
+  const box=document.getElementById('runtimeSchemaFields');
+  document.getElementById('runtimeSchemaTitle').textContent=title||'Runtime setup';
+  document.getElementById('runtimeSchemaSummary').textContent=summary||'';
+  box.innerHTML='';
+  const all=[];
+  (fieldGroups||[]).forEach(group=>{
+    if(group.title){ const h=document.createElement('div'); h.className='sectionTitle'; h.textContent=group.title; box.appendChild(h); }
+    (group.fields||[]).forEach((f)=>{ all.push(f); const idx=all.length-1; const wrap=document.createElement('div'); const label=document.createElement('label'); label.className='fieldLabel'; label.textContent=(f.label||f.field)+(f.required?'':' (optional)'); const hint=document.createElement('div'); hint.className='fieldHint'; hint.textContent=f.message||''; const area=(f.input_type==='textarea'); const input=document.createElement(area?'textarea':'input'); if(!area && f.input_type==='password'){ input.type='password'; input.autocomplete='off'; } input.className='fieldInput '+(area?'area':''); input.id='runtime_schema_form_'+idx; input.dataset.field=f.field; input.dataset.rawName=f.raw_name||f.field; input.dataset.required=f.required?'true':'false'; input.placeholder=f.placeholder||''; wrap.appendChild(label); wrap.appendChild(hint); wrap.appendChild(input); box.appendChild(wrap); });
+  });
+  runtimeSchemaModalState={fields:all,onSubmit:onSubmit};
+  modal.classList.add('show');
+}
+function readRuntimeSchemaModalValues(){
+  const state=runtimeSchemaModalState||{fields:[]};
+  const values={}; const missing=[];
+  state.fields.forEach((f,idx)=>{ const input=document.getElementById('runtime_schema_form_'+idx); if(!input){ return; } const raw=input.value.trim(); if(!raw && f.required){ missing.push(f.field); return; } if(!raw){ return; } let val=raw; if(f.input_type==='textarea'){ try{ val=JSON.parse(raw); }catch(e){ val=raw; } } values[f.field]=val; });
+  return {values, missing};
+}
+async function submitRuntimeSchemaModal(){
+  const state=runtimeSchemaModalState; if(!state){ return; }
+  const {values, missing}=readRuntimeSchemaModalValues();
+  if(missing.length){ addMessage('Please enter required value(s): '+missing.join(', '),'item error'); return; }
+  closeRuntimeSchemaModal();
+  try{ await state.onSubmit(values); }catch(e){ addMessage('Runtime form submit failed: '+String(e && e.message ? e.message : e),'item error'); }
+}
+
 function sampleForSchema(schema){
   const props=(schema&&schema.properties)||{};
   const out={};
@@ -1116,38 +1167,55 @@ function sampleForSchema(schema){
 async function configureRuntimeToolProfile(tool){
   const toolId=tool.tool_id||tool.name||'';
   if(!toolId){ return; }
-  const profileId=prompt('Profile id', 'default');
-  if(profileId===null){ return; }
-  const configRaw=prompt('Connection/config JSON. Secret values must not be placed here.', JSON.stringify(sampleForSchema(tool.connection_schema||{}), null, 2));
-  if(configRaw===null){ return; }
-  const secretRaw=prompt('Secret JSON. Values are stored in the runtime secret store and only references are kept in the profile.', JSON.stringify(sampleForSchema(tool.secret_schema||{}), null, 2));
-  if(secretRaw===null){ return; }
-  let config={}, secrets={};
-  try{ config=configRaw.trim()?JSON.parse(configRaw):{}; secrets=secretRaw.trim()?JSON.parse(secretRaw):{}; }
-  catch(e){ alert('Invalid JSON.'); return; }
-  const res=await fetch('/api/agent-studio/runtime-tool-profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:toolId,profile_id:profileId||'default',config,secrets})});
-  const data=await res.json();
-  addMessage('assistant', data.ok ? ('Runtime profile configured:\n'+renderJson(data.profile)) : ('Runtime profile setup failed:\n'+renderJson(data)), data.ok?'final':'error');
-  refreshState();
+  const profileField={kind:'runtime_profile_id', field:'profile_id', raw_name:'profile_id', label:'Profile ID', message:'Persistent runtime profile name. Use default for normal testing.', input_type:'text', required:true, placeholder:'default'};
+  const connectionFields=schemaFieldsFromObject(tool.connection_schema||{}, 'config', 'runtime_connection_value');
+  const secretFields=schemaFieldsFromObject(tool.secret_schema||{}, 'secrets', 'runtime_secret_value');
+  openRuntimeSchemaModal(
+    'Runtime capability setup',
+    'Provide persistent configuration and secret values generated from this capability schema. Secret values are stored separately and only references are kept in the profile.',
+    [
+      {title:'Profile', fields:[profileField]},
+      {title:'Connection profile values', fields:connectionFields},
+      {title:'Secret values', fields:secretFields}
+    ],
+    async (values)=>{
+      const profileId=String(values.profile_id||'default').trim()||'default';
+      const config={}; const secrets={};
+      Object.keys(values).forEach(k=>{ if(k.startsWith('config.')){ config[k.slice(7)]=values[k]; } if(k.startsWith('secrets.')){ secrets[k.slice(8)]=values[k]; } });
+      const data=await apiFetchJson('/api/agent-studio/runtime-tool-profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:toolId,profile_id:profileId,config,secrets})});
+      addMessage('assistant', data.ok ? ('Runtime profile configured:\n'+renderJson(data.profile)) : ('Runtime profile setup failed:\n'+renderJson(data)), data.ok?'final':'error');
+      refreshState();
+    }
+  );
 }
 
 async function executeRuntimeTool(tool){
   const toolId=typeof tool==='string'?tool:(tool.tool_id||tool.name||'');
   if(!toolId){ return; }
   const inputSchema=typeof tool==='object'?(tool.input_schema||{}):{};
-  const profileId=prompt('Profile id', 'default');
-  if(profileId===null){ return; }
-  const raw=prompt('Input JSON for '+toolId, JSON.stringify(sampleForSchema(inputSchema), null, 2));
-  if(raw===null){ return; }
-  let inputData={};
-  try{ inputData=raw.trim()?JSON.parse(raw):{}; }
-  catch(e){ alert('Invalid JSON input.'); return; }
-  let approvalConfirmed=false;
-  if(tool&&tool.approval_policy&&tool.approval_policy.required){ approvalConfirmed=confirm('This runtime-generated capability declares a human approval requirement. Execute now?'); if(!approvalConfirmed){ return; }}
-  const res=await fetch('/api/agent-studio/runtime-tools/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:toolId,input_data:inputData,profile_id:profileId||'default',approval_confirmed:approvalConfirmed})});
-  const data=await res.json();
-  addMessage('assistant', data.ok ? ('Runtime tool executed:\n'+renderJson(data.result)) : ('Runtime tool execution requires action or failed:\n'+renderJson(data)), data.ok?'final':'error');
-  refreshState();
+  const profileField={kind:'runtime_profile_id', field:'profile_id', raw_name:'profile_id', label:'Profile ID', message:'Choose the saved runtime profile to use.', input_type:'text', required:true, placeholder:'default'};
+  const inputFields=schemaFieldsFromObject(inputSchema||{}, 'input', 'runtime_input_value');
+  openRuntimeSchemaModal(
+    'Run registered runtime capability',
+    'Provide this execution input. If approval is required, a confirmation preview is shown before execution.',
+    [
+      {title:'Profile', fields:[profileField]},
+      {title:'Runtime input values', fields:inputFields}
+    ],
+    async (values)=>{
+      const profileId=String(values.profile_id||'default').trim()||'default';
+      const inputData={};
+      Object.keys(values).forEach(k=>{ if(k.startsWith('input.')){ inputData[k.slice(6)]=values[k]; } });
+      let approvalConfirmed=false;
+      if(tool&&tool.approval_policy&&tool.approval_policy.required){
+        approvalConfirmed=confirm('Approval required before external runtime execution. Continue?\n\n'+renderJson(inputData));
+        if(!approvalConfirmed){ return; }
+      }
+      const data=await apiFetchJson('/api/agent-studio/runtime-tools/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:toolId,input_data:inputData,profile_id:profileId,approval_confirmed:approvalConfirmed})});
+      addMessage('assistant', data.ok ? ('Runtime tool executed:\n'+renderJson(data.result)) : ('Runtime tool execution requires action or failed:\n'+renderJson(data)), data.ok?'final':'error');
+      refreshState();
+    }
+  );
 }
 
 function conversationRunCard(r){
