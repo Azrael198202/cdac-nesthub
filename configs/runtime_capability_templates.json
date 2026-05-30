@@ -257,7 +257,9 @@
               "verify",
               "mock_send",
               "send"
-            ]
+            ],
+            "x-runtime-controlled": true,
+            "x-ui-hidden": true
           },
           "to": {
             "type": "array",
@@ -445,7 +447,19 @@
         "allow_policy_backed_basic_acquisition_without_external_evidence": true,
         "runtime_values_collection": "agent_studio_schema_forms_after_registration"
       },
-      "selection_priority": 100
+      "selection_priority": 100,
+      "runtime_execution_policy": {
+        "default_input_values": {
+          "mode": "send"
+        },
+        "verification_input_values": {
+          "mode": "verify"
+        },
+        "sandbox_input_values": {
+          "mode": "verify"
+        },
+        "policy_reason": "After sandbox validation and registry enablement, normal user execution defaults are declared in the registry. Verification/sandbox callers must explicitly pass verification values."
+      }
     },
     {
       "template_id": "connected_message_delivery_adapter",

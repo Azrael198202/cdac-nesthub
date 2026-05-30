@@ -579,6 +579,7 @@ class RuntimeCapabilityGapImplementer:
             "secret_schema": template.get("secret_schema") if isinstance(template.get("secret_schema"), dict) else {},
             "approval_policy": template.get("approval_policy") if isinstance(template.get("approval_policy"), dict) else {},
             "runtime_interface": template.get("runtime_interface") if isinstance(template.get("runtime_interface"), dict) else {},
+            "runtime_execution_policy": template.get("runtime_execution_policy") if isinstance(template.get("runtime_execution_policy"), dict) else {},
             "verification": {
                 "sandbox_verification": bool(validation.get("passed")),
                 "execution_verification": bool(verification_run.get("passed")),
@@ -608,6 +609,7 @@ class RuntimeCapabilityGapImplementer:
             "secret_schema": tool_record.get("secret_schema", {}),
             "approval_policy": tool_record.get("approval_policy", {}),
             "runtime_interface": tool_record.get("runtime_interface", {}),
+            "runtime_execution_policy": tool_record.get("runtime_execution_policy", {}),
             "verification": tool_record["verification"],
             "registered_at": tool_record["registered_at"],
         }

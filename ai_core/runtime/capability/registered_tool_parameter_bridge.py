@@ -55,6 +55,8 @@ class RegisteredToolParameterBridge:
         fields: list[dict[str, Any]] = []
         for name, prop in properties.items():
             prop = prop if isinstance(prop, dict) else {}
+            if bool(prop.get("x-runtime-controlled")) or bool(prop.get("x-ui-hidden")):
+                continue
             field_name = str(name)
             schema_type = str(prop.get("type") or "string")
             fields.append({

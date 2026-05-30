@@ -197,6 +197,7 @@ class RuntimeGeneratedToolInstaller:
             "api_discovery": manifest.get("api_discovery", {}),
             "documentation_understanding": manifest.get("documentation_understanding", {}),
             "parameter_mapping": manifest.get("parameter_mapping", {}),
+            "runtime_execution_policy": manifest.get("runtime_execution_policy", {}) if isinstance(manifest.get("runtime_execution_policy"), dict) else {},
             "verification": manifest.get("verification", {}),
         }
         self.registry_path.write_text(json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
