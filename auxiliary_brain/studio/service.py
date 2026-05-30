@@ -731,6 +731,9 @@ class AgentStudioService:
             new_id_fn=new_id,
             semantic_plan=semantic_plan,
         )
+        explicit_runtime_parameters.update(
+            self._extract_step_scoped_runtime_parameters_from_tasks(workflow_plan.tasks)
+        )
         for generated_participant in workflow_plan.generated_participants:
             generated_participant.setdefault("created_at", self._now())
             pid = str(generated_participant.get("participant_id") or "").strip()
@@ -1028,6 +1031,7 @@ class AgentStudioService:
         runtime_parameters = {}
         if isinstance(task_graph.get("runtime_parameters"), dict):
             runtime_parameters.update(task_graph.get("runtime_parameters") or {})
+        runtime_parameters.update(self._extract_step_scoped_runtime_parameters_from_tasks(task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []))
         runtime_parameters.update(self._extract_runtime_parameters_from_instruction(instruction or ""))
         if isinstance(provided_inputs, dict):
             runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
@@ -1330,29 +1334,79 @@ class AgentStudioService:
 
 
     def _extract_runtime_parameters_from_instruction(self, instruction: str) -> dict[str, Any]:
-        """Extract explicit task-run parameters from the current instruction.
+        """Extract explicit task-run parameters from user-authored text.
 
-        This is generic syntax extraction, not domain logic. It supports common
-        forms such as `name=value`, `name: value`, and `name 用 value`. Values are
-        task-scoped and are not stored back onto the durable agent profile.
+        Extraction is intentionally syntax based. It accepts simple assignment
+        lines such as `name: value`, `- name: value`, or `name=value`, and avoids
+        treating section headers such as `Parameters for X:` or `Step 1:` as
+        runtime values. Values are task-scoped and are not stored back onto the
+        durable agent profile.
         """
         text = str(instruction or "")
         out: dict[str, Any] = {}
-        for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:)\s*([^,;\n]+)", text):
+        header_prefixes = {"step", "parameters", "parameter", "params"}
+        assignment_line = re.compile(r"^\s*(?:[-*]\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:)\s*(.+?)\s*$")
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            lowered = line.casefold()
+            if any(lowered.startswith(prefix + " ") or lowered.startswith(prefix + ":") for prefix in header_prefixes):
+                continue
+            match = assignment_line.match(line)
+            if not match:
+                continue
             key = match.group(1).strip()
             value = match.group(2).strip().strip("'\"")
-            if key and value:
-                out[key] = value
-        for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:用|为|是|as)\s*([A-Za-z0-9_.:/-]+)", text, flags=re.I):
+            if not key or not value:
+                continue
+            if value.endswith(":") and len(value.split()) <= 5:
+                continue
+            out[key] = value
+        for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:用|为|是)\s*([A-Za-z0-9_.:/-]+)", text, flags=re.I):
             key = match.group(1).strip()
             value = match.group(2).strip().strip("'\"")
             if key and value and key not in out:
                 out[key] = value
-        for match in re.finditer(r"\b(?:with|for|using)\s+([A-Za-z_][A-Za-z0-9_]*)\s+([^,;\n]+)", text, flags=re.I):
-            key = match.group(1).strip()
-            value = match.group(2).strip().strip("'\"")
-            if key and value and key not in out and len(value.split()) <= 4:
-                out[key] = value
+        return out
+
+    def _extract_step_scoped_runtime_parameters_from_tasks(self, tasks: list[dict[str, Any]]) -> dict[str, Any]:
+        """Create participant-scoped runtime values from planned step fragments.
+
+        A task instruction can contain several parameter blocks. The global
+        extractor deliberately remains conservative, so this method binds values
+        from each step fragment to the participant that owns the step. The
+        resulting keys match AgentParameterContractService.apply_values:
+        `<participant_id>.<field>`, `<participant_name>.<field>`, and a global
+        `<field>` fallback when the value is unambiguous.
+        """
+        out: dict[str, Any] = {}
+        unscoped_seen: dict[str, Any] = {}
+        conflicts: set[str] = set()
+        for task in tasks or []:
+            if not isinstance(task, dict):
+                continue
+            fragment = str(task.get("source_instruction_fragment") or "")
+            values = self._extract_runtime_parameters_from_instruction(fragment)
+            if not values:
+                continue
+            pid = str(task.get("participant_id") or "").strip()
+            pname = str(task.get("participant_display_name") or "").strip()
+            safe_pname = re.sub(r"[^A-Za-z0-9_]+", "_", pname).strip("_")
+            for key, value in values.items():
+                if pid:
+                    out[f"{pid}.{key}"] = value
+                if pname:
+                    out[f"{pname}.{key}"] = value
+                if safe_pname:
+                    out[f"{safe_pname}.{key}"] = value
+                if key in unscoped_seen and unscoped_seen[key] != value:
+                    conflicts.add(key)
+                else:
+                    unscoped_seen[key] = value
+        for key, value in unscoped_seen.items():
+            if key not in conflicts:
+                out.setdefault(key, value)
         return out
 
     def _preflight_runtime_parameters(self, task_graph: dict[str, Any], participants: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> dict[str, Any]:

@@ -414,7 +414,9 @@ class AgentDelegationRuntime:
             if not should_resume:
                 continue
             self._record_progress(run_payload, f"participant_{index + 1}_registered_tool_resume", f"Resuming registered tool participant: {self._participant_name(participant)}", "running")
-            result = await self._execute_registered_tool_capability(participant=participant, task_name=task_name)
+            if self._submitted_confirmation(runtime_parameters) and self._submitted_trust_request(runtime_parameters):
+                self._persist_approval_trust(participant=participant, tool_id=participant_tool_id)
+            result = await self._execute_registered_tool_capability(participant=participant, task_name=task_name, completed_results=agent_results, dependency_plan=dependency_plan)
             if result is None:
                 result = AgentExecutionResult(
                     participant_id=pid,
@@ -513,6 +515,66 @@ class AgentDelegationRuntime:
                 return True
         return False
 
+
+    def _submitted_trust_request(self, values: dict[str, Any]) -> bool:
+        if not isinstance(values, dict):
+            return False
+        accepted_tails = {
+            "remember_approval",
+            "remember_confirmation",
+            "trust_after_confirmation",
+            "skip_future_confirmation",
+            "auto_confirm_future",
+            "do_not_ask_again",
+        }
+        for key, value in values.items():
+            tail = str(key or "").split(".")[-1].casefold()
+            tail = tail.replace("-", "_")
+            if tail not in accepted_tails:
+                continue
+            if isinstance(value, bool):
+                if value:
+                    return True
+                continue
+            if isinstance(value, list):
+                if any(self._submitted_trust_request({"remember_approval": item}) for item in value):
+                    return True
+                continue
+            if str(value).strip().casefold() in {"true", "1", "yes", "y", "on", "confirmed", "approve", "approved"}:
+                return True
+        return False
+
+    def _approval_trusted(self, *, participant: dict[str, Any], tool_id: str) -> bool:
+        pid = self._participant_identity(participant)
+        if not pid or not tool_id:
+            return False
+        record = self.store.read_json("configs/policies/approval_trust.json") or {}
+        if not isinstance(record, dict):
+            return False
+        trusted = record.get("trusted") if isinstance(record.get("trusted"), dict) else {}
+        entry = trusted.get(f"{pid}:{tool_id}") if isinstance(trusted, dict) else None
+        return isinstance(entry, dict) and entry.get("enabled") is True
+
+    def _persist_approval_trust(self, *, participant: dict[str, Any], tool_id: str) -> None:
+        pid = self._participant_identity(participant)
+        if not pid or not tool_id:
+            return
+        record = self.store.read_json("configs/policies/approval_trust.json") or {}
+        if not isinstance(record, dict):
+            record = {}
+        trusted = record.setdefault("trusted", {})
+        if not isinstance(trusted, dict):
+            trusted = {}
+            record["trusted"] = trusted
+        trusted[f"{pid}:{tool_id}"] = {
+            "enabled": True,
+            "participant_id": pid,
+            "participant_name": self._participant_name(participant),
+            "tool_id": tool_id,
+            "trusted_after_explicit_confirmation": True,
+            "updated_at": self._now(),
+        }
+        self.store.write_json("configs/policies/approval_trust.json", record)
 
     def _blocked_dependency_ids(self, *, participant_id: str, completed_results: list[Any], dependency_plan: dict[str, Any]) -> list[str]:
         participants = dependency_plan.get("participants") if isinstance(dependency_plan, dict) else {}
@@ -1274,6 +1336,124 @@ class AgentDelegationRuntime:
         answer = str(getattr(result, "final_answer", "") or "").strip()
         return answer
 
+    def _resolve_task_variable_placeholders_for_participant(
+        self,
+        *,
+        participant: dict[str, Any],
+        completed_results: list[Any],
+        dependency_plan: dict[str, Any],
+    ) -> None:
+        """Resolve task dataflow placeholders in participant runtime values.
+
+        This is a generic task-variable resolver.  It does not decide what a
+        capability does.  It only replaces explicit template references such as
+        ``{{Step1.final_answer}}`` or ``{{Participant Name.final_answer}}`` with
+        verified material already produced by completed upstream participants.
+        If a value has no template reference, it is left untouched.
+        """
+        if not isinstance(participant, dict) or not completed_results:
+            return
+        values = dict(participant.get("runtime_parameters") or {}) if isinstance(participant.get("runtime_parameters"), dict) else {}
+        contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}
+        params = contract.get("parameters") if isinstance(contract.get("parameters"), list) else []
+        refs = self._task_variable_reference_map(completed_results=completed_results, dependency_plan=dependency_plan, participant=participant)
+        if not refs:
+            return
+        changed = False
+        resolved_values = self._resolve_task_variable_templates(values, refs)
+        if resolved_values != values:
+            values = resolved_values if isinstance(resolved_values, dict) else values
+            changed = True
+        for param in params:
+            if not isinstance(param, dict):
+                continue
+            if "values" in param:
+                new_param_values = self._resolve_task_variable_templates(param.get("values"), refs)
+                if new_param_values != param.get("values"):
+                    param["values"] = new_param_values
+                    changed = True
+        if changed:
+            participant["runtime_parameters"] = values
+            self.parameter_contract_service.apply_values(participant, values)
+
+    def _task_variable_reference_map(self, *, completed_results: list[Any], dependency_plan: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
+        deps = set(self._participant_dependency_ids(participant, dependency_plan))
+        ref_map: dict[str, Any] = {}
+        included_index = 0
+        for absolute_index, result in enumerate(completed_results, start=1):
+            if str(getattr(result, "status", "") or "") != "completed":
+                continue
+            result_pid = str(getattr(result, "participant_id", "") or "").strip()
+            result_name = str(getattr(result, "participant_name", "") or "").strip()
+            if deps and result_pid not in deps and result_name not in deps:
+                continue
+            included_index += 1
+            material = self._extract_primary_material_from_result(result)
+            workflow_results = getattr(result, "workflow_results", None) if result is not None else None
+            structured: dict[str, Any] = {}
+            if isinstance(workflow_results, dict):
+                for key in ("final_answer", "answer", "result", "content", "text", "output", "material", "final_content"):
+                    value = workflow_results.get(key)
+                    if value not in (None, "", [], {}):
+                        structured[key] = value
+            if material:
+                structured.setdefault("final_answer", material)
+                structured.setdefault("answer", material)
+                structured.setdefault("text", material)
+                structured.setdefault("result", material)
+            aliases = [
+                f"step{absolute_index}",
+                f"step_{absolute_index}",
+                f"step {absolute_index}",
+                f"stage{absolute_index}",
+                f"stage_{absolute_index}",
+                f"stage {absolute_index}",
+                f"result{absolute_index}",
+                f"result_{absolute_index}",
+                f"result {absolute_index}",
+            ]
+            if included_index != absolute_index:
+                aliases.extend([f"input{included_index}", f"input_{included_index}", f"input {included_index}"])
+            if result_pid:
+                aliases.append(result_pid)
+            if result_name:
+                aliases.extend([result_name, re.sub(r"[^A-Za-z0-9_]+", "_", result_name).strip("_")])
+            for alias in aliases:
+                norm_alias = self._normalize_task_variable_key(alias)
+                if norm_alias:
+                    ref_map[norm_alias] = material
+                    for field_name, field_value in structured.items():
+                        ref_map[self._normalize_task_variable_key(f"{alias}.{field_name}")] = field_value
+        return ref_map
+
+    def _resolve_task_variable_templates(self, value: Any, refs: dict[str, Any]) -> Any:
+        if isinstance(value, dict):
+            return {k: self._resolve_task_variable_templates(v, refs) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._resolve_task_variable_templates(v, refs) for v in value]
+        if not isinstance(value, str) or "{{" not in value or "}}" not in value:
+            return value
+        pattern = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
+        matches = list(pattern.finditer(value))
+        if not matches:
+            return value
+        if len(matches) == 1 and matches[0].span() == (0, len(value)):
+            resolved = refs.get(self._normalize_task_variable_key(matches[0].group(1)))
+            return resolved if resolved not in (None, "", [], {}) else value
+        def replace(match: re.Match[str]) -> str:
+            resolved = refs.get(self._normalize_task_variable_key(match.group(1)))
+            if resolved in (None, "", [], {}):
+                return match.group(0)
+            return self._first_scalar(resolved) or str(resolved)
+        return pattern.sub(replace, value)
+
+    def _normalize_task_variable_key(self, value: Any) -> str:
+        text = str(value or "").strip().casefold()
+        text = re.sub(r"\s+", "", text)
+        text = text.replace("-", "_")
+        text = re.sub(r"_+", "_", text)
+        return text.strip("_")
+
     def _dependency_material_text(self, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> str:
         deps = self._participant_dependency_ids(participant, dependency_plan)
         materials: list[str] = []
@@ -1376,7 +1556,7 @@ class AgentDelegationRuntime:
         profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
         capability_type = str(profile.get("capability_type") or "").strip()
         if capability_type == "runtime_registered_tool":
-            return await self._execute_registered_tool_capability(participant=participant, task_name=task_name)
+            return await self._execute_registered_tool_capability(participant=participant, task_name=task_name, completed_results=completed_results, dependency_plan=dependency_plan)
         if capability_type == "image_generation":
             return await self._execute_image_generation_capability(participant=participant, completed_results=completed_results, dependency_plan=dependency_plan)
         if capability_type == "video_generation":
@@ -1427,11 +1607,16 @@ class AgentDelegationRuntime:
             origin="auxiliary_brain",
         )
 
-    async def _execute_registered_tool_capability(self, *, participant: dict[str, Any], task_name: str) -> AgentExecutionResult | None:
+    async def _execute_registered_tool_capability(self, *, participant: dict[str, Any], task_name: str, completed_results: list[Any] | None = None, dependency_plan: dict[str, Any] | None = None) -> AgentExecutionResult | None:
         profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
         tool_id = str(profile.get("tool_id") or "").strip()
         if not tool_id:
             return None
+        self._resolve_task_variable_placeholders_for_participant(
+            participant=participant,
+            completed_results=completed_results or [],
+            dependency_plan=dependency_plan or {},
+        )
         values = participant.get("runtime_parameters") if isinstance(participant.get("runtime_parameters"), dict) else {}
         bridge_result = self.registered_tool_parameter_bridge.build_invocation(participant=participant, provided_values=values)
         input_data = bridge_result.get("input_data") if isinstance(bridge_result.get("input_data"), dict) else {}
@@ -1455,6 +1640,8 @@ class AgentDelegationRuntime:
         execution_policy = profile.get("execution_policy") if isinstance(profile.get("execution_policy"), dict) else {}
         approval_policy = execution_policy.get("approval_policy") if isinstance(execution_policy.get("approval_policy"), dict) else {}
         approval_confirmed = bool(values.get("approval_confirmed") or values.get("confirm") or values.get("confirmed"))
+        if not approval_confirmed and self._approval_trusted(participant=participant, tool_id=tool_id):
+            approval_confirmed = True
         result = self.registered_tool_service.execute_tool(
             tool_id=tool_id,
             input_data=input_data,
@@ -1496,7 +1683,10 @@ class AgentDelegationRuntime:
                     "message": "This runtime-generated capability requires confirmation before execution.",
                     "approval_policy": approval_policy or result.get("approval_policy"),
                     "preview": preview,
-                    "request": {"input_mode": "confirmation", "fields": [{"field": f"{self._participant_identity(participant)}.approval_confirmed", "name": f"{self._participant_identity(participant)}.approval_confirmed", "label": "Confirm execution", "input_type": "boolean", "required": True}]},
+                    "request": {"input_mode": "confirmation", "fields": [
+                        {"field": f"{self._participant_identity(participant)}.approval_confirmed", "name": f"{self._participant_identity(participant)}.approval_confirmed", "label": "Confirm execution", "input_type": "boolean", "required": True},
+                        {"field": f"{self._participant_identity(participant)}.remember_approval", "name": f"{self._participant_identity(participant)}.remember_approval", "label": "Do not ask again for this approved agent/tool", "input_type": "boolean", "required": False}
+                    ]},
                 },
                 missing_inputs=[],
                 origin="auxiliary_brain",
