@@ -418,7 +418,7 @@ class ConversationCoreRuntime:
                 doc = await self.web_research.fetch(url=url, max_chars=8000)
                 if isinstance(doc, dict) and doc.get("status") == "success":
                     fetched.append(doc)
-            material = self._web_answer_material(search, fetched)
+            material = await self._web_answer_material(text, search, fetched, run_id)
             evidence = {
                 "query": query,
                 "original_user_input": text,
@@ -746,28 +746,138 @@ class ConversationCoreRuntime:
             "safe_implementation_policy": "external_code_not_executed_without_validation" if execution.get("capability_gap_resolution") else "not_applicable",
         }
 
-    def _web_answer_material(self, search: dict[str, Any], fetched: list[dict[str, Any]]) -> str:
-        lines = []
+    async def _web_answer_material(self, user_input: str, search: dict[str, Any], fetched: list[dict[str, Any]], run_id: str) -> str:
+        """Create concise user-facing material from web evidence.
+
+        The runtime must keep raw source excerpts in traces/evidence, but the
+        final answer should be easy to read.  This method is intentionally
+        domain-neutral: it does not know what the user asked about.  It asks the
+        model to answer from retrieved text fields and falls back to compact
+        snippet bullets when the model is unavailable.
+        """
         results = search.get("results") if isinstance(search.get("results"), list) else []
-        if results:
-            lines.append("Source URLs:")
-            for item in results[:8]:
-                if isinstance(item, dict) and item.get("url"):
-                    title = str(item.get("title") or item.get("url") or "").strip()
-                    lines.append(f"- {title}: {item.get('url')}")
-        if fetched:
-            lines.append("\nFetched source excerpts:")
-            for doc in fetched[:5]:
-                title = str(doc.get("title") or doc.get("url") or "source").strip()
-                url = str(doc.get("url") or "").strip()
-                excerpt = " ".join(str(doc.get("text_excerpt") or doc.get("snippet") or "").split())[:1800]
-                lines.append(f"\n[{title}] {url}\n{excerpt}")
-        elif results:
-            lines.append("\nSearch snippets:")
-            for item in results[:5]:
-                if isinstance(item, dict):
-                    lines.append("- " + " | ".join(str(item.get(k) or "").strip() for k in ("title", "snippet", "url") if item.get(k)))
+        urls = []
+        for item in results[:8]:
+            if isinstance(item, dict) and item.get("url"):
+                url = str(item.get("url") or "").strip()
+                if url and url not in urls:
+                    urls.append(url)
+
+        evidence_cards: list[dict[str, str]] = []
+        for item in results[:5]:
+            if isinstance(item, dict):
+                evidence_cards.append({
+                    "title": str(item.get("title") or item.get("url") or "source")[:240],
+                    "url": str(item.get("url") or "")[:500],
+                    "text": " ".join(str(item.get("snippet") or "").split())[:900],
+                })
+        for doc in fetched[:5]:
+            if isinstance(doc, dict):
+                evidence_cards.append({
+                    "title": str(doc.get("title") or doc.get("url") or "source")[:240],
+                    "url": str(doc.get("url") or "")[:500],
+                    "text": " ".join(str(doc.get("text_excerpt") or doc.get("visible_text_excerpt") or doc.get("snippet") or "").split())[:1500],
+                })
+
+        fallback_answer = self._compact_web_evidence_material(user_input, evidence_cards, urls)
+        if not evidence_cards:
+            return fallback_answer
+
+        schema = {
+            "type": "object",
+            "required": ["answer"],
+            "properties": {
+                "answer": {"type": "string"},
+                "used_source_urls": {"type": "array", "items": {"type": "string"}},
+                "confidence": {"type": "string"},
+            },
+            "additionalProperties": True,
+        }
+        prompt = {
+            "id": "web_evidence_user_answer_synthesis",
+            "system": (
+                "Answer the user's question using only the provided retrieved source text fields. "
+                "Do not dump raw excerpts. Keep the answer concise and easy to understand. "
+                "If the requested facts are not clearly supported, say that the evidence is insufficient. "
+                "Include only the most relevant source URLs at the end. Return only valid JSON matching the schema."
+            ),
+        }
+        payload = {
+            "user_message": user_input,
+            "retrieved_source_text_fields": evidence_cards[:8],
+            "source_urls": urls[:8],
+            "output_style": {
+                "summary_first": True,
+                "avoid_raw_excerpts": True,
+                "max_user_visible_sources": 5,
+            },
+        }
+        synthesized = await self._json_stage(
+            run_id,
+            "web_evidence_user_answer_synthesis",
+            prompt,
+            json.dumps(payload, ensure_ascii=False),
+            schema,
+            fallback={"answer": fallback_answer, "used_source_urls": urls[:5], "confidence": "fallback"},
+        )
+        answer = str(synthesized.get("answer") or fallback_answer).strip()
+        if not answer:
+            answer = fallback_answer
+        # Keep source visibility even when the model omits URLs.
+        if urls and not any(u in answer for u in urls[:3]):
+            answer = answer.rstrip() + "\n\nSources:\n" + "\n".join(f"- {u}" for u in urls[:5])
+        return answer.strip()
+
+    def _compact_web_evidence_material(self, user_input: str, evidence_cards: list[dict[str, str]], urls: list[str]) -> str:
+        """Fallback material that is readable without model synthesis.
+
+        It selects short evidence snippets from generic text fields instead of
+        printing full fetched pages.  No domain-specific keywords are used.
+        """
+        terms = self._query_terms(user_input)
+        scored: list[tuple[int, dict[str, str]]] = []
+        for card in evidence_cards:
+            text = " ".join(str(card.get("text") or "").split())
+            haystack = (str(card.get("title") or "") + " " + text).casefold()
+            score = sum(1 for term in terms if term and term in haystack)
+            if re.search(r"\d", text):
+                score += 1
+            scored.append((score, card))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        lines = ["I found source material, but could not confidently synthesize a final answer automatically.", "", "Most relevant extracted text fields:"]
+        kept = 0
+        for score, card in scored[:4]:
+            text = " ".join(str(card.get("text") or "").split())[:420]
+            title = str(card.get("title") or card.get("url") or "source").strip()
+            url = str(card.get("url") or "").strip()
+            if not text and not title:
+                continue
+            kept += 1
+            lines.append(f"- {title}" + (f" ({url})" if url else ""))
+            if text:
+                lines.append(f"  {text}")
+        if not kept:
+            lines.append("- No compact text field was available from the fetched pages.")
+        if urls:
+            lines.append("")
+            lines.append("Sources:")
+            for url in urls[:5]:
+                lines.append(f"- {url}")
         return "\n".join(lines).strip()
+
+    def _query_terms(self, text: str) -> list[str]:
+        raw_terms = re.findall(r"[A-Za-z0-9_\-]+|[\u3040-\u30ff\u3400-\u9fff]+", str(text or "").casefold())
+        stop = {
+            "the", "and", "for", "with", "from", "that", "this", "please", "including", "information",
+            "について", "ください", "お願いします", "查询", "搜索", "信息", "内容",
+        }
+        terms: list[str] = []
+        for term in raw_terms:
+            if len(term) < 2 or term in stop:
+                continue
+            if term not in terms:
+                terms.append(term)
+        return terms[:20]
 
     def _generic_external_signal(self, text: str) -> bool:
         return bool(self._external_information_signals(text) or self._generic_capability_gap_signal(text))
