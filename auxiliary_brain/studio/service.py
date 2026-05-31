@@ -1515,9 +1515,10 @@ class AgentStudioService:
         """Inspect uploaded artifacts before delegating execution.
 
         Uploaded-file callable parameters are collected before primary runtime
-        execution starts. This prevents the later execution phase from repeatedly
-        pausing for file parameters and keeps task-specified parameters scoped to
-        the current run.
+        execution starts. Task-authored values may use the agent contract names
+        while the uploaded artifact exposes lower-level callable names.  The
+        bridge below resolves those run-scoped values before deciding that user
+        input is missing; it never stores task values back to the agent profile.
         """
         all_missing: list[dict[str, Any]] = []
         analyses: list[dict[str, Any]] = []
@@ -1525,42 +1526,39 @@ class AgentStudioService:
             artifacts = participant.get("uploaded_artifacts") or task_graph.get("uploaded_artifacts") or []
             if not artifacts:
                 continue
-            step = {
-                "step_id": "studio_pre_execution_uploaded_artifact",
-                "execution_method": "uploaded_artifact",
-                "action_type": "use_uploaded_file",
-                "uploaded_artifacts": artifacts,
-                "parameters": runtime_parameters,
-                "runtime_parameters": runtime_parameters,
-                "objective": participant.get("execution_objective") or participant.get("instruction") or task_graph.get("instruction") or "",
-            }
-            state = {
-                "run_id": "studio_pre_execution",
-                "input": task_graph.get("instruction") or "",
-                "runtime_parameters": runtime_parameters,
-                "provided_inputs": runtime_parameters,
-                "runtime_context": {
-                    "uploaded_artifacts": artifacts,
-                    "available_artifacts": artifacts,
-                    "agent_parameters": {"values": runtime_parameters},
-                },
-                "results": {
-                    "context_awareness": {
-                        "clean_context": {
-                            "uploaded_artifacts": artifacts,
-                            "available_artifacts": artifacts,
-                            "known_parameters": runtime_parameters,
-                        }
-                    }
-                },
-            }
-            contract = self.uploaded_artifact_contract.build_contract(state=state, step=step, step_id="step_1")
+            effective_parameters = dict(runtime_parameters or {})
+            # Run a first inspection to learn the artifact callable contract,
+            # then enrich the run parameters with safe task/agent scoped values.
+            first_contract = self._build_uploaded_artifact_contract(
+                task_graph=task_graph, participant=participant, artifacts=artifacts, runtime_parameters=effective_parameters
+            )
+            effective_parameters.update(
+                self._resolve_uploaded_artifact_parameter_aliases(
+                    participant=participant,
+                    runtime_parameters=effective_parameters,
+                    contract=first_contract,
+                )
+            )
+            contract = self._build_uploaded_artifact_contract(
+                task_graph=task_graph, participant=participant, artifacts=artifacts, runtime_parameters=effective_parameters
+            )
             analyses.append(contract)
             for field in contract.get("missing_parameter_fields") or []:
-                if isinstance(field, dict):
-                    tagged = dict(field)
-                    tagged.setdefault("resolution_layer", "resource_binding")
-                    all_missing.append(tagged)
+                if not isinstance(field, dict):
+                    continue
+                # Optional artifact fields must not block task execution.  They
+                # may be provided when present, but should not create repeated
+                # prompts once required values have been resolved.
+                if field.get("required") is False:
+                    continue
+                tagged = dict(field)
+                tagged.setdefault("resolution_layer", "resource_binding")
+                all_missing.append(tagged)
+            # Persist only the additional effective bindings into this task run
+            # so the later primary runtime receives the callable's exact names.
+            for k, v in effective_parameters.items():
+                if k not in runtime_parameters and v not in (None, "", [], {}):
+                    runtime_parameters[k] = v
         # Deduplicate fields by normalized name.
         deduped: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -1585,6 +1583,144 @@ class AgentStudioService:
                 },
             }
         return {"status": "ready", "analysis": analyses}
+
+    def _build_uploaded_artifact_contract(self, *, task_graph: dict[str, Any], participant: dict[str, Any], artifacts: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> dict[str, Any]:
+        step = {
+            "step_id": "studio_pre_execution_uploaded_artifact",
+            "execution_method": "uploaded_artifact",
+            "action_type": "use_uploaded_file",
+            "uploaded_artifacts": artifacts,
+            "parameters": runtime_parameters,
+            "runtime_parameters": runtime_parameters,
+            "objective": participant.get("execution_objective") or participant.get("instruction") or task_graph.get("instruction") or "",
+        }
+        state = {
+            "run_id": "studio_pre_execution",
+            "input": task_graph.get("instruction") or "",
+            "runtime_parameters": runtime_parameters,
+            "provided_inputs": runtime_parameters,
+            "runtime_context": {
+                "uploaded_artifacts": artifacts,
+                "available_artifacts": artifacts,
+                "agent_parameters": {"values": runtime_parameters},
+            },
+            "results": {
+                "context_awareness": {
+                    "clean_context": {
+                        "uploaded_artifacts": artifacts,
+                        "available_artifacts": artifacts,
+                        "known_parameters": runtime_parameters,
+                    }
+                }
+            },
+        }
+        return self.uploaded_artifact_contract.build_contract(state=state, step=step, step_id="step_1")
+
+    def _resolve_uploaded_artifact_parameter_aliases(self, *, participant: dict[str, Any], runtime_parameters: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
+        """Map task/agent scoped values onto uploaded callable field names.
+
+        This is a generic bridge: exact/normalized aliases win first, then a
+        conservative one-to-one fallback maps a single unresolved required
+        callable field to a single provided participant value.  Optional fields
+        are filled only when a compatible provided field name exists.
+        """
+        selected = contract.get("selected_artifact") if isinstance(contract.get("selected_artifact"), dict) else {}
+        input_contract = selected.get("input_contract") if isinstance(selected.get("input_contract"), dict) else {}
+        properties = input_contract.get("properties") if isinstance(input_contract.get("properties"), dict) else {}
+        if not properties:
+            return {}
+        required = {str(x) for x in input_contract.get("required", []) if str(x).strip()} if isinstance(input_contract.get("required"), list) else set()
+        participant_values = self._participant_scoped_runtime_values(participant, runtime_parameters)
+        additions: dict[str, Any] = {}
+        used_source_keys: set[str] = set()
+        for field_name in properties.keys():
+            if self._value_present_for_field(field_name, {**runtime_parameters, **additions}):
+                continue
+            matched_key = self._best_runtime_value_key_for_field(field_name, participant_values)
+            if matched_key:
+                additions[str(field_name)] = participant_values[matched_key]
+                used_source_keys.add(matched_key)
+        unresolved_required = [name for name in required if not self._value_present_for_field(name, {**runtime_parameters, **additions})]
+        if len(unresolved_required) == 1:
+            candidates = [k for k, v in participant_values.items() if k not in used_source_keys and v not in (None, "", [], {})]
+            if len(candidates) == 1:
+                additions[unresolved_required[0]] = participant_values[candidates[0]]
+        return additions
+
+    def _participant_scoped_runtime_values(self, participant: dict[str, Any], runtime_parameters: dict[str, Any]) -> dict[str, Any]:
+        pid = str(participant.get("participant_id") or "").strip()
+        names = [str(participant.get(k) or "").strip() for k in ("display_name", "agent_name", "name", "role_name")]
+        safe_names = [re.sub(r"[^A-Za-z0-9_]+", "_", n).strip("_") for n in names if n]
+        prefixes = [x for x in [pid, *names, *safe_names] if x]
+        out: dict[str, Any] = {}
+        for key, value in (runtime_parameters or {}).items():
+            skey = str(key)
+            for prefix in prefixes:
+                dot = prefix + "."
+                under = prefix + "_"
+                if skey.startswith(dot):
+                    out[skey[len(dot):]] = value
+                elif skey.startswith(under):
+                    out[skey[len(under):]] = value
+        contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}
+        contract_names: set[str] = set()
+        for param in contract.get("parameters") if isinstance(contract.get("parameters"), list) else []:
+            if not isinstance(param, dict):
+                continue
+            name = str(param.get("name") or "").strip()
+            if name:
+                contract_names.add(name)
+                if name in runtime_parameters:
+                    out.setdefault(name, runtime_parameters[name])
+        # Unscoped task values are safe for this participant only when they
+        # match this participant's declared parameter names.  This prevents a
+        # downstream agent's values from being consumed by an uploaded artifact
+        # owned by a different participant.
+        for key, value in (runtime_parameters or {}).items():
+            skey = str(key)
+            if "." not in skey and skey in contract_names and skey not in out:
+                out[skey] = value
+        return {k: v for k, v in out.items() if v not in (None, "", [], {})}
+
+    def _best_runtime_value_key_for_field(self, field_name: str, values: dict[str, Any]) -> str:
+        target = self._runtime_field_tokens(field_name)
+        target_norm = self._runtime_field_norm(field_name)
+        best_key = ""
+        best_score = 0
+        for key in values.keys():
+            norm = self._runtime_field_norm(key)
+            tokens = self._runtime_field_tokens(key)
+            score = 0
+            if norm == target_norm:
+                score = 100
+            elif norm in target_norm or target_norm in norm:
+                score = 60
+            else:
+                overlap = target & tokens
+                if overlap:
+                    score = 20 + len(overlap) * 10
+            if score > best_score:
+                best_key = key
+                best_score = score
+        return best_key if best_score >= 30 else ""
+
+    def _value_present_for_field(self, field_name: str, values: dict[str, Any]) -> bool:
+        target_norm = self._runtime_field_norm(field_name)
+        for key, value in (values or {}).items():
+            if value in (None, "", [], {}):
+                continue
+            if self._runtime_field_norm(key) == target_norm:
+                return True
+        return False
+
+    def _runtime_field_norm(self, value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+    def _runtime_field_tokens(self, value: Any) -> set[str]:
+        raw = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(value or ""))
+        tokens = {t for t in re.split(r"[^A-Za-z0-9]+", raw.casefold()) if t}
+        generic = {"str", "string", "text", "value", "val", "name", "id", "input", "param", "parameter"}
+        return {t for t in tokens if t not in generic}
 
     def _derive_execution_objective(self, instruction: str, participant_name: str | None = None) -> str:
         """Extract the participant's reusable work objective from a creation command.
