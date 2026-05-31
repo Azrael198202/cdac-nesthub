@@ -1,0 +1,18 @@
+{
+  "enabled": true,
+  "mode": "assistive",
+  "auto_apply_safe_deterministic_repairs": true,
+  "allow_web_evidence_repair": false,
+  "require_validation_after_repair": true,
+  "max_repair_attempts_per_node": 2,
+  "levels": [
+    "deterministic",
+    "runtime_knowledge",
+    "web_evidence",
+    "human_escalation"
+  ],
+  "success_claim_guard": {
+    "enabled": true,
+    "external_actions_require_verified_execution_material": true
+  }
+}

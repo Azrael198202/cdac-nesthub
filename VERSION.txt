@@ -1,2 +1,1 @@
-v14-direct-agent-invocation-bridge
-patch: user-execution-mode-policy
+v14-runtime-self-repair-engine

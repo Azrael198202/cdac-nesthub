@@ -665,3 +665,14 @@ ai_core/tools/__pycache__/runtime_registered_tool_service.cpython-311.pyc
 ai_core/runtime/capability/__pycache__/acquisition_gate.cpython-313.pyc
 ai_core/runtime/capability/__pycache__/registered_tool_agent_binder.cpython-313.pyc
 ai_core/runtime/capability/__pycache__/registered_tool_parameter_bridge.cpython-313.pyc
+ai_core/runtime/self_repair/__pycache__/__init__.cpython-313.pyc
+ai_core/runtime/self_repair/__pycache__/contracts.cpython-313.pyc
+ai_core/runtime/self_repair/__pycache__/engine.cpython-313.pyc
+ai_core/runtime/self_repair/__pycache__/failure_classifier.cpython-313.pyc
+ai_core/runtime/self_repair/__pycache__/final_answer_guard.cpython-313.pyc
+ai_core/runtime/self_repair/__pycache__/json_path.cpython-313.pyc
+ai_core/runtime/self_repair/__pycache__/parameter_repair.cpython-313.pyc
+ai_core/runtime/self_repair/__pycache__/schema_repair.cpython-313.pyc
+ai_core/runtime/self_repair/__pycache__/state_repair.cpython-313.pyc
+ai_core/runtime/self_repair/__pycache__/variable_repair.cpython-313.pyc
+ai_core/runtime/self_repair/__pycache__/web_evidence.cpython-313.pyc
