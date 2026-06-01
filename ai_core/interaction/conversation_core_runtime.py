@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import json
+import os
 import re
 
 from ai_core.config.paths import RUNTIME_TRACES, RUNTIME_GENERATED
@@ -121,40 +122,79 @@ class ConversationCoreRuntime:
         }
 
     async def _input_parsing(self, text: str, run_id: str) -> dict[str, Any]:
-        schema = {
-            "type": "object",
-            "required": ["language", "normalized_input", "explicit_constraints", "missing_information"],
-            "properties": {
-                "language": {"type": "string"},
-                "normalized_input": {"type": "string"},
-                "explicit_constraints": {"type": "array", "items": {"type": "string"}},
-                "missing_information": {"type": "array", "items": {"type": "string"}},
-            },
-            "additionalProperties": True,
+        """Deterministic, compact input normalization.
+
+        This stage intentionally avoids local LLM calls for the ordinary
+        conversation runtime.  It only preserves the original message, a
+        normalized text field, and explicit constraint-like lines.  It does not
+        decide how a task should be executed.
+        """
+        raw = str(text or "")
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        explicit_constraints: list[str] = []
+        for line in lines:
+            compact = re.sub(r"\s+", " ", line).strip()
+            if not compact:
+                continue
+            if compact.startswith(("-", "*")) or re.match(r"^\d+[.)]\s+", compact) or ":" in compact[:80]:
+                explicit_constraints.append(compact[:500])
+            if len(explicit_constraints) >= 24:
+                break
+        return {
+            "language": self._guess_language(raw),
+            "normalized_input": raw.strip(),
+            "explicit_constraints": explicit_constraints,
+            "missing_information": [],
+            "original_input_preserved": True,
+            "_executor_type": "deterministic",
+            "_node_id": "conversation_input_parsing",
         }
-        prompt = {
-            "id": "conversation_input_parsing",
-            "system": (
-                "Parse the user's message into generic runtime-ready fields. "
-                "Do not infer private facts. Do not expose internal reasoning. "
-                "Return only valid JSON matching the schema."
-            ),
-        }
-        return await self._json_stage(
-            run_id,
-            "conversation_input_parsing",
-            prompt,
-            "User message:\n" + text,
-            schema,
-            fallback={
-                "language": self._guess_language(text),
-                "normalized_input": text.strip(),
-                "explicit_constraints": [],
-                "missing_information": [],
-            },
-        )
 
     async def _intent_recognition(self, text: str, parsed: dict[str, Any], run_id: str) -> dict[str, Any]:
+        # Fast path for system-level runtime self-extension requests.  This
+        # improves accuracy and latency because ai_core only recognizes the
+        # control intent here; concrete capability details are still generated
+        # later by the acquisition planner and validated by contracts.
+        capability_gap = self._generic_capability_gap_signal(text)
+        if capability_gap:
+            external_signals = self._external_information_signals(text)
+            return {
+                "intent_type": "capability_gap_resolution",
+                "confidence": 0.92,
+                "response_mode": "runtime_capability_acquisition",
+                "needs_external_execution": True,
+                "requires_external_information": bool(external_signals),
+                "required_capabilities": ["runtime_capability_acquisition"],
+                "source_policy": {
+                    "requires_source_material": False,
+                    "web_as_fallback_only": True,
+                    "min_sources": 0,
+                    "max_results": 5,
+                },
+                "external_information_signals": external_signals,
+                "capability_gap_detected": True,
+                "capability_gap_reason": "runtime_self_extension_requested",
+                "reason": "system_command_skeleton_detected",
+                "missing_information": [],
+                "research_resolvable_missing_information": [],
+                "user_value_collection_policy": {
+                    "during_capability_acquisition": "do_not_block_for_implementation_or_runtime_values",
+                    "after_registration": "collect_runtime_values_from_generated_schemas",
+                },
+                "capability_acquisition_policy": {
+                    "decision_mode": "runtime_autonomous",
+                    "complexity_level": "basic",
+                    "allow_research_based_decisions": True,
+                    "allow_generated_schemas": True,
+                    "allow_generated_tests": True,
+                    "allow_runtime_registration": True,
+                    "block_on_missing_runtime_values": False,
+                    "block_on_missing_implementation_details": False,
+                    "runtime_values_collection": "agent_studio_schema_forms_after_registration",
+                },
+                "_executor_type": "deterministic",
+                "_node_id": "conversation_intent_recognition",
+            }
         schema = {
             "type": "object",
             "required": ["intent_type", "confidence", "response_mode", "needs_external_execution"],
@@ -289,6 +329,42 @@ class ConversationCoreRuntime:
         context: dict[str, Any],
         run_id: str,
     ) -> dict[str, Any]:
+        # System-level capability acquisition uses a fixed generic skeleton.
+        # The skeleton only locks the execution method; it does not decide
+        # concrete tools, fields, providers, or runtime values.  That work is
+        # delegated to the capability acquisition pipeline.
+        if intent.get("capability_gap_detected"):
+            return {
+                "planned_steps": [
+                    {
+                        "step_id": "step_1",
+                        "step_type": "resolve_capability_gap",
+                        "objective": "Generate, validate, register, and verify a runtime capability through the acquisition pipeline.",
+                        "execution_ready": True,
+                        "input_from": ["input_parsing", "intent_recognition", "context_awareness"],
+                        "execution_method": "capability_acquisition",
+                        "capability": "runtime_capability_acquisition",
+                        "source_policy": {
+                            "requires_source_material": False,
+                            "web_as_fallback_only": True,
+                            "min_sources": 0,
+                            "max_results": 5,
+                        },
+                    }
+                ],
+                "locked_execution": {
+                    "execution_method": "capability_acquisition",
+                    "capability": "runtime_capability_acquisition",
+                    "reason": "capability_gap_resolution",
+                },
+                "final_response_contract": {
+                    "user_facing": True,
+                    "no_internal_json": True,
+                    "language": parsed.get("language") or "auto",
+                },
+                "_executor_type": "deterministic",
+                "_node_id": "conversation_workflow_planning",
+            }
         schema = {
             "type": "object",
             "required": ["planned_steps", "final_response_contract"],
@@ -786,6 +862,8 @@ class ConversationCoreRuntime:
 
     def _implementation_requested(self, text: str) -> bool:
         value = " " + str(text or "").strip().casefold() + " "
+        if re.search(r"\bacquire\s+runtime\s+capability\b", value, flags=re.I):
+            return True
         markers = (
             " acquire runtime capability ", " capability acquisition ", " acquire capability ",
             " generate implementation ", " generate tests ", " verify capability acquisition ",
@@ -1015,6 +1093,10 @@ class ConversationCoreRuntime:
         # Generic self-extension signal: the user is asking the runtime to find
         # a way to handle or implement an operation rather than merely answer.
         value = " " + str(text or "").strip().casefold() + " "
+        if re.search(r"\bacquire\s+runtime\s+capability\b", value, flags=re.I):
+            return True
+        if re.search(r"\bruntime\s+capability\b", value, flags=re.I) and re.search(r"\b(acquire|create|generate|register|implement|build)\b", value, flags=re.I):
+            return True
         action_markers = (
             " acquire runtime capability ", " runtime capability ", " capability acquisition ",
             " acquire capability ", " generate implementation ", " generate tests ",
@@ -1096,6 +1178,80 @@ class ConversationCoreRuntime:
         )
         return str(result.get("answer") or "").strip()
 
+    def _stage_llm_limits(self, node_id: str) -> dict[str, int | float]:
+        """Small per-stage budgets for weak local machines.
+
+        Environment variables may override these values, but defaults are short
+        by design so the browser/API request is not held by a slow local model.
+        """
+        node = str(node_id or "")
+        defaults = {
+            "conversation_input_parsing": {"timeout_seconds": 3.0, "max_prompt_tokens": 180, "max_prompt_chars": 900, "max_schema_chars": 500, "num_predict": 96, "num_ctx": 768},
+            "conversation_intent_recognition": {"timeout_seconds": 8.0, "max_prompt_tokens": 320, "max_prompt_chars": 1400, "max_schema_chars": 900, "num_predict": 160, "num_ctx": 1024},
+            "conversation_workflow_planning": {"timeout_seconds": 12.0, "max_prompt_tokens": 420, "max_prompt_chars": 1600, "max_schema_chars": 1000, "num_predict": 220, "num_ctx": 1536},
+            "conversation_execution_response": {"timeout_seconds": 15.0, "max_prompt_tokens": 520, "max_prompt_chars": 2200, "max_schema_chars": 800, "num_predict": 320, "num_ctx": 2048},
+            "conversation_output": {"timeout_seconds": 8.0, "max_prompt_tokens": 360, "max_prompt_chars": 1600, "max_schema_chars": 600, "num_predict": 220, "num_ctx": 1536},
+            "web_evidence_user_answer_synthesis": {"timeout_seconds": 15.0, "max_prompt_tokens": 600, "max_prompt_chars": 2600, "max_schema_chars": 700, "num_predict": 360, "num_ctx": 2048},
+        }
+        base = dict(defaults.get(node, {"timeout_seconds": 15.0, "max_prompt_tokens": 500, "max_prompt_chars": 2000, "max_schema_chars": 900, "num_predict": 300, "num_ctx": 2048}))
+        prefix = "AI_CORE_STAGE_" + re.sub(r"[^A-Z0-9]+", "_", node.upper()).strip("_")
+        for key in list(base.keys()):
+            env = os.environ.get(prefix + "_" + key.upper()) or os.environ.get("AI_CORE_STAGE_" + key.upper())
+            if env is None or str(env).strip() == "":
+                continue
+            try:
+                base[key] = float(env) if key == "timeout_seconds" else int(float(env))
+            except Exception:
+                pass
+        return base
+
+    def _compact_stage_payload(self, node_id: str, payload: str, limit: int | float) -> str:
+        limit_int = max(200, int(limit or 1600))
+        text = str(payload or "")
+        if len(text) <= limit_int:
+            return text
+        try:
+            obj = json.loads(text)
+        except Exception:
+            return text[: max(0, limit_int - 28)] + "\n...[stage_payload_compacted]"
+        node = str(node_id or "")
+        if node == "conversation_workflow_planning":
+            compact = {
+                "intent": self._compact_value(obj.get("intent") if isinstance(obj, dict) else {}, max_depth=2, max_items=12),
+                "parsed": self._compact_value(obj.get("parsed") if isinstance(obj, dict) else {}, max_depth=1, max_items=8),
+                "context_summary": self._compact_value(obj.get("context_summary") if isinstance(obj, dict) else {}, max_depth=1, max_items=6),
+                "user_message_excerpt": str((obj or {}).get("user_message") if isinstance(obj, dict) else "")[:700],
+            }
+        elif node in {"conversation_intent_recognition", "conversation_execution_response", "conversation_output"}:
+            compact = self._compact_value(obj, max_depth=2, max_items=10)
+        else:
+            compact = self._compact_value(obj, max_depth=1, max_items=8)
+        out = json.dumps(compact, ensure_ascii=False)
+        if len(out) > limit_int:
+            out = out[: max(0, limit_int - 28)] + "\n...[stage_payload_compacted]"
+        return out
+
+    def _compact_value(self, value: Any, *, max_depth: int = 2, max_items: int = 10) -> Any:
+        if max_depth <= 0:
+            if isinstance(value, (dict, list)):
+                return "...[compact]"
+            if isinstance(value, str):
+                return value[:500]
+            return value
+        if isinstance(value, dict):
+            out: dict[str, Any] = {}
+            for idx, (k, v) in enumerate(value.items()):
+                if idx >= max_items:
+                    out["_truncated"] = True
+                    break
+                out[str(k)] = self._compact_value(v, max_depth=max_depth - 1, max_items=max_items)
+            return out
+        if isinstance(value, list):
+            return [self._compact_value(v, max_depth=max_depth - 1, max_items=max_items) for v in value[:max_items]]
+        if isinstance(value, str):
+            return value[:700]
+        return value
+
     async def _json_stage(
         self,
         run_id: str,
@@ -1106,11 +1262,22 @@ class ConversationCoreRuntime:
         *,
         fallback: dict[str, Any],
     ) -> dict[str, Any]:
+        stage_limits = self._stage_llm_limits(node_id)
         adapter = self.model_selection.initial_adapter_overrides({
             "adapter_id": node_id + "_adapter",
             "provider_route": [],
-            "max_prompt_tokens": 5000,
+            "max_prompt_tokens": stage_limits["max_prompt_tokens"],
+            "max_prompt_chars": stage_limits["max_prompt_chars"],
+            "provider_timeout_seconds": stage_limits["timeout_seconds"],
+            "max_schema_chars": stage_limits["max_schema_chars"],
+            "provider_options": {
+                "temperature": 0,
+                "num_predict": stage_limits["num_predict"],
+                "num_ctx": stage_limits["num_ctx"],
+                "think": False,
+            },
         })
+        user_payload = self._compact_stage_payload(node_id, user_payload, stage_limits["max_prompt_chars"])
         try:
             result = await self.router.generate_json(
                 run_id=run_id,

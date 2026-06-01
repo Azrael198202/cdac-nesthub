@@ -1,5 +1,3 @@
-import os
-import re
 import time
 from ai_core.config.loader import ConfigLoader
 from ai_core.runtime.modeling.model_provider_autoconfig import ModelProviderAutoConfigurator
@@ -36,6 +34,19 @@ class ProviderRouter:
         self.prompt_io_recorder = PromptIORecorder()
 
 
+    def _canonical_stage_node(self, node_id: str) -> str:
+        node = str(node_id or "")
+        aliases = {
+            "conversation_input_parsing": "input_parsing",
+            "conversation_intent_recognition": "intent_recognition",
+            "conversation_workflow_planning": "workflow_planning",
+            "conversation_execution_response": "execution",
+            "conversation_output": "execution",
+            "web_evidence_user_answer_synthesis": "execution",
+        }
+        return aliases.get(node, node)
+
+
     def _apply_stage_prompt_guard(self, *, node_id: str, adapter: dict) -> dict:
         """Apply generic per-stage LLM budgets before provider routing.
 
@@ -44,51 +55,33 @@ class ProviderRouter:
         Heavy evidence should be reduced deterministically before any LLM call.
         """
         updated = dict(adapter or {})
-        node = str(node_id or "")
+        node = self._canonical_stage_node(node_id)
         if node in {"agent_parameter_contract", "input_parsing"}:
             updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 520), 520)
-            updated["provider_timeout_seconds"] = self._stage_timeout_seconds(node_id=node, default_seconds=180)
+            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 5), 5.0)
             updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 900), 900)
             updated.setdefault("provider_options", {})
             updated["provider_options"].update({"temperature": 0, "num_predict": 256, "num_ctx": 1536, "think": False})
         elif node == "intent_recognition":
             updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 800), 800)
-            updated["provider_timeout_seconds"] = self._stage_timeout_seconds(node_id=node, default_seconds=180)
+            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 10), 10.0)
             updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1500), 1500)
             updated.setdefault("provider_options", {})
             updated["provider_options"].update({"temperature": 0, "num_predict": 384, "num_ctx": 2048, "think": False})
         elif node == "workflow_planning":
             updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 700), 700)
-            updated["provider_timeout_seconds"] = self._stage_timeout_seconds(node_id=node, default_seconds=240)
+            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 15), 15.0)
             updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1200), 1200)
             updated.setdefault("provider_options", {})
             updated["provider_options"].update({"temperature": 0, "num_predict": 384, "num_ctx": 2048, "think": False})
         elif node == "execution":
             updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 800), 800)
-            updated["provider_timeout_seconds"] = self._stage_timeout_seconds(node_id=node, default_seconds=60)
+            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 15), 15.0)
             updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1000), 1000)
             updated["max_provider_attempts"] = 1
             updated.setdefault("provider_options", {})
             updated["provider_options"].update({"temperature": 0, "num_predict": 384, "num_ctx": 2048, "think": False})
         return updated
-
-    def _stage_timeout_seconds(self, *, node_id: str, default_seconds: float) -> float:
-        """Return a configurable local-model stage timeout.
-
-        Capability acquisition may run on slower local models. A timeout remains
-        finite by default so the runtime can fall back to evidence retrieval and
-        repair instead of hanging forever. Operators can set
-        AI_CORE_STAGE_MODEL_TIMEOUT_SECONDS or AI_CORE_<NODE>_TIMEOUT_SECONDS.
-        """
-        key = "AI_CORE_" + re.sub(r"[^A-Z0-9]+", "_", str(node_id or "").upper()).strip("_") + "_TIMEOUT_SECONDS"
-        raw = os.environ.get(key) or os.environ.get("AI_CORE_STAGE_MODEL_TIMEOUT_SECONDS") or os.environ.get("AI_CORE_LOCAL_MODEL_TIMEOUT_SECONDS")
-        try:
-            configured = float(raw) if raw not in (None, "") else float(default_seconds)
-        except Exception:
-            configured = float(default_seconds)
-        if configured <= 0:
-            configured = float(default_seconds)
-        return max(30.0, configured)
 
     def _compact_rendered_prompt(self, *, node_id: str, text: str, adapter: dict) -> str:
         """Shrink LLM prompts without relying on business vocabulary.
@@ -98,7 +91,7 @@ class ProviderRouter:
         execution material.
         """
         text = str(text or "")
-        node = str(node_id or "")
+        node = self._canonical_stage_node(node_id)
         hard_char_limits = {
             "agent_parameter_contract": 1400,
             "input_parsing": 1400,
