@@ -253,6 +253,7 @@ async def graph_runtime_home():
 
 
 @app.get("/runtime-console")
+@app.get("/runtime_console")
 async def runtime_console_home():
     html = open("apps/web/runtime_console.html", "r", encoding="utf-8").read()
     return HTMLResponse(

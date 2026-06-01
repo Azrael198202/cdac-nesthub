@@ -5,6 +5,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 
@@ -50,7 +51,7 @@ def _try_model_planner(*, request_text: str, identity: dict[str, Any], evidence:
     if os.environ.get("AI_CORE_DISABLE_LOCAL_CAPABILITY_MODEL", "").lower() in {"1", "true", "yes"}:
         return {"status": "skipped", "reason": "local_capability_model_disabled"}
     host = os.environ.get("OLLAMA_HOST") or os.environ.get("AI_CORE_OLLAMA_HOST") or "http://127.0.0.1:11434"
-    model = os.environ.get("AI_CORE_CAPABILITY_PLANNER_MODEL") or os.environ.get("OLLAMA_MODEL") or "qwen3.5:2b"
+    model, model_source = _resolve_planner_model()
     attempts = []
     first = _call_ollama_json_planner(
         host=host,
@@ -77,8 +78,53 @@ def _try_model_planner(*, request_text: str, identity: dict[str, Any], evidence:
     if isinstance(retry.get("template"), dict):
         retry["attempts"] = attempts
         retry["compact_retry_used"] = True
+        retry["model_source"] = model_source
         return retry
-    return {"status": "planner_failed", "reason": str(retry.get("reason") or first.get("reason") or "model_returned_no_valid_template"), "model": model, "attempts": attempts}
+    return {"status": "planner_failed", "reason": str(retry.get("reason") or first.get("reason") or "model_returned_no_valid_template"), "model": model, "model_source": model_source, "attempts": attempts}
+
+
+def _resolve_planner_model() -> tuple[str, str]:
+    """Resolve the local planner model from runtime selection before defaults.
+
+    The runtime UI writes the selected model under configs/model_selection.json.
+    The planner must honor that value; otherwise Agent Studio may show one model
+    while the capability planner silently uses another. Environment variables keep
+    highest priority for headless/server deployments.
+    """
+    env_model = (os.environ.get("AI_CORE_CAPABILITY_PLANNER_MODEL") or os.environ.get("OLLAMA_MODEL") or "").strip()
+    if env_model:
+        return env_model, "environment"
+    for root in _candidate_project_roots():
+        path = root / "configs" / "model_selection.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        selected = str(data.get("selected_local_model_id") or data.get("initial_model_id") or "").strip()
+        mode = str(data.get("mode") or "").strip().casefold()
+        if selected and mode in {"", "local_only", "hybrid", "local_first"}:
+            return selected, "configs/model_selection.json"
+    return "qwen3.5:2b", "default"
+
+
+def _candidate_project_roots() -> list[Path]:
+    roots: list[Path] = []
+    try:
+        # runtime_assets/seeds/capability_planners/default_capability_planner.py
+        roots.append(Path(__file__).resolve().parents[3])
+    except Exception:
+        pass
+    try:
+        roots.append(Path.cwd().resolve())
+    except Exception:
+        pass
+    unique: list[Path] = []
+    for root in roots:
+        if root not in unique:
+            unique.append(root)
+    return unique
 
 
 def _call_ollama_json_planner(*, host: str, model: str, prompt: str, force_json: bool, timeout: float) -> dict[str, Any]:
