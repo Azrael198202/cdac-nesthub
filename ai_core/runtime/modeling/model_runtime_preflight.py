@@ -155,7 +155,7 @@ class ModelRuntimePreflight:
                     except Exception:
                         models = []
                     if model_id and models and not any(m == model_id or m.startswith(model_id + ":") for m in models):
-                        download = self._maybe_download_local_model(provider_name, model_id)
+                        download = self._maybe_download_local_model(provider_name, model_id, logical_model_id=logical_model_id)
                         if download.get("attempted"):
                             # Re-read the provider model list after an approved on-demand pull.
                             try:
@@ -216,7 +216,7 @@ class ModelRuntimePreflight:
                     return root
         return None
 
-    def _maybe_download_local_model(self, provider_name: str, model_id: str) -> dict[str, Any]:
+    def _maybe_download_local_model(self, provider_name: str, model_id: str, logical_model_id: str | None = None) -> dict[str, Any]:
         """Prepare a missing local model when policy explicitly allows it.
 
         This is provider/runtime infrastructure only. It does not decide whether a
@@ -243,13 +243,21 @@ class ModelRuntimePreflight:
             timeout = int(os.environ.get("AI_CORE_MODEL_DOWNLOAD_TIMEOUT_SECONDS", "180") or "180")
         except ValueError:
             timeout = 180
-        result = self.model_downloader.download({
-            "model_id": model_id,
-            "runtime": "ollama",
-            "download_strategy": {"preferred_runtime": "ollama"},
+        try:
+            meta = self.selection_store._model_meta(logical_model_id or model_id) or self.selection_store._model_meta(model_id) or {}
+        except Exception:
+            meta = {}
+        preferred_runtime = "ollama_gguf" if "q4_k_m" in str(logical_model_id or model_id).lower() or "gguf" in str(meta).lower() else "ollama"
+        candidate = {
+            **(meta if isinstance(meta, dict) else {}),
+            "model_id": logical_model_id or model_id,
+            "provider_model": model_id,
+            "runtime": preferred_runtime,
+            "download_strategy": {"preferred_runtime": preferred_runtime},
             "requires_human_review": False,
             "license_review_required": False,
-        }, approved=True, timeout_seconds=max(30, timeout))
+        }
+        result = self.model_downloader.download(candidate, approved=True, timeout_seconds=max(30, timeout))
         return {"attempted": True, **result}
 
     async def _check_api_provider(self, provider_name: str, model_id: str) -> ProviderHealth:

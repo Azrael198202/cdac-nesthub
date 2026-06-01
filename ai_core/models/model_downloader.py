@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from ai_core.utils.safe_subprocess import run_text
-from ai_core.config.paths import RUNTIME_DOWNLOADS
+from ai_core.config.paths import RUNTIME_DOWNLOADS, RUNTIME_EXTERNAL_RUNTIMES
+from ai_core.runtime.external_runtimes.gguf_model_resolver import GGUFModelResolver
 
 
 @dataclass
@@ -41,8 +42,9 @@ class RuntimeModelDownloader:
     """
 
     def __init__(self) -> None:
-        self.root = RUNTIME_DOWNLOADS / "models"
+        self.root = RUNTIME_EXTERNAL_RUNTIMES / "models"
         self.root.mkdir(parents=True, exist_ok=True)
+        self.gguf_resolver = GGUFModelResolver(self.root)
 
     def download(self, candidate: dict[str, Any], *, approved: bool = False, timeout_seconds: int = 3600) -> dict[str, Any]:
         model_id = str(candidate.get("model_id") or candidate.get("id") or candidate.get("name") or "").strip()
@@ -54,10 +56,12 @@ class RuntimeModelDownloader:
         if review_needed and not approved:
             return self._result("approval_required", model_id, runtime, None, None, False, True, "Model download requires human approval.", {"candidate": candidate})
 
-        if runtime == "ollama_gguf" or self._candidate_has_gguf(candidate):
-            return self._prepare_ollama_gguf(model_id, candidate, timeout_seconds=timeout_seconds)
+        resolved_candidate = self.gguf_resolver.resolve_candidate({**candidate, "model_id": model_id})
+        resolved_runtime = str(resolved_candidate.get("runtime") or runtime)
+        if resolved_runtime == "ollama_gguf" or self._candidate_has_gguf(resolved_candidate):
+            return self._prepare_ollama_gguf(model_id, resolved_candidate, timeout_seconds=timeout_seconds)
         if runtime == "ollama" or ":" in model_id and not "/" in model_id:
-            return self._download_ollama(model_id, candidate, timeout_seconds=timeout_seconds)
+            return self._download_ollama(model_id, resolved_candidate, timeout_seconds=timeout_seconds)
         return self._download_huggingface(model_id, candidate, timeout_seconds=timeout_seconds)
 
 
@@ -114,7 +118,7 @@ class RuntimeModelDownloader:
         url = url or str(candidate.get("gguf_url") or candidate.get("source_url") or "").strip()
         if not url:
             raise RuntimeError("No GGUF local path or URL was provided.")
-        target_dir = self.root / "gguf" / self._safe(model_id)
+        target_dir = self.root / self._safe(model_id)
         target_dir.mkdir(parents=True, exist_ok=True)
         filename = str(candidate.get("filename") or url.rsplit("/", 1)[-1] or (self._safe(model_id) + ".gguf"))
         if not filename.lower().endswith(".gguf"):

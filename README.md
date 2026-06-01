@@ -114,3 +114,19 @@ python scripts/reset_runtime_data.py --yes --include-runtime-generated
 - The runtime does not alias or silently map `qwen3.5:2b` to another model.
 - When a selected model has a configured GGUF path or URL, Ollama preparation imports the GGUF first with `ollama create` instead of wasting time on a pull that cannot exist.
 - Preferred GGUF filenames are `Qwen3.5-2B-Q4_K_M.gguf` and `Qwen3.5-4B-Q4_K_M.gguf`.
+
+## v15.13 External GGUF Auto Resolver
+
+This version adds a generic external runtime model resolver for GGUF files.
+When a local Ollama model is missing and the selected model is a GGUF-backed
+model, the runtime now checks `runtime/external_runtimes/models/` first. If no
+local GGUF file is found, it resolves a Hugging Face direct download URL and
+stages the file under `runtime/external_runtimes/models/<model_id>/` before
+creating the Ollama model with `ollama create`.
+
+Default Q4_K_M sources:
+
+- `qwen3.5:2b-q4_k_m` → `Qwen3.5-2B-Q4_K_M.gguf`
+- `qwen3.5:4b-q4_k_m` → `Qwen3.5-4B-Q4_K_M.gguf`
+
+The normal `qwen3.5:2b` Ollama tag remains available and is not remapped.

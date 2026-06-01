@@ -1,1 +1,1 @@
-v15.12-qwen35-2b-gguf-direct-import
+v15.13-external-gguf-auto-resolver
