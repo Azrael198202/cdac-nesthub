@@ -106,6 +106,8 @@ class RuntimeCapabilityGapImplementer:
                     "generated_at": datetime.now(timezone.utc).isoformat(),
                 }
             template = self._merge_identity_contract_into_template(dict(planner_record["template"]), identity_contract)
+            persisted_template = self._persist_runtime_planned_template(template=template, run_id=run_id, planner_record=planner_record)
+            mark("TemplateMaterializer", "completed" if persisted_template.get("passed") else "failed", result=persisted_template)
             template_source = "llm_capability_planner"
             match = TemplateMatch(template=template, score=int(planner_record.get("confidence_score") or 1))
 
@@ -352,25 +354,14 @@ class RuntimeCapabilityGapImplementer:
         template compatible with the runtime capability template schema.
         """
         hook = os.environ.get("AI_CORE_CAPABILITY_PLANNER", "").strip()
-        if not hook:
-            return {
-                "status": "planner_unavailable",
-                "reason": "runtime_capability_planner_hook_not_configured",
-                "confidence_score": 0,
-                "needs_external_evidence": True,
-            }
+        planner_origin = "env_hook" if hook else "runtime_generated_default_planner"
         try:
-            module_name, function_name = hook.split(":", 1)
-        except ValueError:
-            return {
-                "status": "planner_failed",
-                "reason": "planner_hook_must_use_module_colon_function_format",
-                "confidence_score": 0,
-                "needs_external_evidence": True,
-            }
-        try:
-            module = __import__(module_name, fromlist=[function_name])
-            planner = getattr(module, function_name)
+            if hook:
+                module_name, function_name = hook.split(":", 1)
+                module = __import__(module_name, fromlist=[function_name])
+                planner = getattr(module, function_name)
+            else:
+                planner = self._load_runtime_generated_default_planner()
             if not callable(planner):
                 raise TypeError("planner_hook_not_callable")
             payload = planner({
@@ -378,6 +369,7 @@ class RuntimeCapabilityGapImplementer:
                 "identity_contract": identity_contract,
                 "evidence": evidence,
                 "required_template_contract": self._runtime_planner_template_contract(),
+                "planner_origin": planner_origin,
             })
             if not isinstance(payload, dict):
                 return {"status": "planner_failed", "reason": "planner_returned_non_object", "confidence_score": 0, "needs_external_evidence": True}
@@ -391,7 +383,15 @@ class RuntimeCapabilityGapImplementer:
             min_confidence = float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_MIN_CONFIDENCE", "0.70") or 0.70)
             if confidence < min_confidence:
                 return {"status": "planner_low_confidence", "reason": "planner_confidence_below_threshold", "confidence_score": confidence, "needs_external_evidence": True, "template": template, "validation": validation}
-            return {"status": "planned", "confidence_score": confidence, "needs_external_evidence": bool(payload.get("needs_external_evidence")), "template": template, "validation": validation}
+            return {"status": "planned", "confidence_score": confidence, "needs_external_evidence": bool(payload.get("needs_external_evidence")), "template": template, "validation": validation, "planner_origin": planner_origin}
+        except ValueError:
+            return {
+                "status": "planner_failed",
+                "reason": "planner_hook_must_use_module_colon_function_format",
+                "confidence_score": 0,
+                "needs_external_evidence": True,
+                "planner_origin": planner_origin,
+            }
         except Exception as exc:
             return {
                 "status": "planner_failed",
@@ -399,6 +399,58 @@ class RuntimeCapabilityGapImplementer:
                 "confidence_score": 0,
                 "needs_external_evidence": True,
             }
+
+
+    def _load_runtime_generated_default_planner(self) -> Callable[[dict[str, Any]], dict[str, Any]]:
+        """Load the runtime-owned default planner when no env hook is set.
+
+        The core only loads a neutral callable contract from runtime/generated.
+        Concrete capability knowledge belongs to that runtime artifact, not to
+        ai_core.  If the artifact is absent, the planner fails explicitly.
+        """
+        candidates = [
+            RUNTIME_GENERATED / "capability_planners" / "default_capability_planner.py",
+            RUNTIME_GENERATED / "capability_planners" / "evidence_template_planner.py",
+        ]
+        for path in candidates:
+            if path.exists():
+                return self._load_function(path, "plan")
+        raise RuntimeError("runtime_generated_default_capability_planner_missing")
+
+
+    def _persist_runtime_planned_template(self, *, template: dict[str, Any], run_id: str, planner_record: dict[str, Any]) -> dict[str, Any]:
+        """Persist a planned template into runtime/generated for future Template First use.
+
+        This is the materialization boundary: a planner output becomes a
+        runtime-owned template only after it satisfies the neutral template
+        contract.  ai_core does not contain the concrete template content.
+        """
+        validation = self._validate_runtime_template_shape(template)
+        if not validation.get("passed"):
+            return {"passed": False, "status": "failed", "reason": "template_contract_failed", "validation": validation}
+        template_dir = RUNTIME_GENERATED / "capability_templates"
+        template_dir.mkdir(parents=True, exist_ok=True)
+        path = template_dir / "runtime_planned_capability_templates.json"
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8") or "{}") if path.exists() else {}
+        except json.JSONDecodeError:
+            existing = {}
+        if not isinstance(existing, dict):
+            existing = {}
+        templates = existing.get("templates") if isinstance(existing.get("templates"), list) else []
+        template_id = str(template.get("template_id") or "generated_capability")
+        kept = [item for item in templates if not (isinstance(item, dict) and str(item.get("template_id") or "") == template_id)]
+        kept.append(template)
+        payload = {
+            "version": "1.0",
+            "source": "runtime_capability_planner",
+            "last_run_id": run_id,
+            "planner_status": planner_record.get("status"),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "templates": kept,
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"passed": True, "status": "completed", "path": str(path), "template_id": template_id, "validation": validation}
 
     def _runtime_planner_template_contract(self) -> dict[str, Any]:
         return {

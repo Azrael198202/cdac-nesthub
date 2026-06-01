@@ -680,3 +680,14 @@ ai_core/runtime/__pycache__/approval_policy_store.cpython-311.pyc
 ai_core/runtime/capability/__pycache__/acquisition_gate.cpython-311.pyc
 ai_core/runtime/capability/__pycache__/registered_tool_agent_binder.cpython-311.pyc
 ai_core/runtime/capability/__pycache__/registered_tool_parameter_bridge.cpython-311.pyc
+ai_core/roles/__pycache__/runtime_role_contract.cpython-311.pyc
+ai_core/runtime/capability/__pycache__/runtime_capability_template_store.cpython-311.pyc
+ai_core/runtime/self_repair/__pycache__/__init__.cpython-311.pyc
+ai_core/runtime/self_repair/__pycache__/contracts.cpython-311.pyc
+ai_core/runtime/self_repair/__pycache__/engine.cpython-311.pyc
+ai_core/runtime/self_repair/__pycache__/failure_classifier.cpython-311.pyc
+ai_core/runtime/self_repair/__pycache__/json_path.cpython-311.pyc
+ai_core/runtime/self_repair/__pycache__/parameter_repair.cpython-311.pyc
+ai_core/runtime/self_repair/__pycache__/schema_repair.cpython-311.pyc
+ai_core/runtime/self_repair/__pycache__/state_repair.cpython-311.pyc
+ai_core/runtime/self_repair/__pycache__/variable_repair.cpython-311.pyc
