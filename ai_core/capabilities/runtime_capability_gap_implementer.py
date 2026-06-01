@@ -17,7 +17,6 @@ from ai_core.runtime.capability.runtime_capability_template_store import Runtime
 from ai_core.runtime.self_repair.engine import RuntimeSelfRepairEngine
 
 
-
 @dataclass(frozen=True)
 class TemplateMatch:
     template: dict[str, Any]
@@ -79,7 +78,6 @@ class RuntimeCapabilityGapImplementer:
         urls = evidence.get("urls") if isinstance(evidence.get("urls"), list) else []
         templates = self._load_templates()
         match = self._select_template(str(user_input or ""), templates)
-<<<<<<< HEAD
         template_source = "template_first"
         planner_record: dict[str, Any] | None = None
         if match:
@@ -111,16 +109,6 @@ class RuntimeCapabilityGapImplementer:
             template_source = "llm_capability_planner"
             match = TemplateMatch(template=template, score=int(planner_record.get("confidence_score") or 1))
 
-=======
-        if not match:
-            return {
-                "status": "blocked",
-                "reason": "no_runtime_template_matched_requested_capability",
-                "template_locations": [str(p) for p in self.template_store.candidate_paths()],
-            }
-        identity_contract = self._extract_requested_identity_contract(user_input)
-        template = self._merge_identity_contract_into_template(match.template, identity_contract)
->>>>>>> 85adcf2187a94c20754c0e54586e0b63331152f7
         acquisition_policy = template.get("acquisition_policy") if isinstance(template.get("acquisition_policy"), dict) else {}
         planner_unknown = bool(planner_record and planner_record.get("needs_external_evidence"))
         allow_policy_backed_basic = bool(acquisition_policy.get("allow_policy_backed_basic_acquisition_without_external_evidence"))
@@ -265,14 +253,9 @@ class RuntimeCapabilityGapImplementer:
         return {
             "status": status,
             "template_id": template.get("template_id"),
-<<<<<<< HEAD
             "template_source": template_source,
             "requested_identity_contract": identity_contract,
             "score": match.score if match else 0,
-=======
-            "requested_identity_contract": identity_contract if 'identity_contract' in locals() else None,
-            "score": match.score,
->>>>>>> 85adcf2187a94c20754c0e54586e0b63331152f7
             "dependency_resolution": dependency_resolution,
             "artifact": artifact,
             "capability_match": capability_match,
@@ -342,10 +325,7 @@ class RuntimeCapabilityGapImplementer:
         contract = dict(merged.get("capability_match_contract") if isinstance(merged.get("capability_match_contract"), dict) else {})
         requested_id = str(identity_contract.get("requested_capability_id") or "").strip()
         if requested_id:
-<<<<<<< HEAD
             merged["template_id"] = requested_id
-=======
->>>>>>> 85adcf2187a94c20754c0e54586e0b63331152f7
             contract["expected_tool_id"] = requested_id
             contract["expected_template_id"] = requested_id
             contract["required_artifact_dir_name"] = requested_id
@@ -355,7 +335,6 @@ class RuntimeCapabilityGapImplementer:
             contract["forbidden_tool_ids"] = list(dict.fromkeys([*existing, *[str(x) for x in forbidden_ids if str(x)]]))
         merged["capability_match_contract"] = contract
         return merged
-<<<<<<< HEAD
 
 
     def _plan_capability_with_runtime_planner(
@@ -470,8 +449,6 @@ class RuntimeCapabilityGapImplementer:
         trace_dir = RUNTIME_GENERATED / "self_repair" / "capability_acquisition"
         trace_path = self.self_repair.write_trace(result=plan, trace_dir=trace_dir, name=f"{run_id}_{self._safe_name(stage)}")
         return {"status": plan.status, "diagnosis": diagnosis, "plan": plan.to_dict(), "trace_path": str(trace_path)}
-=======
->>>>>>> 85adcf2187a94c20754c0e54586e0b63331152f7
 
     def _select_template(self, user_input: str, templates: list[dict[str, Any]]) -> TemplateMatch | None:
         value = " " + user_input.casefold() + " "
