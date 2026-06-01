@@ -90,3 +90,10 @@ To also remove runtime-generated artifacts, traces, checkpoints, and deliveries:
 ```bash
 python scripts/reset_runtime_data.py --yes --include-runtime-generated
 ```
+
+## v15.9 local model default update
+
+- Added Qwen3.5 2B Instruct and Qwen3.5 4B Instruct to the local model catalog.
+- Default local model is now `qwen3.5:2b-instruct`.
+- `qwen3.5:4b-instruct` is used as the first stronger local fallback for planning stages.
+- Existing qwen3:8b remains available as a later fallback, not as the default.

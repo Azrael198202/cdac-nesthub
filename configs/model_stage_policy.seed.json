@@ -167,7 +167,10 @@
           "block_limit": 32,
           "stop_quality_score": 0.78
         }
-      }
+      },
+      "default_local_model": "qwen3.5:2b-instruct",
+      "base_model": "qwen3.5:2b-instruct",
+      "local_fallback_model": "qwen3.5:4b-instruct"
     }
   },
   "capability_taxonomy": {
@@ -353,6 +356,87 @@
         "layout_understanding"
       ],
       "priority_bias": 90
+    },
+    "qwen3.5:2b-instruct": {
+      "provider_template": "ollama",
+      "family": "qwen",
+      "vendor": "local",
+      "cost_class": "free",
+      "deployment": "local_model",
+      "install_strategy": "on_demand",
+      "status": "approved",
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "provider_templates": [
+        "vllm",
+        "ollama"
+      ],
+      "fallback_provider_templates": [],
+      "label": "Qwen3.5 2B Instruct",
+      "provider_model": "qwen3.5:2b-instruct",
+      "tier": "local_light",
+      "capabilities": [
+        "json_generation",
+        "structured_extraction",
+        "input_parsing",
+        "simple_intent",
+        "summarization"
+      ],
+      "context_window_hint": 32768,
+      "priority_bias": 75,
+      "provider_models": {
+        "vllm": "Qwen/Qwen3.5-2B-Instruct",
+        "ollama": "qwen3.5:2b-instruct"
+      }
+    },
+    "qwen3.5:4b-instruct": {
+      "provider_template": "ollama",
+      "family": "qwen",
+      "vendor": "local",
+      "cost_class": "free",
+      "deployment": "local_model",
+      "install_strategy": "on_demand",
+      "status": "approved",
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text",
+          "structured_data"
+        ]
+      },
+      "provider_templates": [
+        "vllm",
+        "ollama"
+      ],
+      "fallback_provider_templates": [],
+      "label": "Qwen3.5 4B Instruct",
+      "provider_model": "qwen3.5:4b-instruct",
+      "tier": "local_basic",
+      "capabilities": [
+        "json_generation",
+        "structured_extraction",
+        "input_parsing",
+        "simple_intent",
+        "reasoning",
+        "planning",
+        "workflow_planning",
+        "summarization"
+      ],
+      "context_window_hint": 32768,
+      "priority_bias": 65,
+      "provider_models": {
+        "vllm": "Qwen/Qwen3.5-4B-Instruct",
+        "ollama": "qwen3.5:4b-instruct"
+      }
     },
     "qwen3:4b": {
       "provider_template": "ollama",
@@ -1227,19 +1311,21 @@
   },
   "stages": {
     "language_detection": {
-      "default": "qwen3:1.7b",
+      "default": "qwen3.5:2b-instruct",
       "fallback": [
-        "qwen2.5:3b",
+        "qwen3.5:4b-instruct",
         "qwen3:4b",
-        "qwen3:8b"
+        "qwen3:8b",
+        "gpt-4o-mini"
       ],
       "upper_substitutes": [
+        "qwen3.5:4b-instruct",
         "qwen3:4b",
         "qwen3:8b",
         "gpt-4o-mini"
       ],
       "lower_substitutes": [
-        "qwen3:1.7b"
+        "qwen3.5:2b-instruct"
       ],
       "required_capabilities": [
         "language_detection",
@@ -1276,19 +1362,21 @@
       }
     },
     "input_parsing": {
-      "default": "qwen3:1.7b",
+      "default": "qwen3.5:2b-instruct",
       "fallback": [
-        "qwen2.5:3b",
+        "qwen3.5:4b-instruct",
         "qwen3:4b",
-        "qwen3:8b"
+        "qwen3:8b",
+        "gpt-4o-mini"
       ],
       "upper_substitutes": [
+        "qwen3.5:4b-instruct",
         "qwen3:4b",
         "qwen3:8b",
         "gpt-4o-mini"
       ],
       "lower_substitutes": [
-        "qwen3:1.7b"
+        "qwen3.5:2b-instruct"
       ],
       "required_capabilities": [
         "input_parsing",
@@ -1325,19 +1413,21 @@
       }
     },
     "simple_intent": {
-      "default": "qwen3:1.7b",
+      "default": "qwen3.5:2b-instruct",
       "fallback": [
-        "qwen2.5:3b",
+        "qwen3.5:4b-instruct",
         "qwen3:4b",
-        "qwen3:8b"
+        "qwen3:8b",
+        "gpt-4o-mini"
       ],
       "upper_substitutes": [
+        "qwen3.5:4b-instruct",
         "qwen3:4b",
         "qwen3:8b",
         "gpt-4o-mini"
       ],
       "lower_substitutes": [
-        "qwen3:1.7b"
+        "qwen3.5:2b-instruct"
       ],
       "required_capabilities": [
         "simple_intent",
@@ -1374,19 +1464,21 @@
       }
     },
     "complex_intent": {
-      "default": "qwen3:1.7b",
+      "default": "qwen3.5:2b-instruct",
       "fallback": [
-        "qwen2.5:3b",
+        "qwen3.5:4b-instruct",
         "qwen3:4b",
-        "qwen3:8b"
+        "qwen3:8b",
+        "gpt-4o-mini"
       ],
       "upper_substitutes": [
+        "qwen3.5:4b-instruct",
         "qwen3:4b",
         "qwen3:8b",
         "gpt-4o-mini"
       ],
       "lower_substitutes": [
-        "qwen3:1.7b"
+        "qwen3.5:2b-instruct"
       ],
       "required_capabilities": [
         "reasoning",
@@ -1424,19 +1516,21 @@
       }
     },
     "capability_classification": {
-      "default": "qwen3:1.7b",
+      "default": "qwen3.5:2b-instruct",
       "fallback": [
-        "qwen2.5:3b",
+        "qwen3.5:4b-instruct",
         "qwen3:4b",
-        "qwen3:8b"
+        "qwen3:8b",
+        "gpt-4o-mini"
       ],
       "upper_substitutes": [
+        "qwen3.5:4b-instruct",
         "qwen3:4b",
         "qwen3:8b",
         "gpt-4o-mini"
       ],
       "lower_substitutes": [
-        "qwen3:1.7b"
+        "qwen3.5:2b-instruct"
       ],
       "required_capabilities": [
         "capability_classification"
@@ -1472,15 +1566,21 @@
       }
     },
     "execution_mode_decision": {
-      "default": "deterministic_runtime_policy",
+      "default": "qwen3.5:2b-instruct",
       "fallback": [
-        "qwen3:14b"
+        "qwen3.5:4b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
+        "gpt-4o-mini"
       ],
       "upper_substitutes": [
-        "gpt-4.1"
+        "qwen3.5:4b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
+        "gpt-4o-mini"
       ],
       "lower_substitutes": [
-        "qwen3:8b"
+        "qwen3.5:2b-instruct"
       ],
       "required_capabilities": [
         "execution_mode_decision"
@@ -1516,10 +1616,22 @@
       }
     },
     "model_routing": {
-      "default": "deterministic_runtime_policy",
-      "fallback": [],
-      "upper_substitutes": [],
-      "lower_substitutes": [],
+      "default": "qwen3.5:2b-instruct",
+      "fallback": [
+        "qwen3.5:4b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
+        "gpt-4o-mini"
+      ],
+      "upper_substitutes": [
+        "qwen3.5:4b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
+        "gpt-4o-mini"
+      ],
+      "lower_substitutes": [
+        "qwen3.5:2b-instruct"
+      ],
       "required_capabilities": [
         "model_routing"
       ],
@@ -1553,20 +1665,22 @@
       }
     },
     "workflow_planning": {
-      "default": "qwen3:4b",
+      "default": "qwen3.5:4b-instruct",
       "fallback": [
+        "qwen3.5:2b-instruct",
+        "qwen3:4b",
         "qwen3:8b",
-        "qwen2.5:3b",
         "gpt-4o-mini"
       ],
       "upper_substitutes": [
+        "qwen3.5:4b-instruct",
+        "qwen3:4b",
         "qwen3:8b",
         "qwen3:14b",
         "gpt-4o-mini"
       ],
       "lower_substitutes": [
-        "qwen2.5:3b",
-        "qwen3:1.7b"
+        "qwen3.5:2b-instruct"
       ],
       "required_capabilities": [
         "workflow_planning",
@@ -1604,20 +1718,22 @@
       }
     },
     "tool_selection": {
-      "default": "qwen3:4b",
+      "default": "qwen3.5:4b-instruct",
       "fallback": [
+        "qwen3.5:2b-instruct",
+        "qwen3:4b",
         "qwen3:8b",
-        "qwen2.5:3b",
         "gpt-4o-mini"
       ],
       "upper_substitutes": [
+        "qwen3.5:4b-instruct",
+        "qwen3:4b",
         "qwen3:8b",
         "qwen3:14b",
         "gpt-4o-mini"
       ],
       "lower_substitutes": [
-        "qwen2.5:3b",
-        "qwen3:1.7b"
+        "qwen3.5:2b-instruct"
       ],
       "required_capabilities": [
         "tool_selection"
@@ -1843,15 +1959,22 @@
       }
     },
     "schema_repair": {
-      "default": "qwen3:14b",
+      "default": "qwen3.5:4b-instruct",
       "fallback": [
-        "qwen2.5-coder:14b"
+        "qwen3.5:2b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
+        "gpt-4o-mini"
       ],
       "upper_substitutes": [
-        "gpt-4.1"
+        "qwen3.5:4b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
+        "qwen3:14b",
+        "gpt-4o-mini"
       ],
       "lower_substitutes": [
-        "qwen3:8b"
+        "qwen3.5:2b-instruct"
       ],
       "required_capabilities": [
         "schema_repair",
@@ -1925,15 +2048,22 @@
       }
     },
     "retrieval_query_rewrite": {
-      "default": "qwen3:8b",
+      "default": "qwen3.5:4b-instruct",
       "fallback": [
-        "qwen3:14b"
+        "qwen3.5:2b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
+        "gpt-4o-mini"
       ],
       "upper_substitutes": [
+        "qwen3.5:4b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
+        "qwen3:14b",
         "gpt-4o-mini"
       ],
       "lower_substitutes": [
-        "qwen3:4b"
+        "qwen3.5:2b-instruct"
       ],
       "required_capabilities": [
         "query_rewrite",
@@ -2015,16 +2145,22 @@
       }
     },
     "evidence_extraction": {
-      "default": "parser_rule_engine",
+      "default": "qwen3.5:4b-instruct",
       "fallback": [
-        "qwen3:14b",
+        "qwen3.5:2b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
         "gpt-4o-mini"
       ],
       "upper_substitutes": [
-        "gpt-4.1"
+        "qwen3.5:4b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
+        "qwen3:14b",
+        "gpt-4o-mini"
       ],
       "lower_substitutes": [
-        "qwen3:8b"
+        "qwen3.5:2b-instruct"
       ],
       "required_capabilities": [
         "evidence_extraction"
@@ -2062,16 +2198,22 @@
       }
     },
     "evidence_compression": {
-      "default": "qwen3:14b",
+      "default": "qwen3.5:4b-instruct",
       "fallback": [
-        "qwen3:32b",
+        "qwen3.5:2b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
         "gpt-4o-mini"
       ],
       "upper_substitutes": [
-        "gpt-4.1"
+        "qwen3.5:4b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
+        "qwen3:14b",
+        "gpt-4o-mini"
       ],
       "lower_substitutes": [
-        "qwen3:8b"
+        "qwen3.5:2b-instruct"
       ],
       "required_capabilities": [
         "evidence_compression",
@@ -2109,17 +2251,22 @@
       }
     },
     "fact_verification": {
-      "default": "gpt-4.1",
+      "default": "qwen3.5:4b-instruct",
       "fallback": [
-        "qwen3:32b",
-        "gpt-5.x"
+        "qwen3.5:2b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
+        "gpt-4o-mini"
       ],
       "upper_substitutes": [
-        "gpt-5.x",
-        "claude-sonnet"
+        "qwen3.5:4b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
+        "qwen3:14b",
+        "gpt-4o-mini"
       ],
       "lower_substitutes": [
-        "qwen3:14b"
+        "qwen3.5:2b-instruct"
       ],
       "required_capabilities": [
         "fact_verification",
@@ -2156,20 +2303,22 @@
       }
     },
     "final_synthesis": {
-      "default": "qwen3:4b",
+      "default": "qwen3.5:2b-instruct",
       "fallback": [
+        "qwen3.5:4b-instruct",
+        "qwen3:4b",
         "qwen3:8b",
-        "qwen2.5:3b",
         "gpt-4o-mini"
       ],
       "upper_substitutes": [
+        "qwen3.5:4b-instruct",
+        "qwen3:4b",
         "qwen3:8b",
         "qwen3:14b",
         "gpt-4o-mini"
       ],
       "lower_substitutes": [
-        "qwen2.5:3b",
-        "qwen3:1.7b"
+        "qwen3.5:2b-instruct"
       ],
       "required_capabilities": [
         "final_synthesis",
@@ -2207,16 +2356,22 @@
       }
     },
     "feedback_understanding": {
-      "default": "qwen3:8b",
+      "default": "qwen3.5:4b-instruct",
       "fallback": [
-        "qwen3:14b",
+        "qwen3.5:2b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
         "gpt-4o-mini"
       ],
       "upper_substitutes": [
-        "gpt-4.1"
+        "qwen3.5:4b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
+        "qwen3:14b",
+        "gpt-4o-mini"
       ],
       "lower_substitutes": [
-        "qwen3:4b"
+        "qwen3.5:2b-instruct"
       ],
       "required_capabilities": [
         "feedback_understanding",
@@ -2253,15 +2408,22 @@
       }
     },
     "memory_update": {
-      "default": "qwen3:8b",
+      "default": "qwen3.5:4b-instruct",
       "fallback": [
-        "qwen3:14b"
+        "qwen3.5:2b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
+        "gpt-4o-mini"
       ],
       "upper_substitutes": [
+        "qwen3.5:4b-instruct",
+        "qwen3:4b",
+        "qwen3:8b",
+        "qwen3:14b",
         "gpt-4o-mini"
       ],
       "lower_substitutes": [
-        "qwen3:4b"
+        "qwen3.5:2b-instruct"
       ],
       "required_capabilities": [
         "structured_extraction",
@@ -3085,20 +3247,22 @@
       }
     },
     "general_runtime": {
-      "default": "qwen3:4b",
+      "default": "qwen3.5:4b-instruct",
       "fallback": [
+        "qwen3.5:2b-instruct",
+        "qwen3:4b",
         "qwen3:8b",
-        "qwen2.5:3b",
         "gpt-4o-mini"
       ],
       "upper_substitutes": [
+        "qwen3.5:4b-instruct",
+        "qwen3:4b",
         "qwen3:8b",
         "qwen3:14b",
         "gpt-4o-mini"
       ],
       "lower_substitutes": [
-        "qwen2.5:3b",
-        "qwen3:1.7b"
+        "qwen3.5:2b-instruct"
       ],
       "required_capabilities": [
         "json_generation",

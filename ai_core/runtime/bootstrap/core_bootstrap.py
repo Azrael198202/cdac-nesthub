@@ -119,11 +119,11 @@ class RuntimeBootstrap:
         target.write_text('{"version":"1.0","templates":[]}', encoding="utf-8")
 
     def _ensure_model_providers(self) -> None:
-        """Ensure provider config prefers the local base model qwen3:8b.
+        """Ensure provider config prefers the local default model qwen3.5:2b-instruct.
 
         Important: older runtimes may already have runtime/configs/models/providers.yaml.
         In that case we must merge/sync the base model settings instead of returning
-        early; otherwise existing projects keep using qwen3:4b or OpenAI-first routes.
+        early; otherwise existing projects keep using older local or OpenAI-first routes.
         """
         p = RUNTIME_CONFIGS / "models" / "providers.yaml"
         desired = self._default_model_providers_config()
@@ -221,8 +221,10 @@ class RuntimeBootstrap:
                     "endpoint_strategy": "auto",
                     "chat_endpoint": "/api/chat",
                     "generate_endpoint": "/api/generate",
-                    "model": "qwen3:8b",
+                    "model": "qwen3.5:2b-instruct",
                     "available_local_models": [
+                        "qwen3.5:2b-instruct",
+                        "qwen3.5:4b-instruct",
                         "qwen3-vl:8b-thinking",
                         "qwen3:32b",
                         "qwen3:14b",
@@ -234,6 +236,8 @@ class RuntimeBootstrap:
                         "llama3.2:3b"
                     ],
                     "fallback_models": [
+                        "qwen3.5:2b-instruct",
+                        "qwen3.5:4b-instruct",
                         "qwen3:32b",
                         "qwen3:14b",
                         "qwen3:8b",
@@ -521,13 +525,13 @@ class RuntimeBootstrap:
                 "api_only_when_local_disabled": True,
                 "api_provider_order": ["openai", "claude"],
                 "base_model_provider": "ollama",
-                "base_model": "qwen3:8b",
+                "base_model": "qwen3.5:2b-instruct",
                 "local_fallback_provider": "ollama",
-                "local_fallback_model": "qwen3:4b",
+                "local_fallback_model": "qwen3.5:4b-instruct",
                 "code_generation_provider": "ollama_coder_qwen25",
                 "code_generation_model": "qwen2.5-coder:7b",
                 "code_generation_fallback_provider": "ollama",
-                "code_generation_fallback_model": "qwen3:8b",
+                "code_generation_fallback_model": "qwen3.5:4b-instruct",
                 "external_provider_is_fallback": True
             }
         }

@@ -515,7 +515,7 @@ class ModelStagePolicy:
             "policy_kind": "runtime_model_governance_policy",
             "global_policy": {},
             "model_catalog": {},
-            "stages": {"general_runtime": {"default": "qwen3:8b", "fallback": [], "upper_substitutes": [], "lower_substitutes": [], "validation": {"schema_required": True, "escalate_on_failure": True}}},
+            "stages": {"general_runtime": {"default": "qwen3.5:2b-instruct", "fallback": [], "upper_substitutes": [], "lower_substitutes": [], "validation": {"schema_required": True, "escalate_on_failure": True}}},
         }
 
     def _load_json(self, path: Path) -> dict[str, Any]:

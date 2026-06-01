@@ -86,7 +86,7 @@ class ModelRuntimePreflight:
                 checks.append(ProviderHealth(initial_provider, initial_model_id, "api", False, f"Missing secret: {required_secret}", str(required_secret)))
             else:
                 checks.append(await self._check_api_provider(initial_provider, initial_model_id))
-            local_model = str(selection.get("selected_local_model_id") or "qwen3:8b").strip()
+            local_model = str(selection.get("selected_local_model_id") or "qwen3.5:2b-instruct").strip()
             local_provider = self.selection_store.provider_for_model(local_model)
             checks.extend(await self._check_local_provider_chain(local_model, preferred_provider=local_provider))
 

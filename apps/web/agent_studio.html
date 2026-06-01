@@ -844,7 +844,7 @@ function modelListForMode(mode, models){
   return models.all || [];
 }
 function defaultModelForMode(mode, selection){
-  if(mode==='local_only'){ return selection.selected_local_model_id || 'qwen3:8b'; }
+  if(mode==='local_only'){ return selection.selected_local_model_id || 'qwen3.5:2b-instruct'; }
   if(mode==='api_only'){ return selection.selected_api_model_id || 'gpt-4o-mini'; }
   return selection.initial_model_id || selection.selected_api_model_id || selection.selected_local_model_id || '';
 }
@@ -895,7 +895,7 @@ async function saveModelSelection(){
   if(suppressModelSave){ return; }
   const mode=currentModelMode();
   const meta=selectedOptionMeta();
-  let selectedLocal=(modelSelectionState&&modelSelectionState.selection&&modelSelectionState.selection.selected_local_model_id) || 'qwen3:8b';
+  let selectedLocal=(modelSelectionState&&modelSelectionState.selection&&modelSelectionState.selection.selected_local_model_id) || 'qwen3.5:2b-instruct';
   let selectedApi=(modelSelectionState&&modelSelectionState.selection&&modelSelectionState.selection.selected_api_model_id) || 'gpt-4o-mini';
   if(meta.family==='local' || mode==='local_only'){ selectedLocal = meta.model_id || selectedLocal; }
   if(meta.family==='api' || mode==='api_only'){ selectedApi = meta.model_id || selectedApi; }

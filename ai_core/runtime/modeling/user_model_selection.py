@@ -19,9 +19,9 @@ _API_PROVIDER_IDS = {"openai", "claude"}
 @dataclass(frozen=True)
 class UserModelSelectionSnapshot:
     mode: str = "local_only"  # local_only | api_only | hybrid
-    initial_model_id: str = "qwen3:8b"
+    initial_model_id: str = "qwen3.5:2b-instruct"
     initial_provider: str = "ollama"
-    selected_local_model_id: str = "qwen3:8b"
+    selected_local_model_id: str = "qwen3.5:2b-instruct"
     selected_api_model_id: str = "gpt-4o-mini"
     selected_provider: str = "auto"
     custom_endpoint: str = ""
@@ -163,10 +163,10 @@ class UserModelSelectionStore:
             }
             result.append(item)
         if not result and family == "local":
-            result = [{"model_id": "qwen3:8b", "label": "qwen3:8b", "family": "local", "provider": "ollama", "cost_class": "local", "requires_secret": None}]
+            result = [{"model_id": "qwen3.5:2b-instruct", "label": "Qwen3.5 2B Instruct", "family": "local", "provider": "ollama", "cost_class": "local", "requires_secret": None}]
         if not result and family == "api":
             result = [{"model_id": "gpt-4o-mini", "label": "gpt-4o-mini", "family": "api", "provider": "openai", "cost_class": "metered", "requires_secret": "OPENAI_API_KEY"}]
-        return sorted(result, key=lambda x: (0 if x.get("model_id") in {"qwen3:8b", "gpt-4o-mini"} else 1, str(x.get("model_id"))))
+        return sorted(result, key=lambda x: (0 if x.get("model_id") in {"qwen3.5:2b-instruct", "gpt-4o-mini"} else 1, str(x.get("model_id"))))
 
     def route_allowed(self, provider_name: str, provider: dict[str, Any] | None = None) -> bool:
         snap = self.snapshot()
@@ -290,10 +290,10 @@ class UserModelSelectionStore:
 
     def _default_local_model(self) -> str:
         ids = [m["model_id"] for m in self.available_models("local") if m.get("model_id")]
-        for preferred in ["qwen3:8b", "qwen2.5:7b", "qwen3:14b"]:
+        for preferred in ["qwen3.5:2b-instruct", "qwen3.5:4b-instruct", "qwen3:4b", "qwen3:8b", "qwen2.5:7b", "qwen3:14b"]:
             if preferred in ids:
                 return preferred
-        return ids[0] if ids else "qwen3:8b"
+        return ids[0] if ids else "qwen3.5:2b-instruct"
 
     def _default_api_model(self) -> str:
         ids = [m["model_id"] for m in self.available_models("api") if m.get("model_id")]
