@@ -8,6 +8,14 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
+
+def json_safe_string(value: Any) -> str:
+    try:
+        import json
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return str(value)
+
 from .query_planner import SearchQueryPlanner
 
 try:  # Optional dependency path. Core still works without these packages.
@@ -39,6 +47,10 @@ class WebEvidenceOptimizer:
 
     MAX_CHUNK_CHARS = 900
     MIN_CHUNK_CHARS = 80
+    DEFAULT_BATCH_SIZE = 8
+    DEFAULT_BATCH_TOP_K = 3
+    DEFAULT_MAX_EVIDENCE_ITEMS = 5
+    DEFAULT_EVIDENCE_TOKEN_BUDGET = 1800
 
     def __init__(self) -> None:
         self.query_planner = SearchQueryPlanner()
@@ -55,7 +67,10 @@ class WebEvidenceOptimizer:
         capability: str = "",
         objective: str = "",
         known: dict[str, Any] | None = None,
-        max_items: int = 8,
+        max_items: int = 5,
+        batch_size: int | None = None,
+        batch_top_k: int | None = None,
+        token_budget: int | None = None,
     ) -> dict[str, Any]:
         known = known if isinstance(known, dict) else {}
         planned_queries = self.plan_queries(user_input=user_input, capability=capability, objective=objective, known=known)
@@ -64,8 +79,11 @@ class WebEvidenceOptimizer:
         raw_docs = self._materialize_documents(search_results or [], documents or [])
         chunks = self._build_chunks(raw_docs, query_terms=query_terms)
         chunks = self._dedupe_chunks(chunks)
-        chunks = sorted(chunks, key=lambda c: (c.relevance_score + c.trust_score * 0.35), reverse=True)[:max_items]
-        evidence_pack = [self._chunk_to_pack_item(c) for c in chunks]
+        batch_size = int(batch_size or self.DEFAULT_BATCH_SIZE)
+        batch_top_k = int(batch_top_k or self.DEFAULT_BATCH_TOP_K)
+        selected_chunks = self._batch_select_chunks(chunks, batch_size=batch_size, batch_top_k=batch_top_k, max_items=max_items or self.DEFAULT_MAX_EVIDENCE_ITEMS)
+        evidence_pack = [self._chunk_to_pack_item(c) for c in selected_chunks]
+        evidence_pack = self._limit_evidence_pack(evidence_pack, token_budget=int(token_budget or self.DEFAULT_EVIDENCE_TOKEN_BUDGET), max_items=max_items or self.DEFAULT_MAX_EVIDENCE_ITEMS)
         status = "verified" if evidence_pack else "no_usable_evidence"
         return {
             "status": status,
@@ -76,6 +94,10 @@ class WebEvidenceOptimizer:
                 "raw_search_result_count": len(search_results or []),
                 "raw_document_count": len(documents or []),
                 "chunk_count_after_dedupe": len(chunks),
+                "batch_size": batch_size,
+                "batch_top_k": batch_top_k,
+                "selected_evidence_count": len(evidence_pack),
+                "token_budget_estimate": int(token_budget or self.DEFAULT_EVIDENCE_TOKEN_BUDGET),
                 "optional_packages": {
                     "beautifulsoup4_available": BeautifulSoup is not None,
                     "advanced_reranker_configured": False,
@@ -150,6 +172,50 @@ class WebEvidenceOptimizer:
                 ))
         return chunks
 
+    def _batch_select_chunks(self, chunks: list[EvidenceChunk], *, batch_size: int, batch_top_k: int, max_items: int) -> list[EvidenceChunk]:
+        """Select top evidence in small batches, then perform a global top-k.
+
+        This keeps tiny local models from receiving large noisy web payloads.
+        Scoring stays deterministic and domain-neutral.
+        """
+        if not chunks:
+            return []
+        batch_size = max(1, min(int(batch_size or self.DEFAULT_BATCH_SIZE), 24))
+        batch_top_k = max(1, min(int(batch_top_k or self.DEFAULT_BATCH_TOP_K), batch_size))
+        max_items = max(1, min(int(max_items or self.DEFAULT_MAX_EVIDENCE_ITEMS), 12))
+        locally_selected: list[EvidenceChunk] = []
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i:i + batch_size]
+            ranked = sorted(batch, key=lambda c: (c.relevance_score + c.trust_score * 0.35), reverse=True)[:batch_top_k]
+            locally_selected.extend(ranked)
+        return sorted(locally_selected, key=lambda c: (c.relevance_score + c.trust_score * 0.35), reverse=True)[:max_items]
+
+    def _limit_evidence_pack(self, evidence_pack: list[dict[str, Any]], *, token_budget: int, max_items: int) -> list[dict[str, Any]]:
+        """Limit evidence size before it is passed to a small model.
+
+        Token count is approximated by chars/4 so the function remains dependency-free.
+        """
+        token_budget = max(200, int(token_budget or self.DEFAULT_EVIDENCE_TOKEN_BUDGET))
+        max_items = max(1, int(max_items or self.DEFAULT_MAX_EVIDENCE_ITEMS))
+        output: list[dict[str, Any]] = []
+        used = 0
+        for item in evidence_pack[:max_items]:
+            cloned = dict(item)
+            excerpt = str(cloned.get("evidence_excerpt") or "")
+            facts = cloned.get("extracted_facts") if isinstance(cloned.get("extracted_facts"), list) else []
+            hints = cloned.get("implementation_hints") if isinstance(cloned.get("implementation_hints"), list) else []
+            notes = cloned.get("security_notes") if isinstance(cloned.get("security_notes"), list) else []
+            static_chars = len(json_safe_string(facts)) + len(json_safe_string(hints)) + len(json_safe_string(notes)) + 120
+            remaining_chars = max(0, (token_budget - used) * 4 - static_chars)
+            if remaining_chars <= 0:
+                break
+            cloned["evidence_excerpt"] = excerpt[: min(len(excerpt), remaining_chars, 700)]
+            used += max(1, (len(str(cloned.get("evidence_excerpt") or "")) + static_chars) // 4)
+            output.append(cloned)
+            if used >= token_budget:
+                break
+        return output
+
     def _dedupe_chunks(self, chunks: list[EvidenceChunk]) -> list[EvidenceChunk]:
         seen: set[str] = set()
         output: list[EvidenceChunk] = []
@@ -191,14 +257,69 @@ class WebEvidenceOptimizer:
         }
 
     def _clean_text(self, text: str) -> str:
-        text = re.sub(r"<script\b.*?</script>|<style\b.*?</style>", " ", str(text or ""), flags=re.I | re.S)
-        if "<" in text and ">" in text and BeautifulSoup is not None:
+        raw = str(text or "")
+        raw = re.sub(r"<script\b.*?</script>|<style\b.*?</style>", " ", raw, flags=re.I | re.S)
+        if "<" in raw and ">" in raw and BeautifulSoup is not None:
             try:
-                text = BeautifulSoup(text, "html.parser").get_text(" ")
+                soup = BeautifulSoup(raw, "html.parser")
+                self._remove_known_noise_nodes(soup)
+                selected = self._select_content_nodes(soup)
+                raw = selected if selected else soup.get_text(" ")
             except Exception:
                 pass
-        text = re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"\s+", " ", raw).strip()
         return text
+
+    def _remove_known_noise_nodes(self, soup: Any) -> None:
+        # Deterministic web boilerplate removal. Generic page-structure words only;
+        # no task/domain vocabulary is used here.
+        for tag in ["script", "style", "nav", "footer", "header", "aside", "form", "noscript", "svg", "iframe", "menu"]:
+            for node in list(soup.find_all(tag)):
+                try:
+                    node.decompose()
+                except Exception:
+                    pass
+        noise_re = re.compile(r"(^|[-_\s])(nav|menu|footer|header|sidebar|breadcrumb|cookie|ads?|advert|promo)([-_\s]|$)", re.I)
+        for node in list(soup.find_all(True)):
+            try:
+                values: list[str] = []
+                node_id = node.get("id")
+                if node_id:
+                    values.append(str(node_id))
+                classes = node.get("class")
+                if isinstance(classes, list):
+                    values.extend(str(x) for x in classes)
+                elif classes:
+                    values.append(str(classes))
+                if values and noise_re.search(" ".join(values)):
+                    node.decompose()
+            except Exception:
+                pass
+
+    def _select_content_nodes(self, soup: Any) -> str:
+        preferred_texts: list[str] = []
+        containers = soup.find_all(["main", "article"]) or []
+        if not containers:
+            containers = soup.find_all(["section"]) or []
+        search_roots = containers or [soup]
+        for root in search_roots:
+            for node in root.find_all(["p", "li", "pre", "code", "table"]):
+                try:
+                    value = node.get_text(" ", strip=True)
+                except Exception:
+                    value = ""
+                if value and len(value) >= 20:
+                    preferred_texts.append(value)
+        if preferred_texts:
+            return " ".join(preferred_texts)
+        for node in soup.find_all(["main", "article", "section"]):
+            try:
+                value = node.get_text(" ", strip=True)
+            except Exception:
+                value = ""
+            if value and len(value) >= 40:
+                preferred_texts.append(value)
+        return " ".join(preferred_texts)
 
     def _split_text(self, text: str) -> list[str]:
         text = self._clean_text(text)

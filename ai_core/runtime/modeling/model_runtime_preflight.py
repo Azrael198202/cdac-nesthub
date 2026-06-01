@@ -14,6 +14,7 @@ from ai_core.config.paths import RUNTIME_CONFIGS
 from ai_core.secrets.secret_store import SecretStore
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 from ai_core.runtime.modeling.model_provider_autoconfig import ModelProviderAutoConfigurator
+from ai_core.models.model_downloader import RuntimeModelDownloader
 
 
 @dataclass
@@ -40,6 +41,7 @@ class ModelRuntimePreflight:
         self.loader = ConfigLoader()
         self.secret_store = SecretStore()
         self.provider_autoconfig = ModelProviderAutoConfigurator()
+        self.model_downloader = RuntimeModelDownloader()
 
     async def check_before_runtime(self) -> dict[str, Any]:
         self.provider_autoconfig.ensure()
@@ -153,6 +155,18 @@ class ModelRuntimePreflight:
                     except Exception:
                         models = []
                     if model_id and models and not any(m == model_id or m.startswith(model_id + ":") for m in models):
+                        download = self._maybe_download_local_model(provider_name, model_id)
+                        if download.get("attempted"):
+                            # Re-read the provider model list after an approved on-demand pull.
+                            try:
+                                res2 = await client.get(url)
+                                payload2 = res2.json() if res2.status_code < 400 else {}
+                                models2 = [str(x.get("name") or "") for x in payload2.get("models", []) if isinstance(x, dict)]
+                            except Exception:
+                                models2 = []
+                            if any(m == model_id or m.startswith(model_id + ":") for m in models2):
+                                return ProviderHealth(provider_name, model_id, "local", True, "Provider is reachable and missing model was prepared on demand.", checked_url=url)
+                            return ProviderHealth(provider_name, model_id, "local", False, f"Provider is running, but selected model is not available after on-demand preparation: {model_id}; {download.get('reason')}", checked_url=url)
                         return ProviderHealth(provider_name, model_id, "local", False, f"Provider is running, but selected model is not available: {model_id}", checked_url=url)
                     return ProviderHealth(provider_name, model_id, "local", True, "Provider is reachable.", checked_url=url)
                 url = base_url + "/v1/models"
@@ -201,6 +215,42 @@ class ModelRuntimePreflight:
                 if root and importlib.util.find_spec(root) is None:
                     return root
         return None
+
+    def _maybe_download_local_model(self, provider_name: str, model_id: str) -> dict[str, Any]:
+        """Prepare a missing local model when policy explicitly allows it.
+
+        This is provider/runtime infrastructure only. It does not decide whether a
+        model is suitable for a user task; it only honors the generic
+        missing-model policy.
+        """
+        if provider_name != "ollama":
+            return {"attempted": False, "reason": "provider_not_supported_for_on_demand_prepare"}
+        if not model_id:
+            return {"attempted": False, "reason": "missing_model_id"}
+        enabled = str(os.environ.get("AI_CORE_AUTO_DOWNLOAD_LOCAL_MODEL", "")).strip().lower()
+        if enabled in {"0", "false", "no", "off"}:
+            return {"attempted": False, "reason": "disabled_by_environment"}
+        try:
+            policy = self.selection_store._load_policy().get("global_policy", {})
+            missing = policy.get("missing_model_policy") if isinstance(policy.get("missing_model_policy"), dict) else {}
+            action = str(missing.get("local_model_action") or "").strip().lower()
+            if action != "download_on_demand" and enabled not in {"1", "true", "yes", "on"}:
+                return {"attempted": False, "reason": "policy_does_not_allow_download_on_demand"}
+        except Exception:
+            if enabled not in {"1", "true", "yes", "on"}:
+                return {"attempted": False, "reason": "policy_unavailable"}
+        try:
+            timeout = int(os.environ.get("AI_CORE_MODEL_DOWNLOAD_TIMEOUT_SECONDS", "180") or "180")
+        except ValueError:
+            timeout = 180
+        result = self.model_downloader.download({
+            "model_id": model_id,
+            "runtime": "ollama",
+            "download_strategy": {"preferred_runtime": "ollama"},
+            "requires_human_review": False,
+            "license_review_required": False,
+        }, approved=True, timeout_seconds=max(30, timeout))
+        return {"attempted": True, **result}
 
     async def _check_api_provider(self, provider_name: str, model_id: str) -> ProviderHealth:
         provider = self._provider_config(provider_name)
