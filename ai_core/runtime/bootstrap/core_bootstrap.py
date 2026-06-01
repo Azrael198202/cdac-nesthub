@@ -106,12 +106,17 @@ class RuntimeBootstrap:
 
 
     def _ensure_runtime_primitive_tool_templates(self) -> None:
-        source = Path("configs/runtime_primitive_tool_templates.seed.json")
+        """Ensure the runtime-owned primitive template location exists.
+
+        Concrete primitive templates are runtime artifacts.  ai_core no longer
+        copies task-specific primitive templates from configs/ at startup.
+        Existing runtime-generated templates are preserved.
+        """
         target = RUNTIME_GENERATED / "system_topology" / "runtime_primitive_tool_templates.json"
         if target.exists():
             return
-        if source.exists():
-            target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('{"version":"1.0","templates":[]}', encoding="utf-8")
 
     def _ensure_model_providers(self) -> None:
         """Ensure provider config prefers the local base model qwen3:8b.

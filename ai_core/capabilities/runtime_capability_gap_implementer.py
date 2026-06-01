@@ -11,8 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from ai_core.config.paths import CONFIGS_DIR, RUNTIME_GENERATED, RUNTIME_REGISTRY
+from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_REGISTRY
 from ai_core.runtime.capability.acquisition_gate import RuntimeCapabilityAcquisitionGate
+from ai_core.runtime.capability.runtime_capability_template_store import RuntimeCapabilityTemplateStore
 
 
 @dataclass(frozen=True)
@@ -32,7 +33,8 @@ class RuntimeCapabilityGapImplementer:
     """
 
     def __init__(self, *, template_path: Path | None = None) -> None:
-        self.template_path = template_path or (CONFIGS_DIR / "runtime_capability_templates.json")
+        self.template_path = template_path
+        self.template_store = RuntimeCapabilityTemplateStore(explicit_path=template_path)
         self.generated_dir = RUNTIME_GENERATED / "tools"
         self.generated_tests_dir = RUNTIME_GENERATED / "tests"
         self.registry_path = RUNTIME_REGISTRY / "tool_registry.json"
@@ -56,7 +58,7 @@ class RuntimeCapabilityGapImplementer:
             return {
                 "status": "blocked",
                 "reason": "no_runtime_template_matched_requested_capability",
-                "template_path": str(self.template_path),
+                "template_locations": [str(p) for p in self.template_store.candidate_paths()],
             }
         identity_contract = self._extract_requested_identity_contract(user_input)
         template = self._merge_identity_contract_into_template(match.template, identity_contract)
@@ -143,14 +145,13 @@ class RuntimeCapabilityGapImplementer:
         }
 
     def _load_templates(self) -> list[dict[str, Any]]:
-        if not self.template_path.exists():
-            return []
-        try:
-            data = json.loads(self.template_path.read_text(encoding="utf-8") or "{}")
-        except json.JSONDecodeError:
-            return []
-        templates = data.get("templates") if isinstance(data, dict) else data
-        return [x for x in templates if isinstance(x, dict)] if isinstance(templates, list) else []
+        """Load runtime capability templates from runtime-owned storage.
+
+        Concrete templates are no longer expected to live permanently under
+        configs/.  This keeps ai_core generic while still allowing runtime
+        acquired or seeded capability templates to be discovered.
+        """
+        return self.template_store.load_templates()
 
 
     def _extract_requested_identity_contract(self, user_input: str) -> dict[str, Any]:
