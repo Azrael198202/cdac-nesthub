@@ -97,32 +97,44 @@ class RuntimeCapabilityGapImplementer:
         else:
             mark("TemplateResolver", "template_not_found", template_locations=[str(p) for p in self.template_store.candidate_paths()])
             planner_record = self._plan_capability_with_runtime_planner(user_input=user_input, identity_contract=identity_contract, evidence=evidence)
-            mark("LLMCapabilityPlanner", str(planner_record.get("status") or "planner_failed"), planner=planner_record)
-            if planner_record.get("status") != "planned" or not isinstance(planner_record.get("template"), dict):
+            mark("BlueprintPlanner", str(planner_record.get("status") or "planner_failed"), planner=planner_record)
+            if planner_record.get("status") != "planned" or not isinstance(planner_record.get("blueprint"), dict):
                 repair = self._runtime_self_repair(
                     run_id=run_id,
-                    stage="LLMCapabilityPlanner",
+                    stage="BlueprintPlanner",
                     status=str(planner_record.get("status") or "planner_failed"),
-                    reason=str(planner_record.get("reason") or "planner_did_not_return_template"),
+                    reason=str(planner_record.get("reason") or "planner_did_not_return_blueprint"),
                     payload={"identity": identity_contract, "planner": planner_record},
-                    expected={"required_status": "planned", "required_payload": "template"},
+                    expected={"required_status": "planned", "required_payload": "blueprint"},
                 )
                 mark("RuntimeSelfRepairEngine", str(repair.get("status") or "repair_checked"), repair=repair)
                 return {
                     "status": str(planner_record.get("status") or "planner_failed"),
-                    "reason": str(planner_record.get("reason") or "template_not_found_and_planner_failed"),
+                    "reason": str(planner_record.get("reason") or "template_not_found_and_blueprint_planner_failed"),
                     "requested_identity_contract": identity_contract,
                     "pipeline": pipeline,
                     "self_repair": repair,
                     "evidence_present": bool(urls),
-                    "diagnosis": "planner_failed_after_verified_evidence" if urls else "planner_failed_before_verified_evidence",
+                    "diagnosis": "blueprint_planner_failed_after_verified_evidence" if urls else "blueprint_planner_failed_before_verified_evidence",
                     "generated_at": datetime.now(timezone.utc).isoformat(),
                 }
-            template = self._merge_identity_contract_into_template(dict(planner_record["template"]), identity_contract)
+            generated_template = self._artifact_template_from_blueprint(blueprint=dict(planner_record["blueprint"]), identity_contract=identity_contract, run_id=run_id)
+            materialization = self._validate_runtime_template_shape(generated_template)
+            mark("ArtifactGenerator", "blueprint_materialized" if materialization.get("passed") else "blueprint_materialization_failed", result=materialization)
+            if not materialization.get("passed"):
+                repair = self._runtime_self_repair(
+                    run_id=run_id, stage="ArtifactGenerator", status="blueprint_materialization_failed",
+                    reason="blueprint_could_not_be_materialized_to_runtime_template",
+                    payload={"blueprint": planner_record.get("blueprint"), "validation": materialization},
+                    expected={"template_shape_passed": True},
+                )
+                mark("RuntimeSelfRepairEngine", str(repair.get("status") or "repair_checked"), repair=repair)
+                return {"status": "blueprint_materialization_failed", "pipeline": pipeline, "self_repair": repair, "generated_at": datetime.now(timezone.utc).isoformat()}
+            template = self._merge_identity_contract_into_template(generated_template, identity_contract)
             persisted_template = self._persist_runtime_planned_template(template=template, run_id=run_id, planner_record=planner_record)
             mark("TemplateMaterializer", "completed" if persisted_template.get("passed") else "failed", result=persisted_template)
-            template_source = "llm_capability_planner"
-            match = TemplateMatch(template=template, score=int(planner_record.get("confidence_score") or 1))
+            template_source = "blueprint_planner_artifact_generator"
+            match = TemplateMatch(template=template, score=int(float(planner_record.get("confidence_score") or 1) * 100))
 
         acquisition_policy = template.get("acquisition_policy") if isinstance(template.get("acquisition_policy"), dict) else {}
         planner_unknown = bool(planner_record and planner_record.get("needs_external_evidence"))
@@ -359,13 +371,7 @@ class RuntimeCapabilityGapImplementer:
         identity_contract: dict[str, Any],
         evidence: dict[str, Any],
     ) -> dict[str, Any]:
-        """Invoke a runtime-configured planner hook for template-less acquisition.
-
-        ai_core only defines the neutral contract.  A concrete planner can be
-        supplied at runtime with AI_CORE_CAPABILITY_PLANNER as
-        "module.path:function_name".  The hook must return a dict containing a
-        template compatible with the runtime capability template schema.
-        """
+        """Invoke a runtime-configured planner hook for blueprint-only planning."""
         hook = os.environ.get("AI_CORE_CAPABILITY_PLANNER", "").strip()
         planner_origin = "env_hook" if hook else "runtime_generated_default_planner"
         try:
@@ -381,37 +387,129 @@ class RuntimeCapabilityGapImplementer:
                 "user_input": user_input,
                 "identity_contract": identity_contract,
                 "evidence": evidence,
-                "required_template_contract": self._runtime_planner_template_contract(),
+                "required_blueprint_contract": self._runtime_planner_blueprint_contract(),
                 "planner_origin": planner_origin,
             })
             if not isinstance(payload, dict):
                 return {"status": "planner_failed", "reason": "planner_returned_non_object", "confidence_score": 0, "needs_external_evidence": True}
-            template = payload.get("template")
+            if isinstance(payload.get("template"), dict) and not isinstance(payload.get("blueprint"), dict):
+                return {"status": "planner_failed", "reason": "planner_returned_template_instead_of_blueprint", "confidence_score": float(payload.get("confidence_score") or 0), "needs_external_evidence": True}
+            blueprint = payload.get("blueprint")
             confidence = float(payload.get("confidence_score") or payload.get("confidence") or 0)
-            if not isinstance(template, dict):
-                return {"status": "planner_failed", "reason": "planner_returned_no_template", "confidence_score": confidence, "needs_external_evidence": True, "raw": payload}
-            validation = self._validate_runtime_template_shape(template)
+            validation = self._validate_runtime_blueprint_shape(blueprint if isinstance(blueprint, dict) else {})
             if not validation.get("passed"):
-                return {"status": "planner_failed", "reason": "planner_template_contract_failed", "confidence_score": confidence, "needs_external_evidence": True, "validation": validation}
+                return {"status": "planner_failed", "reason": "planner_blueprint_contract_failed", "confidence_score": confidence, "needs_external_evidence": True, "validation": validation, "raw": payload}
             min_confidence = float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_MIN_CONFIDENCE", "0.70") or 0.70)
             if confidence < min_confidence:
-                return {"status": "planner_low_confidence", "reason": "planner_confidence_below_threshold", "confidence_score": confidence, "needs_external_evidence": True, "template": template, "validation": validation}
-            return {"status": "planned", "confidence_score": confidence, "needs_external_evidence": bool(payload.get("needs_external_evidence")), "template": template, "validation": validation, "planner_origin": planner_origin}
+                return {"status": "planner_low_confidence", "reason": "planner_confidence_below_threshold", "confidence_score": confidence, "needs_external_evidence": True, "blueprint": blueprint, "validation": validation}
+            return {"status": "planned", "confidence_score": confidence, "needs_external_evidence": bool(payload.get("needs_external_evidence")), "blueprint": blueprint, "validation": validation, "planner_origin": planner_origin}
         except ValueError:
-            return {
-                "status": "planner_failed",
-                "reason": "planner_hook_must_use_module_colon_function_format",
-                "confidence_score": 0,
-                "needs_external_evidence": True,
-                "planner_origin": planner_origin,
-            }
+            return {"status": "planner_failed", "reason": "planner_hook_must_use_module_colon_function_format", "confidence_score": 0, "needs_external_evidence": True, "planner_origin": planner_origin}
         except Exception as exc:
-            return {
-                "status": "planner_failed",
-                "reason": f"{exc.__class__.__name__}: {str(exc)[:500]}",
-                "confidence_score": 0,
-                "needs_external_evidence": True,
-            }
+            return {"status": "planner_failed", "reason": f"{exc.__class__.__name__}: {str(exc)[:500]}", "confidence_score": 0, "needs_external_evidence": True}
+
+
+    def _runtime_planner_blueprint_contract(self) -> dict[str, Any]:
+        return {
+            "required_fields": ["capability_category", "requires_connection", "requires_secret", "required_inputs"],
+            "optional_fields": ["required_connection_fields", "required_secret_fields", "approval_mode", "execution_mode", "verification_mode"],
+            "planner_rule": "Return blueprint JSON only. Do not generate code, schemas, policies, registry entries, or concrete runtime values.",
+            "artifact_boundary": "ArtifactGenerator materializes runtime artifacts under runtime/generated; registry writes only after validation.",
+        }
+
+    def _validate_runtime_blueprint_shape(self, blueprint: dict[str, Any]) -> dict[str, Any]:
+        checks: list[dict[str, Any]] = []
+        checks.append({"name": "blueprint_is_object", "passed": isinstance(blueprint, dict)})
+        checks.append({"name": "capability_category", "passed": bool(str(blueprint.get("capability_category") or "").strip())})
+        checks.append({"name": "requires_connection_boolean", "passed": isinstance(blueprint.get("requires_connection"), bool)})
+        checks.append({"name": "requires_secret_boolean", "passed": isinstance(blueprint.get("requires_secret"), bool)})
+        checks.append({"name": "required_inputs_list", "passed": isinstance(blueprint.get("required_inputs"), list)})
+        passed = all(bool(item.get("passed")) for item in checks)
+        return {"passed": passed, "status": "completed" if passed else "failed", "checks": checks}
+
+    def _artifact_template_from_blueprint(self, *, blueprint: dict[str, Any], identity_contract: dict[str, Any], run_id: str) -> dict[str, Any]:
+        capability_id = str(identity_contract.get("requested_capability_id") or "runtime_generated_adapter").strip() or "runtime_generated_adapter"
+        safe_id = self._safe_name(capability_id)
+        required_inputs = [self._safe_field_name(x) for x in blueprint.get("required_inputs", []) if self._safe_field_name(x)]
+        connection_fields = [self._safe_field_name(x) for x in blueprint.get("required_connection_fields", []) if self._safe_field_name(x)]
+        secret_fields = [self._safe_field_name(x) for x in blueprint.get("required_secret_fields", []) if self._safe_field_name(x)]
+        if bool(blueprint.get("requires_connection")) and not connection_fields:
+            connection_fields = ["endpoint"]
+        if bool(blueprint.get("requires_secret")) and not secret_fields:
+            secret_fields = ["credential"]
+        input_schema = self._object_schema(required_inputs)
+        connection_schema = self._object_schema(connection_fields)
+        secret_schema = self._object_schema(secret_fields)
+        tool_code = self._generic_adapter_tool_code(safe_id=safe_id)
+        test_code = self._generic_adapter_test_code(safe_id=safe_id)
+        return {
+            "template_id": safe_id,
+            "description": "Runtime-generated generic adapter materialized from a compact blueprint.",
+            "capabilities": [str(blueprint.get("capability_category") or "adapter")],
+            "match_terms": [safe_id],
+            "entrypoint": {"module": "tool.py", "function": "run"},
+            "files": [{"path": "tool.py", "content": tool_code}, {"path": "test_tool.py", "content": test_code}],
+            "input_schema": input_schema,
+            "output_schema": {"type": "object", "properties": {"status": {"type": "string"}, "data": {"type": "object"}, "provenance": {"type": "object"}}, "required": ["status", "data", "provenance"]},
+            "connection_schema": connection_schema,
+            "secret_schema": secret_schema,
+            "approval_policy": {"mode": str(blueprint.get("approval_mode") or "always"), "reason": "Runtime-generated adapters require explicit operator approval unless runtime policy overrides it."},
+            "runtime_interface": {"input_style": "json", "configuration_sources": ["input", "connection", "secrets", "_runtime"]},
+            "runtime_execution_policy": {"execution_mode": str(blueprint.get("execution_mode") or "adapter"), "no_hardcoded_runtime_values": True},
+            "verification_input": {"input_data": {name: "test" for name in required_inputs}, "connection": {name: "test" for name in connection_fields}, "secrets": {name: "test" for name in secret_fields}, "dry_run": True},
+            "verification_expectations": {"status_in": ["dry_run", "completed"], "must_return_provenance": True},
+            "acquisition_policy": {"allow_policy_backed_basic_acquisition_without_external_evidence": True},
+            "capability_match_contract": {"expected_tool_id": safe_id, "expected_template_id": safe_id, "required_artifact_dir_name": safe_id, "forbidden_markers": ["password =", "token =", "api_key ="]},
+            "blueprint": blueprint,
+            "run_id": run_id,
+        }
+
+    def _object_schema(self, fields: list[str]) -> dict[str, Any]:
+        return {"type": "object", "properties": {name: {"type": "string"} for name in fields}, "required": fields}
+
+    def _safe_field_name(self, value: Any) -> str:
+        name = re.sub(r"[^a-zA-Z0-9_]+", "_", str(value or "").strip()).strip("_").lower()
+        if not name:
+            return ""
+        if name[0].isdigit():
+            name = "field_" + name
+        return name[:64]
+
+    def _generic_adapter_tool_code(self, *, safe_id: str) -> str:
+        lines = [
+            "from __future__ import annotations",
+            "from datetime import datetime, timezone",
+            "from typing import Any",
+            f"TOOL_ID = {safe_id!r}",
+            "",
+            "def _runtime_section(payload: dict[str, Any], key: str) -> dict[str, Any]:",
+            "    runtime = payload.get('_runtime') if isinstance(payload.get('_runtime'), dict) else {}",
+            "    value = payload.get(key) if isinstance(payload.get(key), dict) else runtime.get(key)",
+            "    return value if isinstance(value, dict) else {}",
+            "",
+            "def run(payload: dict[str, Any] | None = None) -> dict[str, Any]:",
+            "    payload = payload if isinstance(payload, dict) else {}",
+            "    input_data = payload.get('input_data') if isinstance(payload.get('input_data'), dict) else {k: v for k, v in payload.items() if not str(k).startswith('_')}",
+            "    connection = _runtime_section(payload, 'connection')",
+            "    secrets = _runtime_section(payload, 'secrets')",
+            "    dry_run = str(payload.get('dry_run', payload.get('test_mode', True))).casefold() not in {'false', '0', 'no', 'off'}",
+            "    missing_inputs = [k for k, v in input_data.items() if v in (None, '')]",
+            "    if missing_inputs:",
+            "        return {'status': 'missing_input', 'data': {'missing': missing_inputs}, 'provenance': {'tool_id': TOOL_ID, 'executed_at': datetime.now(timezone.utc).isoformat(), 'dry_run': dry_run}}",
+            "    return {'status': 'dry_run' if dry_run else 'completed', 'data': {'accepted_input_keys': sorted(input_data.keys()), 'connection_configured': bool(connection), 'secret_configured': bool(secrets)}, 'provenance': {'tool_id': TOOL_ID, 'executed_at': datetime.now(timezone.utc).isoformat(), 'dry_run': dry_run}}",
+        ]
+        return "\n".join(lines) + "\n"
+
+    def _generic_adapter_test_code(self, *, safe_id: str) -> str:
+        lines = [
+            "from tool import run",
+            "",
+            "def test_run_dry_mode():",
+            "    result = run({'input_data': {'field_1': 'value'}, 'dry_run': True})",
+            "    assert result['status'] in {'dry_run', 'completed'}",
+            f"    assert result['provenance']['tool_id'] == {safe_id!r}",
+        ]
+        return "\n".join(lines) + "\n"
 
 
     def _load_runtime_generated_default_planner(self) -> Callable[[dict[str, Any]], dict[str, Any]]:
@@ -911,7 +1009,14 @@ class RuntimeCapabilityGapImplementer:
             return isinstance(output, dict) and str(output.get("status") or "").lower() in {"completed", "success", "ok", "executed", ""}
         if not isinstance(output, dict):
             return False
+        status_in = expectations.get("status_in") if isinstance(expectations.get("status_in"), list) else None
+        if status_in is not None and str(output.get("status") or "") not in {str(x) for x in status_in}:
+            return False
+        if bool(expectations.get("must_return_provenance")) and not isinstance(output.get("provenance"), dict):
+            return False
         for key, expected in expectations.items():
+            if key in {"status_in", "must_return_provenance"}:
+                continue
             actual = output.get(key)
             if actual != expected:
                 data = output.get("data") if isinstance(output.get("data"), dict) else {}

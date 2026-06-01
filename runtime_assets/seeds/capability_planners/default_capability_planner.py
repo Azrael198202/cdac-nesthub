@@ -23,7 +23,7 @@ def plan(payload: dict[str, Any]) -> dict[str, Any]:
     request_text = str(payload.get("user_input") or "")
     identity = payload.get("identity_contract") if isinstance(payload.get("identity_contract"), dict) else {}
     evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
-    contract = payload.get("required_template_contract")
+    contract = payload.get("required_blueprint_contract") or payload.get("required_template_contract")
 
     model_payload = _try_model_planner(
         request_text=request_text,
@@ -31,7 +31,7 @@ def plan(payload: dict[str, Any]) -> dict[str, Any]:
         evidence=evidence,
         contract=contract,
     )
-    if isinstance(model_payload, dict) and isinstance(model_payload.get("template"), dict):
+    if isinstance(model_payload, dict) and isinstance(model_payload.get("blueprint"), dict):
         model_payload.setdefault("status", "planned")
         model_payload.setdefault("confidence_score", 0.76)
         model_payload.setdefault("needs_external_evidence", False)
@@ -40,7 +40,7 @@ def plan(payload: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "status": "planner_failed",
-        "reason": "local_model_template_unavailable_or_invalid",
+        "reason": "local_model_blueprint_unavailable_or_invalid",
         "confidence_score": 0,
         "needs_external_evidence": True,
         "model_planner_attempt": model_payload if isinstance(model_payload, dict) else {"status": "skipped"},
@@ -61,7 +61,7 @@ def _try_model_planner(*, request_text: str, identity: dict[str, Any], evidence:
         timeout=float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_TIMEOUT", "45")),
     )
     attempts.append(first)
-    if isinstance(first.get("template"), dict):
+    if isinstance(first.get("blueprint"), dict):
         return first
 
     # Small local models sometimes return an empty response when Ollama JSON mode
@@ -75,12 +75,12 @@ def _try_model_planner(*, request_text: str, identity: dict[str, Any], evidence:
         timeout=float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_COMPACT_TIMEOUT", os.environ.get("AI_CORE_CAPABILITY_PLANNER_TIMEOUT", "45"))),
     )
     attempts.append(retry)
-    if isinstance(retry.get("template"), dict):
+    if isinstance(retry.get("blueprint"), dict):
         retry["attempts"] = attempts
         retry["compact_retry_used"] = True
         retry["model_source"] = model_source
         return retry
-    return {"status": "planner_failed", "reason": str(retry.get("reason") or first.get("reason") or "model_returned_no_valid_template"), "model": model, "model_source": model_source, "attempts": attempts}
+    return {"status": "planner_failed", "reason": str(retry.get("reason") or first.get("reason") or "model_returned_no_valid_blueprint"), "model": model, "model_source": model_source, "attempts": attempts}
 
 
 def _resolve_planner_model() -> tuple[str, str]:
@@ -146,14 +146,14 @@ def _call_ollama_json_planner(*, host: str, model: str, prompt: str, force_json:
         parsed = _parse_json_object(text)
         if not isinstance(parsed, dict):
             return {"status": "planner_failed", "reason": "model_returned_non_json", "raw_excerpt": text[:500], "model": model, "force_json": force_json}
-        template = parsed.get("template") if isinstance(parsed.get("template"), dict) else parsed
-        if not isinstance(template, dict):
-            return {"status": "planner_failed", "reason": "model_returned_no_template", "raw_excerpt": text[:500], "model": model, "force_json": force_json}
+        blueprint = parsed.get("blueprint") if isinstance(parsed.get("blueprint"), dict) else parsed
+        if not isinstance(blueprint, dict):
+            return {"status": "planner_failed", "reason": "model_returned_no_blueprint", "raw_excerpt": text[:500], "model": model, "force_json": force_json}
         return {
             "status": "planned",
             "confidence_score": float(parsed.get("confidence_score") or parsed.get("confidence") or 0.76),
             "needs_external_evidence": _to_bool(parsed.get("needs_external_evidence", False), default=False),
-            "template": template,
+            "blueprint": blueprint,
             "model": model,
             "force_json": force_json,
         }
@@ -164,81 +164,24 @@ def _call_ollama_json_planner(*, host: str, model: str, prompt: str, force_json:
 
 
 def _model_prompt(*, request_text: str, identity: dict[str, Any], evidence: dict[str, Any], contract: Any) -> str:
-    optimized = evidence.get("optimized_evidence") if isinstance(evidence.get("optimized_evidence"), dict) else {}
-    evidence_pack = []
-    if isinstance(evidence.get("evidence_pack"), list):
-        evidence_pack = evidence.get("evidence_pack")
-    elif isinstance(optimized.get("evidence_pack"), list):
-        evidence_pack = optimized.get("evidence_pack")
-    evidence_text = json.dumps({
-        "urls": (evidence.get("urls") if isinstance(evidence.get("urls"), list) else [])[:5],
-        "evidence_pack": evidence_pack[:6],
-        "trusted_summary": optimized.get("summary") if isinstance(optimized, dict) else None,
-    }, ensure_ascii=False)[:2200]
-    compact_request = str(request_text or "")[:1600]
-    compact_contract = _compact_contract(contract)
     return (
-        "You are a runtime capability template planner. Return ONLY one JSON object. "
-        "Do not include markdown. Do not ask questions. "
-        "Generate a sandbox-verifiable Python capability template from the user request and evidence. "
-        "Do not invent fixed runtime values. Do not hardcode endpoints, credentials, addresses, tokens, paths, or user data. "
-        "Runtime values must be declared in JSON schemas and supplied at execution time. "
-        "Prefer standard library only when requested. External packages must be declared as dependencies. "
-        "The JSON object must contain: confidence_score, needs_external_evidence, template. "
-        "template must contain: template_id, description, capabilities, match_terms, entrypoint, files, "
-        "input_schema, output_schema, connection_schema, secret_schema, approval_policy, runtime_interface, "
-        "runtime_execution_policy, verification_input, verification_expectations, acquisition_policy, capability_match_contract. "
-        "files must contain one Python implementation file exposing the entrypoint function and one isolated test file. "
-        "Sandbox verification must not contact external services and must use declared test-mode input. "
-        "Live execution must be possible when the user passes false boolean values for test-mode fields and confirms approval. "
-        "Generated Python must parse booleans robustly because browser forms may pass strings such as true, false, 1, 0, yes, no. "
-        "Generated code should also accept runtime configuration from either top-level connection/secrets objects or _runtime.connection/_runtime.secrets. "
-        "Use neutral validation, structured errors, and provenance-friendly outputs.\n\n"
-        f"Required neutral contract:\n{json.dumps(compact_contract, ensure_ascii=False)}\n\n"
-        f"Identity contract:\n{json.dumps(identity, ensure_ascii=False)}\n\n"
-        f"Evidence summary:\n{evidence_text}\n\n"
-        f"User request:\n{compact_request}"
+        "Generate ONLY one valid JSON object. No markdown. "
+        "The object must contain confidence_score, needs_external_evidence, and blueprint. "
+        "blueprint fields: capability_category, requires_connection, requires_secret, required_inputs, "
+        "required_connection_fields, required_secret_fields, approval_mode, execution_mode, verification_mode. "
+        "Use neutral field names. Do not generate code. Do not generate schemas. Do not hardcode runtime values.\n"
+        f"Contract: {json.dumps(_compact_contract(contract), ensure_ascii=False)[:700]}\n"
+        f"Identity: {json.dumps(identity, ensure_ascii=False)[:500]}\n"
+        f"Request: {str(request_text or '')[:900]}"
     )
-
-
 
 def _compact_model_prompt(*, request_text: str, identity: dict[str, Any], evidence: dict[str, Any], contract: Any) -> str:
-    optimized = evidence.get("optimized_evidence") if isinstance(evidence.get("optimized_evidence"), dict) else {}
-    evidence_pack = []
-    if isinstance(evidence.get("evidence_pack"), list):
-        evidence_pack = evidence.get("evidence_pack")
-    elif isinstance(optimized.get("evidence_pack"), list):
-        evidence_pack = optimized.get("evidence_pack")
-    minimal_evidence = []
-    for item in evidence_pack[:3]:
-        if not isinstance(item, dict):
-            continue
-        minimal_evidence.append({
-            "url": item.get("source_url") or item.get("url"),
-            "facts": item.get("extracted_facts") or item.get("facts") or item.get("text"),
-            "hints": item.get("implementation_hints") or item.get("hints"),
-        })
-    compact_payload = {
-        "identity": identity,
-        "request": str(request_text or "")[:900],
-        "evidence": minimal_evidence,
-        "contract_keys": list(contract.keys())[:12] if isinstance(contract, dict) else [],
-    }
     return (
-        "Return ONLY valid JSON. No markdown. No explanation. "
-        "Create one runtime capability template. "
-        "Do not hardcode runtime values. Put runtime values in schemas. "
-        "Use only neutral generic structure. "
-        "Required shape: {\"confidence_score\":0.0-1.0,\"needs_external_evidence\":false,\"template\":{...}}. "
-        "The template must include template_id, description, capabilities, match_terms, entrypoint, files, "
-        "input_schema, output_schema, connection_schema, secret_schema, approval_policy, runtime_interface, "
-        "runtime_execution_policy, verification_input, verification_expectations, acquisition_policy, capability_match_contract. "
-        "files must include one Python implementation and one isolated unit test. "
-        "Sandbox verification must not call external services. "
-        "Boolean form values may arrive as strings and must be parsed robustly.\n"
-        f"DATA={json.dumps(compact_payload, ensure_ascii=False)}"
+        "Return JSON only: {\"confidence_score\":0.0-1.0,\"needs_external_evidence\":false,\"blueprint\":{...}}. "
+        "Blueprint only, no code, no implementation template. "
+        "Required blueprint keys: capability_category, requires_connection, requires_secret, required_inputs. "
+        f"Request: {str(request_text or '')[:600]}"
     )
-
 
 def _compact_contract(contract: Any) -> Any:
     if not isinstance(contract, dict):

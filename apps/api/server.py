@@ -25,7 +25,7 @@ from ai_core.config.paths import RUNTIME_DOWNLOADS
 from ai_core.tools.runtime_registered_tool_service import RuntimeRegisteredToolService
 from ai_core.runtime.approval_policy_store import RuntimeApprovalPolicyStore
 from ai_core.graph.graph_visualization import GraphVisualStateBuilder
-from ai_core.runtime.observability.runtime_console import emit_console_event, list_console_sources, read_console_source
+from ai_core.runtime.observability.runtime_console import emit_console_event, list_console_sources, read_console_source, iter_console_events, list_runtime_explorer_tree, resolve_runtime_explorer_file
 
 import traceback
 approval_learning = ApprovalLearningService()
@@ -274,6 +274,43 @@ async def runtime_console_sources():
 @app.get("/api/runtime-console/read")
 async def runtime_console_read(source: str | None = None, cursor: int = 0, limit_bytes: int = 65536, tail: bool = False):
     return JSONResponse(read_console_source(source, cursor=cursor, limit_bytes=limit_bytes, tail=tail))
+
+
+
+
+@app.get("/runtime-explorer")
+@app.get("/runtime_explorer")
+async def runtime_explorer_home():
+    html = open("apps/web/runtime_explorer.html", "r", encoding="utf-8").read()
+    return HTMLResponse(html, headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache", "Expires": "0"})
+
+
+@app.get("/api/runtime-console/stream")
+async def runtime_console_stream(source: str | None = None, cursor: int = 0):
+    return StreamingResponse(iter_console_events(source=source, cursor=cursor), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/runtime-explorer/tree")
+async def runtime_explorer_tree(root: str = "runtime"):
+    return JSONResponse(list_runtime_explorer_tree(root=root))
+
+
+@app.get("/api/runtime-explorer/download")
+async def runtime_explorer_download(path: str):
+    resolved = resolve_runtime_explorer_file(path)
+    if resolved is None or not resolved.exists() or not resolved.is_file():
+        return JSONResponse({"ok": False, "status": "not_found"}, status_code=404)
+    return FileResponse(resolved, filename=resolved.name)
+
+
+@app.delete("/api/runtime-explorer/delete")
+async def runtime_explorer_delete(path: str):
+    resolved = resolve_runtime_explorer_file(path)
+    if resolved is None or not resolved.exists() or not resolved.is_file():
+        return JSONResponse({"ok": False, "status": "not_found"}, status_code=404)
+    resolved.unlink()
+    emit_console_event(area="runtime_explorer", event="FILE_DELETED", status="completed", message=path)
+    return JSONResponse({"ok": True, "status": "deleted", "path": path})
 
 
 @app.get("/api/graph-runtime/state")

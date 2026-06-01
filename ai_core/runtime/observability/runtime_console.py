@@ -168,3 +168,112 @@ def _redact(text: str) -> str:
     for pat in patterns:
         out = re.sub(pat, lambda m: (m.group(1) + m.group(2) + "***REDACTED***") if len(m.groups()) >= 2 else m.group(1) + "***REDACTED***", out)
     return out
+
+
+def iter_console_events(*, source: str | None = None, cursor: int = 0, poll_interval: float = 1.0):
+    """Yield Server-Sent Events from a safe runtime text source.
+
+    This is a read-only operator stream. It tails runtime-owned files and emits
+    normalized event payloads without changing workflow semantics.
+    """
+    source = source or "runtime/logs/runtime_console.jsonl"
+    safe = _safe_source_path(source)
+    if safe is None:
+        payload = {"ts": datetime.now(timezone.utc).isoformat(), "level": "ERROR", "area": "RUNTIME", "event": "STREAM_SOURCE_REJECTED", "message": "Unsafe runtime console source"}
+        yield f"event: runtime\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        return
+    pos = max(0, int(cursor or 0))
+    while True:
+        try:
+            if not safe.exists():
+                time.sleep(max(0.2, float(poll_interval or 1.0)))
+                continue
+            size = safe.stat().st_size
+            if pos > size:
+                pos = 0
+            with safe.open("rb") as fh:
+                fh.seek(pos)
+                raw = fh.read(65536)
+                pos = fh.tell()
+            if raw:
+                text = _redact(raw.decode("utf-8", errors="replace"))
+                for line in text.splitlines():
+                    payload = _normalize_console_line(line, cursor=pos, source=source)
+                    yield f"event: runtime\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            else:
+                heartbeat = {"ts": datetime.now(timezone.utc).isoformat(), "level": "DEBUG", "area": "RUNTIME", "event": "HEARTBEAT", "message": ""}
+                yield f": {json.dumps(heartbeat, ensure_ascii=False)}\n\n"
+                time.sleep(max(0.2, float(poll_interval or 1.0)))
+        except GeneratorExit:
+            return
+        except Exception as exc:
+            payload = {"ts": datetime.now(timezone.utc).isoformat(), "level": "ERROR", "area": "RUNTIME", "event": "STREAM_ERROR", "message": str(exc)[:500]}
+            yield f"event: runtime\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            time.sleep(max(0.5, float(poll_interval or 1.0)))
+
+
+def _normalize_console_line(line: str, *, cursor: int, source: str) -> dict[str, Any]:
+    try:
+        obj = json.loads(line)
+        if isinstance(obj, dict):
+            status = str(obj.get("status") or obj.get("level") or "info").upper()
+            return {
+                "ts": obj.get("ts") or datetime.now(timezone.utc).isoformat(),
+                "level": _status_to_level(status),
+                "area": str(obj.get("area") or "RUNTIME").upper(),
+                "event": str(obj.get("event") or obj.get("stage") or "EVENT").upper(),
+                "message": str(obj.get("message") or ""),
+                "data": _redact_data(obj.get("data") if isinstance(obj.get("data"), dict) else {}),
+                "cursor": cursor,
+                "source": source,
+            }
+    except Exception:
+        pass
+    return {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "level": "INFO",
+        "area": "RUNTIME",
+        "event": "RAW_LINE",
+        "message": _redact(line),
+        "cursor": cursor,
+        "source": source,
+    }
+
+
+def _status_to_level(status: str) -> str:
+    s = str(status or "").casefold()
+    if any(x in s for x in ("fail", "error", "blocked", "rejected")):
+        return "ERROR"
+    if any(x in s for x in ("warn", "missing", "timeout", "repair")):
+        return "WARN"
+    if any(x in s for x in ("debug", "heartbeat")):
+        return "DEBUG"
+    return "INFO"
+
+
+def list_runtime_explorer_tree(*, root: str = "runtime", max_entries: int = 500) -> dict[str, Any]:
+    allowed_roots = {"runtime": RUNTIME_ROOT}
+    base = allowed_roots.get(str(root or "runtime"), RUNTIME_ROOT).resolve()
+    entries: list[dict[str, Any]] = []
+    if not base.exists():
+        return {"ok": True, "root": root, "entries": entries}
+    for path in sorted(base.rglob("*")):
+        if len(entries) >= max_entries:
+            break
+        try:
+            rel = path.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+            stat = path.stat()
+            entries.append({
+                "path": rel,
+                "name": path.name,
+                "type": "directory" if path.is_dir() else "file",
+                "size_bytes": 0 if path.is_dir() else stat.st_size,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            })
+        except Exception:
+            continue
+    return {"ok": True, "root": root, "entries": entries}
+
+
+def resolve_runtime_explorer_file(path_value: str) -> Path | None:
+    return _safe_source_path(path_value)

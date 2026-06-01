@@ -5,74 +5,53 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Runtime Console</title>
   <style>
-    :root{--bg:#050608;--panel:#080b10;--panel2:#0d1117;--line:#1f2937;--text:#d7f7d7;--muted:#7f8c9a;--accent:#49d169;--cyan:#63d6ff;--warn:#ffcc66;--err:#ff6b6b;--info:#9ecbff}
-    *{box-sizing:border-box} body{margin:0;background:#050608;color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;height:100vh;display:grid;grid-template-columns:330px 1fr;overflow:hidden}
+    :root{--bg:#050608;--panel:#080b10;--line:#1f2937;--text:#d7f7d7;--muted:#7f8c9a;--accent:#49d169;--cyan:#63d6ff;--warn:#ffcc66;--err:#ff6b6b}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;height:100vh;display:grid;grid-template-columns:250px 1fr;overflow:hidden}
     aside{background:#090c10;border-right:1px solid var(--line);padding:14px;overflow:auto} main{display:flex;flex-direction:column;min-width:0;background:#020403}
-    h1{font-size:16px;margin:0 0 12px;color:#f0fff0;letter-spacing:.2px}.badge{color:#061006;background:var(--accent);padding:2px 7px;border-radius:999px;font-size:11px}.hint{font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:12px}
-    .toolbar{display:flex;gap:8px;align-items:center;padding:10px 12px;border-bottom:1px solid #17202b;background:#070a0e}.bottom{border-top:1px solid #17202b;border-bottom:0}.prompt{color:var(--accent);font-weight:bold}.path{color:#d7f7d7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.toplink{color:#9ecbff;text-decoration:none;font-size:12px;margin-left:auto}
-    button,select,input{background:#0d1420;color:#e6edf3;border:1px solid #2a3442;border-radius:6px;padding:7px 9px;font-family:inherit;font-size:12px}button{cursor:pointer}button:hover{border-color:var(--accent);color:#fff}.toggle{display:inline-flex;gap:5px;align-items:center;color:#c9d1d9;font-size:12px}.toggle input{accent-color:var(--accent)}
-    .source{padding:9px 10px;border:1px solid #1d2633;border-radius:8px;margin:8px 0;cursor:pointer;color:#c9d1d9;background:#0b1017;word-break:break-all}.source:hover,.source.active{border-color:var(--accent);background:#0e1a12}.meta{color:var(--muted);font-size:11px;margin-top:5px}
+    h1{font-size:15px;margin:0 0 12px}.nav a,.nav button{display:block;width:100%;text-align:left;margin:6px 0;text-decoration:none}.nav .sep{height:1px;background:#1f2937;margin:12px 0}.badge{color:#061006;background:var(--accent);padding:2px 7px;border-radius:999px;font-size:11px}.hint{font-size:12px;color:var(--muted);line-height:1.5;margin:10px 0 14px}
+    button,a.btn,select,input{background:#0d1420;color:#e6edf3;border:1px solid #2a3442;border-radius:6px;padding:7px 9px;font-family:inherit;font-size:12px}button{cursor:pointer}button:hover,a.btn:hover{border-color:var(--accent);color:#fff}.toolbar{display:flex;gap:8px;align-items:center;padding:10px 12px;border-bottom:1px solid #17202b;background:#070a0e;flex-wrap:wrap}.bottom{border-top:1px solid #17202b;border-bottom:0}.prompt{color:var(--accent);font-weight:bold}.path{color:#d7f7d7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:360px}.toggle{display:inline-flex;gap:5px;align-items:center;color:#c9d1d9;font-size:12px}.toggle input{accent-color:var(--accent)}
     #console{flex:1;overflow:auto;padding:12px 14px;white-space:pre-wrap;line-height:1.38;background:#020403;font-size:12px;color:#b7f6b7;text-shadow:0 0 2px rgba(73,209,105,.15)}
-    .line{display:block;margin:0 0 1px}.ts{color:#6f7b88}.level-info{color:#7ee787}.level-ok{color:#49d169}.level-warn{color:#ffcc66}.level-err{color:#ff6b6b}.area{color:#63d6ff}.event{color:#c9d1d9}.msg{color:#d7f7d7}.data{color:#8b949e}.raw{color:#c9d1d9}.cmd{color:#49d169}.cursor{display:inline-block;background:#49d169;width:8px;height:14px;vertical-align:-2px;animation:blink 1s steps(1) infinite}@keyframes blink{50%{opacity:0}}
-    .status{color:var(--muted);font-size:12px}.ok{color:var(--accent)}.err{color:var(--err)}.warn{color:var(--warn)}
+    .line{display:block;margin:0 0 1px}.ts{color:#6f7b88}.INFO{color:#7ee787}.DEBUG{color:#8b949e}.WARN{color:#ffcc66}.ERROR{color:#ff6b6b}.area{color:#63d6ff}.event{color:#c9d1d9}.msg{color:#d7f7d7}.data{color:#8b949e}.status{color:var(--muted);font-size:12px}.ok{color:var(--accent)}.err{color:var(--err)}.warn{color:var(--warn)}
+    .cmdline{display:grid;grid-template-columns:120px 1fr;gap:8px;margin:8px 0}.cmdline label{font-size:11px;color:#8b949e;align-self:center}.cmdline input,.cmdline select{width:100%}
   </style>
 </head>
 <body>
   <aside>
-    <h1>Runtime Console <span class="badge">tail</span></h1>
-    <div class="hint">Linux terminal-style runtime log viewer. Shows runtime logs, traces, model downloads, GGUF imports, capability acquisition, and tool execution. Secrets are redacted by the API.</div>
-    <button onclick="loadSources()">refresh sources</button>
-    <button onclick="clearConsole()">clear view</button>
-    <div id="sources"></div>
+    <h1>Runtime Console <span class="badge">SSE</span></h1>
+    <div class="nav">
+      <button onclick="newSession()">New Session</button>
+      <div class="sep"></div>
+      <a class="btn" href="/graph-runtime">Graph Runtime</a>
+      <a class="btn" href="/runtime-console">Runtime Console</a>
+      <a class="btn" href="/runtime-explorer">Runtime Explorer</a>
+      <a class="btn" href="/settings">Settings</a>
+    </div>
+    <div class="hint">SSE-based runtime event stream. It behaves like <b>tail -f</b>:逐行显示、滚动条、自动滚动、暂停、过滤、搜索、导出。</div>
+    <div class="cmdline"><label>Source</label><select id="source" onchange="restartStream()"><option value="runtime/logs/runtime_console.jsonl">runtime_console</option></select></div>
+    <div class="cmdline"><label>Filter</label><input id="filter" placeholder="area / event / message" oninput="rerender()" /></div>
+    <div class="cmdline"><label>Search</label><input id="search" placeholder="highlight text" oninput="rerender()" /></div>
   </aside>
   <main>
     <div class="toolbar">
-      <span class="prompt">$</span>
-      <span class="path" id="current">runtime/logs/runtime_console.jsonl</span>
-      <label class="toggle"><input id="auto" type="checkbox" checked /> auto refresh</label>
-      <label class="toggle"><input id="pretty" type="checkbox" checked onchange="rerender()" /> terminal format</label>
-      <button onclick="tailSelected(true)">tail</button>
-      <button onclick="tailSelected(false)">read next</button>
-      <a class="toplink" href="/agent-studio">Agent Studio</a>
+      <span class="prompt">$</span><span class="path" id="current">runtime/logs/runtime_console.jsonl</span>
+      <label class="toggle"><input id="autoscroll" type="checkbox" checked /> Auto Scroll</label>
+      <button onclick="pauseStream()">Pause</button><button onclick="resumeStream()">Resume</button><button onclick="clearConsole()">Clear</button><button onclick="exportConsole()">Export</button>
     </div>
     <div id="console"></div>
-    <div class="toolbar bottom"><span class="status" id="status">ready</span><span class="prompt">$</span><span class="cursor"></span></div>
+    <div class="toolbar bottom"><span class="status" id="status">connecting</span></div>
   </main>
 <script>
-let selected='runtime/logs/runtime_console.jsonl';
-let cursor=0; let buffer='';
+let source='runtime/logs/runtime_console.jsonl'; let es=null; let paused=false; let events=[];
 function esc(s){return String(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 function setStatus(t,cls=''){const el=document.getElementById('status');el.className='status '+cls;el.textContent=t;}
-async function api(url){const r=await fetch(url,{cache:'no-store'}); if(!r.ok) throw new Error(await r.text()); return r.json();}
-function cls(status){const s=String(status||'').toLowerCase(); if(['failed','error','ng','blocked'].some(x=>s.includes(x))) return 'level-err'; if(['warn','missing','timeout'].some(x=>s.includes(x))) return 'level-warn'; if(['completed','success','planned','accepted','matched','registered'].some(x=>s.includes(x))) return 'level-ok'; return 'level-info';}
-function shortData(data){try{if(!data||Object.keys(data).length===0)return ''; let d=JSON.stringify(data); d=d.replace(/\\n/g,' '); return d.length>520?d.slice(0,520)+'…':d;}catch(e){return ''}}
-function renderTerminal(text){
-  const lines=text.split(/\n/); let out=[];
-  for(const line of lines){ if(!line) continue; let obj=null; try{obj=JSON.parse(line)}catch(e){}
-    if(obj&&obj.ts){const time=String(obj.ts).replace('T',' ').replace(/\.\d+\+00:00$/,'Z'); const status=String(obj.status||'info'); const c=cls(status); const data=shortData(obj.data||{}); out.push(`<span class="line"><span class="ts">${esc(time)}</span> <span class="${c}">${esc(status.toUpperCase())}</span> <span class="area">${esc(obj.area||'runtime')}</span> <span class="event">${esc(obj.event||'event')}</span> <span class="msg">${esc(obj.message||'')}</span>${data?` <span class="data">${esc(data)}</span>`:''}</span>`);
-    }else{out.push(`<span class="line raw">${esc(line)}</span>`)}
-  }
-  return out.join('\n');
-}
-function render(){const c=document.getElementById('console'); if(document.getElementById('pretty').checked){c.innerHTML=renderTerminal(buffer);}else{c.textContent=buffer;} c.scrollTop=c.scrollHeight;}
-function rerender(){render()}
-async function loadSources(){
-  try{const data=await api('/api/runtime-console/sources'); const box=document.getElementById('sources'); box.innerHTML='';
-    (data.sources||[]).forEach(s=>{const d=document.createElement('div'); d.className='source '+(s.path===selected?'active':''); d.onclick=()=>selectSource(s.path); d.innerHTML='<div>'+esc(s.path)+'</div><div class="meta">'+esc(s.type)+' · '+(s.size_bytes||0)+' bytes</div>'; box.appendChild(d);});
-    setStatus('sources loaded: '+(data.sources||[]).length,'ok');
-  }catch(e){setStatus('source load failed: '+e.message,'err')}
-}
-function selectSource(path){selected=path;cursor=0;buffer='';document.getElementById('current').textContent=path;render();loadSources();tailSelected(true);}
-function clearConsole(){buffer='';render();}
-async function tailSelected(tail){
-  try{const url='/api/runtime-console/read?source='+encodeURIComponent(selected)+'&cursor='+cursor+'&limit_bytes=65536&tail='+(tail?'true':'false'); const data=await api(url);
-    if(!data.ok){setStatus(data.status||'not found','warn'); return;}
-    cursor=data.next_cursor||cursor; const text=data.content||''; if(tail) buffer=''; if(text){buffer += text; render();}
-    setStatus('cursor '+cursor+' / '+(data.size_bytes||0)+' · '+new Date().toLocaleTimeString(),'ok');
-  }catch(e){setStatus('read failed: '+e.message,'err')}
-}
-setInterval(()=>{if(document.getElementById('auto').checked) tailSelected(false)},2000);
-loadSources().then(()=>tailSelected(true));
+async function loadSources(){try{const r=await fetch('/api/runtime-console/sources',{cache:'no-store'});const data=await r.json();const sel=document.getElementById('source');sel.innerHTML='';(data.sources||[]).forEach(s=>{const o=document.createElement('option');o.value=s.path;o.textContent=s.path;sel.appendChild(o)});sel.value=source;}catch(e){}}
+function format(e){const data=e.data&&Object.keys(e.data).length?` <span class="data">${esc(JSON.stringify(e.data)).slice(0,700)}</span>`:'';return `<span class="line"><span class="ts">${esc(String(e.ts||'').replace('T',' ').replace(/\.\d+.*/,''))}</span> <span class="${esc(e.level||'INFO')}">${esc(e.level||'INFO')}</span> <span class="area">${esc(e.area||'RUNTIME')}</span> <span class="event">${esc(e.event||'EVENT')}</span> <span class="msg">${esc(e.message||'')}</span>${data}</span>`}
+function rerender(){const f=document.getElementById('filter').value.toLowerCase();const q=document.getElementById('search').value.toLowerCase();let shown=events.filter(e=>!f||JSON.stringify(e).toLowerCase().includes(f)); if(q) shown=shown.filter(e=>JSON.stringify(e).toLowerCase().includes(q)); const box=document.getElementById('console');box.innerHTML=shown.map(format).join('\n'); if(document.getElementById('autoscroll').checked) box.scrollTop=box.scrollHeight; setStatus(`${shown.length}/${events.length} events · ${paused?'paused':'streaming'}`, paused?'warn':'ok');}
+function connect(){if(es) es.close(); source=document.getElementById('source').value||source;document.getElementById('current').textContent=source; es=new EventSource('/api/runtime-console/stream?source='+encodeURIComponent(source)); es.addEventListener('runtime',ev=>{if(paused)return; try{events.push(JSON.parse(ev.data)); if(events.length>3000)events=events.slice(-2500); rerender();}catch(e){}}); es.onerror=()=>setStatus('stream reconnecting','warn');}
+function restartStream(){events=[];rerender();connect()} function pauseStream(){paused=true;rerender()} function resumeStream(){paused=false;rerender()} function clearConsole(){events=[];rerender()}
+function exportConsole(){const blob=new Blob([events.map(e=>JSON.stringify(e)).join('\n')],{type:'application/jsonl'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='runtime-console-export.jsonl';a.click();URL.revokeObjectURL(a.href)}
+function newSession(){location.href='/agent-studio'}
+loadSources().then(connect);
 </script>
 </body>
 </html>
