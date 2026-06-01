@@ -190,9 +190,37 @@ class RuntimeCapabilityAcquisitionGate:
             {"name": "required_markers", "passed": not missing, "missing": missing},
             {"name": "forbidden_markers", "passed": not present_forbidden, "present": present_forbidden},
         ]
+
+        expected_tool_id = str(contract.get("expected_tool_id") or "").strip()
+        expected_template_id = str(contract.get("expected_template_id") or "").strip()
+        required_dir_name = str(contract.get("required_artifact_dir_name") or "").strip()
+        artifact_tool_id = str(artifact.get("tool_id") or "").strip()
+        template_id = str(template.get("template_id") or "").strip()
+        artifact_dir_name = Path(str(artifact.get("tool_dir") or artifact.get("artifact_dir") or "")).name if (artifact.get("tool_dir") or artifact.get("artifact_dir")) else ""
+        forbidden_tool_ids = [str(x).strip() for x in contract.get("forbidden_tool_ids", []) if str(x).strip()] if isinstance(contract.get("forbidden_tool_ids"), list) else []
+        identity_passed = True
+        if expected_tool_id:
+            ok = artifact_tool_id == expected_tool_id
+            identity_passed = identity_passed and ok
+            checks.append({"name": "expected_tool_id", "passed": ok, "expected": expected_tool_id, "actual": artifact_tool_id})
+        if expected_template_id:
+            ok = template_id == expected_template_id
+            identity_passed = identity_passed and ok
+            checks.append({"name": "expected_template_id", "passed": ok, "expected": expected_template_id, "actual": template_id})
+        if required_dir_name:
+            ok = artifact_dir_name == required_dir_name
+            identity_passed = identity_passed and ok
+            checks.append({"name": "required_artifact_dir_name", "passed": ok, "expected": required_dir_name, "actual": artifact_dir_name})
+        if forbidden_tool_ids:
+            present_ids = [x for x in forbidden_tool_ids if x in {artifact_tool_id, template_id, artifact_dir_name}]
+            ok = not present_ids
+            identity_passed = identity_passed and ok
+            checks.append({"name": "forbidden_tool_ids", "passed": ok, "present": present_ids})
+
+        passed = not missing and not present_forbidden and identity_passed
         return {
-            "passed": not missing and not present_forbidden,
-            "status": "completed" if not missing and not present_forbidden else "failed",
+            "passed": passed,
+            "status": "completed" if passed else "failed",
             "checks": checks,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }

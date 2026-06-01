@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -57,7 +58,8 @@ class RuntimeCapabilityGapImplementer:
                 "reason": "no_runtime_template_matched_requested_capability",
                 "template_path": str(self.template_path),
             }
-        template = match.template
+        identity_contract = self._extract_requested_identity_contract(user_input)
+        template = self._merge_identity_contract_into_template(match.template, identity_contract)
         acquisition_policy = template.get("acquisition_policy") if isinstance(template.get("acquisition_policy"), dict) else {}
         allow_policy_backed_basic = bool(acquisition_policy.get("allow_policy_backed_basic_acquisition_without_external_evidence"))
         if not urls and not allow_policy_backed_basic:
@@ -128,6 +130,7 @@ class RuntimeCapabilityGapImplementer:
         return {
             "status": status,
             "template_id": template.get("template_id"),
+            "requested_identity_contract": identity_contract if 'identity_contract' in locals() else None,
             "score": match.score,
             "dependency_resolution": dependency_resolution,
             "artifact": artifact if 'artifact' in locals() else None,
@@ -148,6 +151,64 @@ class RuntimeCapabilityGapImplementer:
             return []
         templates = data.get("templates") if isinstance(data, dict) else data
         return [x for x in templates if isinstance(x, dict)] if isinstance(templates, list) else []
+
+
+    def _extract_requested_identity_contract(self, user_input: str) -> dict[str, Any]:
+        """Extract capability identity requirements declared by the user prompt.
+
+        This stays generic: it looks for explicit identity language and simple
+        capability names in the request. Domain-specific markers such as host
+        names should be declared in the runtime template contract, not hardcoded
+        in ai_core.
+        """
+        text = str(user_input or "")
+        folded = text.casefold()
+        requested_id = ""
+        patterns = [
+            r"capability\s+id\s+must\s+be\s*[:：]?\s*([a-zA-Z0-9_\-]+)",
+            r"capability_id\s*[:=]\s*([a-zA-Z0-9_\-]+)",
+            r"runtime\s+capability\s+registered\s+as\s+([a-zA-Z0-9_\-]+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                requested_id = self._safe_name(match.group(1))
+                break
+        if not requested_id:
+            # Generic slug fallback for common "Acquire runtime capability: X" form.
+            title_match = re.search(r"Acquire\s+runtime\s+capability\s*:\s*\n?\s*([^\n.]+)", text, flags=re.IGNORECASE)
+            if title_match:
+                title = title_match.group(1).strip()
+                if title:
+                    requested_id = self._safe_name(title)
+        forbidden_ids: list[str] = []
+        for match in re.finditer(r"Do\s+not\s+(?:reuse|overwrite|register\s+this\s+capability\s+as)\s+([a-zA-Z0-9_\-]+)", text, flags=re.IGNORECASE):
+            value = self._safe_name(match.group(1))
+            if value and value not in forbidden_ids:
+                forbidden_ids.append(value)
+        return {
+            "requested_capability_id": requested_id,
+            "forbidden_capability_ids": forbidden_ids,
+            "explicit": bool(requested_id or forbidden_ids),
+            "raw_request_excerpt": text[:1000],
+        }
+
+    def _merge_identity_contract_into_template(self, template: dict[str, Any], identity_contract: dict[str, Any]) -> dict[str, Any]:
+        if not identity_contract.get("explicit"):
+            return template
+        merged = dict(template)
+        contract = dict(merged.get("capability_match_contract") if isinstance(merged.get("capability_match_contract"), dict) else {})
+        requested_id = str(identity_contract.get("requested_capability_id") or "").strip()
+        if requested_id:
+            contract["expected_tool_id"] = requested_id
+            contract["expected_template_id"] = requested_id
+            contract["required_artifact_dir_name"] = requested_id
+        forbidden_ids = identity_contract.get("forbidden_capability_ids") if isinstance(identity_contract.get("forbidden_capability_ids"), list) else []
+        if forbidden_ids:
+            existing = contract.get("forbidden_tool_ids") if isinstance(contract.get("forbidden_tool_ids"), list) else []
+            contract["forbidden_tool_ids"] = list(dict.fromkeys([*existing, *[str(x) for x in forbidden_ids if str(x)]]))
+        merged["capability_match_contract"] = contract
+        return merged
 
     def _select_template(self, user_input: str, templates: list[dict[str, Any]]) -> TemplateMatch | None:
         value = " " + user_input.casefold() + " "
@@ -414,7 +475,32 @@ class RuntimeCapabilityGapImplementer:
         present_forbidden = [str(marker) for marker in forbidden_markers if str(marker).casefold() in combined]
         checks.append({"name": "required_markers", "passed": not missing, "missing": missing})
         checks.append({"name": "forbidden_markers", "passed": not present_forbidden, "present": present_forbidden})
-        passed = not missing and not present_forbidden
+        expected_tool_id = str(contract.get("expected_tool_id") or "").strip()
+        actual_tool_id = str(artifact.get("tool_id") or template.get("template_id") or "").strip()
+        expected_template_id = str(contract.get("expected_template_id") or "").strip()
+        actual_template_id = str(template.get("template_id") or "").strip()
+        required_dir_name = str(contract.get("required_artifact_dir_name") or "").strip()
+        actual_dir_name = Path(str(artifact.get("tool_dir") or "")).name if artifact.get("tool_dir") else ""
+        forbidden_tool_ids = [str(x).strip() for x in contract.get("forbidden_tool_ids", []) if str(x).strip()] if isinstance(contract.get("forbidden_tool_ids"), list) else []
+        id_checks_passed = True
+        if expected_tool_id:
+            ok = actual_tool_id == expected_tool_id
+            id_checks_passed = id_checks_passed and ok
+            checks.append({"name": "expected_tool_id", "passed": ok, "expected": expected_tool_id, "actual": actual_tool_id})
+        if expected_template_id:
+            ok = actual_template_id == expected_template_id
+            id_checks_passed = id_checks_passed and ok
+            checks.append({"name": "expected_template_id", "passed": ok, "expected": expected_template_id, "actual": actual_template_id})
+        if required_dir_name:
+            ok = actual_dir_name == required_dir_name
+            id_checks_passed = id_checks_passed and ok
+            checks.append({"name": "required_artifact_dir_name", "passed": ok, "expected": required_dir_name, "actual": actual_dir_name})
+        if forbidden_tool_ids:
+            present_ids = [x for x in forbidden_tool_ids if x in {actual_tool_id, actual_template_id, actual_dir_name}]
+            ok = not present_ids
+            id_checks_passed = id_checks_passed and ok
+            checks.append({"name": "forbidden_tool_ids", "passed": ok, "present": present_ids})
+        passed = not missing and not present_forbidden and id_checks_passed
         report = {
             "passed": passed,
             "status": "completed" if passed else "failed",
