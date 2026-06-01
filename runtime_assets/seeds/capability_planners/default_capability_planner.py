@@ -156,6 +156,44 @@ def _model_prompt(*, request_text: str, identity: dict[str, Any], evidence: dict
 
 
 
+def _compact_model_prompt(*, request_text: str, identity: dict[str, Any], evidence: dict[str, Any], contract: Any) -> str:
+    optimized = evidence.get("optimized_evidence") if isinstance(evidence.get("optimized_evidence"), dict) else {}
+    evidence_pack = []
+    if isinstance(evidence.get("evidence_pack"), list):
+        evidence_pack = evidence.get("evidence_pack")
+    elif isinstance(optimized.get("evidence_pack"), list):
+        evidence_pack = optimized.get("evidence_pack")
+    minimal_evidence = []
+    for item in evidence_pack[:3]:
+        if not isinstance(item, dict):
+            continue
+        minimal_evidence.append({
+            "url": item.get("source_url") or item.get("url"),
+            "facts": item.get("extracted_facts") or item.get("facts") or item.get("text"),
+            "hints": item.get("implementation_hints") or item.get("hints"),
+        })
+    compact_payload = {
+        "identity": identity,
+        "request": str(request_text or "")[:900],
+        "evidence": minimal_evidence,
+        "contract_keys": list(contract.keys())[:12] if isinstance(contract, dict) else [],
+    }
+    return (
+        "Return ONLY valid JSON. No markdown. No explanation. "
+        "Create one runtime capability template. "
+        "Do not hardcode runtime values. Put runtime values in schemas. "
+        "Use only neutral generic structure. "
+        "Required shape: {\"confidence_score\":0.0-1.0,\"needs_external_evidence\":false,\"template\":{...}}. "
+        "The template must include template_id, description, capabilities, match_terms, entrypoint, files, "
+        "input_schema, output_schema, connection_schema, secret_schema, approval_policy, runtime_interface, "
+        "runtime_execution_policy, verification_input, verification_expectations, acquisition_policy, capability_match_contract. "
+        "files must include one Python implementation and one isolated unit test. "
+        "Sandbox verification must not call external services. "
+        "Boolean form values may arrive as strings and must be parsed robustly.\n"
+        f"DATA={json.dumps(compact_payload, ensure_ascii=False)}"
+    )
+
+
 def _compact_contract(contract: Any) -> Any:
     if not isinstance(contract, dict):
         return contract
