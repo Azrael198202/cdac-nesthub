@@ -130,3 +130,11 @@ Default Q4_K_M sources:
 - `qwen3.5:4b-q4_k_m` → `Qwen3.5-4B-Q4_K_M.gguf`
 
 The normal `qwen3.5:2b` Ollama tag remains available and is not remapped.
+
+
+## v15.14 Runtime Console / Planner Observability
+
+- Adds `/runtime-console`, a terminal-style log viewer for runtime logs, traces, model downloads, GGUF import, capability acquisition, and tool execution files.
+- Adds `/api/runtime-console/sources` and `/api/runtime-console/read` with path boundary checks and secret redaction.
+- Adds runtime console events for model preparation and capability acquisition pipeline stages.
+- Adds a compact second-pass local planner prompt for small models when the first JSON-mode planner output is empty or non-JSON.

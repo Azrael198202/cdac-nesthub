@@ -1,1 +1,1 @@
-v15.13-external-gguf-auto-resolver
+v15.14-runtime-console-planner-observability

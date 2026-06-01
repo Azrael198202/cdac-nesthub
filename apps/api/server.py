@@ -25,6 +25,7 @@ from ai_core.config.paths import RUNTIME_DOWNLOADS
 from ai_core.tools.runtime_registered_tool_service import RuntimeRegisteredToolService
 from ai_core.runtime.approval_policy_store import RuntimeApprovalPolicyStore
 from ai_core.graph.graph_visualization import GraphVisualStateBuilder
+from ai_core.runtime.observability.runtime_console import emit_console_event, list_console_sources, read_console_source
 
 import traceback
 approval_learning = ApprovalLearningService()
@@ -249,6 +250,29 @@ async def graph_runtime_home():
             "Expires": "0",
         },
     )
+
+
+@app.get("/runtime-console")
+async def runtime_console_home():
+    html = open("apps/web/runtime_console.html", "r", encoding="utf-8").read()
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@app.get("/api/runtime-console/sources")
+async def runtime_console_sources():
+    return JSONResponse({"ok": True, "sources": list_console_sources()})
+
+
+@app.get("/api/runtime-console/read")
+async def runtime_console_read(source: str | None = None, cursor: int = 0, limit_bytes: int = 65536, tail: bool = False):
+    return JSONResponse(read_console_source(source, cursor=cursor, limit_bytes=limit_bytes, tail=tail))
 
 
 @app.get("/api/graph-runtime/state")

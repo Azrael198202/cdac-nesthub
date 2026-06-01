@@ -15,6 +15,7 @@ from ai_core.config.paths import PROJECT_ROOT, RUNTIME_GENERATED, RUNTIME_REGIST
 from ai_core.runtime.capability.acquisition_gate import RuntimeCapabilityAcquisitionGate
 from ai_core.runtime.capability.runtime_capability_template_store import RuntimeCapabilityTemplateStore
 from ai_core.runtime.self_repair.engine import RuntimeSelfRepairEngine
+from ai_core.runtime.observability.runtime_console import emit_console_event
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,16 @@ class RuntimeCapabilityGapImplementer:
 
         def mark(stage: str, status: str, **data: Any) -> None:
             pipeline.append({"stage": stage, "status": status, **data})
+            try:
+                emit_console_event(
+                    area="capability_acquisition",
+                    event=stage,
+                    status=status,
+                    message=f"{stage}: {status}",
+                    data={k: v for k, v in data.items() if k not in {"template"}},
+                )
+            except Exception:
+                pass
 
         mark("CapabilityAcquisitionRouter", "accepted" if allow_implementation else "not_requested")
         if not allow_implementation:
@@ -103,6 +114,8 @@ class RuntimeCapabilityGapImplementer:
                     "requested_identity_contract": identity_contract,
                     "pipeline": pipeline,
                     "self_repair": repair,
+                    "evidence_present": bool(urls),
+                    "diagnosis": "planner_failed_after_verified_evidence" if urls else "planner_failed_before_verified_evidence",
                     "generated_at": datetime.now(timezone.utc).isoformat(),
                 }
             template = self._merge_identity_contract_into_template(dict(planner_record["template"]), identity_contract)

@@ -51,37 +51,70 @@ def _try_model_planner(*, request_text: str, identity: dict[str, Any], evidence:
         return {"status": "skipped", "reason": "local_capability_model_disabled"}
     host = os.environ.get("OLLAMA_HOST") or os.environ.get("AI_CORE_OLLAMA_HOST") or "http://127.0.0.1:11434"
     model = os.environ.get("AI_CORE_CAPABILITY_PLANNER_MODEL") or os.environ.get("OLLAMA_MODEL") or "qwen3.5:2b"
-    prompt = _model_prompt(request_text=request_text, identity=identity, evidence=evidence, contract=contract)
-    body = json.dumps({
+    attempts = []
+    first = _call_ollama_json_planner(
+        host=host,
+        model=model,
+        prompt=_model_prompt(request_text=request_text, identity=identity, evidence=evidence, contract=contract),
+        force_json=True,
+        timeout=float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_TIMEOUT", "45")),
+    )
+    attempts.append(first)
+    if isinstance(first.get("template"), dict):
+        return first
+
+    # Small local models sometimes return an empty response when Ollama JSON mode
+    # is combined with a long schema prompt. Retry once with a smaller prompt and
+    # without provider-side JSON forcing; the parser still accepts only JSON.
+    retry = _call_ollama_json_planner(
+        host=host,
+        model=model,
+        prompt=_compact_model_prompt(request_text=request_text, identity=identity, evidence=evidence, contract=contract),
+        force_json=False,
+        timeout=float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_COMPACT_TIMEOUT", os.environ.get("AI_CORE_CAPABILITY_PLANNER_TIMEOUT", "45"))),
+    )
+    attempts.append(retry)
+    if isinstance(retry.get("template"), dict):
+        retry["attempts"] = attempts
+        retry["compact_retry_used"] = True
+        return retry
+    return {"status": "planner_failed", "reason": str(retry.get("reason") or first.get("reason") or "model_returned_no_valid_template"), "model": model, "attempts": attempts}
+
+
+def _call_ollama_json_planner(*, host: str, model: str, prompt: str, force_json: bool, timeout: float) -> dict[str, Any]:
+    body_payload = {
         "model": model,
         "prompt": prompt,
         "stream": False,
-        "format": "json",
-        "options": {"temperature": 0, "num_ctx": int(os.environ.get("AI_CORE_CAPABILITY_PLANNER_NUM_CTX", "4096")), "num_predict": int(os.environ.get("AI_CORE_CAPABILITY_PLANNER_NUM_PREDICT", "2048")), "think": False},
-    }).encode("utf-8")
+        "options": {"temperature": 0, "num_ctx": int(os.environ.get("AI_CORE_CAPABILITY_PLANNER_NUM_CTX", "3072")), "num_predict": int(os.environ.get("AI_CORE_CAPABILITY_PLANNER_NUM_PREDICT", "1600")), "think": False},
+    }
+    if force_json:
+        body_payload["format"] = "json"
+    body = json.dumps(body_payload).encode("utf-8")
     try:
         req = urllib.request.Request(host.rstrip("/") + "/api/generate", data=body, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_TIMEOUT", "45"))) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="ignore")
         outer = json.loads(raw or "{}")
         text = str(outer.get("response") or "").strip()
         parsed = _parse_json_object(text)
         if not isinstance(parsed, dict):
-            return {"status": "planner_failed", "reason": "model_returned_non_json", "raw_excerpt": text[:500]}
+            return {"status": "planner_failed", "reason": "model_returned_non_json", "raw_excerpt": text[:500], "model": model, "force_json": force_json}
         template = parsed.get("template") if isinstance(parsed.get("template"), dict) else parsed
         if not isinstance(template, dict):
-            return {"status": "planner_failed", "reason": "model_returned_no_template", "raw_excerpt": text[:500]}
+            return {"status": "planner_failed", "reason": "model_returned_no_template", "raw_excerpt": text[:500], "model": model, "force_json": force_json}
         return {
             "status": "planned",
             "confidence_score": float(parsed.get("confidence_score") or parsed.get("confidence") or 0.76),
             "needs_external_evidence": _to_bool(parsed.get("needs_external_evidence", False), default=False),
             "template": template,
             "model": model,
+            "force_json": force_json,
         }
     except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
-        return {"status": "planner_failed", "reason": f"local_model_unavailable_or_invalid: {exc.__class__.__name__}", "model": model}
+        return {"status": "planner_failed", "reason": f"local_model_unavailable_or_invalid: {exc.__class__.__name__}", "model": model, "force_json": force_json}
     except Exception as exc:
-        return {"status": "planner_failed", "reason": f"local_model_error: {exc.__class__.__name__}: {str(exc)[:300]}", "model": model}
+        return {"status": "planner_failed", "reason": f"local_model_error: {exc.__class__.__name__}: {str(exc)[:300]}", "model": model, "force_json": force_json}
 
 
 def _model_prompt(*, request_text: str, identity: dict[str, Any], evidence: dict[str, Any], contract: Any) -> str:

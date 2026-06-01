@@ -13,6 +13,7 @@ from typing import Any
 from ai_core.utils.safe_subprocess import run_text
 from ai_core.config.paths import RUNTIME_DOWNLOADS, RUNTIME_EXTERNAL_RUNTIMES
 from ai_core.runtime.external_runtimes.gguf_model_resolver import GGUFModelResolver
+from ai_core.runtime.observability.runtime_console import emit_console_event
 
 
 @dataclass
@@ -48,6 +49,7 @@ class RuntimeModelDownloader:
 
     def download(self, candidate: dict[str, Any], *, approved: bool = False, timeout_seconds: int = 3600) -> dict[str, Any]:
         model_id = str(candidate.get("model_id") or candidate.get("id") or candidate.get("name") or "").strip()
+        emit_console_event(area="model_downloader", event="prepare_requested", status="running", message=f"prepare model {model_id or 'unknown'}", data={"model_id": model_id, "candidate_runtime": candidate.get("runtime"), "timeout_seconds": timeout_seconds})
         if not model_id:
             return self._result("failed", "unknown", "unknown", None, None, False, True, "No model id was provided.", {})
         strategy = candidate.get("download_strategy") if isinstance(candidate.get("download_strategy"), dict) else {}
@@ -91,8 +93,10 @@ class RuntimeModelDownloader:
                     lines.append(f"PARAMETER {key} {value}")
             modelfile.write_text("\n".join(lines) + "\n", encoding="utf-8")
             cmd = [exe, "create", model_id, "-f", str(modelfile)]
+            emit_console_event(area="model_downloader", event="ollama_gguf_import_start", status="running", message="ollama create from GGUF", data={"model_id": model_id, "gguf": str(gguf), "modelfile": str(modelfile), "command": cmd})
             proc = run_text(cmd, text=True, capture_output=True, timeout=timeout_seconds)
             ok = proc.returncode == 0
+            emit_console_event(area="model_downloader", event="ollama_gguf_import_end", status="completed" if ok else "failed", message="GGUF import completed" if ok else "GGUF import failed", data={"model_id": model_id, "returncode": proc.returncode, "stderr_tail": proc.stderr[-2000:], "stdout_tail": proc.stdout[-2000:]})
             return self._result(
                 "downloaded" if ok else "failed",
                 model_id,
@@ -146,8 +150,10 @@ class RuntimeModelDownloader:
             return self._result("unavailable", model_id, "ollama", None, None, False, True, "ollama command is not available.", {"candidate": candidate})
         cmd = [exe, "pull", model_id]
         try:
+            emit_console_event(area="model_downloader", event="ollama_pull_start", status="running", message="ollama pull started", data={"model_id": model_id, "command": cmd, "timeout_seconds": timeout_seconds})
             proc = run_text(cmd, text=True, capture_output=True, timeout=timeout_seconds)
             ok = proc.returncode == 0
+            emit_console_event(area="model_downloader", event="ollama_pull_end", status="completed" if ok else "failed", message="Ollama pull completed" if ok else "Ollama pull failed", data={"model_id": model_id, "returncode": proc.returncode, "stderr_tail": proc.stderr[-2000:], "stdout_tail": proc.stdout[-2000:]})
             return self._result(
                 "downloaded" if ok else "failed",
                 model_id,
@@ -208,4 +214,5 @@ class RuntimeModelDownloader:
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        emit_console_event(area="model_downloader", event="prepare_result", status=status, message=reason, data={"model_id": model_id, "runtime": runtime, "local_path": local_path, "command": command, "metadata_path": str(meta_path), "ready_for_benchmark": ready})
         return asdict(ModelDownloadResult(status, model_id, runtime, local_path, command, str(meta_path), ready, review, reason))
