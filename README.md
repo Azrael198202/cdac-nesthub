@@ -94,8 +94,8 @@ python scripts/reset_runtime_data.py --yes --include-runtime-generated
 ## v15.9 local model default update
 
 - Added Qwen3.5 2B Instruct and Qwen3.5 4B Instruct to the local model catalog.
-- Default local model is now `qwen3.5:2b-instruct`.
-- `qwen3.5:4b-instruct` is used as the first stronger local fallback for planning stages.
+- Default local model is now `qwen3.5:2b`.
+- `qwen3.5:4b-q4_k_m` is used as the first stronger local fallback for planning stages.
 - Existing qwen3:8b remains available as a later fallback, not as the default.
 
 
@@ -105,3 +105,12 @@ python scripts/reset_runtime_data.py --yes --include-runtime-generated
 - When an Ollama tag is missing, the runtime can resolve a configured local GGUF path or GGUF URL, generate a Modelfile, and call `ollama create <model> -f <Modelfile>`.
 - Configure local GGUF files with environment variables such as `AI_CORE_QWEN35_2B_GGUF_PATH` or URLs with `AI_CORE_QWEN35_2B_GGUF_URL`.
 - GGUF import is runtime model lifecycle support; it is not business capability logic.
+
+
+## v15.12 Qwen3.5 2B Default and Direct GGUF Import
+
+- Default local Ollama model is now `qwen3.5:2b`.
+- Added explicit GGUF-backed local model ids: `qwen3.5:2b-q4_k_m` and `qwen3.5:4b-q4_k_m`.
+- The runtime does not alias or silently map `qwen3.5:2b` to another model.
+- When a selected model has a configured GGUF path or URL, Ollama preparation imports the GGUF first with `ollama create` instead of wasting time on a pull that cannot exist.
+- Preferred GGUF filenames are `Qwen3.5-2B-Q4_K_M.gguf` and `Qwen3.5-4B-Q4_K_M.gguf`.

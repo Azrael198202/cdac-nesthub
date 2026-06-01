@@ -303,6 +303,26 @@ class UniversalModelProviderHandler:
                     "model": model,
                 })
                 return model
+
+            entry = self._ollama_gguf_entry(provider, model)
+            prefer_gguf = bool(entry and entry.get("prefer_gguf_import"))
+            has_gguf_source = bool(entry and self._ollama_gguf_entry_has_configured_source(entry))
+            if provider.get("auto_import_gguf_missing_model", True) and entry and (prefer_gguf or has_gguf_source):
+                imported = await self._import_ollama_model_from_gguf(run_id, node_id, provider_name, provider, model)
+                tags = await self._ollama_tags(base_url) or tags
+                if imported and self._ollama_model_exists(tags, model):
+                    await event_bus.emit(run_id, {
+                        "type": "LLM_MODEL_GGUF_IMPORT_DONE",
+                        "title": "Ollama GGUF import completed",
+                        "message": model,
+                        "node_id": node_id,
+                        "provider": provider_name,
+                        "model": model,
+                    })
+                    return model
+                if prefer_gguf and not provider.get("pull_after_preferred_gguf_import_failure", False):
+                    continue
+
             if not provider.get("auto_pull_missing_model", True):
                 continue
             await event_bus.emit(run_id, {
@@ -317,7 +337,7 @@ class UniversalModelProviderHandler:
             tags = await self._ollama_tags(base_url) or tags
             if ok and self._ollama_model_exists(tags, model):
                 return model
-            if provider.get("auto_import_gguf_missing_model", True):
+            if provider.get("auto_import_gguf_missing_model", True) and entry and not (prefer_gguf or has_gguf_source):
                 imported = await self._import_ollama_model_from_gguf(run_id, node_id, provider_name, provider, model)
                 tags = await self._ollama_tags(base_url) or tags
                 if imported and self._ollama_model_exists(tags, model):
@@ -436,6 +456,16 @@ class UniversalModelProviderHandler:
             if isinstance(entry, dict):
                 return dict(entry)
         return None
+
+    def _ollama_gguf_entry_has_configured_source(self, entry: dict[str, Any]) -> bool:
+        local_env = str(entry.get("local_path_env") or "").strip()
+        url_env = str(entry.get("url_env") or "").strip()
+        local = os.environ.get(local_env) if local_env else None
+        url = os.environ.get(url_env) if url_env else None
+        return bool(
+            str(local or entry.get("local_path") or "").strip()
+            or str(url or entry.get("url") or entry.get("source_url") or "").strip()
+        )
 
     async def _import_ollama_model_from_gguf(self, run_id, node_id, provider_name, provider, model: str) -> bool:
         """Import a missing Ollama model from a runtime-configured GGUF file.

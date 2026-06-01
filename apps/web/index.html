@@ -592,8 +592,8 @@
 
     <form id="form" class="composer">
       <select id="localModel" title="Initial local model">
-        <option value="qwen3.5:2b-instruct" selected>Qwen3.5-2B-Instruct</option>
-        <option value="qwen3.5:4b-instruct">Qwen3.5-4B-Instruct</option>
+        <option value="qwen3.5:2b" selected>Qwen3.5-2B</option>
+        <option value="qwen3.5:4b-q4_k_m">Qwen3.5-4B-Q4_K_M</option>
         <option value="qwen3-vl:8b-thinking">qwen3-vl:8b-thinking</option>
         <option value="qwen3:8b">qwen3:8b</option>
         <option value="qwen3:4b">qwen3:4b</option>
@@ -1575,7 +1575,7 @@ form.onsubmit = async (event) => {
     const res = await fetch("/api/chat", {
       method:"POST",
       headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({message:text, local_model: localModel ? localModel.value : "qwen3.5:2b-instruct"})
+      body:JSON.stringify({message:text, local_model: localModel ? localModel.value : "qwen3.5:2b"})
     });
 
     if(!res.ok){
@@ -1591,7 +1591,7 @@ form.onsubmit = async (event) => {
     addStep({
       type: "USER_INPUT",
       title: "User input",
-      message: text + `\nlocal_model=${localModel ? localModel.value : "qwen3.5:2b-instruct"}`,
+      message: text + `\nlocal_model=${localModel ? localModel.value : "qwen3.5:2b"}`,
       node_id: "runtime",
       progress: 0
     });

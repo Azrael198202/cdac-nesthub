@@ -6,8 +6,8 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT = "qwen3.5:2b-instruct"
-FOUR = "qwen3.5:4b-instruct"
+DEFAULT = "qwen3.5:2b"
+FOUR = "qwen3.5:4b-q4_k_m"
 
 
 def assert_true(condition: bool, message: str) -> None:

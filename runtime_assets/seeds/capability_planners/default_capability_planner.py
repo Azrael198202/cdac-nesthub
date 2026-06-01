@@ -50,7 +50,7 @@ def _try_model_planner(*, request_text: str, identity: dict[str, Any], evidence:
     if os.environ.get("AI_CORE_DISABLE_LOCAL_CAPABILITY_MODEL", "").lower() in {"1", "true", "yes"}:
         return {"status": "skipped", "reason": "local_capability_model_disabled"}
     host = os.environ.get("OLLAMA_HOST") or os.environ.get("AI_CORE_OLLAMA_HOST") or "http://127.0.0.1:11434"
-    model = os.environ.get("AI_CORE_CAPABILITY_PLANNER_MODEL") or os.environ.get("OLLAMA_MODEL") or "qwen3.5:2b-instruct"
+    model = os.environ.get("AI_CORE_CAPABILITY_PLANNER_MODEL") or os.environ.get("OLLAMA_MODEL") or "qwen3.5:2b"
     prompt = _model_prompt(request_text=request_text, identity=identity, evidence=evidence, contract=contract)
     body = json.dumps({
         "model": model,

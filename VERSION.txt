@@ -1,1 +1,1 @@
-v15.11-ollama-gguf-import-support
+v15.12-qwen35-2b-gguf-direct-import

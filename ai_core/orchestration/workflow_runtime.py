@@ -66,7 +66,7 @@ class WorkflowRuntime:
             "progress": 0,
             "node_attempts": {},
             "runtime_options": {
-                "local_model": local_model or "qwen3.5:2b-instruct",
+                "local_model": local_model or "qwen3.5:2b",
             },
         }
         await self._emit(run_id, {
@@ -76,7 +76,7 @@ class WorkflowRuntime:
             "progress": 0,
             "node_attempts": {},
             "runtime_options": {
-                "local_model": local_model or "qwen3.5:2b-instruct",
+                "local_model": local_model or "qwen3.5:2b",
             },
         })
         return run_id, state

@@ -13,6 +13,7 @@ required = [
     'auto_import_gguf_missing_model',
     'ollama create',
     'FROM {gguf_path.as_posix()}',
+    '_ollama_gguf_entry_has_configured_source',
 ]
 missing = [x for x in required if x not in source]
 if missing:
@@ -23,7 +24,7 @@ ollama = providers['providers']['ollama']
 if not ollama.get('auto_import_gguf_missing_model'):
     raise SystemExit('ollama.auto_import_gguf_missing_model is not enabled')
 models = ollama.get('gguf_models') or {}
-for key in ['qwen3.5:2b-instruct', 'qwen3.5:4b-instruct']:
+for key in ['qwen3.5:2b-q4_k_m', 'qwen3.5:4b-q4_k_m']:
     if key not in models:
         raise SystemExit(f'Missing GGUF model config for {key}')
     entry = models[key]
