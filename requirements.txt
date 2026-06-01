@@ -52,3 +52,8 @@ psutil>=5.9.8
 
 # Media preview fallback
 Pillow>=10.0.0
+
+# Optional web evidence optimization / compression
+trafilatura>=1.9.0
+readability-lxml>=0.8.1
+rank-bm25>=0.2.2

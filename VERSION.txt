@@ -1,1 +1,1 @@
-v15-runtime-capability-acquisition-pipeline
+v15.3-qwen-planner-capability-acquisition

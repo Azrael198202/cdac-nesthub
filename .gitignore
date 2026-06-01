@@ -691,3 +691,12 @@ ai_core/runtime/self_repair/__pycache__/parameter_repair.cpython-311.pyc
 ai_core/runtime/self_repair/__pycache__/schema_repair.cpython-311.pyc
 ai_core/runtime/self_repair/__pycache__/state_repair.cpython-311.pyc
 ai_core/runtime/self_repair/__pycache__/variable_repair.cpython-311.pyc
+ai_core/web_evidence_optimizer/__pycache__/__init__.cpython-311.pyc
+ai_core/web_evidence_optimizer/__pycache__/optimizer.cpython-311.pyc
+ai_core/web_evidence_optimizer/__pycache__/query_planner.cpython-311.pyc
+ai_core/roles/__pycache__/runtime_role_contract.cpython-313.pyc
+ai_core/runtime/__pycache__/approval_policy_store.cpython-313.pyc
+ai_core/runtime/capability/__pycache__/runtime_capability_template_store.cpython-313.pyc
+ai_core/web_evidence_optimizer/__pycache__/__init__.cpython-313.pyc
+ai_core/web_evidence_optimizer/__pycache__/optimizer.cpython-313.pyc
+ai_core/web_evidence_optimizer/__pycache__/query_planner.cpython-313.pyc

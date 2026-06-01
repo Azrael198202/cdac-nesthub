@@ -12,6 +12,7 @@ from ai_core.context.vector_memory_store import VectorMemoryStore
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.llm.provider_router import ProviderRouter
 from ai_core.research.web_research_tool import GenericWebResearchTool
+from ai_core.web_evidence_optimizer import WebEvidenceOptimizer
 from ai_core.capabilities.runtime_capability_gap_implementer import RuntimeCapabilityGapImplementer
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 
@@ -32,6 +33,7 @@ class ConversationCoreRuntime:
         self.sessions = SessionMemoryStore()
         self.vector_memory = VectorMemoryStore()
         self.web_research = GenericWebResearchTool()
+        self.web_evidence_optimizer = WebEvidenceOptimizer()
         self.capability_implementer = RuntimeCapabilityGapImplementer()
 
     async def run(self, message: str, *, latest_task: str | None = None, session_id: str | None = None) -> dict[str, Any]:
@@ -374,22 +376,31 @@ class ConversationCoreRuntime:
             steps = plan.get("planned_steps") if isinstance(plan.get("planned_steps"), list) else []
             if not steps:
                 steps = fallback["planned_steps"]
+            capability_gap = bool(intent.get("capability_gap_detected"))
             for step in steps[:1]:
                 if isinstance(step, dict):
-                    step["execution_method"] = "web_search"
-                    step["capability"] = "web_retrieval"
-                    if intent.get("capability_gap_detected"):
+                    if capability_gap:
+                        step["execution_method"] = "capability_acquisition"
+                        step["capability"] = "runtime_capability_acquisition"
                         step["step_type"] = "resolve_capability_gap"
-                        step.setdefault("objective", "Collect external implementation guidance for a runtime capability gap.")
-                    policy = step.get("source_policy") if isinstance(step.get("source_policy"), dict) else {}
-                    policy.setdefault("requires_source_material", True)
-                    policy.setdefault("min_sources", 2)
-                    step["source_policy"] = policy
+                        step.setdefault("objective", "Generate, validate, register, and verify a runtime capability through the acquisition pipeline.")
+                        policy = step.get("source_policy") if isinstance(step.get("source_policy"), dict) else {}
+                        policy.setdefault("requires_source_material", False)
+                        policy.setdefault("web_as_fallback_only", True)
+                        policy.setdefault("min_sources", 0)
+                        step["source_policy"] = policy
+                    else:
+                        step["execution_method"] = "web_search"
+                        step["capability"] = "web_retrieval"
+                        policy = step.get("source_policy") if isinstance(step.get("source_policy"), dict) else {}
+                        policy.setdefault("requires_source_material", True)
+                        policy.setdefault("min_sources", 2)
+                        step["source_policy"] = policy
             plan["planned_steps"] = steps
             plan["locked_execution"] = {
-                "execution_method": "web_search",
-                "capability": "web_retrieval",
-                "reason": "capability_gap_resolution" if intent.get("capability_gap_detected") else "external_information_required",
+                "execution_method": "capability_acquisition" if capability_gap else "web_search",
+                "capability": "runtime_capability_acquisition" if capability_gap else "web_retrieval",
+                "reason": "capability_gap_resolution" if capability_gap else "external_information_required",
             }
         return plan
 
@@ -403,12 +414,102 @@ class ConversationCoreRuntime:
         run_id: str,
     ) -> dict[str, Any]:
         selected = self._selected_step(plan)
+        if str(selected.get("execution_method") or "") == "capability_acquisition" or str(selected.get("capability") or "") == "runtime_capability_acquisition":
+            evidence = {
+                "query": self._capability_gap_query(text),
+                "original_user_input": text,
+                "search_status": "not_required_before_planner",
+                "source_count": 0,
+                "fetched_count": 0,
+                "urls": [],
+                "results": [],
+                "fetched_documents": [],
+                "attempts": [],
+                "planner_input_source": "input_intent_workflow",
+            }
+            runtime_impl = self.capability_implementer.implement_if_requested(
+                user_input=text,
+                evidence=evidence,
+                run_id=run_id,
+                allow_implementation=self._implementation_requested(text),
+            )
+            # If the planner explicitly asks for external evidence, use web only
+            # as a fallback material source, then retry the same acquisition
+            # contract. A missing web result must not block a policy-backed basic
+            # capability whose planner says evidence is not required.
+            if runtime_impl.get("status") in {"planner_low_confidence", "evidence_missing"}:
+                planned_queries = self.web_evidence_optimizer.plan_queries(user_input=text, capability="runtime_capability_acquisition", objective=evidence.get("query", ""))
+                evidence["planned_queries"] = planned_queries
+                search_query = str((planned_queries[0] or {}).get("query") or evidence["query"]) if planned_queries else evidence["query"]
+                search = await self.web_research.search(query=search_query, max_results=5)
+                evidence_items = search.get("results") if isinstance(search.get("results"), list) else []
+                fetched = []
+                for item in evidence_items[:5]:
+                    url = str(item.get("url") or "").strip() if isinstance(item, dict) else ""
+                    if not url:
+                        continue
+                    doc = await self.web_research.fetch(url=url, max_chars=8000)
+                    if isinstance(doc, dict) and doc.get("status") == "success":
+                        fetched.append(doc)
+                optimized = self.web_evidence_optimizer.optimize(
+                    user_input=text,
+                    capability="runtime_capability_acquisition",
+                    objective=evidence.get("query", ""),
+                    search_results=evidence_items,
+                    documents=[{"document": d, "source_search_result": next((r for r in evidence_items if isinstance(r, dict) and r.get("url") == d.get("url")), {})} for d in fetched if isinstance(d, dict)],
+                )
+                evidence.update({
+                    "search_status": search.get("status"),
+                    "source_count": len(evidence_items),
+                    "fetched_count": len(fetched),
+                    "urls": [str(x.get("url") or "") for x in evidence_items if isinstance(x, dict) and x.get("url")],
+                    "results": evidence_items,
+                    "fetched_documents": fetched,
+                    "attempts": search.get("attempts") if isinstance(search.get("attempts"), list) else [],
+                    "optimized_evidence": optimized,
+                    "planner_input_source": "input_intent_workflow_plus_optimized_web_fallback",
+                })
+                runtime_impl = self.capability_implementer.implement_if_requested(
+                    user_input=text,
+                    evidence=evidence,
+                    run_id=run_id,
+                    allow_implementation=self._implementation_requested(text),
+                )
+            implementation = self._capability_gap_resolution_artifact(
+                user_input=text,
+                query=evidence.get("query", ""),
+                evidence=evidence,
+                material="",
+                run_id=run_id,
+            )
+            implementation["runtime_implementation"] = runtime_impl
+            material = self._capability_gap_answer_material(
+                user_input=text,
+                evidence=evidence,
+                implementation=implementation,
+                material="",
+            )
+            runtime_registered = runtime_impl.get("status") == "implemented_tested_registered"
+            return {
+                "status": "completed" if runtime_registered else "capability_acquisition_failed",
+                "execution_mode": "capability_acquisition",
+                "capability": "runtime_capability_acquisition",
+                "answer_material": material,
+                "external_evidence_used": bool(evidence.get("urls")),
+                "policy_backed_runtime_registration": bool(runtime_registered and not evidence.get("urls")),
+                "capability_gap_resolution": True,
+                "capability_implementation": implementation,
+                "evidence": evidence,
+                "knowledge_used": False,
+            }
         if str(selected.get("execution_method") or "") == "web_search" or str(selected.get("capability") or "") == "web_retrieval":
             policy = selected.get("source_policy") if isinstance(selected.get("source_policy"), dict) else {}
             max_results = int(policy.get("max_results") or 5)
             capability_gap = bool(intent.get("capability_gap_detected") or str(selected.get("step_type") or "") == "resolve_capability_gap")
             query = self._capability_gap_query(text) if capability_gap else text
-            search = await self.web_research.search(query=query, max_results=max_results)
+            planned_queries = self.web_evidence_optimizer.plan_queries(user_input=text, capability=str(selected.get("capability") or ""), objective=query)
+            search_query = str((planned_queries[0] or {}).get("query") or query) if planned_queries else query
+            search = await self.web_research.search(query=search_query, max_results=max_results)
             evidence_items = search.get("results") if isinstance(search.get("results"), list) else []
             fetched = []
             for item in evidence_items[:max(2, min(max_results, 5))]:
@@ -419,8 +520,17 @@ class ConversationCoreRuntime:
                 if isinstance(doc, dict) and doc.get("status") == "success":
                     fetched.append(doc)
             material = await self._web_answer_material(text, search, fetched, run_id)
+            optimized = self.web_evidence_optimizer.optimize(
+                user_input=text,
+                capability=str(selected.get("capability") or ""),
+                objective=query,
+                search_results=evidence_items,
+                documents=[{"document": d, "source_search_result": next((r for r in evidence_items if isinstance(r, dict) and r.get("url") == d.get("url")), {})} for d in fetched if isinstance(d, dict)],
+            )
             evidence = {
                 "query": query,
+                "search_query_used": search_query,
+                "planned_queries": planned_queries,
                 "original_user_input": text,
                 "search_status": search.get("status"),
                 "source_count": len(evidence_items),
@@ -428,6 +538,7 @@ class ConversationCoreRuntime:
                 "urls": [str(x.get("url") or "") for x in evidence_items if isinstance(x, dict) and x.get("url")],
                 "results": evidence_items,
                 "fetched_documents": fetched,
+                "optimized_evidence": optimized,
                 "attempts": search.get("attempts") if isinstance(search.get("attempts"), list) else [],
             }
             implementation = None

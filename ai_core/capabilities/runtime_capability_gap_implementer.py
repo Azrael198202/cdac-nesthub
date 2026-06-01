@@ -405,13 +405,14 @@ class RuntimeCapabilityGapImplementer:
         """Load the runtime-owned default planner when no env hook is set.
 
         The core only loads a neutral callable contract from runtime/generated.
-        Concrete capability knowledge belongs to that runtime artifact, not to
-        ai_core.  If the artifact is absent, the planner fails explicitly.
+        Concrete capability knowledge belongs to runtime-generated artifacts or packaged
+        runtime assets, not to ai_core. If both are absent, the planner fails
+        explicitly so self-repair can report the missing boundary asset.
         """
         candidates = [
             RUNTIME_GENERATED / "capability_planners" / "default_capability_planner.py",
             RUNTIME_GENERATED / "capability_planners" / "evidence_template_planner.py",
-            PROJECT_ROOT / "runtime" / "seeds" / "capability_planners" / "default_capability_planner.py",
+            PROJECT_ROOT / "runtime_assets" / "seeds" / "capability_planners" / "default_capability_planner.py",
         ]
         for path in candidates:
             if path.exists():
