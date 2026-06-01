@@ -110,7 +110,11 @@ function addFinalAnswer(text, cls='item final'){
 }
 function renderStudioResponse(data, originalText){
   if(data && data.session_id){ setActiveSession(data.session_id, false); }
+  if(data && (data.ui_run_id || data.client_run_id || data.run_id)){ activeUiRunId = String(data.ui_run_id || data.client_run_id || data.run_id || activeUiRunId); }
   if(data && data.run_id){ lastCompletedRunId = String(data.run_id||''); }
+  if(data && data.action==='create_participant'){ setActiveStateScope('participant', data.participant_id || '', activeUiRunId || data.run_id || data.participant_id); }
+  else if(data && data.action==='create_task_graph'){ setActiveStateScope('task', data.task_name || data.graph_id || '', activeUiRunId || data.run_id || data.graph_id); }
+  else if(data && data.run_id){ setActiveStateScope('run', data.run_id || '', data.run_id); }
   if(data && data.session_boundary){ renderSessionBoundary(data.session_boundary); }
   if(data && data.action==='artifact_edit_proposal'){
     if(data.status==='pending_review' && data.proposal){
@@ -165,7 +169,7 @@ function renderStudioResponse(data, originalText){
 }
 function escapeHtml(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function setStudioStatus(text, running=false){ const el=document.getElementById('status'); el.textContent=text; el.classList.toggle('running', !!running); }
-function addProgressMessage(text){ setStudioStatus(text, true); }
+function addProgressMessage(text){ setStudioStatus('running', true); }
 let lastSubmittedInstruction = '';
 let lastMissingInputs = [];
 let lastPendingRunId = '';
@@ -177,6 +181,10 @@ let selectedArtifactIds = new Set();
 let artifactEditState = {artifactId:"", proposalId:""};
 let activeSessionId = localStorage.getItem("agentStudio.activeSessionId") || "";
 let lastCompletedRunId = "";
+let activeUiRunId = "";
+let activeStateScope = {kind:"", id:""};
+function newClientRunId(){ return 'ui_run_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8); }
+function setActiveStateScope(kind, id, runId){ activeStateScope={kind:String(kind||''), id:String(id||'')}; if(runId){ activeUiRunId=String(runId); } }
 
 
 function setActiveSession(sessionId, reload=true){
@@ -447,6 +455,8 @@ async function sendMessage(){
   if(!text)return;
   lastSubmittedInstruction=text;
   lastPendingInstruction=text;
+  const clientRunId = newClientRunId();
+  setActiveStateScope('request', '', clientRunId);
   const canStart = await ensureSelectedModelCredential();
   if(!canStart){ return; }
   input.value='';
@@ -456,23 +466,10 @@ async function sendMessage(){
   btn.textContent='Thinking...';
   setStudioStatus('running', true);
   let pollTimer=null;
-  let hintTimer=null;
-  const hints=[
-    'receiving instruction',
-    'routing command',
-    'selecting response path',
-    'calling selected runtime',
-    'waiting for result',
-    'refreshing state'
-  ];
-  let hintIndex=0;
   try{
-    addProgressMessage(hints[hintIndex++]);
+    addProgressMessage('running');
     pollTimer=setInterval(()=>refreshState(), 1200);
-    hintTimer=setInterval(()=>{
-      if(hintIndex<hints.length){ addProgressMessage(hints[hintIndex++]); }
-    }, 2500);
-    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, session_id:activeSessionId, uploaded_artifacts:selectedArtifactsForRequest(text)})});
+    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, session_id:activeSessionId, client_run_id:clientRunId, uploaded_artifacts:selectedArtifactsForRequest(text)})});
     const data=await res.json();
     consumeSelectedArtifactsAfterRequest();
     renderStudioResponse(data, text);
@@ -484,7 +481,6 @@ async function sendMessage(){
     addMessage('Error: '+e,'item error');
   } finally{
     if(pollTimer) clearInterval(pollTimer);
-    if(hintTimer) clearInterval(hintTimer);
     btn.disabled=false;
     btn.textContent='Send';
     setStudioStatus('ready', false);
@@ -991,10 +987,11 @@ function toggleTracePanel(){
   btn.innerHTML=collapsed?'&lt;&lt;':'&gt;&gt;';
 }
 
-async function refreshState(){ try{ const res=await fetch('/api/agent-studio/state'); const data=await res.json(); renderState(data); }catch(e){ console.error(e); }}
+async function refreshState(){ try{ const params=new URLSearchParams(); if(activeUiRunId) params.set('active_run_id', activeUiRunId); if(activeStateScope.kind) params.set('scope_kind', activeStateScope.kind); if(activeStateScope.id) params.set('scope_id', activeStateScope.id); const url='/api/agent-studio/state'+(params.toString()?('?'+params.toString()):''); const res=await fetch(url); const data=await res.json(); renderState(data); }catch(e){ console.error(e); }}
 function renderState(data){
   const ps=data.participants||[]; document.getElementById('participantCount').textContent=ps.length; const pbox=document.getElementById('participants'); pbox.innerHTML=''; if(!ps.length)pbox.innerHTML='<div class="empty">No participant.</div>'; ps.forEach(p=>{ const el=document.createElement('div'); el.className='item'; el.innerHTML=`<b>${escapeHtml(p.name||p.participant_id)}</b><div class="small">${escapeHtml(p.participant_id||'')}</div><span class="pill">${escapeHtml(p.status||'created')}</span><span class="pill">delegate_to_ai_core</span><div class="path">${escapeHtml(p._path||'')}</div>`; pbox.appendChild(el); });
-  const right=document.getElementById('rightPane'); const graphs=data.task_graphs||[]; const runs=data.task_runs||[]; const conversationRuns=data.conversation_runs||[]; const runtimeToolRuns=data.runtime_tool_runs||[]; const deliveries=data.deliveries||[]; const traces=data.traces||[]; document.getElementById('graphCount').textContent=graphs.length + conversationRuns.length; right.innerHTML='';
+  const right=document.getElementById('rightPane'); const graphs=data.task_graphs||[]; const runs=data.task_runs||[]; const conversationRuns=data.conversation_runs||[]; const runtimeToolRuns=data.runtime_tool_runs||[]; const deliveries=data.deliveries||[]; const traces=data.traces||[]; document.getElementById('graphCount').textContent=graphs.length + conversationRuns.length + runs.length; right.innerHTML='';
+  if(activeUiRunId){ right.insertAdjacentHTML('beforeend','<div class="small">Active view: '+escapeHtml(activeStateScope.kind||'run')+' / '+escapeHtml(activeStateScope.id||activeUiRunId)+'</div>'); }
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Execution Flow</div>');
   const latestRun = conversationRuns.length ? conversationRuns[0] : (runs.length ? runs[0] : null);
   if(latestRun){ right.appendChild(conversationFlowCard(latestRun)); }
@@ -1003,7 +1000,9 @@ function renderState(data){
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Conversation Workflow Runs</div>'); if(!conversationRuns.length) right.insertAdjacentHTML('beforeend','<div class="empty">No conversation workflow run.</div>'); conversationRuns.forEach(r=>right.appendChild(conversationRunCard(r)));
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Results</div>'); if(!latestRun && !runtimeToolRuns.length) right.insertAdjacentHTML('beforeend','<div class="empty">No runtime result yet.</div>'); if(latestRun) right.appendChild(resultSummaryCard(latestRun)); runtimeToolRuns.forEach(r=>right.appendChild(runtimeToolRunCard(r)));
   const runtimeTools=data.runtime_tools||[];
-  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Runtime Registry</div>'); if(!runtimeTools.length) right.insertAdjacentHTML('beforeend','<div class="empty">No registered runtime tool.</div>'); runtimeTools.forEach(t=>right.appendChild(runtimeToolCard(t)));
+  right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Runtime Registry</div>');
+  if(activeUiRunId && (activeStateScope.kind==='participant' || activeStateScope.kind==='task' || activeStateScope.kind==='request')){ right.insertAdjacentHTML('beforeend','<div class="empty">Registry is global; hidden from scoped live view to prevent cross-run mixing.</div>'); }
+  else { if(!runtimeTools.length) right.insertAdjacentHTML('beforeend','<div class="empty">No registered runtime tool.</div>'); runtimeTools.forEach(t=>right.appendChild(runtimeToolCard(t))); }
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Task Graphs</div>'); if(!graphs.length) right.insertAdjacentHTML('beforeend','<div class="empty">No task graph.</div>'); graphs.forEach(g=>right.appendChild(taskGraphCard(g)));
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Delegation Runs</div>'); if(!runs.length) right.insertAdjacentHTML('beforeend','<div class="empty">No run.</div>'); runs.forEach(r=>right.appendChild(runCard(r)));
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Deliveries</div>'); if(!deliveries.length) right.insertAdjacentHTML('beforeend','<div class="empty">No delivery.</div>'); deliveries.forEach(d=>right.appendChild(deliveryCard(d)));

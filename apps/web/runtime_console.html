@@ -26,7 +26,6 @@
       <a class="btn" href="/runtime-explorer">Runtime Explorer</a>
       <a class="btn" href="/settings">Settings</a>
     </div>
-    <div class="hint">SSE-based runtime event stream. It behaves like <b>tail -f</b>:逐行显示、滚动条、自动滚动、暂停、过滤、搜索、导出。</div>
     <div class="cmdline"><label>Source</label><select id="source" onchange="restartStream()"><option value="runtime/logs/runtime_console.jsonl">runtime_console</option></select></div>
     <div class="cmdline"><label>Filter</label><input id="filter" placeholder="area / event / message" oninput="rerender()" /></div>
     <div class="cmdline"><label>Search</label><input id="search" placeholder="highlight text" oninput="rerender()" /></div>
@@ -41,14 +40,14 @@
     <div class="toolbar bottom"><span class="status" id="status">connecting</span></div>
   </main>
 <script>
-let source='runtime/logs/runtime_console.jsonl'; let es=null; let paused=false; let events=[];
+let source='runtime/logs/runtime_console.jsonl'; let es=null; let paused=false; let events=[]; let pendingEvents=[]; let renderScheduled=false; const MAX_EVENTS=1200;
 function esc(s){return String(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 function setStatus(t,cls=''){const el=document.getElementById('status');el.className='status '+cls;el.textContent=t;}
-async function loadSources(){try{const r=await fetch('/api/runtime-console/sources',{cache:'no-store'});const data=await r.json();const sel=document.getElementById('source');sel.innerHTML='';(data.sources||[]).forEach(s=>{const o=document.createElement('option');o.value=s.path;o.textContent=s.path;sel.appendChild(o)});sel.value=source;}catch(e){}}
+async function loadSources(){try{const r=await fetch('/api/runtime-console/sources',{cache:'no-store'});const data=await r.json();const sel=document.getElementById('source');sel.innerHTML='';const sources=(data.sources||[]).filter(s=>String(s.path||'').startsWith('runtime/logs/')||String(s.path||'').startsWith('runtime/traces/'));sources.forEach(s=>{const o=document.createElement('option');o.value=s.path;o.textContent=s.path;sel.appendChild(o)});if(!sources.some(s=>s.path===source)&&sources[0]) source=sources[0].path;sel.value=source;}catch(e){}}
 function format(e){const data=e.data&&Object.keys(e.data).length?` <span class="data">${esc(JSON.stringify(e.data)).slice(0,700)}</span>`:'';return `<span class="line"><span class="ts">${esc(String(e.ts||'').replace('T',' ').replace(/\.\d+.*/,''))}</span> <span class="${esc(e.level||'INFO')}">${esc(e.level||'INFO')}</span> <span class="area">${esc(e.area||'RUNTIME')}</span> <span class="event">${esc(e.event||'EVENT')}</span> <span class="msg">${esc(e.message||'')}</span>${data}</span>`}
 function rerender(){const f=document.getElementById('filter').value.toLowerCase();const q=document.getElementById('search').value.toLowerCase();let shown=events.filter(e=>!f||JSON.stringify(e).toLowerCase().includes(f)); if(q) shown=shown.filter(e=>JSON.stringify(e).toLowerCase().includes(q)); const box=document.getElementById('console');box.innerHTML=shown.map(format).join('\n'); if(document.getElementById('autoscroll').checked) box.scrollTop=box.scrollHeight; setStatus(`${shown.length}/${events.length} events · ${paused?'paused':'streaming'}`, paused?'warn':'ok');}
-function connect(){if(es) es.close(); source=document.getElementById('source').value||source;document.getElementById('current').textContent=source; es=new EventSource('/api/runtime-console/stream?source='+encodeURIComponent(source)); es.addEventListener('runtime',ev=>{if(paused)return; try{events.push(JSON.parse(ev.data)); if(events.length>3000)events=events.slice(-2500); rerender();}catch(e){}}); es.onerror=()=>setStatus('stream reconnecting','warn');}
-function restartStream(){events=[];rerender();connect()} function pauseStream(){paused=true;rerender()} function resumeStream(){paused=false;rerender()} function clearConsole(){events=[];rerender()}
+function connect(){if(es) es.close(); source=document.getElementById('source').value||source;document.getElementById('current').textContent=source; es=new EventSource('/api/runtime-console/stream?cursor=-1&source='+encodeURIComponent(source)); es.addEventListener('runtime',ev=>{if(paused)return; try{pendingEvents.push(JSON.parse(ev.data)); if(pendingEvents.length>200){pendingEvents=pendingEvents.slice(-200);} scheduleRender();}catch(e){}}); es.onopen=()=>setStatus('streaming','ok'); es.onerror=()=>setStatus('stream reconnecting','warn');}
+function restartStream(){events=[];pendingEvents=[];rerender();connect()} function pauseStream(){paused=true;rerender()} function resumeStream(){paused=false;rerender()} function clearConsole(){events=[];pendingEvents=[];rerender()}
 function exportConsole(){const blob=new Blob([events.map(e=>JSON.stringify(e)).join('\n')],{type:'application/jsonl'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='runtime-console-export.jsonl';a.click();URL.revokeObjectURL(a.href)}
 function newSession(){location.href='/agent-studio'}
 loadSources().then(connect);

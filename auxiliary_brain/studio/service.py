@@ -57,7 +57,7 @@ class AgentStudioService:
         self.store.ensure_workspace()
         self.community_id = self._ensure_community()
 
-    async def handle_message(self, message: str, provided_inputs: dict[str, Any] | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None, session_id: str | None = None) -> dict[str, Any]:
+    async def handle_message(self, message: str, provided_inputs: dict[str, Any] | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None, session_id: str | None = None, client_run_id: str | None = None) -> dict[str, Any]:
         direct = self._direct_ephemeral_answer(message)
         if direct is not None:
             self.execution_reuse_store.save_short_answer(query=message, answer=direct, source="ephemeral_direct")
@@ -75,9 +75,9 @@ class AgentStudioService:
         if routed.action == "update_command_set":
             return self.update_command_set(message)
         if routed.action == "create_participant":
-            return await self.create_participant(message, routed.name, uploaded_artifacts=uploaded_artifacts)
+            return await self.create_participant(message, routed.name, uploaded_artifacts=uploaded_artifacts, client_run_id=client_run_id)
         if routed.action == "create_task":
-            return self.create_task_graph(message, routed.name, uploaded_artifacts=uploaded_artifacts)
+            return self.create_task_graph(message, routed.name, uploaded_artifacts=uploaded_artifacts, client_run_id=client_run_id)
 
         # Direct output-modality requests must be isolated from ordinary chat and
         # from text-model preflight.  If a provider is missing, the user should
@@ -123,6 +123,7 @@ class AgentStudioService:
                 message,
                 provided_inputs=provided_inputs,
                 uploaded_artifacts=uploaded_artifacts,
+                client_run_id=client_run_id,
             )
             if direct_agent_response is not None:
                 return direct_agent_response
@@ -624,26 +625,96 @@ class AgentStudioService:
         runs.sort(key=lambda item: str(item.get("completed_at") or item.get("started_at") or ""), reverse=True)
         return runs[0]
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, active_run_id: str | None = None, scope_kind: str | None = None, scope_id: str | None = None) -> dict[str, Any]:
         conversation_runs = self.store.list_json("traces/conversation_core")
         agent_traces = self.store.list_json("traces/agent_delegation")
         runtime_tool_runs = self.registered_tool_service.list_tool_runs()
         runtime_execution_traces = self.registered_tool_service.list_execution_traces()
+        participants = self.store.list_json("generated/agents")
+        task_graphs = self.store.list_json("generated/tasks")
+        task_runs = self.store.list_json("generated/results")
+        deliveries = self.store.list_json("deliveries")
+        active_run_id = str(active_run_id or "").strip()
+        scope_kind = str(scope_kind or "").strip()
+        scope_id = str(scope_id or "").strip()
+        if active_run_id or scope_id:
+            participants, task_graphs, task_runs, conversation_runs, runtime_tool_runs, agent_traces, runtime_execution_traces, deliveries = self._scope_snapshot_items(
+                participants=participants,
+                task_graphs=task_graphs,
+                task_runs=task_runs,
+                conversation_runs=conversation_runs,
+                runtime_tool_runs=runtime_tool_runs,
+                agent_traces=agent_traces,
+                runtime_execution_traces=runtime_execution_traces,
+                deliveries=deliveries,
+                active_run_id=active_run_id,
+                scope_kind=scope_kind,
+                scope_id=scope_id,
+            )
         return {
             "origin": "auxiliary_brain",
             "community_id": self.community_id,
-            "participants": self.store.list_json("generated/agents"),
-            "task_graphs": self.store.list_json("generated/tasks"),
-            "task_runs": self.store.list_json("generated/results"),
+            "active_run_id": active_run_id,
+            "scope_kind": scope_kind,
+            "scope_id": scope_id,
+            "participants": participants,
+            "task_graphs": task_graphs,
+            "task_runs": task_runs,
             "conversation_runs": conversation_runs,
             "runtime_tools": self.registered_tool_service.list_tools(),
             "runtime_tool_runs": runtime_tool_runs,
             "runtime_execution_traces": runtime_execution_traces,
-            "deliveries": self.store.list_json("deliveries"),
+            "deliveries": deliveries,
             "traces": agent_traces + conversation_runs + runtime_execution_traces,
         }
 
-    async def create_participant(self, instruction: str, name: str | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+
+    def _scope_snapshot_items(self, *, participants: list[dict[str, Any]], task_graphs: list[dict[str, Any]], task_runs: list[dict[str, Any]], conversation_runs: list[dict[str, Any]], runtime_tool_runs: list[dict[str, Any]], agent_traces: list[dict[str, Any]], runtime_execution_traces: list[dict[str, Any]], deliveries: list[dict[str, Any]], active_run_id: str, scope_kind: str, scope_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        """Return only state that belongs to the active UI/run scope.
+
+        This is a presentation-scope guard. It does not delete history and it
+        does not encode business behavior. It prevents stale final answers,
+        participants, workflow results, and registry execution records from
+        different runs from being mixed on the same live screen.
+        """
+        def text(v: Any) -> str:
+            return str(v or "").strip()
+        def has_run(item: dict[str, Any]) -> bool:
+            ids = {text(item.get("run_id")), text(item.get("client_run_id")), text(item.get("ui_run_id")), text(item.get("core_run_id")), text(item.get("trace_id"))}
+            return bool(active_run_id and active_run_id in ids)
+        if scope_kind == "participant" and scope_id:
+            participants = [p for p in participants if text(p.get("participant_id")) == scope_id or text(p.get("client_run_id")) == active_run_id]
+            task_graphs = []
+            task_runs = []
+            conversation_runs = []
+            runtime_tool_runs = []
+            agent_traces = []
+            runtime_execution_traces = []
+            deliveries = []
+        elif scope_kind == "task" and scope_id:
+            task_graphs = [g for g in task_graphs if scope_id in {text(g.get("graph_id")), text(g.get("task_name"))} or text(g.get("client_run_id")) == active_run_id]
+            selected = set()
+            for graph in task_graphs:
+                selected.update(text(x) for x in (graph.get("selected_participant_ids") or []) if text(x))
+            participants = [p for p in participants if text(p.get("participant_id")) in selected or text(p.get("client_run_id")) == active_run_id]
+            task_runs = [r for r in task_runs if text(r.get("task_name")) == scope_id or text(r.get("graph_id")) == scope_id or has_run(r)]
+            conversation_runs = [r for r in conversation_runs if has_run(r)]
+            runtime_tool_runs = [r for r in runtime_tool_runs if has_run(r)]
+            agent_traces = [t for t in agent_traces if has_run(t)]
+            runtime_execution_traces = [t for t in runtime_execution_traces if has_run(t)]
+            deliveries = [d for d in deliveries if has_run(d)]
+        elif active_run_id:
+            task_runs = [r for r in task_runs if has_run(r)]
+            conversation_runs = [r for r in conversation_runs if has_run(r)]
+            runtime_tool_runs = [r for r in runtime_tool_runs if has_run(r)]
+            agent_traces = [t for t in agent_traces if has_run(t)]
+            runtime_execution_traces = [t for t in runtime_execution_traces if has_run(t)]
+            deliveries = [d for d in deliveries if has_run(d)]
+            participants = [p for p in participants if text(p.get("client_run_id")) == active_run_id]
+            task_graphs = [g for g in task_graphs if text(g.get("client_run_id")) == active_run_id]
+        return participants, task_graphs, task_runs, conversation_runs, runtime_tool_runs, agent_traces, runtime_execution_traces, deliveries
+
+    async def create_participant(self, instruction: str, name: str | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None, client_run_id: str | None = None) -> dict[str, Any]:
         participant_id = new_id("participant")
         participant_name = name or participant_id
         execution_objective = self._derive_execution_objective(instruction, participant_name)
@@ -705,6 +776,8 @@ class AgentStudioService:
             "origin": "auxiliary_brain",
             "status": "completed",
             "participant_id": participant_id,
+            "run_id": str(client_run_id or participant_id),
+            "client_run_id": str(client_run_id or ""),
             "agent_name": participant_name,
             "display_name": participant_name,
             "path": str(path),
@@ -713,7 +786,7 @@ class AgentStudioService:
             "bound_tool_id": (payload.get("capability_profile") or {}).get("tool_id"),
         }
 
-    def create_task_graph(self, instruction: str, name: str | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def create_task_graph(self, instruction: str, name: str | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None, client_run_id: str | None = None) -> dict[str, Any]:
         graph_id = new_id("graph")
         task_name = name or graph_id
         participants = self.store.list_json("generated/agents")
@@ -754,6 +827,8 @@ class AgentStudioService:
         }
         payload = {
             "graph_id": graph_id,
+            "run_id": str(client_run_id or graph_id),
+            "client_run_id": str(client_run_id or ""),
             "task_name": task_name,
             "community_id": self.community_id,
             "instruction": instruction,
@@ -784,6 +859,8 @@ class AgentStudioService:
             "origin": "auxiliary_brain",
             "status": "completed",
             "graph_id": graph_id,
+            "run_id": str(client_run_id or graph_id),
+            "client_run_id": str(client_run_id or ""),
             "task_name": task_name,
             "path": str(path),
             "uploaded_artifacts": artifact_refs,
@@ -795,6 +872,7 @@ class AgentStudioService:
         *,
         provided_inputs: dict[str, Any] | None = None,
         uploaded_artifacts: list[dict[str, Any]] | None = None,
+        client_run_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Execute a one-off task when the text names an existing participant.
 
@@ -811,6 +889,7 @@ class AgentStudioService:
             participant=participant,
             provided_inputs=provided_inputs,
             uploaded_artifacts=uploaded_artifacts,
+            client_run_id=client_run_id,
         )
         return await self.execute_task(task_name, provided_inputs=provided_inputs, instruction=message)
 
@@ -853,6 +932,7 @@ class AgentStudioService:
         participant: dict[str, Any],
         provided_inputs: dict[str, Any] | None = None,
         uploaded_artifacts: list[dict[str, Any]] | None = None,
+        client_run_id: str | None = None,
     ) -> str:
         graph_id = new_id("direct_agent_graph")
         task_name = graph_id
@@ -866,6 +946,8 @@ class AgentStudioService:
         artifact_refs = uploaded_artifacts if isinstance(uploaded_artifacts, list) else []
         task_graph = {
             "graph_id": graph_id,
+            "run_id": str(client_run_id or graph_id),
+            "client_run_id": str(client_run_id or ""),
             "task_name": task_name,
             "community_id": self.community_id,
             "instruction": str(message or ""),

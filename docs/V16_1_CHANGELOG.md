@@ -39,3 +39,11 @@
 - `python3 tools/verify_runtime_console.py`
 - `python3 tools/verify_blueprint_capability_pipeline.py`
 - Python compile check for `ai_core`, `auxiliary_brain`, `apps/api`, and capability planner seeds.
+
+## v16.1.6 - Agent Studio run scope and state isolation
+
+- Added client_run_id propagation from Agent Studio UI to backend.
+- Scoped Agent Studio state snapshots by active run/scope to prevent stale participants, workflow results, and tool execution records from different runs appearing together.
+- Hid global Runtime Registry details in scoped live views to avoid confusing unrelated registered tools with the current run.
+- Replaced rotating status hints such as "refreshing state" with a stable running/ready status.
+- Added verification for scoped state isolation.

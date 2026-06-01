@@ -100,6 +100,7 @@ class AgentStudioRequest(BaseModel):
     provided_inputs: dict[str, Any] | None = None
     uploaded_artifacts: list[dict[str, Any]] | None = None
     session_id: str | None = None
+    client_run_id: str | None = None
 
 
 
@@ -698,7 +699,9 @@ async def agent_studio_save_runtime_tool_profile(req: RuntimeToolProfileRequest)
 @app.post("/api/agent-studio/runtime-tools/execute")
 async def agent_studio_execute_runtime_tool(req: RegisteredToolExecuteRequest):
     try:
-        payload = registered_tool_service.execute_tool(
+        emit_console_event(area="runtime_tool", event="EXECUTION_STARTED", status="running", message=req.tool_id)
+        payload = await asyncio.to_thread(
+            registered_tool_service.execute_tool,
             tool_id=req.tool_id,
             input_data=req.input_data if req.input_data is not None else {},
             run_id="agent_studio_registered_tool",
@@ -706,6 +709,7 @@ async def agent_studio_execute_runtime_tool(req: RegisteredToolExecuteRequest):
             approval_confirmed=bool(req.approval_confirmed),
             remember_approval=bool(req.remember_approval),
         )
+        emit_console_event(area="runtime_tool", event="EXECUTION_FINISHED", status="completed" if payload.get("ok") else "failed", message=req.tool_id)
         status = 200 if payload.get("ok") else 400
         return JSONResponse(payload, status_code=status)
     except Exception as exc:
@@ -713,17 +717,36 @@ async def agent_studio_execute_runtime_tool(req: RegisteredToolExecuteRequest):
         return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
 
 @app.get("/api/agent-studio/state")
-async def agent_studio_state():
-    return JSONResponse(studio_service.snapshot())
+async def agent_studio_state(active_run_id: str | None = None, scope_kind: str | None = None, scope_id: str | None = None):
+    return JSONResponse(studio_service.snapshot(active_run_id=active_run_id, scope_kind=scope_kind, scope_id=scope_id))
 
 
 @app.post("/api/agent-studio/message")
 async def agent_studio_message(req: AgentStudioRequest):
     try:
         active_session_id = session_store.start_or_get_session(req.session_id, metadata={"surface": "agent_studio"})
-        payload = await studio_service.handle_message(req.message, provided_inputs=req.provided_inputs, uploaded_artifacts=req.uploaded_artifacts, session_id=active_session_id)
+        emit_console_event(area="agent_studio", event="REQUEST_STARTED", status="running", message="runtime request accepted")
+        # Run the heavy message workflow away from the API event loop.
+        # Model calls, generated programs, downloads, and validations can be
+        # slow; keeping them off the event loop allows SSE console updates,
+        # state polling, and the UI to remain responsive while work continues.
+        payload = await asyncio.to_thread(
+            lambda: asyncio.run(
+                studio_service.handle_message(
+                    req.message,
+                    provided_inputs=req.provided_inputs,
+                    uploaded_artifacts=req.uploaded_artifacts,
+                    session_id=active_session_id,
+                    client_run_id=req.client_run_id,
+                )
+            )
+        )
+        emit_console_event(area="agent_studio", event="REQUEST_FINISHED", status="completed", message="runtime request finished")
         if isinstance(payload, dict):
             payload.setdefault("session_id", active_session_id)
+            if req.client_run_id:
+                payload.setdefault("client_run_id", req.client_run_id)
+                payload.setdefault("ui_run_id", req.client_run_id)
             final_answer = str(payload.get("final_answer") or payload.get("message") or payload.get("status") or "")
             if final_answer.strip():
                 session_store.append_turn(

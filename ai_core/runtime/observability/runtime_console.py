@@ -39,21 +39,19 @@ def emit_console_event(*, area: str, event: str, status: str = "info", message: 
 
 
 def list_console_sources() -> list[dict[str, Any]]:
+    # Operator console intentionally exposes only observability material.
+    # Runtime may contain generated artifacts, profiles, storage, downloads,
+    # external runtimes, and other non-log assets; those must not be mixed into
+    # the live console source list.
     roots = [
         RUNTIME_ROOT / "logs",
         RUNTIME_ROOT / "traces",
-        RUNTIME_ROOT / "generated",
-        RUNTIME_ROOT / "downloads",
-        RUNTIME_ROOT / "external_runtimes",
-        PROJECT_ROOT / "downloads",
-        PROJECT_ROOT / "traces",
-        PROJECT_ROOT / "generated",
     ]
     files: list[Path] = []
     for root in roots:
         if not root.exists():
             continue
-        for pattern in ("*.jsonl", "*.log", "*.txt", "*.json"):
+        for pattern in ("*.jsonl", "*.log", "*.txt"):
             files.extend(root.rglob(pattern))
     unique: dict[str, Path] = {}
     for p in files:
@@ -170,7 +168,7 @@ def _redact(text: str) -> str:
     return out
 
 
-def iter_console_events(*, source: str | None = None, cursor: int = 0, poll_interval: float = 1.0):
+def iter_console_events(*, source: str | None = None, cursor: int = -1, poll_interval: float = 0.5):
     """Yield Server-Sent Events from a safe runtime text source.
 
     This is a read-only operator stream. It tails runtime-owned files and emits
@@ -182,7 +180,13 @@ def iter_console_events(*, source: str | None = None, cursor: int = 0, poll_inte
         payload = {"ts": datetime.now(timezone.utc).isoformat(), "level": "ERROR", "area": "RUNTIME", "event": "STREAM_SOURCE_REJECTED", "message": "Unsafe runtime console source"}
         yield f"event: runtime\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
         return
-    pos = max(0, int(cursor or 0))
+    try:
+        raw_cursor = int(cursor if cursor is not None else -1)
+    except Exception:
+        raw_cursor = -1
+    # Negative cursor means follow new material only, avoiding a large initial
+    # dump that can freeze the browser when historical logs are big.
+    pos = safe.stat().st_size if raw_cursor < 0 and safe.exists() else max(0, raw_cursor)
     while True:
         try:
             if not safe.exists():
@@ -193,7 +197,7 @@ def iter_console_events(*, source: str | None = None, cursor: int = 0, poll_inte
                 pos = 0
             with safe.open("rb") as fh:
                 fh.seek(pos)
-                raw = fh.read(65536)
+                raw = fh.read(32768)
                 pos = fh.tell()
             if raw:
                 text = _redact(raw.decode("utf-8", errors="replace"))
@@ -201,9 +205,10 @@ def iter_console_events(*, source: str | None = None, cursor: int = 0, poll_inte
                     payload = _normalize_console_line(line, cursor=pos, source=source)
                     yield f"event: runtime\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
             else:
+                # Keep the connection alive without sending visible log rows.
                 heartbeat = {"ts": datetime.now(timezone.utc).isoformat(), "level": "DEBUG", "area": "RUNTIME", "event": "HEARTBEAT", "message": ""}
                 yield f": {json.dumps(heartbeat, ensure_ascii=False)}\n\n"
-                time.sleep(max(0.2, float(poll_interval or 1.0)))
+                time.sleep(max(0.2, float(poll_interval or 0.5)))
         except GeneratorExit:
             return
         except Exception as exc:
@@ -252,27 +257,35 @@ def _status_to_level(status: str) -> str:
 
 
 def list_runtime_explorer_tree(*, root: str = "runtime", max_entries: int = 500) -> dict[str, Any]:
-    allowed_roots = {"runtime": RUNTIME_ROOT}
-    base = allowed_roots.get(str(root or "runtime"), RUNTIME_ROOT).resolve()
+    # Default Explorer view is observability-only.  It avoids showing runtime
+    # generated assets, profiles, secrets, downloads, or external runtimes when
+    # the user is looking for logs/traces.
+    base = RUNTIME_ROOT.resolve()
+    visible_roots = [RUNTIME_ROOT / "logs", RUNTIME_ROOT / "traces"]
     entries: list[dict[str, Any]] = []
     if not base.exists():
-        return {"ok": True, "root": root, "entries": entries}
-    for path in sorted(base.rglob("*")):
-        if len(entries) >= max_entries:
-            break
-        try:
-            rel = path.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
-            stat = path.stat()
-            entries.append({
-                "path": rel,
-                "name": path.name,
-                "type": "directory" if path.is_dir() else "file",
-                "size_bytes": 0 if path.is_dir() else stat.st_size,
-                "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
-            })
-        except Exception:
+        return {"ok": True, "root": root, "entries": entries, "view": "observability"}
+    for visible_root in visible_roots:
+        if not visible_root.exists():
             continue
-    return {"ok": True, "root": root, "entries": entries}
+        for path in [visible_root, *sorted(visible_root.rglob("*"))]:
+            if len(entries) >= max_entries:
+                break
+            try:
+                if path.is_file() and path.suffix.lower() not in {".jsonl", ".log", ".txt"}:
+                    continue
+                rel = path.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+                stat = path.stat()
+                entries.append({
+                    "path": rel,
+                    "name": path.name,
+                    "type": "directory" if path.is_dir() else "file",
+                    "size_bytes": 0 if path.is_dir() else stat.st_size,
+                    "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                })
+            except Exception:
+                continue
+    return {"ok": True, "root": root, "entries": entries, "view": "observability"}
 
 
 def resolve_runtime_explorer_file(path_value: str) -> Path | None:
