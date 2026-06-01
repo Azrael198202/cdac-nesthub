@@ -437,7 +437,7 @@ class ConversationCoreRuntime:
             # as a fallback material source, then retry the same acquisition
             # contract. A missing web result must not block a policy-backed basic
             # capability whose planner says evidence is not required.
-            if runtime_impl.get("status") in {"planner_low_confidence", "evidence_missing"}:
+            if runtime_impl.get("status") in {"planner_failed", "planner_low_confidence", "evidence_missing"}:
                 planned_queries = self.web_evidence_optimizer.plan_queries(user_input=text, capability="runtime_capability_acquisition", objective=evidence.get("query", ""))
                 evidence["planned_queries"] = planned_queries
                 search_query = str((planned_queries[0] or {}).get("query") or evidence["query"]) if planned_queries else evidence["query"]

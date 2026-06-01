@@ -1,3 +1,5 @@
+import os
+import re
 import time
 from ai_core.config.loader import ConfigLoader
 from ai_core.runtime.modeling.model_provider_autoconfig import ModelProviderAutoConfigurator
@@ -45,30 +47,48 @@ class ProviderRouter:
         node = str(node_id or "")
         if node in {"agent_parameter_contract", "input_parsing"}:
             updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 520), 520)
-            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 90), 90.0)
+            updated["provider_timeout_seconds"] = self._stage_timeout_seconds(node_id=node, default_seconds=180)
             updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 900), 900)
             updated.setdefault("provider_options", {})
             updated["provider_options"].update({"temperature": 0, "num_predict": 256, "num_ctx": 1536, "think": False})
         elif node == "intent_recognition":
             updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 800), 800)
-            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 60), 60.0)
+            updated["provider_timeout_seconds"] = self._stage_timeout_seconds(node_id=node, default_seconds=180)
             updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1500), 1500)
             updated.setdefault("provider_options", {})
             updated["provider_options"].update({"temperature": 0, "num_predict": 384, "num_ctx": 2048, "think": False})
         elif node == "workflow_planning":
             updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 700), 700)
-            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 120), 120.0)
+            updated["provider_timeout_seconds"] = self._stage_timeout_seconds(node_id=node, default_seconds=240)
             updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1200), 1200)
             updated.setdefault("provider_options", {})
             updated["provider_options"].update({"temperature": 0, "num_predict": 384, "num_ctx": 2048, "think": False})
         elif node == "execution":
             updated["max_prompt_tokens"] = min(int(updated.get("max_prompt_tokens") or 800), 800)
-            updated["provider_timeout_seconds"] = min(float(updated.get("provider_timeout_seconds") or 30), 30.0)
+            updated["provider_timeout_seconds"] = self._stage_timeout_seconds(node_id=node, default_seconds=60)
             updated["max_schema_chars"] = min(int(updated.get("max_schema_chars") or 1000), 1000)
             updated["max_provider_attempts"] = 1
             updated.setdefault("provider_options", {})
             updated["provider_options"].update({"temperature": 0, "num_predict": 384, "num_ctx": 2048, "think": False})
         return updated
+
+    def _stage_timeout_seconds(self, *, node_id: str, default_seconds: float) -> float:
+        """Return a configurable local-model stage timeout.
+
+        Capability acquisition may run on slower local models. A timeout remains
+        finite by default so the runtime can fall back to evidence retrieval and
+        repair instead of hanging forever. Operators can set
+        AI_CORE_STAGE_MODEL_TIMEOUT_SECONDS or AI_CORE_<NODE>_TIMEOUT_SECONDS.
+        """
+        key = "AI_CORE_" + re.sub(r"[^A-Z0-9]+", "_", str(node_id or "").upper()).strip("_") + "_TIMEOUT_SECONDS"
+        raw = os.environ.get(key) or os.environ.get("AI_CORE_STAGE_MODEL_TIMEOUT_SECONDS") or os.environ.get("AI_CORE_LOCAL_MODEL_TIMEOUT_SECONDS")
+        try:
+            configured = float(raw) if raw not in (None, "") else float(default_seconds)
+        except Exception:
+            configured = float(default_seconds)
+        if configured <= 0:
+            configured = float(default_seconds)
+        return max(30.0, configured)
 
     def _compact_rendered_prompt(self, *, node_id: str, text: str, adapter: dict) -> str:
         """Shrink LLM prompts without relying on business vocabulary.
