@@ -1,1 +1,1 @@
-v15.3-qwen-planner-capability-acquisition
+v15.6-runtime-type-coercion-neutral-planner

@@ -1136,9 +1136,10 @@ function schemaFieldsFromObject(schema, prefix, kind){
       raw_name:name,
       label:String(spec.title||name),
       message:String(spec.description||('Please provide '+name+'.')),
-      input_type: kind==='runtime_secret_value' ? 'password' : (type==='object'?'textarea':(type==='array'?'textarea':'text')),
+      input_type: kind==='runtime_secret_value' ? 'password' : (type==='boolean'?'checkbox':(type==='number'||type==='integer'?'number':(type==='object'?'textarea':(type==='array'?'textarea':'text')))),
+      schema_type: type,
       required: required.includes(name),
-      placeholder: type==='array'?'[]':(type==='object'?'{}':'')
+      placeholder: type==='array'?'[]':(type==='object'?'{}':(type==='boolean'?'false':''))
     };
   });
 }
@@ -1151,7 +1152,7 @@ function openRuntimeSchemaModal(title, summary, fieldGroups, onSubmit){
   const all=[];
   (fieldGroups||[]).forEach(group=>{
     if(group.title){ const h=document.createElement('div'); h.className='sectionTitle'; h.textContent=group.title; box.appendChild(h); }
-    (group.fields||[]).forEach((f)=>{ all.push(f); const idx=all.length-1; const wrap=document.createElement('div'); const label=document.createElement('label'); label.className='fieldLabel'; label.textContent=(f.label||f.field)+(f.required?'':' (optional)'); const hint=document.createElement('div'); hint.className='fieldHint'; hint.textContent=f.message||''; const area=(f.input_type==='textarea'); const input=document.createElement(area?'textarea':'input'); if(!area && f.input_type==='password'){ input.type='password'; input.autocomplete='off'; } input.className='fieldInput '+(area?'area':''); input.id='runtime_schema_form_'+idx; input.dataset.field=f.field; input.dataset.rawName=f.raw_name||f.field; input.dataset.required=f.required?'true':'false'; input.placeholder=f.placeholder||''; wrap.appendChild(label); wrap.appendChild(hint); wrap.appendChild(input); box.appendChild(wrap); });
+    (group.fields||[]).forEach((f)=>{ all.push(f); const idx=all.length-1; const wrap=document.createElement('div'); const label=document.createElement('label'); label.className='fieldLabel'; label.textContent=(f.label||f.field)+(f.required?'':' (optional)'); const hint=document.createElement('div'); hint.className='fieldHint'; hint.textContent=f.message||''; const area=(f.input_type==='textarea'); const input=document.createElement(area?'textarea':'input'); if(!area && f.input_type==='password'){ input.type='password'; input.autocomplete='off'; } if(!area && f.input_type==='checkbox'){ input.type='checkbox'; } if(!area && f.input_type==='number'){ input.type='number'; } input.className='fieldInput '+(area?'area':''); input.id='runtime_schema_form_'+idx; input.dataset.field=f.field; input.dataset.rawName=f.raw_name||f.field; input.dataset.required=f.required?'true':'false'; input.dataset.schemaType=f.schema_type||'string'; input.placeholder=f.placeholder||''; wrap.appendChild(label); wrap.appendChild(hint); wrap.appendChild(input); box.appendChild(wrap); });
   });
   runtimeSchemaModalState={fields:all,onSubmit:onSubmit};
   modal.classList.add('show');
@@ -1159,7 +1160,7 @@ function openRuntimeSchemaModal(title, summary, fieldGroups, onSubmit){
 function readRuntimeSchemaModalValues(){
   const state=runtimeSchemaModalState||{fields:[]};
   const values={}; const missing=[];
-  state.fields.forEach((f,idx)=>{ const input=document.getElementById('runtime_schema_form_'+idx); if(!input){ return; } const raw=input.value.trim(); if(!raw && f.required){ missing.push(f.field); return; } if(!raw){ return; } let val=raw; if(f.input_type==='textarea'){ try{ val=JSON.parse(raw); }catch(e){ val=raw; } } values[f.field]=val; });
+  state.fields.forEach((f,idx)=>{ const input=document.getElementById('runtime_schema_form_'+idx); if(!input){ return; } const type=f.schema_type||input.dataset.schemaType||'string'; let val; if(f.input_type==='checkbox'){ val=!!input.checked; values[f.field]=val; return; } const raw=input.value.trim(); if(!raw && f.required){ missing.push(f.field); return; } if(!raw){ return; } val=raw; if(type==='integer'){ val=parseInt(raw,10); } else if(type==='number'){ val=Number(raw); } else if(f.input_type==='textarea'||type==='array'||type==='object'){ try{ val=JSON.parse(raw); }catch(e){ val=raw; } } values[f.field]=val; });
   return {values, missing};
 }
 async function submitRuntimeSchemaModal(){

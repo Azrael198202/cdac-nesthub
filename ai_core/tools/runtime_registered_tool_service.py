@@ -60,10 +60,14 @@ class RuntimeRegisteredToolService:
         spec = self.get_tool(tool_id)
         if spec is None:
             return {"ok": False, "status": "failed", "error": {"code": "tool_not_found", "message": "Runtime tool is not registered."}}
+        normalized_config = self._coerce_by_schema(
+            config if isinstance(config, dict) else {},
+            spec.get("connection_schema") if isinstance(spec.get("connection_schema"), dict) else {},
+        )
         profile = self.connection_store.upsert_profile(
             tool_id=str(spec.get("tool_id") or tool_id),
             profile_id=profile_id or "default",
-            config=config if isinstance(config, dict) else {},
+            config=normalized_config,
             secrets=secrets if isinstance(secrets, dict) else {},
             secret_schema=spec.get("secret_schema") if isinstance(spec.get("secret_schema"), dict) else {},
             metadata={"source": "agent_studio_runtime_profile"},
@@ -112,11 +116,21 @@ class RuntimeRegisteredToolService:
         if approval_confirmed:
             self.approval_policy_store.record_confirmation(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id, remember=remember_approval)
         payload = input_data if isinstance(input_data, dict) else {"input": input_data}
+        payload = self._coerce_by_schema(payload, spec.get("input_schema") if isinstance(spec.get("input_schema"), dict) else {})
         payload = self._apply_runtime_invocation_defaults(spec=spec, payload=payload, approval_confirmed=approval_confirmed)
+        payload = self._coerce_by_schema(payload, spec.get("input_schema") if isinstance(spec.get("input_schema"), dict) else {})
         runtime_context = self.connection_store.runtime_context_for(tool_spec=spec, profile_id=profile_id)
         if runtime_context.get("connection") or runtime_context.get("secrets") or runtime_context.get("secret_refs"):
             payload = dict(payload)
-            payload["_runtime"] = runtime_context
+            normalized_runtime = dict(runtime_context)
+            normalized_runtime["connection"] = self._coerce_by_schema(
+                runtime_context.get("connection") if isinstance(runtime_context.get("connection"), dict) else {},
+                spec.get("connection_schema") if isinstance(spec.get("connection_schema"), dict) else {},
+            )
+            payload["_runtime"] = normalized_runtime
+            payload.setdefault("connection", normalized_runtime.get("connection", {}))
+            if normalized_runtime.get("secrets"):
+                payload.setdefault("secrets", normalized_runtime.get("secrets", {}))
         result = self.runner.run_tool(spec, payload, run_id=run_id, node_id="agent_studio_registered_tool", step_id=str(tool_id), capability=str(spec.get("capability") or ""))
         out = {
             "ok": str(result.get("status") or "").lower() in {"success", "ok", "executed"},
@@ -163,6 +177,70 @@ class RuntimeRegisteredToolService:
     def list_profiles(self, tool_id: str | None = None) -> list[dict[str, Any]]:
         return self.connection_store.list_profiles(tool_id)
 
+
+
+    def _coerce_by_schema(self, value: Any, schema: dict[str, Any] | None) -> Any:
+        """Coerce browser/runtime string values to schema-declared JSON types.
+
+        This stays capability-agnostic: it only follows runtime-declared JSON
+        schema types. It prevents common UI issues such as the string "false"
+        being treated as truthy by generated Python code.
+        """
+        if not isinstance(schema, dict):
+            return value
+        expected = schema.get("type")
+        if isinstance(expected, list):
+            expected = next((x for x in expected if x != "null"), expected[0] if expected else None)
+        if expected == "boolean":
+            return self._parse_bool(value)
+        if expected == "integer":
+            try:
+                if value in (None, ""):
+                    return value
+                return int(value)
+            except Exception:
+                return value
+        if expected == "number":
+            try:
+                if value in (None, ""):
+                    return value
+                return float(value)
+            except Exception:
+                return value
+        if expected == "array" and isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, list) else value
+            except Exception:
+                return value
+        if expected == "object" and isinstance(value, dict):
+            props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+            return {k: self._coerce_by_schema(v, props.get(k) if isinstance(props.get(k), dict) else {}) for k, v in value.items()}
+        if expected == "object" and isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    return self._coerce_by_schema(parsed, schema)
+            except Exception:
+                return value
+        if isinstance(value, dict):
+            props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+            return {k: self._coerce_by_schema(v, props.get(k) if isinstance(props.get(k), dict) else {}) for k, v in value.items()}
+        return value
+
+    def _parse_bool(self, value: Any) -> Any:
+        if isinstance(value, bool):
+            return value
+        if value is None or value == "":
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().casefold()
+        if text in {"true", "1", "yes", "y", "on"}:
+            return True
+        if text in {"false", "0", "no", "n", "off"}:
+            return False
+        return value
 
     def _apply_runtime_invocation_defaults(self, *, spec: dict[str, Any], payload: Any, approval_confirmed: bool) -> dict[str, Any]:
         """Apply registry-declared invocation defaults before execution.
