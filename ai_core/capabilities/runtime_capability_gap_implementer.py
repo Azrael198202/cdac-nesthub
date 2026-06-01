@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_REGISTRY
+from ai_core.config.paths import PROJECT_ROOT, RUNTIME_GENERATED, RUNTIME_REGISTRY
 from ai_core.runtime.capability.acquisition_gate import RuntimeCapabilityAcquisitionGate
 from ai_core.runtime.capability.runtime_capability_template_store import RuntimeCapabilityTemplateStore
 from ai_core.runtime.self_repair.engine import RuntimeSelfRepairEngine
@@ -411,6 +411,7 @@ class RuntimeCapabilityGapImplementer:
         candidates = [
             RUNTIME_GENERATED / "capability_planners" / "default_capability_planner.py",
             RUNTIME_GENERATED / "capability_planners" / "evidence_template_planner.py",
+            PROJECT_ROOT / "runtime" / "seeds" / "capability_planners" / "default_capability_planner.py",
         ]
         for path in candidates:
             if path.exists():

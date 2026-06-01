@@ -924,11 +924,33 @@ class ConversationCoreRuntime:
         return bool(has_action and (has_discovery or self._external_information_signals(text)))
 
     def _capability_gap_query(self, text: str) -> str:
-        base = str(text or "").strip()
-        suffix = " implementation guide official documentation example safe integration validation"
-        if any(token in base.casefold() for token in ("documentation", "docs", "official", "guide", "example")):
-            return base
-        return (base + suffix).strip()
+        """Build a compact evidence query for capability acquisition.
+
+        The full user request can contain UI/storage/validation constraints.
+        Sending that whole text to a web search adapter often produces a 200
+        response with zero kept results.  This method keeps the logic generic:
+        it extracts neutral capability terms and appends evidence-purpose terms.
+        Concrete implementation remains in runtime planners/templates.
+        """
+        raw = str(text or "").strip()
+        folded = raw.casefold()
+        terms: list[str] = []
+        for line in raw.splitlines():
+            clean = re.sub(r"[^A-Za-z0-9_+.#/-]+", " ", line).strip()
+            if not clean:
+                continue
+            low = clean.casefold()
+            if any(marker in low for marker in ("capability", "runtime", "constraints", "complete only", "schema", "registry", "sandbox")):
+                continue
+            if len(clean) <= 80:
+                terms.append(clean)
+        if not terms:
+            terms = self._generic_capability_terms(raw)[:6]
+        base = " ".join(terms[:8]).strip()
+        if not base:
+            base = "runtime capability implementation"
+        purpose = "official documentation implementation guide example validation"
+        return (base + " " + purpose).strip()[:300]
 
     async def _direct_answer(self, text: str, parsed: dict[str, Any], intent: dict[str, Any], context: dict[str, Any], plan: dict[str, Any], run_id: str) -> str:
         schema = {
