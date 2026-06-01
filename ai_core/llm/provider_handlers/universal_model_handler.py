@@ -6,6 +6,10 @@ import shlex
 import time
 import shutil
 import json
+import os
+import hashlib
+import urllib.request
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -18,6 +22,7 @@ from ai_core.llm.provider_handlers.utils import build_system_prompt, parse_json_
 from ai_core.llm.token_usage_logger import TokenUsageLogger
 from ai_core.llm.prompt_io_recorder import PromptIORecorder
 from ai_core.secrets.secret_store import SecretStore
+from ai_core.config.paths import RUNTIME_DOWNLOADS
 
 
 class UniversalModelProviderHandler:
@@ -312,6 +317,19 @@ class UniversalModelProviderHandler:
             tags = await self._ollama_tags(base_url) or tags
             if ok and self._ollama_model_exists(tags, model):
                 return model
+            if provider.get("auto_import_gguf_missing_model", True):
+                imported = await self._import_ollama_model_from_gguf(run_id, node_id, provider_name, provider, model)
+                tags = await self._ollama_tags(base_url) or tags
+                if imported and self._ollama_model_exists(tags, model):
+                    await event_bus.emit(run_id, {
+                        "type": "LLM_MODEL_GGUF_IMPORT_DONE",
+                        "title": "Ollama GGUF import completed",
+                        "message": model,
+                        "node_id": node_id,
+                        "provider": provider_name,
+                        "model": model,
+                    })
+                    return model
         raise ProviderUnavailableError(
             f"{provider_name}: no configured Ollama model is available. Tried: {', '.join(candidates)}"
         )
@@ -401,6 +419,183 @@ class UniversalModelProviderHandler:
                 "model": model,
             })
             return False
+
+    def _safe_model_file_stem(self, value: str) -> str:
+        return "".join(c if c.isalnum() or c in {"_", "-", "."} else "_" for c in value)[:120] or "model"
+
+    def _ollama_gguf_entry(self, provider: dict[str, Any], model: str) -> dict[str, Any] | None:
+        maps = []
+        for key in ("gguf_models", "model_imports", "ollama_gguf_models"):
+            value = provider.get(key)
+            if isinstance(value, dict):
+                maps.append(value)
+        for mapping in maps:
+            entry = mapping.get(model) or mapping.get(model.lower())
+            if isinstance(entry, str):
+                return {"local_path": entry}
+            if isinstance(entry, dict):
+                return dict(entry)
+        return None
+
+    async def _import_ollama_model_from_gguf(self, run_id, node_id, provider_name, provider, model: str) -> bool:
+        """Import a missing Ollama model from a runtime-configured GGUF file.
+
+        This is generic model lifecycle support, not model-specific logic:
+        runtime config may provide either a local GGUF path or a URL. The handler
+        prepares a Modelfile and calls `ollama create <model> -f <Modelfile>`.
+        Official Ollama documentation supports building from a GGUF file with
+        `FROM ./model.gguf` in a Modelfile and `ollama create`.
+        """
+        entry = self._ollama_gguf_entry(provider, model)
+        if not entry:
+            await event_bus.emit(run_id, {
+                "type": "LLM_MODEL_GGUF_IMPORT_SKIPPED",
+                "title": "No GGUF import source configured",
+                "message": model,
+                "node_id": node_id,
+                "provider": provider_name,
+                "model": model,
+            })
+            return False
+        try:
+            gguf_path = await self._resolve_ollama_gguf_path(run_id, node_id, provider_name, provider, model, entry)
+            if not gguf_path or not gguf_path.exists():
+                return False
+            expected_sha = str(entry.get("sha256") or os.environ.get(str(entry.get("sha256_env") or "")) or "").strip()
+            if expected_sha and not self._verify_file_sha256(gguf_path, expected_sha):
+                await event_bus.emit(run_id, {
+                    "type": "LLM_MODEL_GGUF_IMPORT_FAILED",
+                    "title": "GGUF checksum mismatch",
+                    "message": str(gguf_path),
+                    "node_id": node_id,
+                    "provider": provider_name,
+                    "model": model,
+                })
+                return False
+            model_dir = RUNTIME_DOWNLOADS / "models" / "ollama_imports" / self._safe_model_file_stem(model)
+            model_dir.mkdir(parents=True, exist_ok=True)
+            modelfile = model_dir / "Modelfile"
+            modelfile.write_text(self._render_ollama_modelfile(gguf_path, entry), encoding="utf-8")
+            binary = str(provider.get("binary") or "ollama").strip() or "ollama"
+            command = [binary, "create", model, "-f", str(modelfile)]
+            timeout = int(entry.get("create_timeout_seconds") or provider.get("gguf_create_timeout_seconds") or 3600)
+            await event_bus.emit(run_id, {
+                "type": "LLM_MODEL_GGUF_IMPORT_START",
+                "title": "Importing GGUF into Ollama",
+                "message": " ".join(shlex.quote(x) for x in command),
+                "node_id": node_id,
+                "provider": provider_name,
+                "model": model,
+            })
+            proc = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            if proc.returncode == 0:
+                meta = {
+                    "model": model,
+                    "gguf_path": str(gguf_path),
+                    "modelfile": str(modelfile),
+                    "command": command,
+                    "status": "imported",
+                }
+                (model_dir / "import.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+                return True
+            await event_bus.emit(run_id, {
+                "type": "LLM_MODEL_GGUF_IMPORT_FAILED",
+                "title": "Ollama GGUF import failed",
+                "message": (stderr or stdout or b"").decode(errors="ignore")[-2000:],
+                "node_id": node_id,
+                "provider": provider_name,
+                "model": model,
+            })
+            return False
+        except Exception as exc:
+            await event_bus.emit(run_id, {
+                "type": "LLM_MODEL_GGUF_IMPORT_FAILED",
+                "title": "Ollama GGUF import failed",
+                "message": str(exc),
+                "node_id": node_id,
+                "provider": provider_name,
+                "model": model,
+            })
+            return False
+
+    async def _resolve_ollama_gguf_path(self, run_id, node_id, provider_name, provider, model: str, entry: dict[str, Any]) -> Path | None:
+        env_name = str(entry.get("local_path_env") or "").strip()
+        local = os.environ.get(env_name) if env_name else None
+        local = local or str(entry.get("local_path") or "").strip()
+        if local:
+            path = Path(local).expanduser()
+            if path.exists():
+                return path.resolve()
+            await event_bus.emit(run_id, {
+                "type": "LLM_MODEL_GGUF_PATH_MISSING",
+                "title": "Configured GGUF file is missing",
+                "message": str(path),
+                "node_id": node_id,
+                "provider": provider_name,
+                "model": model,
+            })
+        url_env = str(entry.get("url_env") or "").strip()
+        url = os.environ.get(url_env) if url_env else None
+        url = url or str(entry.get("url") or entry.get("source_url") or "").strip()
+        if not url:
+            return None
+        target_dir = RUNTIME_DOWNLOADS / "models" / "gguf" / self._safe_model_file_stem(model)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        filename = str(entry.get("filename") or "").strip() or self._safe_model_file_stem(url.rsplit("/", 1)[-1] or model + ".gguf")
+        if not filename.lower().endswith(".gguf"):
+            filename += ".gguf"
+        target = target_dir / filename
+        if target.exists() and target.stat().st_size > 0:
+            return target.resolve()
+        timeout = int(entry.get("download_timeout_seconds") or provider.get("gguf_download_timeout_seconds") or 3600)
+        await event_bus.emit(run_id, {
+            "type": "LLM_MODEL_GGUF_DOWNLOAD_START",
+            "title": "Downloading GGUF model file",
+            "message": url,
+            "node_id": node_id,
+            "provider": provider_name,
+            "model": model,
+        })
+        await asyncio.to_thread(self._download_file_sync, url, target, timeout)
+        return target.resolve() if target.exists() else None
+
+    def _download_file_sync(self, url: str, target: Path, timeout: int) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(target.suffix + ".part")
+        request = urllib.request.Request(url, headers={"User-Agent": "ai-core-runtime-model-preparer/1.0"})
+        with urllib.request.urlopen(request, timeout=timeout) as response, tmp.open("wb") as fh:
+            shutil.copyfileobj(response, fh)
+        tmp.replace(target)
+
+    def _verify_file_sha256(self, path: Path, expected: str) -> bool:
+        digest = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest().lower() == expected.lower()
+
+    def _render_ollama_modelfile(self, gguf_path: Path, entry: dict[str, Any]) -> str:
+        lines = [f"FROM {gguf_path.as_posix()}"]
+        system_prompt = str(entry.get("system") or entry.get("system_prompt") or "").strip()
+        if system_prompt:
+            lines.append('SYSTEM """')
+            lines.append(system_prompt)
+            lines.append('"""')
+        params = entry.get("parameters") if isinstance(entry.get("parameters"), dict) else {}
+        for key, value in params.items():
+            if key and value is not None:
+                lines.append(f"PARAMETER {key} {value}")
+        template = str(entry.get("template") or "").strip()
+        if template:
+            lines.append('TEMPLATE """')
+            lines.append(template)
+            lines.append('"""')
+        return "\n".join(lines) + "\n"
 
     async def _call_ollama(self, run_id, node_id, provider_name, provider, prompt, rendered_user_prompt, schema, protocol):
         base_url = provider.get("base_url", "http://127.0.0.1:11434").rstrip("/")
