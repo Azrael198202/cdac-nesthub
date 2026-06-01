@@ -109,6 +109,11 @@ function addFinalAnswer(text, cls='item final'){
   addMessage('', cls, {html: '<div class="small" style="font-weight:700;margin-bottom:6px">Final Answer:</div>'+formatAnswerHtml(text)+feedback});
 }
 function renderStudioResponse(data, originalText){
+  if(data && String(data.status || '').toLowerCase() === 'running'){
+    renderStudioJobProgress(data);
+    setStudioStatus('running', true);
+    return;
+  }
   if(data && data.session_id){ setActiveSession(data.session_id, false); }
   if(data && (data.ui_run_id || data.client_run_id || data.run_id)){ activeUiRunId = String(data.ui_run_id || data.client_run_id || data.run_id || activeUiRunId); }
   if(data && data.run_id){ lastCompletedRunId = String(data.run_id||''); }
@@ -147,7 +152,7 @@ function renderStudioResponse(data, originalText){
   if(data && data.final_answer){
     const ans=String(data.final_answer||'').trim();
     if(ans.toLowerCase()==='thinking...' || ans.toLowerCase()==='thinking'){
-      addMessage('Execution is still running. Refreshing state...', 'item');
+      addMessage('Execution is still running.', 'item');
       refreshState();
       return;
     }
@@ -185,6 +190,71 @@ let activeUiRunId = "";
 let activeStateScope = {kind:"", id:""};
 function newClientRunId(){ return 'ui_run_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8); }
 function setActiveStateScope(kind, id, runId){ activeStateScope={kind:String(kind||''), id:String(id||'')}; if(runId){ activeUiRunId=String(runId); } }
+let activeStudioJobPoll = null;
+let activeStudioJobRunId = '';
+let activeStudioJobRenderedStages = new Set();
+
+function resetActiveRunUi(runId){
+  activeStudioJobRunId = String(runId || '');
+  activeStudioJobRenderedStages = new Set();
+  setActiveStateScope('request', '', activeStudioJobRunId);
+}
+
+function isTerminalStudioStatus(status){
+  return ['completed','failed','cancelled','blocked','requires_input','pending_review','not_found'].includes(String(status||'').toLowerCase());
+}
+
+function renderStudioJobProgress(job){
+  const events = Array.isArray(job && job.progress_events) ? job.progress_events : [];
+  events.forEach((ev, idx)=>{
+    const key = [job.run_id || activeStudioJobRunId, ev.stage || ev.label || idx, ev.status || 'running', ev.detail || ''].join('|');
+    if(activeStudioJobRenderedStages.has(key)) return;
+    activeStudioJobRenderedStages.add(key);
+    const label = ev.stage || ev.label || 'step';
+    const status = ev.status || 'running';
+    const detail = ev.detail ? ' — '+ev.detail : '';
+    addMessage(label+': '+status+detail, status==='failed' ? 'item error' : 'item');
+  });
+}
+
+async function pollStudioJob(runId, originalText){
+  if(activeStudioJobPoll){ clearInterval(activeStudioJobPoll); activeStudioJobPoll=null; }
+  let terminalReached = false;
+  const tick = async ()=>{
+    try{
+      const r = await fetch('/api/agent-studio/run-status/'+encodeURIComponent(runId), {cache:'no-store'});
+      const job = await r.json();
+      renderStudioJobProgress(job);
+      await refreshState();
+      const status = String(job.status || '').toLowerCase();
+      if(isTerminalStudioStatus(status)){
+        terminalReached = true;
+        if(activeStudioJobPoll){ clearInterval(activeStudioJobPoll); activeStudioJobPoll=null; }
+        const result = job.result || job;
+        renderStudioResponse(result, originalText);
+        await refreshState();
+        const btn=document.getElementById('sendBtn');
+        btn.disabled=false;
+        btn.textContent='Send';
+        setStudioStatus(status === 'failed' ? 'failed' : 'ready', false);
+      }else{
+        setStudioStatus('running', true);
+      }
+    }catch(e){
+      terminalReached = true;
+      if(activeStudioJobPoll){ clearInterval(activeStudioJobPoll); activeStudioJobPoll=null; }
+      addMessage('Run status polling failed: '+e, 'item error');
+      const btn=document.getElementById('sendBtn');
+      btn.disabled=false;
+      btn.textContent='Send';
+      setStudioStatus('ready', false);
+    }
+  };
+  await tick();
+  if(!terminalReached){
+    activeStudioJobPoll = setInterval(tick, 1200);
+  }
+}
 
 
 function setActiveSession(sessionId, reload=true){
@@ -456,31 +526,34 @@ async function sendMessage(){
   lastSubmittedInstruction=text;
   lastPendingInstruction=text;
   const clientRunId = newClientRunId();
-  setActiveStateScope('request', '', clientRunId);
+  resetActiveRunUi(clientRunId);
   const canStart = await ensureSelectedModelCredential();
   if(!canStart){ return; }
   input.value='';
   addMessage(text,'item user');
   const btn=document.getElementById('sendBtn');
   btn.disabled=true;
-  btn.textContent='Thinking...';
+  btn.textContent='Running...';
   setStudioStatus('running', true);
-  let pollTimer=null;
   try{
-    addProgressMessage('running');
-    pollTimer=setInterval(()=>refreshState(), 1200);
+    addMessage('request accepted: running', 'item');
     const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, session_id:activeSessionId, client_run_id:clientRunId, uploaded_artifacts:selectedArtifactsForRequest(text)})});
     const data=await res.json();
     consumeSelectedArtifactsAfterRequest();
-    renderStudioResponse(data, text);
-    const pendingItems = collectMissingInputs(data);
-    if(pendingItems.length){ lastMissingInputs=pendingItems; lastPendingRunId=data.run_id||''; lastPendingInstruction=text; addMissingInputs(pendingItems, text, lastPendingRunId); }
-    // Final answers are rendered by renderStudioResponse; do not duplicate or show raw runtime JSON here.
+    if(!res.ok || data.status==='failed'){
+      renderStudioResponse(data, text);
+      btn.disabled=false;
+      btn.textContent='Send';
+      setStudioStatus('failed', false);
+      return;
+    }
+    const runId = String(data.ui_run_id || data.client_run_id || data.run_id || clientRunId);
+    resetActiveRunUi(runId);
+    renderStudioJobProgress(data);
     await refreshState();
+    await pollStudioJob(runId, text);
   }catch(e){
     addMessage('Error: '+e,'item error');
-  } finally{
-    if(pollTimer) clearInterval(pollTimer);
     btn.disabled=false;
     btn.textContent='Send';
     setStudioStatus('ready', false);

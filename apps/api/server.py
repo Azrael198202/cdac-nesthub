@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 import json
 import base64
+import time
 
 from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
 from ai_core.artifacts.artifact_edit_service import ArtifactEditService
@@ -39,6 +40,137 @@ graph_visual_builder = GraphVisualStateBuilder()
 knowledge_service = KnowledgeService()
 registered_tool_service = RuntimeRegisteredToolService()
 approval_policy_store = RuntimeApprovalPolicyStore()
+
+# Generic UI run registry for Agent Studio.
+# It stores run lifecycle only; runtime artifacts and domain-specific results stay in runtime storage.
+AGENT_STUDIO_RUNS: dict[str, dict[str, Any]] = {}
+AGENT_STUDIO_TASKS: set[asyncio.Task] = set()
+
+
+def _terminal_status(value: str | None) -> str:
+    status = str(value or "").strip().lower()
+    if status in {"completed", "failed", "cancelled", "blocked", "requires_input", "pending_review"}:
+        return status
+    return "completed" if status else "completed"
+
+
+def _job_progress(stage: str, status: str = "running", detail: str | None = None) -> dict[str, Any]:
+    return {"stage": stage, "status": status, "detail": detail or ""}
+
+
+async def _run_agent_studio_job(run_id: str, req: "AgentStudioRequest", active_session_id: str) -> None:
+    job = AGENT_STUDIO_RUNS.setdefault(run_id, {})
+    job.update({
+        "ok": True,
+        "run_id": run_id,
+        "client_run_id": run_id,
+        "ui_run_id": run_id,
+        "session_id": active_session_id,
+        "status": "running",
+        "stage": "execution",
+        "progress_events": [
+            _job_progress("request accepted", "completed"),
+            _job_progress("execution", "running"),
+        ],
+    })
+    heartbeat_stop = asyncio.Event()
+
+    async def _heartbeat() -> None:
+        started = time.monotonic()
+        tick = 0
+        while not heartbeat_stop.is_set():
+            await asyncio.sleep(2.0)
+            if heartbeat_stop.is_set():
+                break
+            tick += 1
+            elapsed = int(time.monotonic() - started)
+            job["stage"] = "execution"
+            job["status"] = "running"
+            job["progress_events"] = [
+                _job_progress("request accepted", "completed"),
+                _job_progress("execution", "running", f"elapsed {elapsed}s"),
+            ]
+            emit_console_event(area="agent_studio", event="REQUEST_HEARTBEAT", status="running", message=f"execution running {elapsed}s", data={"run_id": run_id, "tick": tick})
+
+    heartbeat_task = asyncio.create_task(_heartbeat())
+    try:
+        emit_console_event(area="agent_studio", event="REQUEST_STARTED", status="running", message="runtime request accepted", data={"run_id": run_id})
+        payload = await asyncio.to_thread(
+            lambda: asyncio.run(
+                studio_service.handle_message(
+                    req.message,
+                    provided_inputs=req.provided_inputs,
+                    uploaded_artifacts=req.uploaded_artifacts,
+                    session_id=active_session_id,
+                    client_run_id=run_id,
+                )
+            )
+        )
+        heartbeat_stop.set()
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except BaseException:
+            pass
+        if not isinstance(payload, dict):
+            payload = {"ok": False, "status": "failed", "message": str(payload)}
+        payload.setdefault("session_id", active_session_id)
+        payload.setdefault("client_run_id", run_id)
+        payload.setdefault("ui_run_id", run_id)
+        payload.setdefault("run_id", payload.get("run_id") or run_id)
+        final_answer = str(payload.get("final_answer") or payload.get("message") or payload.get("status") or "")
+        if final_answer.strip():
+            session_store.append_turn(
+                session_id=active_session_id,
+                run_id=str(payload.get("run_id") or payload.get("resumed_from_run_id") or payload.get("task_name") or run_id),
+                user_input=req.message,
+                final_answer=final_answer,
+                stage_results={"agent_studio_payload": payload},
+                metadata={"action": str(payload.get("action") or "")},
+            )
+            payload["session_boundary"] = session_store.boundary_status(active_session_id)
+        terminal = _terminal_status(str(payload.get("status") or "completed"))
+        job.update({
+            "ok": bool(payload.get("ok", True)),
+            "status": terminal,
+            "stage": "final_synthesis",
+            "result": payload,
+            "progress_events": [
+                _job_progress("request accepted", "completed"),
+                _job_progress("execution", "completed"),
+                _job_progress("final answer", "completed" if terminal != "failed" else "failed"),
+            ],
+        })
+        emit_console_event(area="agent_studio", event="REQUEST_FINISHED", status=terminal, message="runtime request finished", data={"run_id": run_id})
+    except Exception as exc:
+        heartbeat_stop.set()
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except BaseException:
+            pass
+        _write_api_error_log(area="agent_studio_message_background", exc=exc, context={"session_id": active_session_id, "run_id": run_id, "message_preview": str(req.message or "")[:300]})
+        error_payload = {
+            "ok": False,
+            "status": "failed",
+            "run_id": run_id,
+            "client_run_id": run_id,
+            "ui_run_id": run_id,
+            "session_id": active_session_id,
+            "error": {"type": exc.__class__.__name__, "message": str(exc)},
+            "diagnostic_log": "runtime/logs/api_errors.jsonl",
+        }
+        job.update({
+            "ok": False,
+            "status": "failed",
+            "stage": "failed",
+            "result": error_payload,
+            "progress_events": [
+                _job_progress("request accepted", "completed"),
+                _job_progress("execution", "failed", str(exc)),
+            ],
+        })
+        emit_console_event(area="agent_studio", event="REQUEST_FAILED", status="failed", message=str(exc), data={"run_id": run_id})
 
 
 def _write_api_error_log(*, area: str, exc: Exception, context: dict[str, Any] | None = None) -> None:
@@ -725,40 +857,33 @@ async def agent_studio_state(active_run_id: str | None = None, scope_kind: str |
 async def agent_studio_message(req: AgentStudioRequest):
     try:
         active_session_id = session_store.start_or_get_session(req.session_id, metadata={"surface": "agent_studio"})
-        emit_console_event(area="agent_studio", event="REQUEST_STARTED", status="running", message="runtime request accepted")
-        # Run the heavy message workflow away from the API event loop.
-        # Model calls, generated programs, downloads, and validations can be
-        # slow; keeping them off the event loop allows SSE console updates,
-        # state polling, and the UI to remain responsive while work continues.
-        payload = await asyncio.to_thread(
-            lambda: asyncio.run(
-                studio_service.handle_message(
-                    req.message,
-                    provided_inputs=req.provided_inputs,
-                    uploaded_artifacts=req.uploaded_artifacts,
-                    session_id=active_session_id,
-                    client_run_id=req.client_run_id,
-                )
-            )
-        )
-        emit_console_event(area="agent_studio", event="REQUEST_FINISHED", status="completed", message="runtime request finished")
-        if isinstance(payload, dict):
-            payload.setdefault("session_id", active_session_id)
-            if req.client_run_id:
-                payload.setdefault("client_run_id", req.client_run_id)
-                payload.setdefault("ui_run_id", req.client_run_id)
-            final_answer = str(payload.get("final_answer") or payload.get("message") or payload.get("status") or "")
-            if final_answer.strip():
-                session_store.append_turn(
-                    session_id=active_session_id,
-                    run_id=str(payload.get("run_id") or payload.get("resumed_from_run_id") or payload.get("task_name") or "studio_run"),
-                    user_input=req.message,
-                    final_answer=final_answer,
-                    stage_results={"agent_studio_payload": payload},
-                    metadata={"action": str(payload.get("action") or "")},
-                )
-                payload["session_boundary"] = session_store.boundary_status(active_session_id)
-        return JSONResponse(payload)
+        run_id = str(req.client_run_id or uuid4().hex[:12])
+        AGENT_STUDIO_RUNS[run_id] = {
+            "ok": True,
+            "status": "running",
+            "run_id": run_id,
+            "client_run_id": run_id,
+            "ui_run_id": run_id,
+            "session_id": active_session_id,
+            "stage": "queued",
+            "progress_events": [
+                _job_progress("request accepted", "completed"),
+                _job_progress("queued", "running"),
+            ],
+        }
+        task = asyncio.create_task(_run_agent_studio_job(run_id, req, active_session_id))
+        AGENT_STUDIO_TASKS.add(task)
+        task.add_done_callback(lambda t: AGENT_STUDIO_TASKS.discard(t))
+        return JSONResponse({
+            "ok": True,
+            "status": "running",
+            "run_id": run_id,
+            "client_run_id": run_id,
+            "ui_run_id": run_id,
+            "session_id": active_session_id,
+            "message": "Runtime request accepted. Progress will update asynchronously.",
+            "progress_events": AGENT_STUDIO_RUNS[run_id]["progress_events"],
+        })
     except Exception as exc:
         _write_api_error_log(area="agent_studio_message", exc=exc, context={"session_id": req.session_id, "message_preview": str(req.message or "")[:300]})
         return JSONResponse(
@@ -774,6 +899,15 @@ async def agent_studio_message(req: AgentStudioRequest):
             },
             status_code=500,
         )
+
+
+@app.get("/api/agent-studio/run-status/{run_id}")
+async def agent_studio_run_status(run_id: str):
+    job = AGENT_STUDIO_RUNS.get(str(run_id or ""))
+    if not job:
+        return JSONResponse({"ok": False, "status": "not_found", "run_id": run_id}, status_code=404)
+    return JSONResponse(job)
+
 
 
 @app.post("/api/agent-studio/secret")
