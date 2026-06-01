@@ -23,6 +23,7 @@ from ai_core.context.session_memory_store import SessionMemoryStore
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.config.paths import RUNTIME_DOWNLOADS
 from ai_core.tools.runtime_registered_tool_service import RuntimeRegisteredToolService
+from ai_core.runtime.approval_policy_store import RuntimeApprovalPolicyStore
 from ai_core.graph.graph_visualization import GraphVisualStateBuilder
 
 import traceback
@@ -36,6 +37,7 @@ session_store = SessionMemoryStore()
 graph_visual_builder = GraphVisualStateBuilder()
 knowledge_service = KnowledgeService()
 registered_tool_service = RuntimeRegisteredToolService()
+approval_policy_store = RuntimeApprovalPolicyStore()
 
 
 def _write_api_error_log(*, area: str, exc: Exception, context: dict[str, Any] | None = None) -> None:
@@ -76,7 +78,15 @@ class RegisteredToolExecuteRequest(BaseModel):
     input_data: Any | None = None
     profile_id: str | None = None
     approval_confirmed: bool = False
+    remember_approval: bool = False
 
+
+
+
+class RuntimeApprovalPolicyRequest(BaseModel):
+    tool_id: str
+    profile_id: str | None = None
+    mode: str = "always"
 
 class RuntimeToolProfileRequest(BaseModel):
     tool_id: str
@@ -213,6 +223,19 @@ async def home():
 
 
 
+
+
+@app.get("/settings")
+async def runtime_settings_home():
+    html = open("apps/web/settings.html", "r", encoding="utf-8").read()
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.get("/graph-runtime")
@@ -569,6 +592,26 @@ async def agent_studio_runtime_tools():
     return JSONResponse({"ok": True, "tools": registered_tool_service.list_tools()})
 
 
+@app.get("/api/runtime/settings")
+async def runtime_settings():
+    return JSONResponse({
+        "ok": True,
+        "tools": registered_tool_service.list_tools(),
+        "profiles": registered_tool_service.list_profiles(),
+        "approval_policies": approval_policy_store.list_policies(),
+    })
+
+
+@app.post("/api/runtime/settings/tool-approval")
+async def runtime_settings_tool_approval(req: RuntimeApprovalPolicyRequest):
+    payload = approval_policy_store.set_tool_policy(
+        tool_id=req.tool_id,
+        profile_id=req.profile_id or "default",
+        mode=req.mode or "always",
+    )
+    return JSONResponse({"ok": True, "policy": payload})
+
+
 @app.get("/api/agent-studio/runtime-tool-profiles")
 async def agent_studio_runtime_tool_profiles(tool_id: str | None = None):
     return JSONResponse({"ok": True, "profiles": registered_tool_service.list_profiles(tool_id)})
@@ -599,6 +642,7 @@ async def agent_studio_execute_runtime_tool(req: RegisteredToolExecuteRequest):
             run_id="agent_studio_registered_tool",
             profile_id=req.profile_id or "default",
             approval_confirmed=bool(req.approval_confirmed),
+            remember_approval=bool(req.remember_approval),
         )
         status = 200 if payload.get("ok") else 400
         return JSONResponse(payload, status_code=status)

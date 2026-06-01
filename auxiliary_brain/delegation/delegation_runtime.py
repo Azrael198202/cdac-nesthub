@@ -1684,8 +1684,8 @@ class AgentDelegationRuntime:
                     "approval_policy": approval_policy or result.get("approval_policy"),
                     "preview": preview,
                     "request": {"input_mode": "confirmation", "fields": [
-                        {"field": f"{self._participant_identity(participant)}.approval_confirmed", "name": f"{self._participant_identity(participant)}.approval_confirmed", "label": "Confirm execution", "input_type": "boolean", "required": True},
-                        {"field": f"{self._participant_identity(participant)}.remember_approval", "name": f"{self._participant_identity(participant)}.remember_approval", "label": "Do not ask again for this approved agent/tool", "input_type": "boolean", "required": False}
+                        {"field": f"{self._participant_identity(participant)}.approval_confirmed", "name": f"{self._participant_identity(participant)}.approval_confirmed", "label": "Confirm execution", "message": "Check to confirm execution.", "input_type": "boolean", "required": True},
+                        {"field": f"{self._participant_identity(participant)}.remember_approval", "name": f"{self._participant_identity(participant)}.remember_approval", "label": "Do not ask again", "message": "Optional: remember this approval for this agent/tool.", "input_type": "boolean", "required": False}
                     ]},
                 },
                 missing_inputs=[],
@@ -1745,9 +1745,26 @@ class AgentDelegationRuntime:
             return "Runtime tool execution returned no structured result."
         tool_id = str(result.get("tool_id") or "runtime tool")
         if result.get("ok"):
+            # This means the runtime tool completed successfully. For external
+            # delivery tools it does not necessarily prove final inbox or third
+            # party delivery unless the tool reports such evidence explicitly.
             return f"Runtime capability executed successfully: {tool_id}."
+        message = "Runtime capability execution failed."
         error = result.get("error") if isinstance(result.get("error"), dict) else {}
-        message = str(error.get("message") or result.get("status") or "Runtime capability execution failed.")
+        nested = result.get("result") if isinstance(result.get("result"), dict) else {}
+        nested_error = nested.get("error") if isinstance(nested.get("error"), dict) else {}
+        data = nested.get("data") if isinstance(nested.get("data"), dict) else {}
+        candidates = [
+            error.get("message") if isinstance(error, dict) else None,
+            nested_error.get("message") if isinstance(nested_error, dict) else None,
+            nested.get("error") if isinstance(nested.get("error"), str) else None,
+            data.get("reason") if isinstance(data, dict) else None,
+            result.get("status"),
+        ]
+        for item in candidates:
+            if item not in (None, "", [], {}):
+                message = str(item)
+                break
         return f"Runtime capability execution failed: {tool_id}. {message}"
 
 
