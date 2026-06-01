@@ -709,3 +709,11 @@ runtime_assets/seeds/capability_planners/__pycache__/default_capability_planner.
 ai_core/runtime/observability/__pycache__/runtime_console.cpython-313.pyc
 ai_core/runtime/external_runtimes/__pycache__/__init__.cpython-313.pyc
 ai_core/runtime/external_runtimes/__pycache__/gguf_model_resolver.cpython-313.pyc
+ai_core/runtime/external_runtimes/__pycache__/__init__.cpython-311.pyc
+ai_core/runtime/external_runtimes/__pycache__/gguf_model_resolver.cpython-311.pyc
+ai_core/runtime/observability/__pycache__/__init__.cpython-311.pyc
+ai_core/runtime/observability/__pycache__/runtime_console.cpython-311.pyc
+ai_core/runtime/cognitive/__pycache__/__init__.cpython-313.pyc
+ai_core/runtime/cognitive/__pycache__/generic_quality_gate.cpython-313.pyc
+ai_core/runtime/cognitive/__pycache__/prompt_audit_store.cpython-313.pyc
+ai_core/runtime/cognitive/__pycache__/runtime_cognitive_graph.cpython-313.pyc

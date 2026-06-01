@@ -399,10 +399,35 @@ class RuntimeCapabilityGapImplementer:
             validation = self._validate_runtime_blueprint_shape(blueprint if isinstance(blueprint, dict) else {})
             if not validation.get("passed"):
                 return {"status": "planner_failed", "reason": "planner_blueprint_contract_failed", "confidence_score": confidence, "needs_external_evidence": True, "validation": validation, "raw": payload}
+            fallback_used = bool(payload.get("fallback_used")) or str(payload.get("planner_engine") or "") == "deterministic_blueprint_fallback"
             min_confidence = float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_MIN_CONFIDENCE", "0.70") or 0.70)
-            if confidence < min_confidence:
-                return {"status": "planner_low_confidence", "reason": "planner_confidence_below_threshold", "confidence_score": confidence, "needs_external_evidence": True, "blueprint": blueprint, "validation": validation}
-            return {"status": "planned", "confidence_score": confidence, "needs_external_evidence": bool(payload.get("needs_external_evidence")), "blueprint": blueprint, "validation": validation, "planner_origin": planner_origin}
+            if confidence < min_confidence and not fallback_used:
+                return {
+                    "status": "planner_low_confidence",
+                    "reason": "planner_confidence_below_threshold",
+                    "confidence_score": confidence,
+                    "needs_external_evidence": True,
+                    "blueprint": blueprint,
+                    "validation": validation,
+                    "planner_origin": planner_origin,
+                    "planner_engine": payload.get("planner_engine"),
+                    "model": payload.get("model"),
+                    "model_source": payload.get("model_source"),
+                }
+            return {
+                "status": "planned",
+                "confidence_score": confidence,
+                "needs_external_evidence": bool(payload.get("needs_external_evidence")),
+                "blueprint": blueprint,
+                "validation": validation,
+                "planner_origin": planner_origin,
+                "planner_engine": payload.get("planner_engine"),
+                "model": payload.get("model"),
+                "model_source": payload.get("model_source"),
+                "fallback_used": fallback_used,
+                "fallback_reason": payload.get("fallback_reason"),
+                "model_planner_attempt": payload.get("model_planner_attempt"),
+            }
         except ValueError:
             return {"status": "planner_failed", "reason": "planner_hook_must_use_module_colon_function_format", "confidence_score": 0, "needs_external_evidence": True, "planner_origin": planner_origin}
         except Exception as exc:

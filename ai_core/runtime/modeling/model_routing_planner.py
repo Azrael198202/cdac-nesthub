@@ -5,6 +5,7 @@ from typing import Any
 from ai_core.runtime.modeling.capability_topology import RuntimeModelTopology
 from ai_core.runtime.modeling.complexity_estimator import ComplexityEstimator
 from ai_core.runtime.modeling.feedback_escalator import FeedbackEscalator
+from ai_core.runtime.cognitive.runtime_cognitive_graph import RuntimeCognitiveGraph
 
 
 class ModelRoutingPlanner:
@@ -19,6 +20,7 @@ class ModelRoutingPlanner:
         self.topology_loader = RuntimeModelTopology()
         self.complexity = ComplexityEstimator()
         self.feedback = FeedbackEscalator()
+        self.cognitive_graph = RuntimeCognitiveGraph()
 
     def plan(
         self,
@@ -32,6 +34,7 @@ class ModelRoutingPlanner:
         default_route: list[str],
     ) -> dict[str, Any]:
         topology = self.topology_loader.load()
+        cognitive_decision = self.cognitive_graph.decision_for(node_id or "general_runtime")
         feedback = self.feedback.feedback_for(node_id=node_id, adapter=adapter)
         complexity = self.complexity.estimate(
             node_id=node_id,
@@ -44,6 +47,8 @@ class ModelRoutingPlanner:
         )
         routes = provider_config.get("routes") if isinstance(provider_config.get("routes"), dict) else {}
         route_name = self._select_route_name(node_id=node_id, adapter=adapter, complexity=complexity, topology=topology)
+        if route_name in {"local_capable", "local_balanced", "local_fast", "internal", "adapter_or_default"}:
+            route_name = cognitive_decision.route_name or route_name
         escalated = False
         if self.feedback.should_escalate(node_id=node_id, adapter=adapter, complexity=complexity, topology=topology):
             node_policy = self._node_policy(node_id=node_id, topology=topology)
@@ -59,6 +64,15 @@ class ModelRoutingPlanner:
             "complexity": complexity,
             "escalated": escalated,
             "feedback": feedback,
+            "cognitive_node": {
+                "node_id": cognitive_decision.node_id,
+                "role": cognitive_decision.role,
+                "model_policy": cognitive_decision.model_policy,
+                "route_name": cognitive_decision.route_name,
+                "escalate_route_name": cognitive_decision.escalate_route_name,
+                "max_prompt_chars": cognitive_decision.max_prompt_chars,
+                "json_only": cognitive_decision.json_only,
+            },
         }
 
     def _select_route_name(self, *, node_id: str, adapter: dict[str, Any], complexity: dict[str, Any], topology: dict[str, Any]) -> str:

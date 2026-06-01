@@ -1,0 +1,33 @@
+{
+  "version": "1.0",
+  "principle": "generic_runtime_cognitive_graph",
+  "nodes": [
+    {"id": "input_parsing", "role": "normalize_input", "model_policy": "tiny_structural", "output": "normalized_input"},
+    {"id": "context_awareness", "role": "bind_runtime_context", "model_policy": "tiny_structural", "output": "clean_context"},
+    {"id": "intent_recognition", "role": "classify_user_goal", "model_policy": "small_semantic", "output": "intent_contract"},
+    {"id": "requirement_completion", "role": "detect_missing_runtime_values", "model_policy": "small_structural", "output": "requirement_contract"},
+    {"id": "workflow_planning", "role": "build_locked_graph", "model_policy": "capable_planner", "output": "execution_plan"},
+    {"id": "pre_execution_validation", "role": "validate_contracts", "model_policy": "deterministic_first", "output": "validation_report"},
+    {"id": "execution", "role": "execute_locked_plan", "model_policy": "no_replanning", "output": "step_results"},
+    {"id": "result_verification", "role": "verify_evidence_and_contract", "model_policy": "small_verifier", "output": "verification_report"},
+    {"id": "feedback_repair", "role": "repair_by_policy", "model_policy": "small_repair_or_escalate", "output": "repair_action"},
+    {"id": "final_synthesis", "role": "compose_grounded_answer", "model_policy": "strong_summarizer_when_needed", "output": "final_answer"}
+  ],
+  "model_policies": {
+    "tiny_structural": {"route_name": "local_fast", "max_prompt_chars": 900, "temperature": 0, "json_only": true},
+    "small_semantic": {"route_name": "local_balanced", "max_prompt_chars": 1400, "temperature": 0, "json_only": true},
+    "small_structural": {"route_name": "local_fast", "max_prompt_chars": 1200, "temperature": 0, "json_only": true},
+    "capable_planner": {"route_name": "local_capable", "escalate_route_name": "strong_reasoning", "max_prompt_chars": 1800, "temperature": 0, "json_only": true},
+    "deterministic_first": {"route_name": "internal", "max_prompt_chars": 0, "temperature": 0, "json_only": true},
+    "no_replanning": {"route_name": "internal", "max_prompt_chars": 0, "temperature": 0, "json_only": false},
+    "small_verifier": {"route_name": "local_fast", "escalate_route_name": "strong_reasoning", "max_prompt_chars": 1300, "temperature": 0, "json_only": true},
+    "small_repair_or_escalate": {"route_name": "local_balanced", "escalate_route_name": "strong_reasoning", "max_prompt_chars": 1400, "temperature": 0, "json_only": true},
+    "strong_summarizer_when_needed": {"route_name": "local_balanced", "escalate_route_name": "strong_reasoning", "max_prompt_chars": 2200, "temperature": 0.2, "json_only": false}
+  },
+  "quality_gates": {
+    "json_nodes": ["input_parsing", "context_awareness", "intent_recognition", "requirement_completion", "workflow_planning", "pre_execution_validation", "result_verification", "feedback_repair"],
+    "locked_plan_nodes": ["execution", "result_verification", "final_synthesis"],
+    "fallback_rule": "fallback_must_be_declared_in_plan",
+    "trace_required": true
+  }
+}
