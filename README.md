@@ -1,21 +1,85 @@
-# cdac-nesthub 9.0
+# cdac-nesthub v15
 
-This package adds the session UI and the execution reuse layer.
+This package keeps `ai_core` as a generic runtime brain and operating-system layer. Concrete capabilities are generated, combined, executed, verified, and registered at runtime-owned boundaries instead of being embedded as fixed core behavior.
 
-## Main additions
+## v15 design boundary
 
-- Left sidebar session UI: new session, session list, switch session, collapse sidebar.
-- Session persistence: structured conversation turns, summaries, feedback, and local memory.
-- Execution reuse registry:
-  - saves successful task / agent / artifact execution assets;
-  - reuses saved task assets on later executions;
-  - bypasses planning when a reusable artifact is available;
-  - asks only for missing runtime parameters when a saved parameter schema exists;
-  - exposes `context_trace` so the UI can confirm whether task registry, artifact registry, LLM, or planning was used.
-- Short answer cache for ephemeral chat that should not enter long-term memory.
-- Runtime reset script for clean UI testing.
+- `ai_core`: generic brain, runtime contracts, planning/execution/verification boundaries, self-repair, registry policy, and runtime OS services.
+- `auxiliary_brain`: assistant layer for Studio, parameter completion, task/agent interaction, and user-facing orchestration support.
+- Runtime-owned capability material:
+  - `runtime/generated/`
+  - `runtime/registry/`
+  - `runtime/profiles/`
+  - `runtime/secrets/`
+- Static config boundary:
+  - system policy
+  - model routes
+  - sandbox policy
+  - approval defaults
 
-## Reset local test data
+## Runtime roles
+
+v15 adds a neutral role contract in `ai_core.roles.runtime_role_contract`:
+
+- Core system designer: designs the generic brain and auxiliary-brain boundary.
+- Implementation engineer: implements the approved generic design without adding concrete task logic to core.
+- Quality challenger: verifies stage boundaries, acquisition failure modes, registry boundary, and final synthesis safety.
+
+These roles describe responsibilities only. They do not contain concrete capability logic or task-specific behavior.
+
+## Core workflow stages
+
+1. `input_parsing`: normalize text, file, and media inputs into text plus metadata while preserving raw input.
+2. `intent_recognition`: classify the user's intended operation, required capability categories, missing information, and draft steps.
+3. `requirement_completion`: pause for missing required parameters and resume after UI collection.
+4. `context_awareness`: bind supplemental input to suspended work, build clean context, and keep independent agent outputs isolated.
+5. `workflow_planning`: generate and lock the workflow, graph, execution method, tool/model/provider/source policy, and execution plan.
+6. `pre_execution_validation`: check schema, parameters, tool availability, generation need, and approval requirement.
+7. `execution`: execute only the locked plan and record trace, evidence, and provenance.
+8. `result_verification`: verify real execution, step satisfaction, confidence, and planned fallback only.
+9. `feedback_repair`: repair schema, parameters, state, variables, dependency, sandbox, or identity failures through the self-repair engine.
+10. `final_synthesis`: collect step outputs and answer without re-executing, re-searching, or inventing facts.
+
+## Capability Acquisition Pipeline
+
+`Acquire runtime capability` now enters an explicit pipeline:
+
+1. `CapabilityAcquisitionRouter`
+2. `CapabilityIdentityExtractor`
+3. `TemplateResolver`
+4. `LLMCapabilityPlanner`
+5. `WebEvidenceRetriever`
+6. `ArtifactGenerator`
+7. `SandboxValidator`
+8. `CapabilityMatchContract`
+9. `RegistryWriter`
+
+The identity contract extracted from the user request is carried through the whole lifecycle. When no template matches, a runtime-configured planner hook can be supplied through `AI_CORE_CAPABILITY_PLANNER=module.path:function_name`. The planner must return a runtime capability template that passes the neutral template contract. Low confidence, missing planner output, missing evidence, sandbox failure, or identity mismatch routes into Runtime Self-Repair.
+
+## Capability Match Contract
+
+Before registration, generated artifacts must satisfy the declared match contract:
+
+- expected tool id
+- expected template id
+- required artifact directory name
+- required markers
+- forbidden markers
+- schema-bearing manifest
+- sandbox validation report
+- verification run report
+
+Failure produces explicit statuses such as `template_not_found`, `planner_failed`, `evidence_missing`, `sandbox_failed`, or `generated_but_capability_mismatch` instead of silently registering an incorrect capability.
+
+## Validation commands
+
+```bash
+python validate_source_package.py
+python tools/verify_runtime_config_boundary.py
+python tools/verify_runtime_self_repair.py
+```
+
+## Reset local runtime data
 
 ```bash
 python scripts/reset_runtime_data.py --yes
@@ -26,18 +90,3 @@ To also remove runtime-generated artifacts, traces, checkpoints, and deliveries:
 ```bash
 python scripts/reset_runtime_data.py --yes --include-runtime-generated
 ```
-
-## Confirm reuse behavior
-
-After a task succeeds once, execute the same task again. The response should include `context_trace` similar to:
-
-```json
-{
-  "task_registry": true,
-  "artifact_registry": true,
-  "planning_used": false,
-  "llm_used": false
-}
-```
-
-For LLM-generation agents, the second execution should reuse the saved task and parameter contract. It may still call the LLM to generate the final answer, but it should not recreate the agent or re-plan the task.

@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from typing import Any
 
-from ai_core.config.paths import CONFIGS_DIR, RUNTIME_GENERATED
+from ai_core.config.paths import RUNTIME_GENERATED
 
 
 class RuntimePrimitiveToolFactory:
@@ -62,7 +62,6 @@ class RuntimePrimitiveToolFactory:
     def _templates(self) -> list[dict[str, Any]]:
         templates: list[dict[str, Any]] = []
         for path in [
-            CONFIGS_DIR / "runtime_primitive_tool_templates.seed.json",
             RUNTIME_GENERATED / "system_topology" / "runtime_primitive_tool_templates.json",
             RUNTIME_GENERATED / "contracts" / "runtime_primitive_tool_templates.json",
         ]:

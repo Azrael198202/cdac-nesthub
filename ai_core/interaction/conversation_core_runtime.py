@@ -620,13 +620,13 @@ class ConversationCoreRuntime:
         material: str,
     ) -> str:
         urls = evidence.get("urls") if isinstance(evidence.get("urls"), list) else []
-        if not urls:
+        runtime_impl = implementation.get("runtime_implementation") if isinstance(implementation.get("runtime_implementation"), dict) else {}
+        runtime_status = str(runtime_impl.get("status") or "not_requested")
+        if not urls and runtime_status not in {"implemented_tested_registered", "implemented_tested_registered_verified"}:
             return (
                 self._external_retrieval_failure_material(evidence)
                 + "\n\nCapability gap status: blocked_without_verified_evidence. No implementation was generated or registered."
             )
-        runtime_impl = implementation.get("runtime_implementation") if isinstance(implementation.get("runtime_implementation"), dict) else {}
-        runtime_status = str(runtime_impl.get("status") or "not_requested")
         if runtime_status in {"implemented_tested_registered", "implemented_tested_registered_verified"}:
             headline = "Capability gap resolution completed. Runtime capability was implemented, sandbox-tested, registered, and verified by execution."
         elif runtime_status in {"blocked", "generated_but_validation_failed"}:

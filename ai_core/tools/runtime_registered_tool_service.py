@@ -7,6 +7,7 @@ from typing import Any
 from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_REGISTRY, RUNTIME_TRACES
 from ai_core.connections.connection_profile_store import ConnectionProfileStore
 from ai_core.tools.generic_tool_runner import GenericToolRunner
+from ai_core.runtime.approval_policy_store import RuntimeApprovalPolicyStore
 
 
 class RuntimeRegisteredToolService:
@@ -17,10 +18,11 @@ class RuntimeRegisteredToolService:
     approval policies, and invokes the registered implementation.
     """
 
-    def __init__(self, *, registry_path: Path | None = None, connection_store: ConnectionProfileStore | None = None) -> None:
+    def __init__(self, *, registry_path: Path | None = None, connection_store: ConnectionProfileStore | None = None, approval_policy_store: RuntimeApprovalPolicyStore | None = None) -> None:
         self.registry_path = registry_path or (RUNTIME_REGISTRY / "tool_registry.json")
         self.runner = GenericToolRunner()
         self.connection_store = connection_store or ConnectionProfileStore()
+        self.approval_policy_store = approval_policy_store or RuntimeApprovalPolicyStore()
 
     def list_tools(self) -> list[dict[str, Any]]:
         registry = self._load_registry()
@@ -33,6 +35,7 @@ class RuntimeRegisteredToolService:
             item["executable"] = self._is_executable(item)
             item["configuration_status"] = self.connection_store.missing_requirements(tool_spec=item, profile_id="default")
             item["profiles"] = self.connection_store.list_profiles(str(item.get("tool_id") or tool_id))
+            item["approval_settings"] = self.approval_policy_store.get_tool_policy(tool_id=str(item.get("tool_id") or tool_id), profile_id="default")
             tools.append(item)
         tools.sort(key=lambda x: (not bool(x.get("executable")), str(x.get("tool_id") or "")))
         return tools
@@ -75,6 +78,7 @@ class RuntimeRegisteredToolService:
         run_id: str = "agent_studio_tool_run",
         profile_id: str = "default",
         approval_confirmed: bool = False,
+        remember_approval: bool = False,
     ) -> dict[str, Any]:
         spec = self.get_tool(tool_id)
         if spec is None:
@@ -92,15 +96,21 @@ class RuntimeRegisteredToolService:
                 "tool": self._public_tool_summary(spec),
             }
         approval = spec.get("approval_policy") if isinstance(spec.get("approval_policy"), dict) else {}
+        approval_settings = self.approval_policy_store.get_tool_policy(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id)
+        if bool(approval.get("required")) and not approval_confirmed and self.approval_policy_store.is_auto_approved(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id):
+            approval_confirmed = True
         if bool(approval.get("required")) and not approval_confirmed:
             return {
                 "ok": False,
                 "status": "requires_human_confirmation",
                 "error": {"code": "human_confirmation_required", "message": "This runtime-generated capability requires confirmation before execution."},
                 "approval_policy": approval,
+                "approval_settings": approval_settings,
                 "preview": self._approval_preview(input_data),
                 "tool": self._public_tool_summary(spec),
             }
+        if approval_confirmed:
+            self.approval_policy_store.record_confirmation(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id, remember=remember_approval)
         payload = input_data if isinstance(input_data, dict) else {"input": input_data}
         payload = self._apply_runtime_invocation_defaults(spec=spec, payload=payload, approval_confirmed=approval_confirmed)
         runtime_context = self.connection_store.runtime_context_for(tool_spec=spec, profile_id=profile_id)
@@ -115,6 +125,7 @@ class RuntimeRegisteredToolService:
             "profile_id": profile_id,
             "result": result,
             "tool": self._public_tool_summary(spec),
+            "approval_settings": self.approval_policy_store.get_tool_policy(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id),
         }
         self._persist_tool_result(out)
         return out
@@ -233,5 +244,6 @@ class RuntimeRegisteredToolService:
             "connection_schema": spec.get("connection_schema") if isinstance(spec.get("connection_schema"), dict) else {},
             "secret_schema": spec.get("secret_schema") if isinstance(spec.get("secret_schema"), dict) else {},
             "approval_policy": spec.get("approval_policy") if isinstance(spec.get("approval_policy"), dict) else {},
+            "approval_settings": self.approval_policy_store.get_tool_policy(tool_id=str(spec.get("tool_id") or spec.get("name") or ""), profile_id="default"),
             "verification": spec.get("verification") if isinstance(spec.get("verification"), dict) else {},
         }

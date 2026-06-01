@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -10,8 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from ai_core.config.paths import CONFIGS_DIR, RUNTIME_GENERATED, RUNTIME_REGISTRY
+from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_REGISTRY
 from ai_core.runtime.capability.acquisition_gate import RuntimeCapabilityAcquisitionGate
+from ai_core.runtime.capability.runtime_capability_template_store import RuntimeCapabilityTemplateStore
+from ai_core.runtime.self_repair.engine import RuntimeSelfRepairEngine
 
 
 @dataclass(frozen=True)
@@ -31,12 +34,14 @@ class RuntimeCapabilityGapImplementer:
     """
 
     def __init__(self, *, template_path: Path | None = None) -> None:
-        self.template_path = template_path or (CONFIGS_DIR / "runtime_capability_templates.json")
+        self.template_path = template_path
+        self.template_store = RuntimeCapabilityTemplateStore(explicit_path=template_path)
         self.generated_dir = RUNTIME_GENERATED / "tools"
         self.generated_tests_dir = RUNTIME_GENERATED / "tests"
         self.registry_path = RUNTIME_REGISTRY / "tool_registry.json"
         self.module_registry_path = RUNTIME_REGISTRY / "module_registry.json"
         self.acquisition_gate = RuntimeCapabilityAcquisitionGate()
+        self.self_repair = RuntimeSelfRepairEngine(storage_root=RUNTIME_GENERATED / "self_repair")
 
     def implement_if_requested(
         self,
@@ -46,36 +51,123 @@ class RuntimeCapabilityGapImplementer:
         run_id: str,
         allow_implementation: bool,
     ) -> dict[str, Any]:
+        """Run the runtime capability acquisition pipeline.
+
+        Pipeline contract:
+        CapabilityAcquisitionRouter -> CapabilityIdentityExtractor ->
+        TemplateResolver -> LLMCapabilityPlanner -> WebEvidenceRetriever
+        gate -> ArtifactGenerator -> SandboxValidator -> CapabilityMatchContract
+        -> RegistryWriter.
+
+        The method is deliberately generic.  It never contains concrete
+        capability behavior; behavior must come from a runtime template or a
+        runtime-configured planner artifact.
+        """
+        pipeline: list[dict[str, Any]] = []
+
+        def mark(stage: str, status: str, **data: Any) -> None:
+            pipeline.append({"stage": stage, "status": status, **data})
+
+        mark("CapabilityAcquisitionRouter", "accepted" if allow_implementation else "not_requested")
         if not allow_implementation:
-            return {"status": "not_requested", "reason": "implementation_was_not_requested"}
+            return {"status": "not_requested", "reason": "implementation_was_not_requested", "pipeline": pipeline}
+
+        identity_contract = self._extract_requested_identity_contract(user_input)
+        mark("CapabilityIdentityExtractor", "completed", identity=identity_contract)
+
         urls = evidence.get("urls") if isinstance(evidence.get("urls"), list) else []
         templates = self._load_templates()
         match = self._select_template(str(user_input or ""), templates)
-        if not match:
-            return {
-                "status": "blocked",
-                "reason": "no_runtime_template_matched_requested_capability",
-                "template_path": str(self.template_path),
-            }
-        template = match.template
+        template_source = "template_first"
+        planner_record: dict[str, Any] | None = None
+        if match:
+            template = self._merge_identity_contract_into_template(match.template, identity_contract)
+            mark("TemplateResolver", "matched", template_id=template.get("template_id"), score=match.score)
+        else:
+            mark("TemplateResolver", "template_not_found", template_locations=[str(p) for p in self.template_store.candidate_paths()])
+            planner_record = self._plan_capability_with_runtime_planner(user_input=user_input, identity_contract=identity_contract, evidence=evidence)
+            mark("LLMCapabilityPlanner", str(planner_record.get("status") or "planner_failed"), planner=planner_record)
+            if planner_record.get("status") != "planned" or not isinstance(planner_record.get("template"), dict):
+                repair = self._runtime_self_repair(
+                    run_id=run_id,
+                    stage="LLMCapabilityPlanner",
+                    status=str(planner_record.get("status") or "planner_failed"),
+                    reason=str(planner_record.get("reason") or "planner_did_not_return_template"),
+                    payload={"identity": identity_contract, "planner": planner_record},
+                    expected={"required_status": "planned", "required_payload": "template"},
+                )
+                mark("RuntimeSelfRepairEngine", str(repair.get("status") or "repair_checked"), repair=repair)
+                return {
+                    "status": str(planner_record.get("status") or "planner_failed"),
+                    "reason": str(planner_record.get("reason") or "template_not_found_and_planner_failed"),
+                    "requested_identity_contract": identity_contract,
+                    "pipeline": pipeline,
+                    "self_repair": repair,
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            template = self._merge_identity_contract_into_template(dict(planner_record["template"]), identity_contract)
+            template_source = "llm_capability_planner"
+            match = TemplateMatch(template=template, score=int(planner_record.get("confidence_score") or 1))
+
         acquisition_policy = template.get("acquisition_policy") if isinstance(template.get("acquisition_policy"), dict) else {}
+        planner_unknown = bool(planner_record and planner_record.get("needs_external_evidence"))
         allow_policy_backed_basic = bool(acquisition_policy.get("allow_policy_backed_basic_acquisition_without_external_evidence"))
+        if not urls and planner_unknown:
+            mark("WebEvidenceRetriever", "evidence_missing", reason="planner_requested_external_evidence")
+        elif urls:
+            mark("WebEvidenceRetriever", "completed", source_count=len(urls))
+        else:
+            mark("WebEvidenceRetriever", "not_required", policy_backed=allow_policy_backed_basic)
+
         if not urls and not allow_policy_backed_basic:
-            return {"status": "blocked", "reason": "verified_evidence_required_before_implementation"}
+            repair = self._runtime_self_repair(
+                run_id=run_id,
+                stage="WebEvidenceRetriever",
+                status="evidence_missing",
+                reason="verified_evidence_required_before_implementation",
+                payload={"identity": identity_contract, "template_id": template.get("template_id")},
+                expected={"required_evidence": True},
+            )
+            mark("RuntimeSelfRepairEngine", str(repair.get("status") or "repair_checked"), repair=repair)
+            return {
+                "status": "evidence_missing",
+                "reason": "verified_evidence_required_before_implementation",
+                "template_id": template.get("template_id"),
+                "requested_identity_contract": identity_contract,
+                "pipeline": pipeline,
+                "self_repair": repair,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
         if not urls and allow_policy_backed_basic:
             evidence = dict(evidence)
             evidence["urls"] = ["runtime-policy://basic-generated-capability-contract"]
-            evidence["source_note"] = "External source retrieval was unavailable; a basic runtime-generated template with sandbox validation is allowed by capability acquisition policy."
+            evidence["source_note"] = "Policy-backed runtime acquisition without external source material."
+
         dependency_resolution = self._resolve_dependencies(template)
+        mark("DependencyResolver", "completed" if dependency_resolution.get("passed") else str(dependency_resolution.get("status") or "failed"), result=dependency_resolution)
         if not dependency_resolution.get("passed"):
+            repair = self._runtime_self_repair(
+                run_id=run_id,
+                stage="DependencyResolver",
+                status=str(dependency_resolution.get("status") or "failed"),
+                reason="dependency_resolution_failed",
+                payload=dependency_resolution,
+                expected={"passed": True},
+            )
+            mark("RuntimeSelfRepairEngine", str(repair.get("status") or "repair_checked"), repair=repair)
             return {
                 "status": "dependency_resolution_failed",
                 "template_id": template.get("template_id"),
-                "score": match.score,
+                "score": match.score if match else 0,
                 "dependency_resolution": dependency_resolution,
+                "pipeline": pipeline,
+                "self_repair": repair,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
             }
+
         artifact = self._write_artifact(template=template, run_id=run_id, evidence=evidence, dependency_resolution=dependency_resolution)
+        mark("ArtifactGenerator", "completed", artifact=artifact)
+
         pre_gate = self.acquisition_gate.evaluate_before_validation(
             requested_capability=str(template.get("template_id") or ""),
             user_input=user_input,
@@ -84,13 +176,26 @@ class RuntimeCapabilityGapImplementer:
             dependency_resolution=dependency_resolution,
         )
         self.acquisition_gate.write_report(artifact_dir=artifact.get("tool_dir"), report={"pre_validation": pre_gate})
+        mark("AcquisitionGate", "passed" if pre_gate.get("passed") else str(pre_gate.get("status") or "failed"), result=pre_gate)
+
         capability_match = self._verify_capability_match(template=template, artifact=artifact, user_input=user_input)
+        mark("CapabilityMatchContract", "completed" if capability_match.get("passed") else "identity_mismatch", result=capability_match)
         if not pre_gate.get("passed") or not capability_match.get("passed"):
-            status = str(pre_gate.get("status") or "generated_but_capability_mismatch")
+            repair = self._runtime_self_repair(
+                run_id=run_id,
+                stage="CapabilityMatchContract",
+                status="identity_mismatch",
+                reason="generated_but_capability_mismatch",
+                payload={"gate": pre_gate, "capability_match": capability_match, "artifact": artifact},
+                expected={"capability_match_passed": True},
+            )
+            mark("RuntimeSelfRepairEngine", str(repair.get("status") or "repair_checked"), repair=repair)
             return {
-                "status": status,
+                "status": "generated_but_capability_mismatch",
                 "template_id": template.get("template_id"),
-                "score": match.score,
+                "template_source": template_source,
+                "score": match.score if match else 0,
+                "requested_identity_contract": identity_contract,
                 "dependency_resolution": dependency_resolution,
                 "artifact": artifact,
                 "capability_match": capability_match,
@@ -98,20 +203,27 @@ class RuntimeCapabilityGapImplementer:
                 "validation": None,
                 "verification_run": None,
                 "registration": None,
+                "pipeline": pipeline,
+                "self_repair": repair,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
             }
+
         validation = self._validate_artifact(artifact)
+        mark("SandboxValidator", "completed" if validation.get("passed") else "sandbox_failed", result=validation)
         verification_run: dict[str, Any] | None = None
-        registration: dict[str, Any] | None = None
-        registration_gate: dict[str, Any] | None = None
         if validation.get("passed"):
             verification_run = self._execute_verification_run(template=template, artifact=artifact)
+            mark("VerificationRun", "completed" if verification_run.get("passed") else "failed", result=verification_run)
+
         registration_gate = self.acquisition_gate.evaluate_before_registration(
             pre_validation_decision=pre_gate,
             validation=validation,
             verification_run=verification_run or {},
         )
         self.acquisition_gate.write_report(artifact_dir=artifact.get("tool_dir"), report={"pre_validation": pre_gate, "registration": registration_gate})
+        mark("RegistrationGate", "safe_to_register" if registration_gate.get("safe_to_register") else str(registration_gate.get("status") or "blocked"), result=registration_gate)
+
+        registration: dict[str, Any] | None = None
         if registration_gate.get("safe_to_register"):
             registration = self._register_artifact(
                 template=template,
@@ -122,32 +234,221 @@ class RuntimeCapabilityGapImplementer:
                 evidence=evidence,
                 acquisition_gate=registration_gate,
             )
+            mark("RegistryWriter", "completed", registration=registration)
             status = "implemented_tested_registered"
+            repair = None
         else:
+            failure_status = "sandbox_failed" if not validation.get("passed") else str(registration_gate.get("status") or "registration_blocked")
+            repair = self._runtime_self_repair(
+                run_id=run_id,
+                stage="SandboxValidator" if not validation.get("passed") else "RegistrationGate",
+                status=failure_status,
+                reason=str(registration_gate.get("reason") or failure_status),
+                payload={"validation": validation, "verification_run": verification_run, "registration_gate": registration_gate},
+                expected={"safe_to_register": True},
+            )
+            mark("RuntimeSelfRepairEngine", str(repair.get("status") or "repair_checked"), repair=repair)
             status = str(registration_gate.get("status") or "generated_but_validation_failed")
+
         return {
             "status": status,
             "template_id": template.get("template_id"),
-            "score": match.score,
+            "template_source": template_source,
+            "requested_identity_contract": identity_contract,
+            "score": match.score if match else 0,
             "dependency_resolution": dependency_resolution,
-            "artifact": artifact if 'artifact' in locals() else None,
-            "capability_match": capability_match if 'capability_match' in locals() else None,
-            "acquisition_gate": registration_gate if 'registration_gate' in locals() else pre_gate if 'pre_gate' in locals() else None,
-            "validation": validation if 'validation' in locals() else None,
+            "artifact": artifact,
+            "capability_match": capability_match,
+            "acquisition_gate": registration_gate,
+            "validation": validation,
             "verification_run": verification_run,
             "registration": registration,
+            "pipeline": pipeline,
+            "self_repair": repair,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
     def _load_templates(self) -> list[dict[str, Any]]:
-        if not self.template_path.exists():
-            return []
+        """Load runtime capability templates from runtime-owned storage.
+
+        Concrete templates are no longer expected to live permanently under
+        configs/.  This keeps ai_core generic while still allowing runtime
+        acquired or seeded capability templates to be discovered.
+        """
+        return self.template_store.load_templates()
+
+
+    def _extract_requested_identity_contract(self, user_input: str) -> dict[str, Any]:
+        """Extract capability identity requirements declared by the user prompt.
+
+        This stays generic: it looks for explicit identity language and simple
+        capability names in the request. Domain-specific markers such as host
+        names should be declared in the runtime template contract, not hardcoded
+        in ai_core.
+        """
+        text = str(user_input or "")
+        folded = text.casefold()
+        requested_id = ""
+        patterns = [
+            r"capability\s+id\s+must\s+be\s*[:：]?\s*([a-zA-Z0-9_\-]+)",
+            r"capability_id\s*[:=]\s*([a-zA-Z0-9_\-]+)",
+            r"runtime\s+capability\s+registered\s+as\s+([a-zA-Z0-9_\-]+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                requested_id = self._safe_name(match.group(1))
+                break
+        if not requested_id:
+            # Generic slug fallback for common "Acquire runtime capability: X" form.
+            title_match = re.search(r"Acquire\s+runtime\s+capability\s*:\s*\n?\s*([^\n.]+)", text, flags=re.IGNORECASE)
+            if title_match:
+                title = title_match.group(1).strip()
+                if title:
+                    requested_id = self._safe_name(title)
+        forbidden_ids: list[str] = []
+        for match in re.finditer(r"Do\s+not\s+(?:reuse|overwrite|register\s+this\s+capability\s+as)\s+([a-zA-Z0-9_\-]+)", text, flags=re.IGNORECASE):
+            value = self._safe_name(match.group(1))
+            if value and value not in forbidden_ids:
+                forbidden_ids.append(value)
+        return {
+            "requested_capability_id": requested_id,
+            "forbidden_capability_ids": forbidden_ids,
+            "explicit": bool(requested_id or forbidden_ids),
+            "raw_request_excerpt": text[:1000],
+        }
+
+    def _merge_identity_contract_into_template(self, template: dict[str, Any], identity_contract: dict[str, Any]) -> dict[str, Any]:
+        if not identity_contract.get("explicit"):
+            return template
+        merged = dict(template)
+        contract = dict(merged.get("capability_match_contract") if isinstance(merged.get("capability_match_contract"), dict) else {})
+        requested_id = str(identity_contract.get("requested_capability_id") or "").strip()
+        if requested_id:
+            merged["template_id"] = requested_id
+            contract["expected_tool_id"] = requested_id
+            contract["expected_template_id"] = requested_id
+            contract["required_artifact_dir_name"] = requested_id
+        forbidden_ids = identity_contract.get("forbidden_capability_ids") if isinstance(identity_contract.get("forbidden_capability_ids"), list) else []
+        if forbidden_ids:
+            existing = contract.get("forbidden_tool_ids") if isinstance(contract.get("forbidden_tool_ids"), list) else []
+            contract["forbidden_tool_ids"] = list(dict.fromkeys([*existing, *[str(x) for x in forbidden_ids if str(x)]]))
+        merged["capability_match_contract"] = contract
+        return merged
+
+
+    def _plan_capability_with_runtime_planner(
+        self,
+        *,
+        user_input: str,
+        identity_contract: dict[str, Any],
+        evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Invoke a runtime-configured planner hook for template-less acquisition.
+
+        ai_core only defines the neutral contract.  A concrete planner can be
+        supplied at runtime with AI_CORE_CAPABILITY_PLANNER as
+        "module.path:function_name".  The hook must return a dict containing a
+        template compatible with the runtime capability template schema.
+        """
+        hook = os.environ.get("AI_CORE_CAPABILITY_PLANNER", "").strip()
+        if not hook:
+            return {
+                "status": "planner_unavailable",
+                "reason": "runtime_capability_planner_hook_not_configured",
+                "confidence_score": 0,
+                "needs_external_evidence": True,
+            }
         try:
-            data = json.loads(self.template_path.read_text(encoding="utf-8") or "{}")
-        except json.JSONDecodeError:
-            return []
-        templates = data.get("templates") if isinstance(data, dict) else data
-        return [x for x in templates if isinstance(x, dict)] if isinstance(templates, list) else []
+            module_name, function_name = hook.split(":", 1)
+        except ValueError:
+            return {
+                "status": "planner_failed",
+                "reason": "planner_hook_must_use_module_colon_function_format",
+                "confidence_score": 0,
+                "needs_external_evidence": True,
+            }
+        try:
+            module = __import__(module_name, fromlist=[function_name])
+            planner = getattr(module, function_name)
+            if not callable(planner):
+                raise TypeError("planner_hook_not_callable")
+            payload = planner({
+                "user_input": user_input,
+                "identity_contract": identity_contract,
+                "evidence": evidence,
+                "required_template_contract": self._runtime_planner_template_contract(),
+            })
+            if not isinstance(payload, dict):
+                return {"status": "planner_failed", "reason": "planner_returned_non_object", "confidence_score": 0, "needs_external_evidence": True}
+            template = payload.get("template")
+            confidence = float(payload.get("confidence_score") or payload.get("confidence") or 0)
+            if not isinstance(template, dict):
+                return {"status": "planner_failed", "reason": "planner_returned_no_template", "confidence_score": confidence, "needs_external_evidence": True, "raw": payload}
+            validation = self._validate_runtime_template_shape(template)
+            if not validation.get("passed"):
+                return {"status": "planner_failed", "reason": "planner_template_contract_failed", "confidence_score": confidence, "needs_external_evidence": True, "validation": validation}
+            min_confidence = float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_MIN_CONFIDENCE", "0.70") or 0.70)
+            if confidence < min_confidence:
+                return {"status": "planner_low_confidence", "reason": "planner_confidence_below_threshold", "confidence_score": confidence, "needs_external_evidence": True, "template": template, "validation": validation}
+            return {"status": "planned", "confidence_score": confidence, "needs_external_evidence": bool(payload.get("needs_external_evidence")), "template": template, "validation": validation}
+        except Exception as exc:
+            return {
+                "status": "planner_failed",
+                "reason": f"{exc.__class__.__name__}: {str(exc)[:500]}",
+                "confidence_score": 0,
+                "needs_external_evidence": True,
+            }
+
+    def _runtime_planner_template_contract(self) -> dict[str, Any]:
+        return {
+            "required_top_level_fields": ["template_id", "entrypoint", "files", "input_schema", "output_schema", "verification_input", "verification_expectations"],
+            "required_entrypoint_fields": ["module", "function"],
+            "required_contract_fields": ["expected_tool_id", "required_artifact_dir_name", "required_markers", "forbidden_markers"],
+            "storage_boundary": "runtime/generated for artifacts; runtime/registry for registrations; configs only for policy and model routing",
+        }
+
+    def _validate_runtime_template_shape(self, template: dict[str, Any]) -> dict[str, Any]:
+        checks: list[dict[str, Any]] = []
+        required = self._runtime_planner_template_contract()["required_top_level_fields"]
+        for key in required:
+            ok = key in template and template.get(key) not in (None, "", [], {})
+            checks.append({"name": f"field:{key}", "passed": ok})
+        entrypoint = template.get("entrypoint") if isinstance(template.get("entrypoint"), dict) else {}
+        for key in self._runtime_planner_template_contract()["required_entrypoint_fields"]:
+            ok = bool(str(entrypoint.get(key) or "").strip())
+            checks.append({"name": f"entrypoint:{key}", "passed": ok})
+        files = template.get("files") if isinstance(template.get("files"), list) else []
+        files_ok = bool(files) and all(isinstance(item, dict) and str(item.get("path") or "").strip() and isinstance(item.get("content"), str) for item in files)
+        checks.append({"name": "files_have_paths_and_content", "passed": files_ok})
+        passed = all(bool(item.get("passed")) for item in checks)
+        return {"passed": passed, "status": "completed" if passed else "failed", "checks": checks}
+
+    def _runtime_self_repair(
+        self,
+        *,
+        run_id: str,
+        stage: str,
+        status: str,
+        reason: str,
+        payload: dict[str, Any],
+        expected: dict[str, Any],
+    ) -> dict[str, Any]:
+        report = {
+            "run_id": run_id,
+            "node_id": "capability_acquisition_pipeline",
+            "stage": stage,
+            "status": status,
+            "reason": reason,
+            "payload": payload,
+            "expected_contract": expected,
+            "runtime_state": {"pipeline": "capability_acquisition"},
+        }
+        diagnosis = self.self_repair.diagnose(report)
+        plan = self.self_repair.plan(report)
+        trace_dir = RUNTIME_GENERATED / "self_repair" / "capability_acquisition"
+        trace_path = self.self_repair.write_trace(result=plan, trace_dir=trace_dir, name=f"{run_id}_{self._safe_name(stage)}")
+        return {"status": plan.status, "diagnosis": diagnosis, "plan": plan.to_dict(), "trace_path": str(trace_path)}
 
     def _select_template(self, user_input: str, templates: list[dict[str, Any]]) -> TemplateMatch | None:
         value = " " + user_input.casefold() + " "
@@ -157,7 +458,11 @@ class RuntimeCapabilityGapImplementer:
             required = template.get("required_terms") if isinstance(template.get("required_terms"), list) else []
             if required and not all(str(term).casefold() in value for term in required):
                 continue
-            score = sum(1 for term in terms if str(term).casefold() in value)
+            term_score = sum(1 for term in terms if str(term).casefold() in value)
+            generic_required_terms = {"capability", "runtime", "tool", "action"}
+            if term_score <= 0 and required and all(str(term).casefold() in generic_required_terms for term in required):
+                continue
+            score = term_score
             # Template selection remains contract-driven.  A template may declare
             # a numeric priority to prefer a precise capability template over a
             # broader fallback template when both match the same request.
@@ -414,7 +719,32 @@ class RuntimeCapabilityGapImplementer:
         present_forbidden = [str(marker) for marker in forbidden_markers if str(marker).casefold() in combined]
         checks.append({"name": "required_markers", "passed": not missing, "missing": missing})
         checks.append({"name": "forbidden_markers", "passed": not present_forbidden, "present": present_forbidden})
-        passed = not missing and not present_forbidden
+        expected_tool_id = str(contract.get("expected_tool_id") or "").strip()
+        actual_tool_id = str(artifact.get("tool_id") or template.get("template_id") or "").strip()
+        expected_template_id = str(contract.get("expected_template_id") or "").strip()
+        actual_template_id = str(template.get("template_id") or "").strip()
+        required_dir_name = str(contract.get("required_artifact_dir_name") or "").strip()
+        actual_dir_name = Path(str(artifact.get("tool_dir") or "")).name if artifact.get("tool_dir") else ""
+        forbidden_tool_ids = [str(x).strip() for x in contract.get("forbidden_tool_ids", []) if str(x).strip()] if isinstance(contract.get("forbidden_tool_ids"), list) else []
+        id_checks_passed = True
+        if expected_tool_id:
+            ok = actual_tool_id == expected_tool_id
+            id_checks_passed = id_checks_passed and ok
+            checks.append({"name": "expected_tool_id", "passed": ok, "expected": expected_tool_id, "actual": actual_tool_id})
+        if expected_template_id:
+            ok = actual_template_id == expected_template_id
+            id_checks_passed = id_checks_passed and ok
+            checks.append({"name": "expected_template_id", "passed": ok, "expected": expected_template_id, "actual": actual_template_id})
+        if required_dir_name:
+            ok = actual_dir_name == required_dir_name
+            id_checks_passed = id_checks_passed and ok
+            checks.append({"name": "required_artifact_dir_name", "passed": ok, "expected": required_dir_name, "actual": actual_dir_name})
+        if forbidden_tool_ids:
+            present_ids = [x for x in forbidden_tool_ids if x in {actual_tool_id, actual_template_id, actual_dir_name}]
+            ok = not present_ids
+            id_checks_passed = id_checks_passed and ok
+            checks.append({"name": "forbidden_tool_ids", "passed": ok, "present": present_ids})
+        passed = not missing and not present_forbidden and id_checks_passed
         report = {
             "passed": passed,
             "status": "completed" if passed else "failed",
