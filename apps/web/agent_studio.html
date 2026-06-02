@@ -160,6 +160,10 @@ function renderStudioResponse(data, originalText){
     return;
   }
   const status = data && data.status ? String(data.status) : 'received';
+  if(['not_found','run_state_unavailable'].includes(status.toLowerCase())){
+    addProgressMessage('waiting for run state');
+    return;
+  }
   const action = data && data.action ? String(data.action) : 'runtime response';
   let detail = '';
   if(data && data.error){
@@ -173,8 +177,29 @@ function renderStudioResponse(data, originalText){
   addMessage(`${action}: ${status}${detail ? ' — '+detail : ''}`, data && data.status==='completed' ? 'item' : 'item error');
 }
 function escapeHtml(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-function setStudioStatus(text, running=false){ const el=document.getElementById('status'); el.textContent=text; el.classList.toggle('running', !!running); }
-function addProgressMessage(text){ setStudioStatus('running', true); }
+
+function setStudioStatus(text, running=false, detail=''){
+  const el=document.getElementById('status');
+  const base=String(text||'ready');
+  const suffix=detail ? ' · '+String(detail) : '';
+  el.textContent=base+suffix;
+  el.classList.toggle('running', !!running);
+}
+function addProgressMessage(text){ setStudioStatus('running', true, text||''); }
+function formatElapsedSeconds(seconds){
+  const n=Math.max(0, Math.floor(Number(seconds||0)));
+  const h=Math.floor(n/3600), m=Math.floor((n%3600)/60), s=n%60;
+  if(h>0) return `${h}h ${m}m ${s}s`;
+  if(m>0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+function eventLooksLikeHeartbeat(ev){
+  const label=String((ev&&ev.label)||'').toLowerCase();
+  const stage=String((ev&&ev.stage)||'').toLowerCase();
+  const detail=String((ev&&ev.detail)||'').toLowerCase();
+  return /elapsed\s+\d+s/.test(label) || /elapsed\s+\d+s/.test(detail) || (stage==='execution' && String(ev&&ev.status||'').toLowerCase()==='running' && /elapsed/.test(label+detail));
+}
+
 let lastSubmittedInstruction = '';
 let lastMissingInputs = [];
 let lastPendingRunId = '';
@@ -193,37 +218,75 @@ function setActiveStateScope(kind, id, runId){ activeStateScope={kind:String(kin
 let activeStudioJobPoll = null;
 let activeStudioJobRunId = '';
 let activeStudioJobRenderedStages = new Set();
+let activeRunProgressCard = null;
+let activeRunStartedAtMs = 0;
 
 function resetActiveRunUi(runId){
   activeStudioJobRunId = String(runId || '');
   activeStudioJobRenderedStages = new Set();
+  activeRunStartedAtMs = Date.now();
+  activeRunProgressCard = null;
   setActiveStateScope('request', '', activeStudioJobRunId);
 }
 
+function ensureActiveRunProgressCard(){
+  if(activeRunProgressCard && activeRunProgressCard.isConnected) return activeRunProgressCard;
+  const el=document.createElement('div');
+  el.className='item';
+  el.setAttribute('data-runtime-progress-card','true');
+  el.innerHTML='<div class="cardHeader"><b>Current run</b><span class="pill">running</span></div><div class="message small">accepted</div>';
+  messages.appendChild(el);
+  messages.scrollTop=messages.scrollHeight;
+  activeRunProgressCard=el;
+  return el;
+}
+
+
 function isTerminalStudioStatus(status){
-  return ['completed','failed','cancelled','blocked','requires_input','pending_review','not_found'].includes(String(status||'').toLowerCase());
+  return ['completed','failed','cancelled','blocked','requires_input','pending_review'].includes(String(status||'').toLowerCase());
 }
 
 function renderStudioJobProgress(job){
   const events = Array.isArray(job && job.progress_events) ? job.progress_events : [];
-  events.forEach((ev, idx)=>{
-    const key = [job.run_id || activeStudioJobRunId, ev.stage || ev.label || idx, ev.status || 'running', ev.detail || ''].join('|');
-    if(activeStudioJobRenderedStages.has(key)) return;
-    activeStudioJobRenderedStages.add(key);
-    const label = ev.stage || ev.label || 'step';
-    const status = ev.status || 'running';
-    const detail = ev.detail ? ' — '+ev.detail : '';
-    addMessage(label+': '+status+detail, status==='failed' ? 'item error' : 'item');
-  });
+  const status = String((job && job.status) || 'running').toLowerCase();
+  const terminal = isTerminalStudioStatus(status);
+  const startedMs = activeRunStartedAtMs || Date.now();
+  const elapsed = job && job.elapsed_seconds != null ? Number(job.elapsed_seconds) : ((Date.now()-startedMs)/1000);
+  const visibleEvents = events.filter(ev=>!eventLooksLikeHeartbeat(ev));
+  const latest = visibleEvents.length ? visibleEvents[visibleEvents.length-1] : null;
+  const latestLabel = latest ? String(latest.label || latest.stage || 'execution') : 'execution';
+  const latestStatus = latest ? String(latest.status || status || 'running') : status;
+  const latestDetail = latest && latest.detail ? String(latest.detail) : '';
+  setStudioStatus(terminal ? status : 'running', !terminal, terminal ? '' : formatElapsedSeconds(elapsed));
+  const card = ensureActiveRunProgressCard();
+  const pill = card.querySelector('.pill');
+  if(pill) pill.textContent = terminal ? status : 'running';
+  const completedCount = visibleEvents.filter(ev=>String(ev.status||'').toLowerCase()==='completed').length;
+  const totalCount = visibleEvents.length;
+  const body = card.querySelector('.message');
+  if(body){
+    body.innerHTML =
+      '<div><b>'+escapeHtml(latestLabel)+'</b> — '+escapeHtml(latestStatus||'running')+'</div>'+
+      (latestDetail ? '<div class="small">'+escapeHtml(latestDetail)+'</div>' : '')+
+      '<div class="small">elapsed '+escapeHtml(formatElapsedSeconds(elapsed))+(totalCount ? ' / completed '+completedCount+' of '+totalCount : '')+'</div>';
+  }
 }
 
 async function pollStudioJob(runId, originalText){
   if(activeStudioJobPoll){ clearInterval(activeStudioJobPoll); activeStudioJobPoll=null; }
   let terminalReached = false;
+  let missingStateCount = 0;
   const tick = async ()=>{
     try{
       const r = await fetch('/api/agent-studio/run-status/'+encodeURIComponent(runId), {cache:'no-store'});
       const job = await r.json();
+      if(!r.ok || job.ok===false || ['not_found','run_state_unavailable'].includes(String(job.status||'').toLowerCase())){
+        missingStateCount += 1;
+        renderStudioJobProgress({status:'running', progress_events:[{stage:'starting', status:'running', label:'waiting for run state', detail:'retry '+missingStateCount}]});
+        if(missingStateCount < 20){ return; }
+        throw new Error((job && (job.message || job.status)) || ('HTTP '+r.status));
+      }
+      missingStateCount = 0;
       renderStudioJobProgress(job);
       await refreshState();
       const status = String(job.status || '').toLowerCase();
@@ -536,7 +599,7 @@ async function sendMessage(){
   btn.textContent='Running...';
   setStudioStatus('running', true);
   try{
-    addMessage('request accepted: running', 'item');
+    renderStudioJobProgress({status:'running', progress_events:[{stage:'accepted', status:'running', label:'request accepted'}]});
     const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, session_id:activeSessionId, client_run_id:clientRunId, uploaded_artifacts:selectedArtifactsForRequest(text)})});
     const data=await res.json();
     consumeSelectedArtifactsAfterRequest();

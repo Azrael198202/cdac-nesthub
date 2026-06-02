@@ -45,6 +45,54 @@ approval_policy_store = RuntimeApprovalPolicyStore()
 # It stores run lifecycle only; runtime artifacts and domain-specific results stay in runtime storage.
 AGENT_STUDIO_RUNS: dict[str, dict[str, Any]] = {}
 AGENT_STUDIO_TASKS: set[asyncio.Task] = set()
+AGENT_STUDIO_RUN_STATE_DIR = Path("runtime") / "traces" / "agent_studio_runs"
+
+
+def _safe_run_id(value: str | None) -> str:
+    raw = str(value or "").strip()
+    return "".join(ch for ch in raw if ch.isalnum() or ch in {"_", "-"})[:96]
+
+
+def _persist_agent_studio_run(run_id: str, job: dict[str, Any]) -> None:
+    safe = _safe_run_id(run_id)
+    if not safe:
+        return
+    try:
+        AGENT_STUDIO_RUN_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        payload = dict(job or {})
+        payload["run_id"] = str(payload.get("run_id") or safe)
+        payload["client_run_id"] = str(payload.get("client_run_id") or safe)
+        payload["ui_run_id"] = str(payload.get("ui_run_id") or safe)
+        payload["persisted_at"] = time.time()
+        tmp = AGENT_STUDIO_RUN_STATE_DIR / f"{safe}.json.tmp"
+        final = AGENT_STUDIO_RUN_STATE_DIR / f"{safe}.json"
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
+        tmp.replace(final)
+    except Exception as exc:
+        _write_api_error_log(area="agent_studio_run_state_persist", exc=exc, context={"run_id": run_id})
+
+
+def _load_agent_studio_run(run_id: str) -> dict[str, Any] | None:
+    safe = _safe_run_id(run_id)
+    if not safe:
+        return None
+    path = AGENT_STUDIO_RUN_STATE_DIR / f"{safe}.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            AGENT_STUDIO_RUNS[safe] = payload
+            return payload
+    except Exception as exc:
+        _write_api_error_log(area="agent_studio_run_state_load", exc=exc, context={"run_id": run_id})
+    return None
+
+
+def _save_job(run_id: str, job: dict[str, Any]) -> dict[str, Any]:
+    AGENT_STUDIO_RUNS[_safe_run_id(run_id) or str(run_id)] = job
+    _persist_agent_studio_run(run_id, job)
+    return job
 
 
 def _terminal_status(value: str | None) -> str:
@@ -72,7 +120,9 @@ async def _run_agent_studio_job(run_id: str, req: "AgentStudioRequest", active_s
             _job_progress("request accepted", "completed"),
             _job_progress("execution", "running"),
         ],
+        "updated_at": time.time(),
     })
+    _save_job(run_id, job)
     heartbeat_stop = asyncio.Event()
 
     async def _heartbeat() -> None:
@@ -90,6 +140,8 @@ async def _run_agent_studio_job(run_id: str, req: "AgentStudioRequest", active_s
                 _job_progress("request accepted", "completed"),
                 _job_progress("execution", "running", f"elapsed {elapsed}s"),
             ]
+            job["updated_at"] = time.time()
+            _save_job(run_id, job)
             emit_console_event(area="agent_studio", event="REQUEST_HEARTBEAT", status="running", message=f"execution running {elapsed}s", data={"run_id": run_id, "tick": tick})
 
     heartbeat_task = asyncio.create_task(_heartbeat())
@@ -140,7 +192,9 @@ async def _run_agent_studio_job(run_id: str, req: "AgentStudioRequest", active_s
                 _job_progress("execution", "completed"),
                 _job_progress("final answer", "completed" if terminal != "failed" else "failed"),
             ],
+            "updated_at": time.time(),
         })
+        _save_job(run_id, job)
         emit_console_event(area="agent_studio", event="REQUEST_FINISHED", status=terminal, message="runtime request finished", data={"run_id": run_id})
     except Exception as exc:
         heartbeat_stop.set()
@@ -169,7 +223,9 @@ async def _run_agent_studio_job(run_id: str, req: "AgentStudioRequest", active_s
                 _job_progress("request accepted", "completed"),
                 _job_progress("execution", "failed", str(exc)),
             ],
+            "updated_at": time.time(),
         })
+        _save_job(run_id, job)
         emit_console_event(area="agent_studio", event="REQUEST_FAILED", status="failed", message=str(exc), data={"run_id": run_id})
 
 
@@ -870,7 +926,9 @@ async def agent_studio_message(req: AgentStudioRequest):
                 _job_progress("request accepted", "completed"),
                 _job_progress("queued", "running"),
             ],
+            "updated_at": time.time(),
         }
+        _save_job(run_id, AGENT_STUDIO_RUNS[run_id])
         task = asyncio.create_task(_run_agent_studio_job(run_id, req, active_session_id))
         AGENT_STUDIO_TASKS.add(task)
         task.add_done_callback(lambda t: AGENT_STUDIO_TASKS.discard(t))
@@ -903,9 +961,15 @@ async def agent_studio_message(req: AgentStudioRequest):
 
 @app.get("/api/agent-studio/run-status/{run_id}")
 async def agent_studio_run_status(run_id: str):
-    job = AGENT_STUDIO_RUNS.get(str(run_id or ""))
+    safe = _safe_run_id(run_id)
+    job = AGENT_STUDIO_RUNS.get(safe) or _load_agent_studio_run(safe)
     if not job:
-        return JSONResponse({"ok": False, "status": "not_found", "run_id": run_id}, status_code=404)
+        return JSONResponse({
+            "ok": False,
+            "status": "run_state_unavailable",
+            "run_id": run_id,
+            "message": "Run state is not available yet or was cleared. The UI should retry briefly instead of rendering this as a runtime result.",
+        }, status_code=202)
     return JSONResponse(job)
 
 
