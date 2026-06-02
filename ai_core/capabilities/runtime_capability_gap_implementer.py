@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -490,10 +491,10 @@ class RuntimeCapabilityGapImplementer:
         required_inputs = [self._safe_field_name(x) for x in blueprint.get("required_inputs", []) if self._safe_field_name(x)]
         connection_fields = [self._safe_field_name(x) for x in blueprint.get("required_connection_fields", []) if self._safe_field_name(x)]
         secret_fields = [self._safe_field_name(x) for x in blueprint.get("required_secret_fields", []) if self._safe_field_name(x)]
-        if bool(blueprint.get("requires_connection")) and not connection_fields:
-            connection_fields = ["endpoint"]
-        if bool(blueprint.get("requires_secret")) and not secret_fields:
-            secret_fields = ["credential"]
+        # Do not invent concrete connection/secret fields in ai_core.
+        # Empty schemas are valid when the user did not explicitly declare
+        # fields; the generated adapter remains configurable through runtime
+        # profiles without embedding domain-specific defaults.
         input_schema = self._object_schema(required_inputs)
         connection_schema = self._object_schema(connection_fields)
         secret_schema = self._object_schema(secret_fields)
@@ -824,6 +825,10 @@ class RuntimeCapabilityGapImplementer:
                 )
                 if not environment_failure:
                     return {**attempt, "attempts": attempts}
+            except subprocess.TimeoutExpired as exc:
+                attempt = {"executable": exe, "returncode": -124, "stdout": str(exc.stdout or "")[-2000:], "stderr": f"TimeoutExpired: exceeded {timeout}s"}
+                attempts.append(attempt)
+                return {**attempt, "attempts": attempts, "timed_out": True, "timeout_seconds": timeout}
             except Exception as exc:
                 attempts.append({"executable": exe, "returncode": -1, "stdout": "", "stderr": f"{exc.__class__.__name__}: {exc}"})
                 continue
@@ -1016,44 +1021,62 @@ class RuntimeCapabilityGapImplementer:
         return str(data.get("console_message") or f"{stage}: {status}")
 
     def _validate_artifact(self, artifact: dict[str, Any], progress: Callable[..., None] | None = None) -> dict[str, Any]:
-        tool_dir = Path(str(artifact.get("tool_dir") or ""))
+        tool_dir = Path(str(artifact.get("tool_dir") or "")).resolve()
         if not tool_dir.exists():
-            return {"passed": False, "status": "failed", "reason": "artifact_directory_missing"}
+            return {"passed": False, "status": "failed", "reason": "artifact_directory_missing", "tool_dir": str(tool_dir)}
         checks: list[dict[str, Any]] = []
-        py_files = [str(p) for p in tool_dir.rglob("*.py")]
+
+        def emit(status: str, *, action: str, message: str, **data: Any) -> None:
+            if progress:
+                progress("SandboxValidator", status, action=action, console_message=message, **data)
+
+        py_files = sorted([p.resolve() for p in tool_dir.rglob("*.py") if p.is_file()])
+        emit("running", action="Preparing artifact validation", message=f"Sandbox validation target prepared: {tool_dir.name}", target_dir=str(tool_dir), file_count=len(py_files))
         if py_files:
-            if progress:
-                progress("SandboxValidator", "running", action="Compiling generated Python files", console_message="Validation case 1 running: python compile")
-            proc = self._run_isolated_python(["-m", "py_compile", *py_files], cwd=tool_dir, timeout=15)
-            checks.append({
-                "name": "python_compile",
-                "returncode": proc.get("returncode"),
-                "stdout": str(proc.get("stdout") or "")[-2000:],
-                "stderr": str(proc.get("stderr") or "")[-2000:],
-                "attempts": proc.get("attempts", []),
-            })
-            if proc.get("returncode") != 0:
-                if progress:
-                    progress("SandboxValidator", "failed", action="Python compile failed", console_message="Validation case 1 failed: python compile")
-                return {"passed": False, "status": "failed", "checks": checks}
-            if progress:
-                progress("SandboxValidator", "completed", action="Python compile passed; preparing unit tests", console_message="Validation case 1 passed: python compile")
+            import py_compile
+            emit("running", action="Compiling generated Python files", message=f"Validation case 1 running: python compile ({len(py_files)} files)", target_dir=str(tool_dir), file_count=len(py_files))
+            compile_started = time.monotonic()
+            for file_index, py_file in enumerate(py_files, start=1):
+                # Guard against accidental workspace-wide scans. Validation may only
+                # inspect files inside the generated artifact directory.
+                try:
+                    py_file.relative_to(tool_dir)
+                except ValueError:
+                    check = {"name": "python_compile", "file": str(py_file), "passed": False, "reason": "file_outside_artifact_dir"}
+                    checks.append(check)
+                    emit("failed", action="Python compile target escaped artifact directory", message="Validation case 1 failed: compile target outside artifact directory", target_dir=str(tool_dir), current_file=str(py_file))
+                    return {"passed": False, "status": "failed", "checks": checks}
+                emit("running", action=f"Compiling {py_file.name}", message=f"Validation case 1 running: compile {py_file.name}", target_dir=str(tool_dir), current_file=str(py_file), case_index=1, file_index=file_index, file_count=len(py_files))
+                try:
+                    py_compile.compile(str(py_file), doraise=True)
+                    checks.append({"name": "python_compile", "file": str(py_file), "passed": True})
+                except Exception as exc:
+                    check = {"name": "python_compile", "file": str(py_file), "passed": False, "error_type": exc.__class__.__name__, "error": str(exc)[-2000:]}
+                    checks.append(check)
+                    emit("failed", action="Python compile failed", message=f"Validation case 1 failed: compile {py_file.name}", target_dir=str(tool_dir), current_file=str(py_file), error_type=exc.__class__.__name__, detail=str(exc)[-500:])
+                    return {"passed": False, "status": "failed", "checks": checks}
+                if (time.monotonic() - compile_started) > 10:
+                    check = {"name": "python_compile", "passed": False, "reason": "compile_timeout_guard", "elapsed_seconds": round(time.monotonic() - compile_started, 3)}
+                    checks.append(check)
+                    emit("failed", action="Python compile timeout guard triggered", message="Validation case 1 failed: python compile timeout guard", target_dir=str(tool_dir), elapsed_seconds=check["elapsed_seconds"])
+                    return {"passed": False, "status": "failed", "checks": checks}
+            emit("completed", action="Python compile passed; preparing unit tests", message="Validation case 1 passed: python compile", target_dir=str(tool_dir), file_count=len(py_files))
+
         test_candidates: list[Path] = []
-        test_dir = Path(str(artifact.get("test_dir") or ""))
+        test_dir = Path(str(artifact.get("test_dir") or "")).resolve()
         if test_dir.exists():
-            test_candidates.extend(sorted(test_dir.glob("test_*.py")))
-        legacy_test_file = tool_dir / "test_tool.py"
+            test_candidates.extend(sorted([p.resolve() for p in test_dir.glob("test_*.py") if p.is_file()]))
+        legacy_test_file = (tool_dir / "test_tool.py").resolve()
         if legacy_test_file.exists() and legacy_test_file not in test_candidates:
             test_candidates.append(legacy_test_file)
         for case_index, test_file in enumerate(test_candidates, start=2):
-            if progress:
-                progress("SandboxValidator", "running", action=f"Executing validation case {case_index}: {test_file.name}", console_message=f"Validation case {case_index} running: {test_file.name}")
+            emit("running", action=f"Executing validation case {case_index}: {test_file.name}", message=f"Validation case {case_index} running: {test_file.name}", target_dir=str(tool_dir), current_file=str(test_file), case_index=case_index)
             runner = (
                 "import runpy, sys; "
                 f"sys.path.insert(0, {json.dumps(str(tool_dir))}); "
                 f"runpy.run_path({json.dumps(str(test_file))}, run_name='__main__')"
             )
-            proc = self._run_isolated_python(["-c", runner], cwd=tool_dir, timeout=15)
+            proc = self._run_isolated_python(["-c", runner], cwd=tool_dir, timeout=10)
             check = {
                 "name": "unit_test",
                 "test_file": str(test_file),
@@ -1065,12 +1088,10 @@ class RuntimeCapabilityGapImplementer:
             checks.append(check)
             self._write_test_report(artifact, check)
             if proc.get("returncode") != 0:
-                if progress:
-                    progress("SandboxValidator", "failed", action=f"Validation case {case_index} failed", console_message=f"Validation case {case_index} failed: {test_file.name}")
+                emit("failed", action=f"Validation case {case_index} failed", message=f"Validation case {case_index} failed: {test_file.name}", target_dir=str(tool_dir), current_file=str(test_file), returncode=proc.get("returncode"), detail=str(proc.get("stderr") or proc.get("stdout") or "")[-500:])
                 return {"passed": False, "status": "failed", "checks": checks}
-            if progress:
-                progress("SandboxValidator", "completed", action=f"Validation case {case_index} passed", console_message=f"Validation case {case_index} passed: {test_file.name}")
-        return {"passed": True, "status": "completed", "checks": checks}
+            emit("completed", action=f"Validation case {case_index} passed", message=f"Validation case {case_index} passed: {test_file.name}", target_dir=str(tool_dir), current_file=str(test_file), case_index=case_index)
+        return {"passed": True, "status": "completed", "checks": checks, "target_dir": str(tool_dir)}
 
     def _execute_verification_run(self, *, template: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
         entrypoint = template.get("entrypoint") if isinstance(template.get("entrypoint"), dict) else {}

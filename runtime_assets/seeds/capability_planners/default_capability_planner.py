@@ -72,33 +72,35 @@ def _try_model_planner(*, request_text: str, identity: dict[str, Any], evidence:
         model_source=model_source,
         prompt=first_prompt,
         force_json=True,
-        timeout=float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_TIMEOUT", "15")),
+        timeout=float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_TIMEOUT", "6")),
         prompt_stage="capability_blueprint_planning",
     )
     attempts.append(first)
     if isinstance(first.get("blueprint"), dict):
         return first
 
-    # Small local models sometimes return an empty response when Ollama JSON mode
-    # is combined with a long schema prompt. Retry once with a smaller prompt and
-    # without provider-side JSON forcing; the parser still accepts only JSON.
-    retry_prompt = _compact_model_prompt(request_text=request_text, identity=identity, evidence=evidence, contract=contract)
-    retry = _call_ollama_json_planner(
-        host=host,
-        model=model,
-        model_source=model_source,
-        prompt=retry_prompt,
-        force_json=False,
-        timeout=float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_COMPACT_TIMEOUT", os.environ.get("AI_CORE_CAPABILITY_PLANNER_TIMEOUT", "15"))),
-        prompt_stage="capability_blueprint_planning_compact",
-    )
-    attempts.append(retry)
-    if isinstance(retry.get("blueprint"), dict):
-        retry["attempts"] = attempts
-        retry["compact_retry_used"] = True
-        retry["model_source"] = model_source
-        return retry
-    return {"status": "planner_failed", "reason": str(retry.get("reason") or first.get("reason") or "model_returned_no_valid_blueprint"), "model": model, "model_source": model_source, "attempts": attempts}
+    # Deterministic runtime acquisition should not wait on repeated local-model
+    # retries by default. Operators can enable one compact retry explicitly when
+    # they want to diagnose model behavior. The deterministic fallback below is
+    # the reliability path for normal runs.
+    if os.environ.get("AI_CORE_CAPABILITY_PLANNER_ENABLE_COMPACT_RETRY", "").lower() in {"1", "true", "yes"}:
+        retry_prompt = _compact_model_prompt(request_text=request_text, identity=identity, evidence=evidence, contract=contract)
+        retry = _call_ollama_json_planner(
+            host=host,
+            model=model,
+            model_source=model_source,
+            prompt=retry_prompt,
+            force_json=False,
+            timeout=float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_COMPACT_TIMEOUT", os.environ.get("AI_CORE_CAPABILITY_PLANNER_TIMEOUT", "6"))),
+            prompt_stage="capability_blueprint_planning_compact",
+        )
+        attempts.append(retry)
+        if isinstance(retry.get("blueprint"), dict):
+            retry["attempts"] = attempts
+            retry["compact_retry_used"] = True
+            retry["model_source"] = model_source
+            return retry
+    return {"status": "planner_failed", "reason": str(first.get("reason") or "model_returned_no_valid_blueprint"), "model": model, "model_source": model_source, "attempts": attempts}
 
 
 def _resolve_planner_model() -> tuple[str, str]:
@@ -336,10 +338,9 @@ def _deterministic_blueprint_fallback(*, request_text: str, identity: dict[str, 
 
     if not input_fields:
         input_fields = _extract_backticked_fields(text) or ["field_1"]
-    if requires_connection and not connection_fields:
-        connection_fields = ["connection_value"]
-    if requires_secret and not secret_fields:
-        secret_fields = ["secret_value"]
+    # Do not invent schema fields from prose. If the user did not explicitly
+    # declare fields, keep the schema empty and let the materialized artifact
+    # expose a dry-run configurable shell.
 
     _emit_planner_event(
         event="DeterministicBlueprintFallback",
@@ -444,15 +445,21 @@ def _safe_field_name(value: Any) -> str:
     return name[:64]
 
 def _model_prompt(*, request_text: str, identity: dict[str, Any], evidence: dict[str, Any], contract: Any) -> str:
+    # Keep the model call advisory and compact. The full user request is not
+    # passed through; explicit schema fields are extracted deterministically.
+    schema_hint = {
+        "input": _extract_schema_section_fields(request_text, section_name="input"),
+        "connection": _extract_schema_section_fields(request_text, section_name="connection"),
+        "secret": _extract_schema_section_fields(request_text, section_name="secret"),
+    }
+    compact_identity = {"requested_capability_id": identity.get("requested_capability_id"), "explicit": bool(identity.get("explicit"))}
     return (
-        "Generate ONLY one valid JSON object. No markdown. "
-        "The object must contain confidence_score, needs_external_evidence, and blueprint. "
-        "blueprint fields: capability_category, requires_connection, requires_secret, required_inputs, "
+        "Return JSON only. Keys: confidence_score, needs_external_evidence, blueprint. "
+        "Blueprint keys: capability_category, requires_connection, requires_secret, required_inputs, "
         "required_connection_fields, required_secret_fields, approval_mode, execution_mode, verification_mode. "
-        "Use neutral field names. Do not generate code. Do not generate schemas. Do not hardcode runtime values.\n"
-        f"Contract: {json.dumps(_compact_contract(contract), ensure_ascii=False)[:700]}\n"
-        f"Identity: {json.dumps(identity, ensure_ascii=False)[:500]}\n"
-        f"Request: {str(request_text or '')[:900]}"
+        "Do not generate code or schemas. Use only the explicit field hints.\n"
+        f"Identity: {json.dumps(compact_identity, ensure_ascii=False)}\n"
+        f"Field hints: {json.dumps(schema_hint, ensure_ascii=False)}"
     )
 
 def _compact_model_prompt(*, request_text: str, identity: dict[str, Any], evidence: dict[str, Any], contract: Any) -> str:

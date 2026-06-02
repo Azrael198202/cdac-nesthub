@@ -336,13 +336,26 @@ async function pollStudioJob(runId, originalText){
     try{
       const r = await fetch('/api/agent-studio/run-status/'+encodeURIComponent(runId), {cache:'no-store'});
       const job = await r.json();
-      if(!r.ok || job.ok===false || ['not_found','run_state_unavailable'].includes(String(job.status||'').toLowerCase())){
+      const statusText = String((job && job.status) || '').toLowerCase();
+      if(!r.ok || job.ok===false || ['not_found','run_state_unavailable'].includes(statusText)){
         missingStateCount += 1;
-        renderStudioJobProgress({status:'running', progress_events:[{stage:'starting', status:'running', label:'waiting for run state', detail:'retry '+missingStateCount}]});
+        setStudioStatus('reconnecting', true, 'status retry '+missingStateCount);
+        const card = ensureActiveRunProgressCard();
+        const body = card.querySelector('.message');
+        if(body){
+          const note = document.createElement('div');
+          note.className = 'runWarning';
+          note.textContent = 'Run status polling is reconnecting. Current runtime stage is preserved; retry '+missingStateCount+'.';
+          if(!body.querySelector('.pollingReconnectWarning')){ note.classList.add('pollingReconnectWarning'); body.appendChild(note); }
+        }
         if(missingStateCount < 20){ return; }
         throw new Error((job && (job.message || job.status)) || ('HTTP '+r.status));
       }
       missingStateCount = 0;
+      if(statusText === 'waiting_for_state' || statusText === 'status_unavailable'){
+        setStudioStatus('reconnecting', true);
+        return;
+      }
       renderStudioJobProgress(job);
       await refreshState();
       const status = String(job.status || '').toLowerCase();

@@ -1213,36 +1213,59 @@ async def agent_studio_message(req: AgentStudioRequest):
 @app.get("/api/agent-studio/run-status/{run_id}")
 async def agent_studio_run_status(run_id: str):
     safe = _safe_run_id(run_id)
-    job = AGENT_STUDIO_RUNS.get(safe) or _load_agent_studio_run(safe)
-    if not job:
-        terminal_event = _console_terminal_event_for_run(safe)
-        if terminal_event:
-            terminal = _terminal_status(str(terminal_event.get("status") or "completed"))
-            job = {
-                "ok": terminal == "completed",
-                "status": terminal,
-                "run_id": safe,
-                "client_run_id": safe,
-                "ui_run_id": safe,
-                "stage": "final_synthesis" if terminal == "completed" else terminal,
-                "progress_events": [
-                    _job_progress("request accepted", "completed"),
-                    _job_progress("execution", "completed" if terminal == "completed" else terminal),
-                    _job_progress("final answer", "completed" if terminal == "completed" else terminal),
-                ],
-                "message": "Recovered terminal state from runtime console.",
-                "updated_at": time.time(),
-            }
-            _save_job(safe, job)
-        else:
-            return JSONResponse({
-                "ok": False,
-                "status": "run_state_unavailable",
-                "run_id": run_id,
-                "message": "Run state is not available yet or was cleared. The UI should retry briefly instead of rendering this as a runtime result.",
-            }, status_code=202)
-    job = _normalize_agent_studio_job(safe, job)
-    return JSONResponse(job)
+    try:
+        job = AGENT_STUDIO_RUNS.get(safe) or _load_agent_studio_run(safe)
+        if not job:
+            terminal_event = _console_terminal_event_for_run(safe)
+            if terminal_event:
+                terminal = _terminal_status(str(terminal_event.get("status") or "completed"))
+                job = {
+                    "ok": terminal == "completed",
+                    "status": terminal,
+                    "run_id": safe,
+                    "client_run_id": safe,
+                    "ui_run_id": safe,
+                    "stage": "final_synthesis" if terminal == "completed" else terminal,
+                    "progress_events": [
+                        _job_progress("request accepted", "completed"),
+                        _job_progress("execution", "completed" if terminal == "completed" else terminal),
+                        _job_progress("final answer", "completed" if terminal == "completed" else terminal),
+                    ],
+                    "message": "Recovered terminal state from runtime console.",
+                    "updated_at": time.time(),
+                }
+                _save_job(safe, job)
+            else:
+                return JSONResponse({
+                    "ok": True,
+                    "status": "waiting_for_state",
+                    "run_id": safe or run_id,
+                    "client_run_id": safe or run_id,
+                    "ui_run_id": safe or run_id,
+                    "stage": "state_recovery",
+                    "current_stage": "state_recovery",
+                    "current_action": "Waiting for persisted run state",
+                    "last_event": "Run state is not available yet",
+                    "progress_events": [],
+                    "message": "Run state is not available yet. Polling may continue without changing the runtime stage.",
+                }, status_code=202)
+        job = _normalize_agent_studio_job(safe, job)
+        return JSONResponse(job)
+    except Exception as exc:
+        _write_api_error_log(area="agent_studio_run_status", exc=exc, context={"run_id": run_id})
+        return JSONResponse({
+            "ok": True,
+            "status": "status_unavailable",
+            "run_id": safe or run_id,
+            "client_run_id": safe or run_id,
+            "ui_run_id": safe or run_id,
+            "stage": "status_polling",
+            "current_stage": "status_polling",
+            "current_action": "Run status endpoint returned a diagnostic error",
+            "last_event": str(exc)[:500],
+            "progress_events": [],
+            "message": "Run status could not be normalized. See runtime/logs/api_errors.jsonl.",
+        }, status_code=200)
 
 
 
