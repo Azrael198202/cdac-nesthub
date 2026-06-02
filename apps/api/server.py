@@ -106,6 +106,71 @@ def _job_progress(stage: str, status: str = "running", detail: str | None = None
     return {"stage": stage, "status": status, "detail": detail or ""}
 
 
+def _console_terminal_event_for_run(run_id: str) -> dict[str, Any] | None:
+    safe = _safe_run_id(run_id)
+    if not safe:
+        return None
+    path = Path("runtime") / "logs" / "runtime_console.jsonl"
+    if not path.exists():
+        return None
+    terminal_events = {"REQUEST_FINISHED", "REQUEST_FAILED", "REQUEST_CANCELLED"}
+    found: dict[str, Any] | None = None
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    event = json.loads(line)
+                except Exception:
+                    continue
+                data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                if str(data.get("run_id") or "") != safe:
+                    continue
+                if str(event.get("event") or "") in terminal_events:
+                    found = event
+    except Exception:
+        return None
+    return found
+
+
+def _normalize_agent_studio_job(run_id: str, job: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(job, dict):
+        job = {}
+    safe = _safe_run_id(run_id) or str(run_id)
+    job.setdefault("run_id", safe)
+    job.setdefault("client_run_id", safe)
+    job.setdefault("ui_run_id", safe)
+    events = job.get("progress_events") if isinstance(job.get("progress_events"), list) else []
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    status = str(job.get("status") or "").strip().lower()
+    last_status = ""
+    if events:
+        last = events[-1] if isinstance(events[-1], dict) else {}
+        last_status = str(last.get("status") or "").strip().lower()
+    if status == "running" and (result.get("final_answer") or result.get("message") or result.get("status") or last_status in {"completed", "failed", "blocked", "requires_input", "pending_review"}):
+        status = last_status if last_status in {"failed", "blocked", "requires_input", "pending_review"} else "completed"
+        job["status"] = status
+        job["stage"] = job.get("stage") or "final_synthesis"
+        job["updated_at"] = time.time()
+        _save_job(safe, job)
+        return job
+    if status == "running":
+        terminal_event = _console_terminal_event_for_run(safe)
+        if terminal_event:
+            terminal = _terminal_status(str(terminal_event.get("status") or "completed"))
+            job["status"] = terminal
+            job["stage"] = "final_synthesis" if terminal == "completed" else terminal
+            if not events or str((events[-1] if isinstance(events[-1], dict) else {}).get("stage") or "") != "final answer":
+                events = [
+                    _job_progress("request accepted", "completed"),
+                    _job_progress("execution", "completed" if terminal == "completed" else terminal),
+                    _job_progress("final answer", "completed" if terminal == "completed" else terminal),
+                ]
+                job["progress_events"] = events
+            job["updated_at"] = time.time()
+            _save_job(safe, job)
+    return job
+
+
 async def _run_agent_studio_job(run_id: str, req: "AgentStudioRequest", active_session_id: str) -> None:
     job = AGENT_STUDIO_RUNS.setdefault(run_id, {})
     job.update({
@@ -116,6 +181,8 @@ async def _run_agent_studio_job(run_id: str, req: "AgentStudioRequest", active_s
         "session_id": active_session_id,
         "status": "running",
         "stage": "execution",
+        "started_at": time.time(),
+        "elapsed_seconds": 0,
         "progress_events": [
             _job_progress("request accepted", "completed"),
             _job_progress("execution", "running"),
@@ -134,8 +201,11 @@ async def _run_agent_studio_job(run_id: str, req: "AgentStudioRequest", active_s
                 break
             tick += 1
             elapsed = int(time.monotonic() - started)
+            if _terminal_status(str(job.get("status") or "")) == str(job.get("status") or "").lower() and str(job.get("status") or "").lower() != "running":
+                break
             job["stage"] = "execution"
             job["status"] = "running"
+            job["elapsed_seconds"] = elapsed
             job["progress_events"] = [
                 _job_progress("request accepted", "completed"),
                 _job_progress("execution", "running", f"elapsed {elapsed}s"),
@@ -187,6 +257,8 @@ async def _run_agent_studio_job(run_id: str, req: "AgentStudioRequest", active_s
             "status": terminal,
             "stage": "final_synthesis",
             "result": payload,
+            "completed_at": time.time(),
+            "elapsed_seconds": int(time.time() - float(job.get("started_at") or time.time())),
             "progress_events": [
                 _job_progress("request accepted", "completed"),
                 _job_progress("execution", "completed"),
@@ -219,6 +291,8 @@ async def _run_agent_studio_job(run_id: str, req: "AgentStudioRequest", active_s
             "status": "failed",
             "stage": "failed",
             "result": error_payload,
+            "completed_at": time.time(),
+            "elapsed_seconds": int(time.time() - float(job.get("started_at") or time.time())),
             "progress_events": [
                 _job_progress("request accepted", "completed"),
                 _job_progress("execution", "failed", str(exc)),
@@ -964,12 +1038,33 @@ async def agent_studio_run_status(run_id: str):
     safe = _safe_run_id(run_id)
     job = AGENT_STUDIO_RUNS.get(safe) or _load_agent_studio_run(safe)
     if not job:
-        return JSONResponse({
-            "ok": False,
-            "status": "run_state_unavailable",
-            "run_id": run_id,
-            "message": "Run state is not available yet or was cleared. The UI should retry briefly instead of rendering this as a runtime result.",
-        }, status_code=202)
+        terminal_event = _console_terminal_event_for_run(safe)
+        if terminal_event:
+            terminal = _terminal_status(str(terminal_event.get("status") or "completed"))
+            job = {
+                "ok": terminal == "completed",
+                "status": terminal,
+                "run_id": safe,
+                "client_run_id": safe,
+                "ui_run_id": safe,
+                "stage": "final_synthesis" if terminal == "completed" else terminal,
+                "progress_events": [
+                    _job_progress("request accepted", "completed"),
+                    _job_progress("execution", "completed" if terminal == "completed" else terminal),
+                    _job_progress("final answer", "completed" if terminal == "completed" else terminal),
+                ],
+                "message": "Recovered terminal state from runtime console.",
+                "updated_at": time.time(),
+            }
+            _save_job(safe, job)
+        else:
+            return JSONResponse({
+                "ok": False,
+                "status": "run_state_unavailable",
+                "run_id": run_id,
+                "message": "Run state is not available yet or was cleared. The UI should retry briefly instead of rendering this as a runtime result.",
+            }, status_code=202)
+    job = _normalize_agent_studio_job(safe, job)
     return JSONResponse(job)
 
 

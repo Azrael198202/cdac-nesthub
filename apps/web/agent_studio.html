@@ -225,6 +225,7 @@ function resetActiveRunUi(runId){
   activeStudioJobRunId = String(runId || '');
   activeStudioJobRenderedStages = new Set();
   activeRunStartedAtMs = Date.now();
+  document.querySelectorAll('[data-runtime-progress-card=\"true\"]').forEach(el=>el.remove());
   activeRunProgressCard = null;
   setActiveStateScope('request', '', activeStudioJobRunId);
 }
@@ -248,15 +249,20 @@ function isTerminalStudioStatus(status){
 
 function renderStudioJobProgress(job){
   const events = Array.isArray(job && job.progress_events) ? job.progress_events : [];
-  const status = String((job && job.status) || 'running').toLowerCase();
+  let status = String((job && job.status) || 'running').toLowerCase();
+  const hasResult = !!(job && job.result && (job.result.final_answer || job.result.message || job.result.status));
+  const visibleEvents = events.filter(ev=>!eventLooksLikeHeartbeat(ev));
+  const lastVisible = visibleEvents.length ? visibleEvents[visibleEvents.length-1] : null;
+  const lastVisibleStatus = String((lastVisible && lastVisible.status) || '').toLowerCase();
+  if(!isTerminalStudioStatus(status) && (hasResult || ['completed','failed','blocked','requires_input','pending_review'].includes(lastVisibleStatus))){
+    status = lastVisibleStatus || 'completed';
+  }
   const terminal = isTerminalStudioStatus(status);
   const startedMs = activeRunStartedAtMs || Date.now();
   const elapsed = job && job.elapsed_seconds != null ? Number(job.elapsed_seconds) : ((Date.now()-startedMs)/1000);
-  const visibleEvents = events.filter(ev=>!eventLooksLikeHeartbeat(ev));
-  const latest = visibleEvents.length ? visibleEvents[visibleEvents.length-1] : null;
+  const latest = lastVisible || null;
   const latestLabel = latest ? String(latest.label || latest.stage || 'execution') : 'execution';
   const latestStatus = latest ? String(latest.status || status || 'running') : status;
-  const latestDetail = latest && latest.detail ? String(latest.detail) : '';
   setStudioStatus(terminal ? status : 'running', !terminal, terminal ? '' : formatElapsedSeconds(elapsed));
   const card = ensureActiveRunProgressCard();
   const pill = card.querySelector('.pill');
@@ -265,9 +271,15 @@ function renderStudioJobProgress(job){
   const totalCount = visibleEvents.length;
   const body = card.querySelector('.message');
   if(body){
+    const rows = visibleEvents.slice(-10).map(ev=>{
+      const label = String(ev.label || ev.stage || 'step');
+      const st = String(ev.status || 'running');
+      const detail = ev.detail ? ' <span class="muted">'+escapeHtml(String(ev.detail))+'</span>' : '';
+      return '<div class="small">• <b>'+escapeHtml(label)+'</b> — '+escapeHtml(st)+detail+'</div>';
+    }).join('') || '<div class="small">• <b>'+escapeHtml(latestLabel)+'</b> — '+escapeHtml(latestStatus||'running')+'</div>';
     body.innerHTML =
-      '<div><b>'+escapeHtml(latestLabel)+'</b> — '+escapeHtml(latestStatus||'running')+'</div>'+
-      (latestDetail ? '<div class="small">'+escapeHtml(latestDetail)+'</div>' : '')+
+      '<div><b>Progress</b> — '+escapeHtml(terminal ? status : 'running')+'</div>'+
+      rows+
       '<div class="small">elapsed '+escapeHtml(formatElapsedSeconds(elapsed))+(totalCount ? ' / completed '+completedCount+' of '+totalCount : '')+'</div>';
   }
 }
@@ -611,7 +623,9 @@ async function sendMessage(){
       return;
     }
     const runId = String(data.ui_run_id || data.client_run_id || data.run_id || clientRunId);
-    resetActiveRunUi(runId);
+    activeStudioJobRunId = runId;
+    activeUiRunId = runId;
+    setActiveStateScope('request', '', runId);
     renderStudioJobProgress(data);
     await refreshState();
     await pollStudioJob(runId, text);
