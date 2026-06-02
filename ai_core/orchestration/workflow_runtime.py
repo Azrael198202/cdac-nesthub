@@ -9,7 +9,7 @@ from ai_core.events.event_bus import event_bus
 from ai_core.runtime.bootstrap import RuntimeBootstrap
 from ai_core.runtime.checkpoint_store import CheckpointStore
 from ai_core.runtime.trace_writer import TraceWriter
-from ai_core.capabilities.capability_resolver import CapabilityResolver
+from auxiliary_brain.capability_acquisition.implementation_planner import CapabilityResolver
 from ai_core.nodes.node_runner import NodeRunner
 from ai_core.nodes.node_config_loader import NodeConfigLoader
 from ai_core.knowledge.knowledge_service import KnowledgeService

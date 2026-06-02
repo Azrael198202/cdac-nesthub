@@ -7,12 +7,12 @@
   <style>
     :root{--bg:#050608;--panel:#080b10;--panel2:#0d1117;--line:#1f2937;--text:#d7f7d7;--muted:#7f8c9a;--accent:#49d169;--cyan:#63d6ff;--warn:#ffcc66;--err:#ff6b6b;--info:#9ecbff}
     *{box-sizing:border-box} body{margin:0;background:#050608;color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;height:100vh;display:grid;grid-template-columns:330px 1fr;overflow:hidden}
-    aside{background:#090c10;border-right:1px solid var(--line);padding:14px;overflow:auto} main{display:flex;flex-direction:column;min-width:0;background:#020403}
+    aside{background:#090c10;border-right:1px solid var(--line);padding:14px;overflow-y:auto;min-height:0} main{display:flex;flex-direction:column;min-width:0;min-height:0;background:#020403;overflow:hidden}
     h1{font-size:16px;margin:0 0 12px;color:#f0fff0;letter-spacing:.2px}.badge{color:#061006;background:var(--accent);padding:2px 7px;border-radius:999px;font-size:11px}.hint{font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:12px}
     .toolbar{display:flex;gap:8px;align-items:center;padding:10px 12px;border-bottom:1px solid #17202b;background:#070a0e}.bottom{border-top:1px solid #17202b;border-bottom:0}.prompt{color:var(--accent);font-weight:bold}.path{color:#d7f7d7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.toplink{color:#9ecbff;text-decoration:none;font-size:12px;margin-left:auto}
     button,select,input{background:#0d1420;color:#e6edf3;border:1px solid #2a3442;border-radius:6px;padding:7px 9px;font-family:inherit;font-size:12px}button{cursor:pointer}button:hover{border-color:var(--accent);color:#fff}.toggle{display:inline-flex;gap:5px;align-items:center;color:#c9d1d9;font-size:12px}.toggle input{accent-color:var(--accent)}
     .source{padding:9px 10px;border:1px solid #1d2633;border-radius:8px;margin:8px 0;cursor:pointer;color:#c9d1d9;background:#0b1017;word-break:break-all}.source:hover,.source.active{border-color:var(--accent);background:#0e1a12}.meta{color:var(--muted);font-size:11px;margin-top:5px}
-    #console{flex:1;overflow:auto;padding:12px 14px;white-space:pre-wrap;line-height:1.38;background:#020403;font-size:12px;color:#b7f6b7;text-shadow:0 0 2px rgba(73,209,105,.15)}
+    #console{flex:1;min-height:0;overflow-y:auto;padding:12px 14px;white-space:pre-wrap;line-height:1.38;background:#020403;font-size:12px;color:#b7f6b7;text-shadow:0 0 2px rgba(73,209,105,.15)}
     .line{display:block;margin:0 0 1px}.ts{color:#6f7b88}.level-info{color:#7ee787}.level-ok{color:#49d169}.level-warn{color:#ffcc66}.level-err{color:#ff6b6b}.area{color:#63d6ff}.event{color:#c9d1d9}.msg{color:#d7f7d7}.data{color:#8b949e}.raw{color:#c9d1d9}.cmd{color:#49d169}.cursor{display:inline-block;background:#49d169;width:8px;height:14px;vertical-align:-2px;animation:blink 1s steps(1) infinite}@keyframes blink{50%{opacity:0}}
     .status{color:var(--muted);font-size:12px}.ok{color:var(--accent)}.err{color:var(--err)}.warn{color:var(--warn)}
   </style>
@@ -20,7 +20,7 @@
 <body>
   <aside>
     <h1>Runtime Console <span class="badge">tail</span></h1>
-    <div class="hint">Linux terminal-style runtime log viewer. Shows runtime logs, traces, model downloads, GGUF imports, capability acquisition, and tool execution. Secrets are redacted by the API.</div>
+    <div class="hint">Linux terminal-style runtime log viewer. Shows runtime logs and traces only. Generated artifacts, downloads, caches, datasets, external runtimes, generated tools, and generated models are excluded. Secrets are redacted by the API.</div>
     <button onclick="loadSources()">refresh sources</button>
     <button onclick="clearConsole()">clear view</button>
     <div id="sources"></div>

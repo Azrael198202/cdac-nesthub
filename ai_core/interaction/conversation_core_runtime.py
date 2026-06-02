@@ -14,7 +14,8 @@ from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.llm.provider_router import ProviderRouter
 from ai_core.research.web_research_tool import GenericWebResearchTool
 from ai_core.web_evidence_optimizer import WebEvidenceOptimizer
-from ai_core.capabilities.runtime_capability_gap_implementer import RuntimeCapabilityGapImplementer
+from auxiliary_brain.capability_acquisition import RuntimeCapabilityGapImplementer
+from ai_core.events.need_capability_event import NeedCapabilityEvent
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 
 
@@ -334,7 +335,19 @@ class ConversationCoreRuntime:
         # concrete tools, fields, providers, or runtime values.  That work is
         # delegated to the capability acquisition pipeline.
         if intent.get("capability_gap_detected"):
+            need_event = NeedCapabilityEvent(
+                run_id=run_id,
+                required_capability="runtime_capability_acquisition",
+                available=False,
+                payload={
+                    "reason": "capability_gap_detected",
+                    "input_refs": ["input_parsing", "intent_recognition", "context_awareness"],
+                },
+            ).to_dict()
             return {
+                "required_capability": "runtime_capability_acquisition",
+                "available": False,
+                "need_capability_event": need_event,
                 "planned_steps": [
                     {
                         "step_id": "step_1",
@@ -478,6 +491,15 @@ class ConversationCoreRuntime:
                 "capability": "runtime_capability_acquisition" if capability_gap else "web_retrieval",
                 "reason": "capability_gap_resolution" if capability_gap else "external_information_required",
             }
+            if capability_gap:
+                plan["required_capability"] = "runtime_capability_acquisition"
+                plan["available"] = False
+                plan["need_capability_event"] = NeedCapabilityEvent(
+                    run_id=run_id,
+                    required_capability="runtime_capability_acquisition",
+                    available=False,
+                    payload={"reason": "capability_gap_detected", "locked_execution": plan.get("locked_execution", {})},
+                ).to_dict()
         return plan
 
     async def _execution(
@@ -565,7 +587,7 @@ class ConversationCoreRuntime:
                 implementation=implementation,
                 material="",
             )
-            runtime_registered = runtime_impl.get("status") == "implemented_tested_registered"
+            runtime_registered = runtime_impl.get("status") == "registered"
             return {
                 "status": "completed" if runtime_registered else "capability_acquisition_failed",
                 "execution_mode": "capability_acquisition",
@@ -633,7 +655,7 @@ class ConversationCoreRuntime:
                     allow_implementation=self._implementation_requested(text),
                 )
                 policy_backed_registration = False
-                if (not evidence.get("urls")) and runtime_impl.get("status") == "implemented_tested_registered":
+                if (not evidence.get("urls")) and runtime_impl.get("status") == "registered":
                     evidence["urls"] = ["runtime-policy://basic-generated-capability-contract"]
                     evidence["source_count"] = 1
                     evidence["source_note"] = "Policy-backed basic acquisition used because external retrieval did not provide source URLs."
@@ -656,7 +678,7 @@ class ConversationCoreRuntime:
                 material = self._external_retrieval_failure_material(evidence)
             runtime_registered = False
             if implementation and isinstance(implementation.get("runtime_implementation"), dict):
-                runtime_registered = implementation["runtime_implementation"].get("status") == "implemented_tested_registered"
+                runtime_registered = implementation["runtime_implementation"].get("status") == "registered"
             completed = bool(evidence_items) or runtime_registered
             return {
                 "status": "completed" if completed else "blocked_no_external_material",
@@ -809,12 +831,12 @@ class ConversationCoreRuntime:
         urls = evidence.get("urls") if isinstance(evidence.get("urls"), list) else []
         runtime_impl = implementation.get("runtime_implementation") if isinstance(implementation.get("runtime_implementation"), dict) else {}
         runtime_status = str(runtime_impl.get("status") or "not_requested")
-        if not urls and runtime_status not in {"implemented_tested_registered", "implemented_tested_registered_verified"}:
+        if not urls and runtime_status not in {"registered", "registered_verified"}:
             return (
                 self._external_retrieval_failure_material(evidence)
                 + "\n\nCapability gap status: blocked_without_verified_evidence. No implementation was generated or registered."
             )
-        if runtime_status in {"implemented_tested_registered", "implemented_tested_registered_verified"}:
+        if runtime_status in {"registered", "registered_verified"}:
             headline = "Capability gap resolution completed. Runtime capability was implemented, sandbox-tested, registered, and verified by execution."
         elif runtime_status in {"blocked", "generated_but_validation_failed"}:
             headline = "Capability gap resolution collected verified material, but implementation was not registered."

@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from ai_core.codegen.dynamic_value_hardcode_detector import DynamicValueHardcodeDetector
+from auxiliary_brain.runtime_codegen.dynamic_value_hardcode_detector import DynamicValueHardcodeDetector
 
 
 @dataclass

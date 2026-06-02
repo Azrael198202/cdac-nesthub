@@ -1,7 +1,7 @@
 from typing import Tuple, Dict, Any
 from ai_core.events.event_bus import event_bus
 from ai_core.capabilities.capability_registry import CapabilityRegistry
-from ai_core.capabilities.capability_spec_generator import CapabilitySpecGenerator
+from auxiliary_brain.capability_acquisition.blueprint_generator import CapabilitySpecGenerator
 class CapabilityResolver:
     def __init__(self): self.registry=CapabilityRegistry(); self.generator=CapabilitySpecGenerator()
     async def ensure_capabilities(self, run_id: str, node_config: dict, context: dict)->Tuple[bool,Dict[str,Any]]:

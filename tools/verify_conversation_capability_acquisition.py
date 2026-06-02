@@ -14,7 +14,7 @@ from ai_core.interaction.conversation_core_runtime import ConversationCoreRuntim
 
 REQUEST = """Acquire runtime capability:
 
-Basic SMTP mail sender.
+Generic text transform capability.
 
 Use runtime autonomous acquisition mode.
 
@@ -22,16 +22,12 @@ Constraints:
 - Runtime language: Python
 - Complexity level: basic
 - Use Python standard library if possible
-- Prefer smtplib and email.message
 - Do not require external package installation
-- Do not block on protocol or library selection
 - Generate input schema
-- Generate connection schema
-- Generate secret schema
+- Generate connection schema only if needed
+- Generate secret schema only if needed
 - Generate approval policy
-- Store connection values through Agent Studio UI
-- Store secret values in local runtime secret store
-- Verify by running a dry-run or mock SMTP test
+- Verify by running a deterministic local test
 - Register the capability after sandbox validation
 
 The capability acquisition is complete only after:
@@ -40,6 +36,7 @@ The capability acquisition is complete only after:
 3. registry updated
 4. verification run completed
 """
+TOOL_ID = "generic_text_transform_capability"
 
 
 async def _run() -> dict:
@@ -47,32 +44,31 @@ async def _run() -> dict:
 
 
 def main() -> None:
-    cleanup_runtime_capability_outputs(ROOT, "basic_smtp_mail_sender")
+    cleanup_runtime_capability_outputs(ROOT, TOOL_ID)
     try:
         result = asyncio.run(_run())
         execution = result.get("workflow_results", {}).get("execution", {})
         runtime_impl = execution.get("capability_implementation", {}).get("runtime_implementation", {})
-        assert runtime_impl.get("status") == "implemented_tested_registered", runtime_impl
+        assert runtime_impl.get("status") == "registered", runtime_impl
+        plan = result.get("workflow_results", {}).get("workflow_planning", {})
+        assert plan.get("required_capability") and plan.get("available") is False, plan
+        assert isinstance(plan.get("need_capability_event"), dict), plan
         stages = [(item.get("stage"), item.get("status")) for item in runtime_impl.get("pipeline", [])]
-        required = [
-            ("TemplateResolver", "template_not_found"),
-            ("LLMCapabilityPlanner", "planned"),
+        for item in [
+            ("TemplateResolver", "skipped"),
+            ("BlueprintPlanner", "planned"),
             ("ArtifactGenerator", "completed"),
             ("SandboxValidator", "completed"),
             ("VerificationRun", "completed"),
             ("RegistryWriter", "completed"),
-        ]
-        for item in required:
+        ]:
             assert item in stages, stages
         tool_registry = json.loads((ROOT / "runtime/registry/tool_registry.json").read_text(encoding="utf-8") or "{}")
-        record = tool_registry.get("basic_smtp_mail_sender")
+        record = tool_registry.get(TOOL_ID)
         assert isinstance(record, dict), tool_registry
-        assert record.get("connection_schema"), record
-        assert record.get("secret_schema"), record
-        assert record.get("approval_policy"), record
         print("Conversation capability acquisition e2e verification passed")
     finally:
-        cleanup_runtime_capability_outputs(ROOT, "basic_smtp_mail_sender")
+        cleanup_runtime_capability_outputs(ROOT, TOOL_ID)
 
 
 def cleanup_runtime_capability_outputs(root: Path, tool_id: str) -> None:

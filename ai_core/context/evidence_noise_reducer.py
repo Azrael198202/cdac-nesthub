@@ -4,7 +4,7 @@ import re
 from ai_core.runtime.temporal import DateAliasGenerator
 from typing import Any
 
-from ai_core.codegen.runtime_variable_inferencer import RuntimeVariableInferencer
+from auxiliary_brain.runtime_codegen.runtime_variable_inferencer import RuntimeVariableInferencer
 
 
 class EvidenceNoiseReducer:

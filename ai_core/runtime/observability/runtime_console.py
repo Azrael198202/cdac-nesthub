@@ -39,15 +39,13 @@ def emit_console_event(*, area: str, event: str, status: str = "info", message: 
 
 
 def list_console_sources() -> list[dict[str, Any]]:
+    # Phase-1 console scope is intentionally narrow and stable.
+    # Only operator logs and traces are scanned; runtime artifacts, external
+    # runtimes, downloads, caches, datasets, generated tools, and generated
+    # models are excluded to avoid UI stalls and backend reload loops.
     roots = [
         RUNTIME_ROOT / "logs",
         RUNTIME_ROOT / "traces",
-        RUNTIME_ROOT / "generated",
-        RUNTIME_ROOT / "downloads",
-        RUNTIME_ROOT / "external_runtimes",
-        PROJECT_ROOT / "downloads",
-        PROJECT_ROOT / "traces",
-        PROJECT_ROOT / "generated",
     ]
     files: list[Path] = []
     for root in roots:
@@ -112,10 +110,8 @@ def _safe_source_path(source: str) -> Path | None:
         value = "runtime/logs/runtime_console.jsonl"
     path = (PROJECT_ROOT / value).resolve()
     allowed = [
-        (PROJECT_ROOT / "runtime").resolve(),
-        (PROJECT_ROOT / "downloads").resolve(),
-        (PROJECT_ROOT / "traces").resolve(),
-        (PROJECT_ROOT / "generated").resolve(),
+        (RUNTIME_ROOT / "logs").resolve(),
+        (RUNTIME_ROOT / "traces").resolve(),
     ]
     try:
         if not any(path.is_relative_to(root) for root in allowed):
@@ -128,8 +124,6 @@ def _safe_source_path(source: str) -> Path | None:
 
 def _source_type(path: Path) -> str:
     text = path.as_posix().lower()
-    if "download" in text or "external_runtimes" in text:
-        return "install_download"
     if "trace" in text:
         return "trace"
     if "error" in text:

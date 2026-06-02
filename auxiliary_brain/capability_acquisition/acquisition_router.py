@@ -17,7 +17,7 @@ from ai_core.runtime.capability.runtime_capability_template_store import Runtime
 from ai_core.runtime.self_repair.engine import RuntimeSelfRepairEngine
 from ai_core.runtime.observability.runtime_console import emit_console_event
 from ai_core.runtime.observability.stage_observer import RuntimeStageObserver
-from ai_core.capabilities.runtime_blueprint_artifact_generator import RuntimeBlueprintArtifactGenerator
+from auxiliary_brain.capability_acquisition.code_generator import RuntimeBlueprintArtifactGenerator
 
 
 @dataclass(frozen=True)
@@ -170,7 +170,7 @@ class RuntimeCapabilityGapImplementer:
             }
         if not urls and allow_policy_backed_basic:
             evidence = dict(evidence)
-            evidence["urls"] = ["runtime-policy://basic-generated-capability-contract"]
+            evidence["urls"] = ["runtime-policy://basic-runtime-capability-contract"]
             evidence["source_note"] = "Policy-backed runtime acquisition without external source material."
 
         dependency_resolution = self._resolve_dependencies(template)
@@ -265,7 +265,7 @@ class RuntimeCapabilityGapImplementer:
                 acquisition_gate=registration_gate,
             )
             mark("RegistryWriter", "completed", registration=registration)
-            status = "implemented_tested_registered"
+            status = str((registration or {}).get("status") or "registered")
             repair = None
         else:
             failure_status = "sandbox_failed" if not validation.get("passed") else str(registration_gate.get("status") or "registration_blocked")

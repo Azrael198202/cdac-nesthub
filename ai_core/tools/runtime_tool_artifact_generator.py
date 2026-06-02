@@ -5,7 +5,7 @@ import json
 
 from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import RUNTIME_CONFIGS
-from ai_core.codegen.runtime_variable_inferencer import RuntimeVariableInferencer
+from auxiliary_brain.runtime_codegen.runtime_variable_inferencer import RuntimeVariableInferencer
 from ai_core.llm.provider_router import ProviderRouter
 
 

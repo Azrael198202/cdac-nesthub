@@ -10,30 +10,30 @@ from ai_core.web_evidence_optimizer import WebEvidenceOptimizer
 
 def main() -> None:
     optimizer = WebEvidenceOptimizer()
-    user_input = "Acquire runtime capability: Generic text transport sender. Generate schema and validate with dry run."
+    user_input = "Acquire runtime capability: Generic text transform capability. Generate schema and validate with deterministic local run."
     search_results = [
         {
-            "url": "https://docs.python.org/3/library/email.message.html",
-            "title": "email.message documentation",
-            "snippet": "The email.message module provides a class for representing messages and parameters.",
+            "url": "https://docs.python.org/3/tutorial/inputoutput.html",
+            "title": "Python input and output documentation",
+            "snippet": "The Python documentation describes standard string formatting and file-oriented input and output patterns.",
         },
         {
-            "url": "https://docs.python.org/3/library/smtplib.html",
-            "title": "smtplib documentation",
-            "snippet": "The smtplib module defines an SMTP client session object that can be used to send mail.",
+            "url": "https://docs.python.org/3/library/json.html",
+            "title": "json documentation",
+            "snippet": "The json module provides encoding and decoding support for structured data.",
         },
         {
             "url": "https://example.invalid/noise",
             "title": "Unrelated page",
-            "snippet": "This page contains random unrelated marketing text with no implementation details.",
+            "snippet": "This page contains unrelated marketing text with no implementation details.",
         },
     ]
     documents = [
         {
             "document": {
-                "url": "https://docs.python.org/3/library/smtplib.html",
-                "title": "smtplib documentation",
-                "text_excerpt": "This module defines an SMTP client session object. For normal use, connect to a host, authenticate when required, and use TLS/SSL when credentials are sent. The module is part of the Python standard library.",
+                "url": "https://docs.python.org/3/library/json.html",
+                "title": "json documentation",
+                "text_excerpt": "The module provides functions for transforming structured data into text and back using deterministic standard-library behavior.",
             },
             "source_search_result": search_results[1],
         }
