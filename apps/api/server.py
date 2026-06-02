@@ -106,8 +106,12 @@ def _terminal_status(value: str | None) -> str:
     return "completed" if status else "completed"
 
 
-def _job_progress(stage: str, status: str = "running", detail: str | None = None) -> dict[str, Any]:
-    return {"stage": stage, "status": status, "detail": detail or ""}
+def _job_progress(stage: str, status: str = "running", detail: str | None = None, **extra: Any) -> dict[str, Any]:
+    payload = {"stage": stage, "label": stage, "status": status, "detail": detail or "", "ts": time.time()}
+    for key, value in extra.items():
+        if value is not None:
+            payload[key] = value
+    return payload
 
 
 def _console_events_for_run(run_id: str, *, limit: int = 80) -> list[dict[str, Any]]:
@@ -152,27 +156,43 @@ def _console_events_for_run(run_id: str, *, limit: int = 80) -> list[dict[str, A
 
 def _console_progress_for_run(run_id: str) -> list[dict[str, Any]]:
     progress: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     for event in _console_events_for_run(run_id):
         name = str(event.get("event") or event.get("area") or "runtime")
         status = str(event.get("status") or "running").lower()
         if name == "REQUEST_HEARTBEAT":
             continue
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
         if name == "REQUEST_STARTED":
             label = "request accepted"
+            action = "Runtime request accepted"
         elif name == "REQUEST_FINISHED":
             label = "final answer"
+            action = "Runtime request finished"
         elif name == "REQUEST_FAILED":
             label = "failed"
+            action = "Runtime request failed"
         else:
-            label = name
-        key = (label, status)
+            label = str(data.get("stage_label") or name)
+            action = str(data.get("action") or event.get("message") or label)
+        detail = str(data.get("detail") or event.get("message") or "")
+        key = (label, status, detail[:160])
         if key in seen:
             continue
         seen.add(key)
-        progress.append(_job_progress(label, status, str(event.get("message") or "")))
+        progress.append(_job_progress(
+            label,
+            status,
+            detail,
+            action=action,
+            message=str(event.get("message") or detail or action),
+            console_message=str(data.get("console_message") or event.get("message") or action),
+            ts=str(event.get("ts") or ""),
+            stage_index=data.get("stage_index"),
+            total_stages=data.get("total_stages"),
+            source=data.get("source"),
+        ))
     return progress
-
 
 def _console_terminal_event_for_run(run_id: str) -> dict[str, Any] | None:
     terminal_events = {"REQUEST_FINISHED", "REQUEST_FAILED", "REQUEST_CANCELLED", "REQUEST_TIMED_OUT"}
@@ -214,11 +234,45 @@ def _normalize_agent_studio_job(run_id: str, job: dict[str, Any]) -> dict[str, A
     result = job.get("result") if isinstance(job.get("result"), dict) else {}
     status = str(job.get("status") or "").strip().lower()
 
+    # Derive operator-facing current stage/action/progress from structured runtime events.
+    events = job.get("progress_events") if isinstance(job.get("progress_events"), list) else []
+    non_heartbeat = [ev for ev in events if isinstance(ev, dict) and "elapsed " not in str(ev.get("detail") or "")]
+    last_running = next((ev for ev in reversed(non_heartbeat) if str(ev.get("status") or "").lower() == "running"), None)
+    last_event = non_heartbeat[-1] if non_heartbeat else None
+    current = last_running or last_event
+    if current:
+        job["current_stage"] = str(current.get("stage") or current.get("label") or job.get("stage") or "execution")
+        job["current_action"] = str(current.get("action") or current.get("detail") or current.get("message") or current.get("stage") or "running")
+        job["last_event"] = str(current.get("console_message") or current.get("message") or current.get("detail") or current.get("stage") or "")
+        try:
+            total_candidates = [int(ev.get("total_stages")) for ev in non_heartbeat if ev.get("total_stages") not in (None, "")]
+            index_candidates = [int(ev.get("stage_index")) for ev in non_heartbeat if ev.get("stage_index") not in (None, "")]
+            if total_candidates:
+                job["total_steps"] = max(total_candidates)
+            if index_candidates:
+                completed_indexes = [int(ev.get("stage_index")) for ev in non_heartbeat if str(ev.get("status") or "").lower() in {"completed", "passed", "safe_to_register", "registered", "verified"} and ev.get("stage_index") not in (None, "")]
+                job["completed_steps"] = max(completed_indexes) if completed_indexes else max(0, max(index_candidates)-1)
+        except Exception:
+            pass
+    # Stage elapsed warning support.
+    if current and str(current.get("status") or "").lower() == "running":
+        try:
+            raw_ts = current.get("ts")
+            if isinstance(raw_ts, (int, float)):
+                start_ts = float(raw_ts)
+            else:
+                from datetime import datetime
+                start_ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00")).timestamp()
+            job["stage_elapsed_seconds"] = max(0, int(time.time() - start_ts))
+        except Exception:
+            job["stage_elapsed_seconds"] = 0
+
     terminal_event = _console_terminal_event_for_run(safe)
     if terminal_event:
         terminal = _terminal_status(str(terminal_event.get("status") or "completed"))
         job["status"] = terminal
-        job["stage"] = "final_synthesis" if terminal == "completed" else terminal
+        event_name = str(terminal_event.get("event") or "")
+        job["stage"] = "final_synthesis" if terminal == "completed" else ("timed_out" if event_name == "REQUEST_TIMED_OUT" else terminal)
         if not result and isinstance(terminal_event.get("data"), dict):
             maybe_result = terminal_event["data"].get("result")
             if isinstance(maybe_result, dict):

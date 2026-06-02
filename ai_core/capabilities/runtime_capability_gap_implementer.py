@@ -66,15 +66,44 @@ class RuntimeCapabilityGapImplementer:
         """
         pipeline: list[dict[str, Any]] = []
 
+        stage_order = [
+            "CapabilityAcquisitionRouter",
+            "CapabilityIdentityExtractor",
+            "TemplateResolver",
+            "BlueprintPlanner",
+            "ArtifactGenerator",
+            "TemplateMaterializer",
+            "WebEvidenceRetriever",
+            "DependencyResolver",
+            "AcquisitionGate",
+            "CapabilityMatchContract",
+            "SandboxValidator",
+            "VerificationRun",
+            "RegistrationGate",
+            "RegistryWriter",
+            "FinalSynthesis",
+        ]
+        stage_index_map = {name: idx + 1 for idx, name in enumerate(stage_order)}
+
         def mark(stage: str, status: str, **data: Any) -> None:
-            pipeline.append({"stage": stage, "status": status, **data})
+            event_payload = {"stage": stage, "status": status, **data}
+            pipeline.append(event_payload)
             try:
+                clean_data = {k: v for k, v in data.items() if k not in {"template"}}
+                clean_data.update({
+                    "run_id": run_id,
+                    "stage_label": stage,
+                    "stage_index": stage_index_map.get(stage),
+                    "total_stages": len(stage_order),
+                    "action": clean_data.get("action") or self._stage_action_text(stage, status, clean_data),
+                    "console_message": self._stage_console_message(stage, status, clean_data),
+                })
                 emit_console_event(
                     area="capability_acquisition",
                     event=stage,
                     status=status,
-                    message=f"{stage}: {status}",
-                    data={k: v for k, v in data.items() if k not in {"template"}},
+                    message=str(clean_data.get("console_message") or f"{stage}: {status}"),
+                    data=clean_data,
                 )
             except Exception:
                 pass
@@ -235,14 +264,14 @@ class RuntimeCapabilityGapImplementer:
                 "generated_at": datetime.now(timezone.utc).isoformat(),
             }
 
-        mark("SandboxValidator", "running", tool_id=artifact.get("tool_id"), tool_dir=artifact.get("tool_dir"))
-        validation = self._validate_artifact(artifact)
-        mark("SandboxValidator", "completed" if validation.get("passed") else "sandbox_failed", result=validation)
+        mark("SandboxValidator", "running", tool_id=artifact.get("tool_id"), tool_dir=artifact.get("tool_dir"), action="Preparing validation cases", console_message="Sandbox validation started")
+        validation = self._validate_artifact(artifact, progress=mark)
+        mark("SandboxValidator", "completed" if validation.get("passed") else "sandbox_failed", result=validation, action="Sandbox validation completed")
         verification_run: dict[str, Any] | None = None
         if validation.get("passed"):
-            mark("VerificationRun", "running", tool_id=artifact.get("tool_id"))
+            mark("VerificationRun", "running", tool_id=artifact.get("tool_id"), action="Executing generated capability with verification input", console_message="Verification run started")
             verification_run = self._execute_verification_run(template=template, artifact=artifact)
-            mark("VerificationRun", "completed" if verification_run.get("passed") else "failed", result=verification_run)
+            mark("VerificationRun", "completed" if verification_run.get("passed") else "failed", result=verification_run, action="Verification run completed")
 
         registration_gate = self.acquisition_gate.evaluate_before_registration(
             pre_validation_decision=pre_gate,
@@ -947,13 +976,53 @@ class RuntimeCapabilityGapImplementer:
             (tool_dir / "capability_match_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         return report
 
-    def _validate_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]:
+    def _stage_action_text(self, stage: str, status: str, data: dict[str, Any]) -> str:
+        if stage == "TemplateResolver":
+            return "Resolving runtime template" if status != "template_not_found" else "No template found; switching to blueprint planner"
+        if stage == "BlueprintPlanner":
+            source = data.get("source") or (data.get("planner") if isinstance(data.get("planner"), str) else "runtime planner")
+            return f"Planning compact blueprint through {source}"
+        if stage == "ArtifactGenerator":
+            return "Materializing runtime artifact from blueprint/template"
+        if stage == "SandboxValidator":
+            return str(data.get("action") or "Running sandbox validation")
+        if stage == "VerificationRun":
+            return str(data.get("action") or "Executing verification run")
+        if stage == "RegistryWriter":
+            return "Writing registry entry"
+        return str(data.get("action") or f"{stage} {status}")
+
+    def _stage_console_message(self, stage: str, status: str, data: dict[str, Any]) -> str:
+        if stage == "TemplateResolver" and status == "template_not_found":
+            return "Template not found; BlueprintPlanner will be used"
+        if stage == "BlueprintPlanner" and status == "planned":
+            planner = data.get("planner") if isinstance(data.get("planner"), dict) else {}
+            origin = planner.get("planner_origin") or planner.get("planner_engine") or data.get("source") or "planner"
+            return f"Blueprint generated by {origin}"
+        if stage == "ArtifactGenerator" and status in {"blueprint_materialized", "completed"}:
+            src = data.get("template_source") or data.get("source") or "runtime plan"
+            return f"Artifact generated from {src}"
+        if stage == "DependencyResolver" and status == "completed":
+            return "Dependency resolution completed"
+        if stage == "SandboxValidator" and status == "running":
+            return str(data.get("console_message") or "Sandbox validation started")
+        if stage == "SandboxValidator" and status == "completed":
+            return "Sandbox validation completed"
+        if stage == "VerificationRun" and status == "running":
+            return "Verification run started"
+        if stage == "VerificationRun" and status == "completed":
+            return "Verification run completed"
+        return str(data.get("console_message") or f"{stage}: {status}")
+
+    def _validate_artifact(self, artifact: dict[str, Any], progress: Callable[..., None] | None = None) -> dict[str, Any]:
         tool_dir = Path(str(artifact.get("tool_dir") or ""))
         if not tool_dir.exists():
             return {"passed": False, "status": "failed", "reason": "artifact_directory_missing"}
         checks: list[dict[str, Any]] = []
         py_files = [str(p) for p in tool_dir.rglob("*.py")]
         if py_files:
+            if progress:
+                progress("SandboxValidator", "running", action="Compiling generated Python files", console_message="Validation case 1 running: python compile")
             proc = self._run_isolated_python(["-m", "py_compile", *py_files], cwd=tool_dir, timeout=15)
             checks.append({
                 "name": "python_compile",
@@ -963,7 +1032,11 @@ class RuntimeCapabilityGapImplementer:
                 "attempts": proc.get("attempts", []),
             })
             if proc.get("returncode") != 0:
+                if progress:
+                    progress("SandboxValidator", "failed", action="Python compile failed", console_message="Validation case 1 failed: python compile")
                 return {"passed": False, "status": "failed", "checks": checks}
+            if progress:
+                progress("SandboxValidator", "completed", action="Python compile passed; preparing unit tests", console_message="Validation case 1 passed: python compile")
         test_candidates: list[Path] = []
         test_dir = Path(str(artifact.get("test_dir") or ""))
         if test_dir.exists():
@@ -971,7 +1044,9 @@ class RuntimeCapabilityGapImplementer:
         legacy_test_file = tool_dir / "test_tool.py"
         if legacy_test_file.exists() and legacy_test_file not in test_candidates:
             test_candidates.append(legacy_test_file)
-        for test_file in test_candidates:
+        for case_index, test_file in enumerate(test_candidates, start=2):
+            if progress:
+                progress("SandboxValidator", "running", action=f"Executing validation case {case_index}: {test_file.name}", console_message=f"Validation case {case_index} running: {test_file.name}")
             runner = (
                 "import runpy, sys; "
                 f"sys.path.insert(0, {json.dumps(str(tool_dir))}); "
@@ -989,7 +1064,11 @@ class RuntimeCapabilityGapImplementer:
             checks.append(check)
             self._write_test_report(artifact, check)
             if proc.get("returncode") != 0:
+                if progress:
+                    progress("SandboxValidator", "failed", action=f"Validation case {case_index} failed", console_message=f"Validation case {case_index} failed: {test_file.name}")
                 return {"passed": False, "status": "failed", "checks": checks}
+            if progress:
+                progress("SandboxValidator", "completed", action=f"Validation case {case_index} passed", console_message=f"Validation case {case_index} passed: {test_file.name}")
         return {"passed": True, "status": "completed", "checks": checks}
 
     def _execute_verification_run(self, *, template: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
