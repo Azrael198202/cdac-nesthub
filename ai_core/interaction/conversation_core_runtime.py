@@ -322,6 +322,76 @@ class ConversationCoreRuntime:
             "intent_type": intent.get("intent_type"),
         }
 
+    def _build_need_capability_payload(
+        self,
+        *,
+        text: str,
+        parsed: dict[str, Any],
+        intent: dict[str, Any],
+        context: dict[str, Any],
+        planned_step: dict[str, Any] | None = None,
+        plan: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build the ai_core -> auxiliary_brain capability contract.
+
+        ai_core owns understanding, missing-information handling, context, and
+        workflow planning.  auxiliary_brain must consume this contract and must
+        not restart intent recognition from the raw user message.
+        """
+        step = planned_step if isinstance(planned_step, dict) else {}
+        missing = []
+        for source in (parsed, intent, context, plan or {}, step):
+            if isinstance(source, dict):
+                for key in ("blocking_missing_information", "missing_information", "missing_required", "missing_fields"):
+                    values = source.get(key)
+                    if isinstance(values, list):
+                        for item in values:
+                            if item not in missing:
+                                missing.append(item)
+        known_parameters: dict[str, Any] = {}
+        for source in (parsed, intent, context, step):
+            if not isinstance(source, dict):
+                continue
+            for key in ("parameters", "known_parameters", "extracted_fields", "explicit_fields"):
+                values = source.get(key)
+                if isinstance(values, dict):
+                    known_parameters.update(values)
+        return {
+            "contract_version": "need_capability_event.v2",
+            "original_user_input": text,
+            "input_contract": {
+                "language": parsed.get("language"),
+                "normalized_input": parsed.get("normalized_input"),
+                "explicit_constraints": parsed.get("explicit_constraints") if isinstance(parsed.get("explicit_constraints"), list) else [],
+                "original_input_preserved": bool(parsed.get("original_input_preserved")),
+            },
+            "intent_contract": {
+                "intent_type": intent.get("intent_type"),
+                "response_mode": intent.get("response_mode"),
+                "confidence": intent.get("confidence"),
+                "required_capabilities": intent.get("required_capabilities") if isinstance(intent.get("required_capabilities"), list) else [],
+                "capability_gap_detected": bool(intent.get("capability_gap_detected")),
+                "capability_gap_reason": intent.get("capability_gap_reason"),
+                "source_policy": intent.get("source_policy") if isinstance(intent.get("source_policy"), dict) else {},
+                "capability_acquisition_policy": intent.get("capability_acquisition_policy") if isinstance(intent.get("capability_acquisition_policy"), dict) else {},
+                "user_value_collection_policy": intent.get("user_value_collection_policy") if isinstance(intent.get("user_value_collection_policy"), dict) else {},
+            },
+            "workflow_contract": {
+                "planned_step": step,
+                "locked_execution": (plan or {}).get("locked_execution") if isinstance((plan or {}).get("locked_execution"), dict) else {},
+                "final_response_contract": (plan or {}).get("final_response_contract") if isinstance((plan or {}).get("final_response_contract"), dict) else {},
+                "blocking_missing_information": missing,
+                "known_parameters": known_parameters,
+            },
+            "capability_constraints": parsed.get("explicit_constraints") if isinstance(parsed.get("explicit_constraints"), list) else [],
+            "acquisition_boundary": {
+                "intent_source": "ai_core.intent_recognition",
+                "workflow_source": "ai_core.workflow_planning",
+                "auxiliary_brain_must_not_reinfer_intent": True,
+                "schema_source": "workflow_contract_and_capability_constraints",
+            },
+        }
+
     async def _workflow_planning(
         self,
         text: str,
@@ -335,36 +405,22 @@ class ConversationCoreRuntime:
         # concrete tools, fields, providers, or runtime values.  That work is
         # delegated to the capability acquisition pipeline.
         if intent.get("capability_gap_detected"):
-            need_event = NeedCapabilityEvent(
-                run_id=run_id,
-                required_capability="runtime_capability_acquisition",
-                available=False,
-                payload={
-                    "reason": "capability_gap_detected",
-                    "input_refs": ["input_parsing", "intent_recognition", "context_awareness"],
+            initial_step = {
+                "step_id": "step_1",
+                "step_type": "resolve_capability_gap",
+                "objective": "Generate, validate, register, and verify a runtime capability through the acquisition pipeline.",
+                "execution_ready": True,
+                "input_from": ["input_parsing", "intent_recognition", "context_awareness"],
+                "execution_method": "capability_acquisition",
+                "capability": "runtime_capability_acquisition",
+                "source_policy": {
+                    "requires_source_material": False,
+                    "web_as_fallback_only": True,
+                    "min_sources": 0,
+                    "max_results": 5,
                 },
-            ).to_dict()
-            return {
-                "required_capability": "runtime_capability_acquisition",
-                "available": False,
-                "need_capability_event": need_event,
-                "planned_steps": [
-                    {
-                        "step_id": "step_1",
-                        "step_type": "resolve_capability_gap",
-                        "objective": "Generate, validate, register, and verify a runtime capability through the acquisition pipeline.",
-                        "execution_ready": True,
-                        "input_from": ["input_parsing", "intent_recognition", "context_awareness"],
-                        "execution_method": "capability_acquisition",
-                        "capability": "runtime_capability_acquisition",
-                        "source_policy": {
-                            "requires_source_material": False,
-                            "web_as_fallback_only": True,
-                            "min_sources": 0,
-                            "max_results": 5,
-                        },
-                    }
-                ],
+            }
+            initial_plan = {
                 "locked_execution": {
                     "execution_method": "capability_acquisition",
                     "capability": "runtime_capability_acquisition",
@@ -375,6 +431,28 @@ class ConversationCoreRuntime:
                     "no_internal_json": True,
                     "language": parsed.get("language") or "auto",
                 },
+                "blocking_missing_information": [],
+            }
+            need_event = NeedCapabilityEvent(
+                run_id=run_id,
+                required_capability="runtime_capability_acquisition",
+                available=False,
+                payload=self._build_need_capability_payload(
+                    text=text,
+                    parsed=parsed,
+                    intent=intent,
+                    context=context,
+                    planned_step=initial_step,
+                    plan=initial_plan,
+                ),
+            ).to_dict()
+            return {
+                "required_capability": "runtime_capability_acquisition",
+                "available": False,
+                "need_capability_event": need_event,
+                "planned_steps": [initial_step],
+                "locked_execution": initial_plan["locked_execution"],
+                "final_response_contract": initial_plan["final_response_contract"],
                 "_executor_type": "deterministic",
                 "_node_id": "conversation_workflow_planning",
             }
@@ -494,11 +572,14 @@ class ConversationCoreRuntime:
             if capability_gap:
                 plan["required_capability"] = "runtime_capability_acquisition"
                 plan["available"] = False
+                first_step = steps[0] if steps and isinstance(steps[0], dict) else {}
                 plan["need_capability_event"] = NeedCapabilityEvent(
                     run_id=run_id,
                     required_capability="runtime_capability_acquisition",
                     available=False,
-                    payload={"reason": "capability_gap_detected", "locked_execution": plan.get("locked_execution", {})},
+                    payload=self._build_need_capability_payload(
+                        text=text, parsed=parsed, intent=intent, context=context, planned_step=first_step, plan=plan
+                    ),
                 ).to_dict()
         return plan
 
@@ -524,6 +605,7 @@ class ConversationCoreRuntime:
                 "fetched_documents": [],
                 "attempts": [],
                 "planner_input_source": "input_intent_workflow",
+                "need_capability_event": plan.get("need_capability_event") if isinstance(plan.get("need_capability_event"), dict) else {},
             }
             runtime_impl = self.capability_implementer.implement_if_requested(
                 user_input=text,
@@ -638,6 +720,7 @@ class ConversationCoreRuntime:
                 "fetched_documents": fetched,
                 "optimized_evidence": optimized,
                 "attempts": search.get("attempts") if isinstance(search.get("attempts"), list) else [],
+                "need_capability_event": plan.get("need_capability_event") if isinstance(plan.get("need_capability_event"), dict) else {},
             }
             implementation = None
             if capability_gap:

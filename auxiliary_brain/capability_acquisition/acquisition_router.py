@@ -87,6 +87,9 @@ class RuntimeCapabilityGapImplementer:
         if not allow_implementation:
             return {"status": "not_requested", "reason": "implementation_was_not_requested", "pipeline": pipeline}
 
+        event_contract = self._extract_need_capability_event_contract(evidence)
+        mark("NeedCapabilityContract", "accepted" if event_contract else "missing", contract_version=event_contract.get("contract_version") if isinstance(event_contract, dict) else None)
+
         identity_contract = self._extract_requested_identity_contract(user_input)
         mark("CapabilityIdentityExtractor", "completed", identity=identity_contract)
 
@@ -100,7 +103,9 @@ class RuntimeCapabilityGapImplementer:
         # Existing runtime templates may be used only when explicitly enabled for
         # compatibility by AI_CORE_ALLOW_TEMPLATE_FALLBACK=true.
         mark("TemplateResolver", "skipped", reason="template_less_blueprint_generation_is_default")
-        planner_record = self._plan_capability_with_runtime_planner(user_input=user_input, identity_contract=identity_contract, evidence=evidence)
+        planner_record = self._plan_capability_with_runtime_planner(
+            user_input=user_input, identity_contract=identity_contract, evidence=evidence, event_contract=event_contract
+        )
         mark("BlueprintPlanner", str(planner_record.get("status") or "planner_failed"), planner=planner_record)
 
         if planner_record.get("status") == "planned" and isinstance(planner_record.get("template"), dict):
@@ -268,7 +273,7 @@ class RuntimeCapabilityGapImplementer:
             status = str((registration or {}).get("status") or "registered")
             repair = None
         else:
-            failure_status = "sandbox_failed" if not validation.get("passed") else str(registration_gate.get("status") or "registration_blocked")
+            failure_status = "sandbox_failed" if not validation.get("passed") else "not_registered"
             repair = self._runtime_self_repair(
                 run_id=run_id,
                 stage="SandboxValidator" if not validation.get("passed") else "RegistrationGate",
@@ -278,7 +283,7 @@ class RuntimeCapabilityGapImplementer:
                 expected={"safe_to_register": True},
             )
             mark("RuntimeSelfRepairEngine", str(repair.get("status") or "repair_checked"), repair=repair)
-            status = str(registration_gate.get("status") or "generated_but_validation_failed")
+            status = failure_status
 
         return {
             "status": status,
@@ -307,6 +312,24 @@ class RuntimeCapabilityGapImplementer:
         """
         return self.template_store.load_templates()
 
+
+    def _extract_need_capability_event_contract(self, evidence: dict[str, Any]) -> dict[str, Any]:
+        """Read ai_core's authoritative planning contract from evidence.
+
+        auxiliary_brain consumes this contract for schema/implementation planning;
+        it must not redo ai_core intent recognition or missing-information logic.
+        """
+        event = evidence.get("need_capability_event") if isinstance(evidence, dict) else None
+        if not isinstance(event, dict):
+            return {}
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if not payload:
+            return {}
+        boundary = payload.get("acquisition_boundary") if isinstance(payload.get("acquisition_boundary"), dict) else {}
+        if boundary and boundary.get("auxiliary_brain_must_not_reinfer_intent") is not True:
+            payload = dict(payload)
+            payload["acquisition_boundary_warning"] = "missing_no_reinfer_contract"
+        return payload
 
     def _extract_requested_identity_contract(self, user_input: str) -> dict[str, Any]:
         """Extract capability identity requirements declared by the user prompt.
@@ -373,6 +396,7 @@ class RuntimeCapabilityGapImplementer:
         user_input: str,
         identity_contract: dict[str, Any],
         evidence: dict[str, Any],
+        event_contract: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Invoke a runtime-configured planner hook for template-less acquisition.
 
@@ -397,6 +421,12 @@ class RuntimeCapabilityGapImplementer:
                     "user_input": user_input,
                     "identity_contract": identity_contract,
                     "evidence": evidence,
+                    "need_capability_event_contract": event_contract or {},
+                    "ai_core_boundary_contract": {
+                        "intent_and_workflow_are_authoritative": bool(event_contract),
+                        "do_not_reinfer_intent_from_user_input": bool(event_contract),
+                        "derive_schema_from": ["need_capability_event_contract.workflow_contract", "need_capability_event_contract.capability_constraints"],
+                    },
                     "required_template_contract": self._runtime_planner_template_contract(),
                     "required_blueprint_contract": self._runtime_planner_template_contract(),
                     "planner_origin": planner_origin,
@@ -758,6 +788,8 @@ class RuntimeCapabilityGapImplementer:
             "secret_schema": template.get("secret_schema") if isinstance(template.get("secret_schema"), dict) else {},
             "approval_policy": template.get("approval_policy") if isinstance(template.get("approval_policy"), dict) else {},
             "runtime_interface": template.get("runtime_interface") if isinstance(template.get("runtime_interface"), dict) else {},
+            "runtime_execution_policy": template.get("runtime_execution_policy") if isinstance(template.get("runtime_execution_policy"), dict) else {},
+            "artifact_kind": template.get("artifact_kind") or "unknown",
             "verification_input": template.get("verification_input") if isinstance(template.get("verification_input"), dict) else {},
             "written_files": written,
             "test_dir": str(tests_dir),
@@ -885,8 +917,86 @@ class RuntimeCapabilityGapImplementer:
             checks.append(check)
             self._write_test_report(artifact, check)
             if proc.get("returncode") != 0:
-                return {"passed": False, "status": "failed", "checks": checks}
-        return {"passed": True, "status": "completed", "checks": checks}
+                return {"passed": False, "status": "sandbox_failed", "checks": checks}
+        quality = self._artifact_registration_quality_gate(artifact)
+        checks.append({"name": "registration_quality_gate", "passed": bool(quality.get("passed")), "result": quality})
+        if not quality.get("passed"):
+            return {"passed": False, "status": "sandbox_failed", "reason": str(quality.get("reason") or "artifact_quality_gate_failed"), "checks": checks}
+        return {"passed": True, "status": "completed", "checks": checks, "isolation_level": "clean_subprocess"}
+
+    def _artifact_registration_quality_gate(self, artifact: dict[str, Any]) -> dict[str, Any]:
+        """Reject blueprint/stub artifacts before registration.
+
+        The gate is strict because a registry entry means a real runtime tool is
+        available.  Blueprint-only artifacts can still be saved under
+        runtime/generated, but they must not appear as registered tools.
+        """
+        tool_dir = Path(str(artifact.get("tool_dir") or ""))
+        manifest_path = Path(str(artifact.get("manifest_path") or tool_dir / "manifest.json"))
+        checks: list[dict[str, Any]] = []
+        if not manifest_path.exists():
+            return {"passed": False, "status": "not_registered", "reason": "manifest_missing", "checks": checks}
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {"passed": False, "status": "not_registered", "reason": f"manifest_unreadable:{exc.__class__.__name__}", "checks": checks}
+
+        if str(manifest.get("artifact_kind") or "") == "blueprint_only_not_registerable":
+            checks.append({"name": "artifact_kind", "passed": False, "actual": manifest.get("artifact_kind")})
+            return {"passed": False, "status": "not_registered", "reason": "blueprint_artifact_is_not_registerable", "checks": checks}
+        checks.append({"name": "artifact_kind", "passed": True, "actual": manifest.get("artifact_kind")})
+
+        for schema_name in ["input_schema", "connection_schema", "secret_schema"]:
+            schema = manifest.get(schema_name) if isinstance(manifest.get(schema_name), dict) else {}
+            schema_check = self._schema_is_specific(schema)
+            checks.append({"name": schema_name, **schema_check})
+            if not schema_check.get("passed"):
+                return {"passed": False, "status": "not_registered", "reason": f"{schema_name}_is_empty_or_open", "checks": checks}
+
+        text = self._artifact_source_text(tool_dir)
+        forbidden = ["requires_runtime_implementation", "runtime blueprint artifact verified", "blueprint only; not a registerable"]
+        present_forbidden = [item for item in forbidden if item in text.casefold()]
+        checks.append({"name": "no_stub_markers", "passed": not present_forbidden, "present": present_forbidden})
+        if present_forbidden:
+            return {"passed": False, "status": "not_registered", "reason": "stub_markers_present", "checks": checks}
+
+        capability_text = json.dumps({"manifest": manifest}, ensure_ascii=False).casefold() + "\n" + text.casefold()
+        if "smtp" in capability_text:
+            required = ["smtplib", "emailmessage", "send_message"]
+            missing = [item for item in required if item not in capability_text]
+            # Real path must contain a network SMTP class and a separate dry-run path.
+            has_smtp_client = "smtplib.smtp" in capability_text or "smtplib.smtp_ssl" in capability_text
+            has_dry_run = "dry_run" in capability_text and "_dryrunsmtp" in capability_text
+            smtp_passed = not missing and has_smtp_client and has_dry_run
+            checks.append({"name": "smtp_real_implementation_markers", "passed": smtp_passed, "missing": missing, "has_smtp_client": has_smtp_client, "has_dry_run_path": has_dry_run})
+            if not smtp_passed:
+                return {"passed": False, "status": "not_registered", "reason": "smtp_real_implementation_markers_missing", "checks": checks}
+
+        return {"passed": True, "status": "registerable", "checks": checks}
+
+    def _schema_is_specific(self, schema: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(schema, dict) or schema.get("type") != "object":
+            return {"passed": False, "reason": "schema_is_not_object"}
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        if not properties:
+            return {"passed": False, "reason": "schema_has_no_properties"}
+        if schema.get("additionalProperties") is True and len(properties) == 0:
+            return {"passed": False, "reason": "schema_accepts_anything"}
+        if schema.get("additionalProperties") is True and not schema.get("required"):
+            return {"passed": False, "reason": "schema_is_too_open"}
+        return {"passed": True, "property_count": len(properties), "required": schema.get("required", [])}
+
+    def _artifact_source_text(self, tool_dir: Path) -> str:
+        parts: list[str] = []
+        if not tool_dir.exists():
+            return ""
+        for path in sorted(tool_dir.rglob("*")):
+            if path.is_file() and path.suffix.lower() in {".py", ".json", ".md", ".txt", ".yaml", ".yml"}:
+                try:
+                    parts.append(path.read_text(encoding="utf-8", errors="ignore"))
+                except Exception:
+                    continue
+        return "\n".join(parts)
 
     def _execute_verification_run(self, *, template: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
         entrypoint = template.get("entrypoint") if isinstance(template.get("entrypoint"), dict) else {}

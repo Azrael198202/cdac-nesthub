@@ -24,12 +24,14 @@ def plan(payload: dict[str, Any]) -> dict[str, Any]:
     identity = payload.get("identity_contract") if isinstance(payload.get("identity_contract"), dict) else {}
     evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
     contract = payload.get("required_template_contract")
+    event_contract = payload.get("need_capability_event_contract") if isinstance(payload.get("need_capability_event_contract"), dict) else {}
 
     model_payload = _try_model_planner(
         request_text=request_text,
         identity=identity,
         evidence=evidence,
         contract=contract,
+        event_contract=event_contract,
     )
     if isinstance(model_payload, dict) and (isinstance(model_payload.get("blueprint"), dict) or isinstance(model_payload.get("template"), dict)):
         model_payload.setdefault("status", "planned")
@@ -46,7 +48,7 @@ def plan(payload: dict[str, Any]) -> dict[str, Any]:
             "needs_external_evidence": False,
             "planner_engine": "neutral_blueprint_fallback",
             "model_planner_attempt": model_payload if isinstance(model_payload, dict) else {"status": "skipped"},
-            "blueprint": _neutral_blueprint(request_text=request_text, identity=identity),
+            "blueprint": _neutral_blueprint(request_text=request_text, identity=identity, event_contract=event_contract),
         }
 
     return {
@@ -58,7 +60,7 @@ def plan(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _try_model_planner(*, request_text: str, identity: dict[str, Any], evidence: dict[str, Any], contract: Any) -> dict[str, Any]:
+def _try_model_planner(*, request_text: str, identity: dict[str, Any], evidence: dict[str, Any], contract: Any, event_contract: dict[str, Any] | None = None) -> dict[str, Any]:
     if os.environ.get("AI_CORE_DISABLE_LOCAL_CAPABILITY_MODEL", "").lower() in {"1", "true", "yes"}:
         return {"status": "skipped", "reason": "local_capability_model_disabled"}
     host = os.environ.get("OLLAMA_HOST") or os.environ.get("AI_CORE_OLLAMA_HOST") or "http://127.0.0.1:11434"
@@ -67,7 +69,7 @@ def _try_model_planner(*, request_text: str, identity: dict[str, Any], evidence:
     first = _call_ollama_json_planner(
         host=host,
         model=model,
-        prompt=_model_prompt(request_text=request_text, identity=identity, evidence=evidence, contract=contract),
+        prompt=_model_prompt(request_text=request_text, identity=identity, evidence=evidence, contract=contract, event_contract=event_contract or {}),
         force_json=True,
         timeout=float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_TIMEOUT", "45")),
     )
@@ -81,7 +83,7 @@ def _try_model_planner(*, request_text: str, identity: dict[str, Any], evidence:
     retry = _call_ollama_json_planner(
         host=host,
         model=model,
-        prompt=_compact_model_prompt(request_text=request_text, identity=identity, evidence=evidence, contract=contract),
+        prompt=_compact_model_prompt(request_text=request_text, identity=identity, evidence=evidence, contract=contract, event_contract=event_contract or {}),
         force_json=False,
         timeout=float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_COMPACT_TIMEOUT", os.environ.get("AI_CORE_CAPABILITY_PLANNER_TIMEOUT", "45"))),
     )
@@ -174,7 +176,7 @@ def _call_ollama_json_planner(*, host: str, model: str, prompt: str, force_json:
         return {"status": "planner_failed", "reason": f"local_model_error: {exc.__class__.__name__}: {str(exc)[:300]}", "model": model, "force_json": force_json}
 
 
-def _model_prompt(*, request_text: str, identity: dict[str, Any], evidence: dict[str, Any], contract: Any) -> str:
+def _model_prompt(*, request_text: str, identity: dict[str, Any], evidence: dict[str, Any], contract: Any, event_contract: dict[str, Any] | None = None) -> str:
     optimized = evidence.get("optimized_evidence") if isinstance(evidence.get("optimized_evidence"), dict) else {}
     evidence_pack = []
     if isinstance(evidence.get("evidence_pack"), list):
@@ -188,6 +190,7 @@ def _model_prompt(*, request_text: str, identity: dict[str, Any], evidence: dict
     }, ensure_ascii=False)[:2200]
     compact_request = str(request_text or "")[:1600]
     compact_contract = _compact_contract(contract)
+    compact_event_contract = _compact_event_contract(event_contract or {})
     return (
         "You are a runtime capability blueprint planner. Return ONLY one JSON object. "
         "Do not include markdown. Do not ask questions. "
@@ -207,13 +210,14 @@ def _model_prompt(*, request_text: str, identity: dict[str, Any], evidence: dict
         "Use neutral validation, structured errors, and provenance-friendly outputs.\n\n"
         f"Required neutral contract:\n{json.dumps(compact_contract, ensure_ascii=False)}\n\n"
         f"Identity contract:\n{json.dumps(identity, ensure_ascii=False)}\n\n"
+        f"Authoritative ai_core contract:\n{json.dumps(compact_event_contract, ensure_ascii=False)}\n\n"
         f"Evidence summary:\n{evidence_text}\n\n"
         f"User request:\n{compact_request}"
     )
 
 
 
-def _compact_model_prompt(*, request_text: str, identity: dict[str, Any], evidence: dict[str, Any], contract: Any) -> str:
+def _compact_model_prompt(*, request_text: str, identity: dict[str, Any], evidence: dict[str, Any], contract: Any, event_contract: dict[str, Any] | None = None) -> str:
     optimized = evidence.get("optimized_evidence") if isinstance(evidence.get("optimized_evidence"), dict) else {}
     evidence_pack = []
     if isinstance(evidence.get("evidence_pack"), list):
@@ -232,6 +236,7 @@ def _compact_model_prompt(*, request_text: str, identity: dict[str, Any], eviden
     compact_payload = {
         "identity": identity,
         "request": str(request_text or "")[:900],
+        "ai_core_contract": _compact_event_contract(event_contract or {}),
         "evidence": minimal_evidence,
         "contract_keys": list(contract.keys())[:12] if isinstance(contract, dict) else [],
     }
@@ -252,7 +257,7 @@ def _compact_model_prompt(*, request_text: str, identity: dict[str, Any], eviden
 
 
 
-def _neutral_blueprint(*, request_text: str, identity: dict[str, Any]) -> dict[str, Any]:
+def _neutral_blueprint(*, request_text: str, identity: dict[str, Any], event_contract: dict[str, Any] | None = None) -> dict[str, Any]:
     requested = str(identity.get("requested_capability_id") or "").strip()
     if not requested:
         match = re.search(r"Acquire\s+runtime\s+capability\s*:\s*\n?\s*([^\n.]+)", request_text, flags=re.I)
@@ -263,7 +268,7 @@ def _neutral_blueprint(*, request_text: str, identity: dict[str, Any]) -> dict[s
         "capabilities": [_safe_name(requested)],
         "match_terms": [],
         "entrypoint": {"module": "tool.py", "function": "run"},
-        "input_schema": {"type": "object", "additionalProperties": True},
+        "input_schema": _schema_from_event_contract(event_contract or {}),
         "output_schema": {"type": "object", "properties": {"status": {"type": "string"}, "data": {"type": "object"}}, "additionalProperties": True},
         "verification_input": {"_runtime": {"dry_run": True}},
         "verification_expectations": {"status": "completed"},
@@ -275,6 +280,49 @@ def _neutral_blueprint(*, request_text: str, identity: dict[str, Any]) -> dict[s
             "required_markers": [_safe_name(requested)],
             "forbidden_markers": [],
         },
+    }
+
+
+def _schema_from_event_contract(event_contract: dict[str, Any]) -> dict[str, Any]:
+    workflow = event_contract.get("workflow_contract") if isinstance(event_contract.get("workflow_contract"), dict) else {}
+    known = workflow.get("known_parameters") if isinstance(workflow.get("known_parameters"), dict) else {}
+    properties: dict[str, Any] = {}
+    for key, value in known.items():
+        name = _safe_name(str(key))
+        if not name:
+            continue
+        typ = "boolean" if isinstance(value, bool) else "number" if isinstance(value, (int, float)) else "array" if isinstance(value, list) else "object" if isinstance(value, dict) else "string"
+        properties[name] = {"type": typ}
+    # If ai_core has no concrete runtime-value contract yet, keep this blueprint
+    # non-registerable by using an open schema; the registration gate will block it.
+    if not properties:
+        return {"type": "object", "additionalProperties": True}
+    return {"type": "object", "properties": properties, "required": list(properties.keys()), "additionalProperties": False}
+
+
+def _compact_event_contract(event_contract: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(event_contract, dict):
+        return {}
+    workflow = event_contract.get("workflow_contract") if isinstance(event_contract.get("workflow_contract"), dict) else {}
+    intent = event_contract.get("intent_contract") if isinstance(event_contract.get("intent_contract"), dict) else {}
+    input_contract = event_contract.get("input_contract") if isinstance(event_contract.get("input_contract"), dict) else {}
+    return {
+        "contract_version": event_contract.get("contract_version"),
+        "intent_contract": {
+            "intent_type": intent.get("intent_type"),
+            "response_mode": intent.get("response_mode"),
+            "required_capabilities": intent.get("required_capabilities"),
+            "capability_acquisition_policy": intent.get("capability_acquisition_policy"),
+        },
+        "workflow_contract": {
+            "planned_step": workflow.get("planned_step"),
+            "known_parameters": workflow.get("known_parameters"),
+            "blocking_missing_information": workflow.get("blocking_missing_information"),
+            "locked_execution": workflow.get("locked_execution"),
+        },
+        "capability_constraints": event_contract.get("capability_constraints"),
+        "input_contract": {"explicit_constraints": input_contract.get("explicit_constraints")},
+        "acquisition_boundary": event_contract.get("acquisition_boundary"),
     }
 
 
