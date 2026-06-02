@@ -373,13 +373,29 @@ async function pollStudioJob(runId, originalText){
         setStudioStatus('running', true);
       }
     }catch(e){
-      terminalReached = true;
-      if(activeStudioJobPoll){ clearInterval(activeStudioJobPoll); activeStudioJobPoll=null; }
-      addMessage('Run status polling failed: '+e, 'item error');
-      const btn=document.getElementById('sendBtn');
-      btn.disabled=false;
-      btn.textContent='Send';
-      setStudioStatus('ready', false);
+      missingStateCount += 1;
+      setStudioStatus('reconnecting', true, 'status retry '+missingStateCount);
+      const card = ensureActiveRunProgressCard();
+      const body = card.querySelector('.message');
+      if(body && !body.querySelector('.pollingReconnectWarning')){
+        const note = document.createElement('div');
+        note.className = 'runWarning pollingReconnectWarning';
+        note.textContent = 'Run status polling is reconnecting after backend reload or network interruption. Current displayed stage is preserved.';
+        body.appendChild(note);
+      }
+      // Do not terminate the UI immediately during a development backend reload.
+      // Keep polling so the new backend process can reload the persisted run
+      // state and return either a terminal recovered state or a fresh running
+      // state.
+      if(missingStateCount >= 120){
+        terminalReached = true;
+        if(activeStudioJobPoll){ clearInterval(activeStudioJobPoll); activeStudioJobPoll=null; }
+        addMessage('Run status polling failed after reconnect attempts: '+e, 'item error');
+        const btn=document.getElementById('sendBtn');
+        btn.disabled=false;
+        btn.textContent='Send';
+        setStudioStatus('ready', false);
+      }
     }
   };
   await tick();

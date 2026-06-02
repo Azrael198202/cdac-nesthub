@@ -46,6 +46,8 @@ approval_policy_store = RuntimeApprovalPolicyStore()
 # It stores run lifecycle only; runtime artifacts and domain-specific results stay in runtime storage.
 AGENT_STUDIO_RUNS: dict[str, dict[str, Any]] = {}
 AGENT_STUDIO_TASKS: set[asyncio.Task] = set()
+AGENT_STUDIO_TASKS_BY_RUN: dict[str, asyncio.Task] = {}
+SERVER_STARTED_AT = time.time()
 AGENT_STUDIO_RUN_STATE_DIR = Path("runtime") / "traces" / "agent_studio_runs"
 
 
@@ -88,6 +90,52 @@ def _load_agent_studio_run(run_id: str) -> dict[str, Any] | None:
     except Exception as exc:
         _write_api_error_log(area="agent_studio_run_state_load", exc=exc, context={"run_id": run_id})
     return None
+
+
+def _is_run_task_alive(run_id: str) -> bool:
+    safe = _safe_run_id(run_id)
+    task = AGENT_STUDIO_TASKS_BY_RUN.get(safe or str(run_id))
+    return bool(task and not task.done())
+
+
+def _mark_run_interrupted_by_backend_restart(run_id: str, job: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    safe = _safe_run_id(run_id) or str(run_id)
+    message = (
+        "Runtime worker was interrupted by backend restart or development reload. "
+        "The current in-process job cannot continue; please run the request again."
+    )
+    job.update({
+        "ok": False,
+        "status": "failed",
+        "stage": "interrupted",
+        "current_stage": "BackendRestartRecovery",
+        "current_action": "Runtime worker interrupted; safe to start a new run",
+        "last_event": message,
+        "result": {
+            "ok": False,
+            "status": "failed",
+            "message": message,
+            "reason": reason,
+            "run_id": safe,
+            "client_run_id": safe,
+            "ui_run_id": safe,
+        },
+        "completed_at": time.time(),
+        "updated_at": time.time(),
+    })
+    existing = job.get("progress_events") if isinstance(job.get("progress_events"), list) else []
+    job["progress_events"] = _merge_progress_events(existing, [
+        _job_progress("backend restart recovery", "failed", message, action="Runtime worker interrupted", console_message=message),
+    ])
+    _save_job(safe, job)
+    emit_console_event(
+        area="agent_studio",
+        event="REQUEST_FAILED",
+        status="failed",
+        message=message,
+        data={"run_id": safe, "stage_label": "BackendRestartRecovery", "action": "Runtime worker interrupted", "reason": reason},
+    )
+    return job
 
 
 def _save_job(run_id: str, job: dict[str, Any]) -> dict[str, Any]:
@@ -301,6 +349,20 @@ def _normalize_agent_studio_job(run_id: str, job: dict[str, Any]) -> dict[str, A
         job["updated_at"] = time.time()
         _save_job(safe, job)
         return job
+
+    # When uvicorn/dev reload restarts the backend, in-process background
+    # tasks are killed. Persisted running jobs must not stay running forever.
+    # If the saved job predates this process and no task is alive in this
+    # process, surface an explicit recoverable interruption so the UI can
+    # reconnect cleanly and the user can start the next run.
+    if status == "running" and not _is_run_task_alive(safe):
+        updated_at = float(job.get("updated_at") or job.get("started_at") or 0)
+        started_at = float(job.get("started_at") or 0)
+        # A small grace window avoids racing the POST handler while it is still
+        # creating the task in the same process. Persisted jobs older than the
+        # current process start cannot be resumed by this API worker.
+        if (updated_at and updated_at < SERVER_STARTED_AT - 0.5) or (started_at and started_at < SERVER_STARTED_AT - 0.5):
+            return _mark_run_interrupted_by_backend_restart(safe, job, reason="backend_process_restarted")
 
     if status == "running" and (result.get("final_answer") or result.get("message") or str(result.get("status") or "").lower() in TERMINAL_RUN_STATUSES):
         result_status = str(result.get("status") or "").lower()
@@ -1182,7 +1244,12 @@ async def agent_studio_message(req: AgentStudioRequest):
         _save_job(run_id, AGENT_STUDIO_RUNS[run_id])
         task = asyncio.create_task(_run_agent_studio_job(run_id, req, active_session_id))
         AGENT_STUDIO_TASKS.add(task)
-        task.add_done_callback(lambda t: AGENT_STUDIO_TASKS.discard(t))
+        AGENT_STUDIO_TASKS_BY_RUN[run_id] = task
+        def _discard_agent_studio_task(t: asyncio.Task, rid: str = run_id) -> None:
+            AGENT_STUDIO_TASKS.discard(t)
+            if AGENT_STUDIO_TASKS_BY_RUN.get(rid) is t:
+                AGENT_STUDIO_TASKS_BY_RUN.pop(rid, None)
+        task.add_done_callback(_discard_agent_studio_task)
         return JSONResponse({
             "ok": True,
             "status": "running",
