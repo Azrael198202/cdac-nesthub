@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Any
+import json
+
+from ai_core.config.paths import RUNTIME_TRACES
 
 
 @dataclass(frozen=True)
@@ -29,4 +32,11 @@ class NeedCapabilityEvent:
             data["created_at"] = datetime.now(timezone.utc).isoformat()
         if data.get("payload") is None:
             data["payload"] = {}
+        try:
+            trace_dir = RUNTIME_TRACES / "need_capability_events"
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            path = trace_dir / (str(self.run_id or "unknown") + ".json")
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        except Exception:
+            pass
         return data

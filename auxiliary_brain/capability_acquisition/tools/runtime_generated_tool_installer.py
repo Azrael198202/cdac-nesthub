@@ -8,6 +8,8 @@ from typing import Any
 from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_REGISTRY
 from auxiliary_brain.capability_acquisition.tools.runtime_tool_artifact_validator import RuntimeToolArtifactValidator
 from ai_core.runtime.capability.acquisition_gate import RuntimeCapabilityAcquisitionGate
+from auxiliary_brain.capability_acquisition.registry_manager import RuntimeCapabilityRegistryManager
+from auxiliary_brain.capability_acquisition.trace_logger import CapabilityAcquisitionTraceLogger
 from ai_core.sandbox.verified_sandbox_runtime import VerifiedSandboxRuntime
 
 
@@ -32,6 +34,8 @@ class RuntimeGeneratedToolInstaller:
         self.validator = RuntimeToolArtifactValidator()
         self.acquisition_gate = RuntimeCapabilityAcquisitionGate()
         self.sandbox_runtime = VerifiedSandboxRuntime()
+        self.registry_manager = RuntimeCapabilityRegistryManager()
+        self.trace_logger = CapabilityAcquisitionTraceLogger()
 
     def install_from_step(
         self,
@@ -87,6 +91,8 @@ class RuntimeGeneratedToolInstaller:
         manifest.setdefault("source_step", source_step or {})
         manifest.setdefault("input_schema", {"type": "object", "additionalProperties": True})
         manifest.setdefault("output_schema", {"type": "object", "additionalProperties": True})
+        manifest.setdefault("connection_schema", manifest.get("connection_schema", {}))
+        manifest.setdefault("secret_schema", manifest.get("secret_schema", {}))
         manifest.setdefault("safety", {
             "can_read_external_data": "runtime_declared",
             "can_write_external_data": False,
@@ -167,6 +173,17 @@ class RuntimeGeneratedToolInstaller:
         if not registration_gate.get("safe_to_register"):
             raise ValueError("Generated runtime tool artifact blocked before registry enablement: " + str(registration_gate.get("reason")))
 
+        # Final registration guard.  The generic sandbox may prove that Python
+        # can run, but it must not enable blueprint/stub artifacts or open
+        # schemas.  This is the last mandatory check before registry write.
+        manifest_path_for_guard = target_dir / "manifest.json"
+        manifest_path_for_guard.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        final_guard = self.registry_manager.assert_registerable(target_dir)
+        self.trace_logger.record(run_id=str(manifest.get("run_id") or manifest.get("tool_id") or "runtime_tool_install"), stage="InstallerFinalRegistrationGuard", status="passed" if final_guard.get("safe_to_register") else "blocked", payload=final_guard)
+        if not final_guard.get("safe_to_register"):
+            self.acquisition_gate.write_report(artifact_dir=target_dir, report={"pre_validation": pre_gate, "sandbox": sandbox_result, "registration": registration_gate, "final_registration_guard": final_guard}, filename="registration_blocked_report.json")
+            raise ValueError("Generated runtime tool artifact blocked by final registration guard: " + str(final_guard.get("reason")))
+
         manifest["verification"] = {
             **(manifest.get("verification") if isinstance(manifest.get("verification"), dict) else {}),
             "sandbox_verification": True,
@@ -189,6 +206,8 @@ class RuntimeGeneratedToolInstaller:
             "implementation": manifest.get("implementation", {}),
             "input_schema": manifest.get("input_schema", {"type": "object", "additionalProperties": True}),
             "output_schema": manifest.get("output_schema", {"type": "object", "additionalProperties": True}),
+            "connection_schema": manifest.get("connection_schema", {}),
+            "secret_schema": manifest.get("secret_schema", {}),
             "safety": manifest.get("safety", {}),
             "runtime_generated": True,
             "source": manifest.get("source"),

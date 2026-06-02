@@ -62,36 +62,43 @@ class ConversationCoreRuntime:
         parsed = await self._input_parsing(state["input"], run_id)
         state["results"]["input_parsing"] = parsed
         self._event(state, "input_parsing", "completed")
+        self._write_stage_trace(run_id, "input_parsing", "completed", parsed)
 
         self._event(state, "intent_recognition", "running")
         intent = await self._intent_recognition(state["input"], parsed, run_id)
         state["results"]["intent_recognition"] = intent
         self._event(state, "intent_recognition", "completed")
+        self._write_stage_trace(run_id, "intent_recognition", "completed", intent)
 
         self._event(state, "context_awareness", "running")
         context = self._context_awareness(state["input"], intent, state.get("context_window", {}))
         state["results"]["context_awareness"] = context
         self._event(state, "context_awareness", "completed")
+        self._write_stage_trace(run_id, "context_awareness", "completed", context)
 
         self._event(state, "workflow_planning", "running")
         plan = await self._workflow_planning(state["input"], parsed, intent, context, run_id)
         state["results"]["workflow_planning"] = plan
         self._event(state, "workflow_planning", "completed")
+        self._write_stage_trace(run_id, "workflow_planning", "completed", plan)
 
         self._event(state, "execution", "running")
         execution = await self._execution(state["input"], parsed, intent, context, plan, run_id)
         state["results"]["execution"] = execution
         self._event(state, "execution", "completed")
+        self._write_stage_trace(run_id, "execution", "completed", execution)
 
         self._event(state, "result_verification", "running")
         verification = self._result_verification(execution, plan)
         state["results"]["result_verification"] = verification
         self._event(state, "result_verification", "completed" if verification.get("passed") else "needs_review")
+        self._write_stage_trace(run_id, "result_verification", "completed" if verification.get("passed") else "needs_review", verification)
 
         self._event(state, "final_synthesis", "running")
         output = await self._output(state["input"], parsed, intent, context, plan, execution, run_id, verification)
         state["results"]["final_synthesis"] = output
         self._event(state, "final_synthesis", "completed")
+        self._write_stage_trace(run_id, "final_synthesis", "completed", output)
 
         final_answer = str(output.get("final_answer") or output.get("message") or "").strip()
         self._persist_conversation_turn(active_session_id, run_id, state["input"], final_answer, state.get("results", {}))
@@ -1437,6 +1444,27 @@ class ConversationCoreRuntime:
     def _compact_summary_text(self, user_input: str, final_answer: str, *, max_chars: int = 1600) -> str:
         text = "User input:\n" + str(user_input or "").strip() + "\n\nFinal answer:\n" + str(final_answer or "").strip()
         return text[:max_chars]
+
+    def _write_stage_trace(self, run_id: str, stage: str, status: str, payload: dict[str, Any]) -> None:
+        try:
+            trace_dir = RUNTIME_TRACES / "ai_core_pipeline"
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            path = trace_dir / (run_id + ".jsonl")
+            event = {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "run_id": run_id,
+                "stage": stage,
+                "status": status,
+                "payload": payload,
+            }
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+            snapshot_dir = trace_dir / run_id
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            safe_stage = "".join(c if c.isalnum() or c in {"_", "-"} else "_" for c in stage)
+            (snapshot_dir / f"{safe_stage}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        except Exception:
+            pass
 
     def _event(self, state: dict[str, Any], stage: str, status: str) -> None:
         state.setdefault("progress_events", []).append({

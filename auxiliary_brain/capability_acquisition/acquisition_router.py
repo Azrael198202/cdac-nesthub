@@ -18,6 +18,7 @@ from ai_core.runtime.self_repair.engine import RuntimeSelfRepairEngine
 from ai_core.runtime.observability.runtime_console import emit_console_event
 from ai_core.runtime.observability.stage_observer import RuntimeStageObserver
 from auxiliary_brain.capability_acquisition.code_generator import RuntimeBlueprintArtifactGenerator
+from auxiliary_brain.capability_acquisition.trace_logger import CapabilityAcquisitionTraceLogger
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,7 @@ class RuntimeCapabilityGapImplementer:
         self.self_repair = RuntimeSelfRepairEngine(storage_root=RUNTIME_GENERATED / "self_repair")
         self.stage_observer = RuntimeStageObserver()
         self.blueprint_artifact_generator = RuntimeBlueprintArtifactGenerator()
+        self.trace_logger = CapabilityAcquisitionTraceLogger()
 
     def implement_if_requested(
         self,
@@ -71,7 +73,12 @@ class RuntimeCapabilityGapImplementer:
         pipeline: list[dict[str, Any]] = []
 
         def mark(stage: str, status: str, **data: Any) -> None:
-            pipeline.append({"stage": stage, "status": status, **data})
+            record = {"stage": stage, "status": status, **data}
+            pipeline.append(record)
+            try:
+                self.trace_logger.record(run_id=run_id, stage=stage, status=status, payload=data)
+            except Exception:
+                pass
             try:
                 emit_console_event(
                     area="capability_acquisition",
@@ -83,7 +90,11 @@ class RuntimeCapabilityGapImplementer:
             except Exception:
                 pass
 
-        mark("CapabilityAcquisitionRouter", "accepted" if allow_implementation else "not_requested")
+        mark("CapabilityAcquisitionRouter", "accepted" if allow_implementation else "not_requested", user_input_excerpt=str(user_input or "")[:1000], evidence_keys=sorted(list(evidence.keys())) if isinstance(evidence, dict) else [])
+        try:
+            self.trace_logger.write_snapshot(run_id=run_id, name="00_router_input", payload={"user_input": user_input, "evidence": evidence, "allow_implementation": allow_implementation})
+        except Exception:
+            pass
         if not allow_implementation:
             return {"status": "not_requested", "reason": "implementation_was_not_requested", "pipeline": pipeline}
 
@@ -1082,6 +1093,28 @@ class RuntimeCapabilityGapImplementer:
         evidence: dict[str, Any],
         acquisition_gate: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        # Final registry guard: this check runs immediately before writing
+        # registry files.  Even if an earlier validator is bypassed, blueprint,
+        # stub, open-schema, or unverified artifacts cannot become enabled tools.
+        final_quality = self._artifact_registration_quality_gate(artifact)
+        final_checks = [
+            {"name": "validation_passed", "passed": bool(validation.get("passed")), "result": validation},
+            {"name": "verification_passed", "passed": bool(verification_run.get("passed")), "result": verification_run},
+            {"name": "registration_gate_safe", "passed": bool((acquisition_gate or {}).get("safe_to_register")), "result": acquisition_gate or {}},
+            {"name": "final_artifact_quality", "passed": bool(final_quality.get("passed")), "result": final_quality},
+        ]
+        if not all(bool(item.get("passed")) for item in final_checks):
+            report = {
+                "status": "not_registered",
+                "reason": "final_registration_guard_blocked",
+                "checks": final_checks,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            tool_dir = Path(str(artifact.get("tool_dir") or ""))
+            if tool_dir.exists():
+                (tool_dir / "registration_blocked_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            return report
+
         RUNTIME_REGISTRY.mkdir(parents=True, exist_ok=True)
         registry = self._load_registry(self.registry_path)
         module_registry = self._load_registry(self.module_registry_path)

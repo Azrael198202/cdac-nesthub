@@ -88,6 +88,13 @@ class RuntimeToolRegistry:
             return False
         if not (implementation.get("function") or implementation.get("callable") or "run"):
             return False
+        text = json.dumps(tool, ensure_ascii=False, default=str).casefold()
+        if "runtime blueprint artifact verified" in text or "requires_runtime_implementation" in text:
+            return False
+        schema = tool.get("input_schema") if isinstance(tool.get("input_schema"), dict) else {}
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        if not props and schema.get("additionalProperties") is True:
+            return False
         return True
 
 
