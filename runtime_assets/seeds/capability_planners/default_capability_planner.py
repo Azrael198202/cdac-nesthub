@@ -6,6 +6,7 @@ import re
 import urllib.error
 import urllib.request
 import hashlib
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -175,6 +176,8 @@ def _candidate_project_roots() -> list[Path]:
 
 
 def _call_ollama_json_planner(*, host: str, model: str, model_source: str, prompt: str, force_json: bool, timeout: float, prompt_stage: str) -> dict[str, Any]:
+    attempt_started = time.monotonic()
+    attempt_id = hashlib.sha256((str(model) + str(prompt_stage) + str(len(prompt))).encode("utf-8", errors="ignore")).hexdigest()[:12]
     _emit_planner_event(
         event="PlannerModelAttempt",
         status="running",
@@ -187,6 +190,9 @@ def _call_ollama_json_planner(*, host: str, model: str, model_source: str, promp
             "model_source": model_source,
             "force_json": force_json,
             "prompt_stage": prompt_stage,
+            "attempt_id": attempt_id,
+            "timeout_seconds": timeout,
+            "prompt_chars": len(str(prompt or "")),
         },
     )
     body_payload = {
@@ -219,9 +225,13 @@ def _call_ollama_json_planner(*, host: str, model: str, model_source: str, promp
                     "model_source": model_source,
                     "force_json": force_json,
                     "raw_empty": not bool(text),
+                    "attempt_id": attempt_id,
+                    "duration_ms": int((time.monotonic() - attempt_started) * 1000),
+                    "timeout_seconds": timeout,
+                    "diagnosis": "Provider returned empty or non-JSON text; strict parser rejected the planner response.",
                 },
             )
-            return {"status": "planner_failed", "reason": "model_returned_non_json", "raw_excerpt": text[:500], "model": model, "model_source": model_source, "force_json": force_json, "raw_empty": not bool(text)}
+            return {"status": "planner_failed", "reason": "model_returned_non_json", "raw_excerpt": text[:500], "model": model, "model_source": model_source, "force_json": force_json, "raw_empty": not bool(text), "attempt_id": attempt_id, "duration_ms": int((time.monotonic() - attempt_started) * 1000), "timeout_seconds": timeout}
         blueprint = parsed.get("blueprint") if isinstance(parsed.get("blueprint"), dict) else parsed
         if not isinstance(blueprint, dict):
             _audit_model_prompt(stage=prompt_stage, model=model, model_source=model_source, prompt=prompt, status="model_returned_no_blueprint", route="local_model")
@@ -238,6 +248,9 @@ def _call_ollama_json_planner(*, host: str, model: str, model_source: str, promp
                 "model": model,
                 "model_source": model_source,
                 "force_json": force_json,
+                "attempt_id": attempt_id,
+                "duration_ms": int((time.monotonic() - attempt_started) * 1000),
+                "timeout_seconds": timeout,
             },
         )
         return {
@@ -248,6 +261,9 @@ def _call_ollama_json_planner(*, host: str, model: str, model_source: str, promp
             "model": model,
             "model_source": model_source,
             "force_json": force_json,
+            "attempt_id": attempt_id,
+            "duration_ms": int((time.monotonic() - attempt_started) * 1000),
+            "timeout_seconds": timeout,
         }
     except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
         _audit_model_prompt(stage=prompt_stage, model=model, model_source=model_source, prompt=prompt, status=f"{exc.__class__.__name__}", route="local_model")
@@ -262,9 +278,13 @@ def _call_ollama_json_planner(*, host: str, model: str, model_source: str, promp
                 "model": model,
                 "model_source": model_source,
                 "force_json": force_json,
+                "attempt_id": attempt_id,
+                "duration_ms": int((time.monotonic() - attempt_started) * 1000),
+                "timeout_seconds": timeout,
+                "diagnosis": "Local planner call failed before a valid JSON object was accepted.",
             },
         )
-        return {"status": "planner_failed", "reason": f"local_model_unavailable_or_invalid: {exc.__class__.__name__}", "model": model, "model_source": model_source, "force_json": force_json}
+        return {"status": "planner_failed", "reason": f"local_model_unavailable_or_invalid: {exc.__class__.__name__}", "model": model, "model_source": model_source, "force_json": force_json, "attempt_id": attempt_id, "duration_ms": int((time.monotonic() - attempt_started) * 1000), "timeout_seconds": timeout}
     except Exception as exc:
         _audit_model_prompt(stage=prompt_stage, model=model, model_source=model_source, prompt=prompt, status=f"{exc.__class__.__name__}", route="local_model")
         _emit_planner_event(
@@ -278,9 +298,13 @@ def _call_ollama_json_planner(*, host: str, model: str, model_source: str, promp
                 "model": model,
                 "model_source": model_source,
                 "force_json": force_json,
+                "attempt_id": attempt_id,
+                "duration_ms": int((time.monotonic() - attempt_started) * 1000),
+                "timeout_seconds": timeout,
+                "diagnosis": "Unexpected local planner error; fallback will be used when allowed.",
             },
         )
-        return {"status": "planner_failed", "reason": f"local_model_error: {exc.__class__.__name__}: {str(exc)[:300]}", "model": model, "model_source": model_source, "force_json": force_json}
+        return {"status": "planner_failed", "reason": f"local_model_error: {exc.__class__.__name__}: {str(exc)[:300]}", "model": model, "model_source": model_source, "force_json": force_json, "attempt_id": attempt_id, "duration_ms": int((time.monotonic() - attempt_started) * 1000), "timeout_seconds": timeout}
 
 
 def _emit_planner_event(*, event: str, status: str, message: str, data: dict[str, Any] | None = None) -> None:

@@ -192,6 +192,14 @@ def _console_progress_for_run(run_id: str, *, started_at: float | None = None) -
             stage_index=data.get("stage_index"),
             total_stages=data.get("total_stages"),
             source=data.get("source"),
+            reason=data.get("reason"),
+            diagnosis=data.get("diagnosis"),
+            duration_ms=data.get("duration_ms"),
+            timeout_seconds=data.get("timeout_seconds"),
+            attempt_id=data.get("attempt_id"),
+            model=data.get("model"),
+            model_source=data.get("model_source"),
+            prompt_stage=data.get("prompt_stage"),
         ))
     return progress
 
@@ -219,7 +227,7 @@ def _merge_progress_events(existing: list[dict[str, Any]], updates: list[dict[st
         item = _job_progress(stage, status, detail)
         # Preserve operator-facing metadata. Without this the UI can only show
         # generic stage names and may fall back to stale "request accepted".
-        for k in ("action", "message", "console_message", "ts", "stage_index", "total_stages", "source"):
+        for k in ("action", "message", "console_message", "ts", "stage_index", "total_stages", "source", "reason", "diagnosis", "duration_ms", "timeout_seconds", "attempt_id", "model", "model_source", "prompt_stage"):
             if k in ev and ev.get(k) not in (None, ""):
                 item[k] = ev.get(k)
         merged.append(item)
@@ -244,9 +252,11 @@ def _normalize_agent_studio_job(run_id: str, job: dict[str, Any]) -> dict[str, A
     # Derive operator-facing current stage/action/progress from structured runtime events.
     events = job.get("progress_events") if isinstance(job.get("progress_events"), list) else []
     non_heartbeat = [ev for ev in events if isinstance(ev, dict) and "elapsed " not in str(ev.get("detail") or "")]
-    last_running = next((ev for ev in reversed(non_heartbeat) if str(ev.get("status") or "").lower() == "running"), None)
+    # Current stage must reflect the newest correlated runtime event, not an
+    # older long-lived parent event such as RuntimeExecution. Otherwise the UI
+    # appears stuck at "runtime request accepted" while child stages are moving.
     last_event = non_heartbeat[-1] if non_heartbeat else None
-    current = last_running or last_event
+    current = last_event
     if current:
         job["current_stage"] = str(current.get("stage") or current.get("label") or job.get("stage") or "execution")
         job["current_action"] = str(current.get("action") or current.get("detail") or current.get("message") or current.get("stage") or "running")
@@ -358,14 +368,11 @@ async def _run_agent_studio_job(run_id: str, req: "AgentStudioRequest", active_s
             elapsed = int(time.monotonic() - started)
             if _terminal_status(str(job.get("status") or "")) == str(job.get("status") or "").lower() and str(job.get("status") or "").lower() != "running":
                 break
-            job["stage"] = "execution"
+            # Heartbeat updates liveness and elapsed time only. It must not
+            # overwrite the current semantic stage/action chosen from runtime
+            # console events.
             job["status"] = "running"
             job["elapsed_seconds"] = elapsed
-            current_events = job.get("progress_events") if isinstance(job.get("progress_events"), list) else []
-            job["progress_events"] = _merge_progress_events(current_events, [
-                _job_progress("request accepted", "completed"),
-                _job_progress("execution", "running", f"elapsed {elapsed}s"),
-            ])
             job["updated_at"] = time.time()
             _save_job(run_id, job)
             # Heartbeat is for liveness only; the UI should not render it as a separate row.

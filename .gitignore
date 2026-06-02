@@ -736,3 +736,7 @@ tools/__pycache__/verify_runtime_self_repair.cpython-313.pyc
 tools/__pycache__/verify_runtime_value_type_coercion.cpython-313.pyc
 tools/__pycache__/verify_web_cleaning_batch_optimizer.cpython-313.pyc
 tools/__pycache__/verify_web_evidence_optimizer.cpython-313.pyc
+ai_core/runtime/cognitive/__pycache__/__init__.cpython-311.pyc
+ai_core/runtime/cognitive/__pycache__/generic_quality_gate.cpython-311.pyc
+ai_core/runtime/cognitive/__pycache__/prompt_audit_store.cpython-311.pyc
+ai_core/runtime/cognitive/__pycache__/runtime_cognitive_graph.cpython-311.pyc

@@ -37,8 +37,12 @@ class ConversationCoreRuntime:
         self.web_evidence_optimizer = WebEvidenceOptimizer()
         self.capability_implementer = RuntimeCapabilityGapImplementer()
 
-    async def run(self, message: str, *, latest_task: str | None = None, session_id: str | None = None) -> dict[str, Any]:
-        run_id = "conversation_core_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    async def run(self, message: str, *, latest_task: str | None = None, session_id: str | None = None, client_run_id: str | None = None) -> dict[str, Any]:
+        # Use the UI/client run id as the primary correlation id when present.
+        # This keeps ai_core stage events, Agent Studio status, and the console
+        # stream on the same run without adding business-specific coupling.
+        requested = str(client_run_id or "").strip()
+        run_id = "".join(ch for ch in requested if ch.isalnum() or ch in {"_", "-"})[:96] or ("conversation_core_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"))
         active_session_id = self.sessions.start_or_get_session(session_id, metadata={"latest_task": latest_task or ""})
         context_window = self.sessions.load_context_window(active_session_id)
         state: dict[str, Any] = {

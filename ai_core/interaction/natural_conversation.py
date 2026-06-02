@@ -40,7 +40,7 @@ class NaturalConversationService:
         except Exception:
             return False
 
-    async def reply(self, message: str, *, latest_task: str | None = None, session_id: str | None = None) -> dict[str, Any]:
+    async def reply(self, message: str, *, latest_task: str | None = None, session_id: str | None = None, client_run_id: str | None = None) -> dict[str, Any]:
         text = str(message or "").strip()
         if not text:
             answer = "Please enter the content you want me to handle."
@@ -52,7 +52,7 @@ class NaturalConversationService:
         # workflow_planning -> execution -> result_verification ->
         # final_synthesis.  This remains domain-neutral: ai_core decides only
         # capability/source policy, not business-specific behavior.
-        result = await self.core_runtime.run(text, latest_task=latest_task, session_id=session_id)
+        result = await self.core_runtime.run(text, latest_task=latest_task, session_id=session_id, client_run_id=client_run_id)
         if isinstance(result, dict) and (result.get("final_answer") or result.get("message")):
             return result
         answer = self._safe_fallback_answer(text)

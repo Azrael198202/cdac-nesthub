@@ -149,7 +149,7 @@ class AgentStudioService:
         # web_retrieval -> result_verification -> final_synthesis.
         core_pipeline_requested = self.natural_conversation.needs_core_conversation_pipeline(message)
         if routed.action == "feedback_adaptation" and core_pipeline_requested:
-            return await self.natural_conversation.reply(message, latest_task=self._latest_task_name(), session_id=session_id)
+            return await self.natural_conversation.reply(message, latest_task=self._latest_task_name(), session_id=session_id, client_run_id=client_run_id)
 
         if routed.action == "feedback_adaptation":
             return await self.handle_feedback(message, routed.name)
@@ -160,7 +160,7 @@ class AgentStudioService:
             feedback = self.feedback_classifier.classify(message, fallback_target=self._latest_task_name())
             if feedback.get("matched"):
                 return await self.handle_feedback(message, feedback.get("target_task"))
-        return await self.natural_conversation.reply(message, latest_task=self._latest_task_name(), session_id=session_id)
+        return await self.natural_conversation.reply(message, latest_task=self._latest_task_name(), session_id=session_id, client_run_id=client_run_id)
 
 
     async def _handle_direct_image_generation(self, request: dict[str, Any]) -> dict[str, Any]:

@@ -103,8 +103,9 @@ function addMessage(text, cls='item', options={}) {
   el.className=cls;
   if(options.html){ el.innerHTML=options.html; }
   else { el.innerHTML=`<div class="message">${escapeHtml(text)}</div>`; }
+  const shouldFollow = isNearBottom(messages);
   messages.appendChild(el);
-  messages.scrollTop=messages.scrollHeight;
+  followIfAllowed(messages, shouldFollow);
 }
 function addFinalAnswer(text, cls='item final'){
   const feedback='<div class="feedbackBar"><span class="small">Evaluate:</span><button class="copyBtn" onclick="sendConversationFeedback(\'good\')">Good</button><button class="copyBtn" onclick="sendConversationFeedback(\'bad\')">Bad</button><input id="feedbackNote" class="feedbackNote" placeholder="optional note" /></div>';
@@ -222,6 +223,10 @@ let activeStudioJobRunId = '';
 let activeStudioJobRenderedStages = new Set();
 let activeRunProgressCard = null;
 let activeRunStartedAtMs = 0;
+let messagesAutoFollow = true;
+let runConsoleAutoFollow = true;
+function isNearBottom(el, threshold=32){ return !el || (el.scrollHeight - el.scrollTop - el.clientHeight) <= threshold; }
+function followIfAllowed(el, allowed){ if(el && allowed){ el.scrollTop = el.scrollHeight; } }
 
 function resetActiveRunUi(runId){
   activeStudioJobRunId = String(runId || '');
@@ -238,8 +243,9 @@ function ensureActiveRunProgressCard(){
   el.className='item';
   el.setAttribute('data-runtime-progress-card','true');
   el.innerHTML='<div class="cardHeader"><b>Current run</b><span class="pill">running</span></div><div class="message small">accepted</div>';
+  const shouldFollow = isNearBottom(messages);
   messages.appendChild(el);
-  messages.scrollTop=messages.scrollHeight;
+  followIfAllowed(messages, shouldFollow);
   activeRunProgressCard=el;
   return el;
 }
@@ -264,9 +270,15 @@ function eventDisplayTime(ev){
   return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
 }
 function renderRuntimeConsoleRows(events){
-  const rows=(events||[]).filter(ev=>!eventLooksLikeHeartbeat(ev)).slice(-12).map(ev=>{
+  const rows=(events||[]).filter(ev=>!eventLooksLikeHeartbeat(ev)).slice(-16).map(ev=>{
     const t=eventDisplayTime(ev);
-    const label=String(ev.console_message || ev.message || ev.detail || ev.label || ev.stage || 'runtime event');
+    let label=String(ev.console_message || ev.message || ev.detail || ev.label || ev.stage || 'runtime event');
+    const extra=[];
+    if(ev.duration_ms!==undefined && ev.duration_ms!==null && ev.duration_ms!==''){ extra.push('duration '+Math.round(Number(ev.duration_ms)/1000*10)/10+'s'); }
+    if(ev.timeout_seconds!==undefined && ev.timeout_seconds!==null && ev.timeout_seconds!==''){ extra.push('timeout '+ev.timeout_seconds+'s'); }
+    if(ev.reason){ extra.push('reason '+ev.reason); }
+    if(ev.diagnosis){ extra.push('diagnosis '+ev.diagnosis); }
+    if(extra.length){ label += ' — '+extra.join(' / '); }
     return '<div class="runConsoleRow">'+(t ? '['+escapeHtml(t)+'] ' : '')+escapeHtml(label)+'</div>';
   }).join('');
   return rows || '<div class="small muted">Waiting for runtime events...</div>';
@@ -297,6 +309,9 @@ function renderStudioJobProgress(job){
   const body = card.querySelector('.message');
   const warning = (!terminal && stageElapsed >= 60) ? '<div class="runWarning">Stage has been running for '+escapeHtml(formatElapsedSeconds(stageElapsed))+'. If no console events appear, the stage may be waiting for a subprocess or model response.</div>' : '';
   if(body){
+    const outerShouldFollow = isNearBottom(messages);
+    const oldConsole = body.querySelector('.runConsole');
+    const consoleShouldFollow = isNearBottom(oldConsole);
     body.innerHTML =
       '<div><b>'+escapeHtml(workflowName)+'</b> <span class="small muted">'+escapeHtml(percent)+'%</span></div>'+ 
       '<div class="runProgressBar"><div class="runProgressFill" style="width:'+escapeHtml(percent)+'%"></div></div>'+ 
@@ -307,6 +322,9 @@ function renderStudioJobProgress(job){
       '<div class="runMetric"><b>Status:</b><span>'+escapeHtml(terminal ? status : 'running')+'</span></div>'+ 
       warning+
       '<div class="runConsole"><div class="small"><b>Runtime Console</b></div>'+renderRuntimeConsoleRows(visibleEvents)+'</div>';
+    const newConsole = body.querySelector('.runConsole');
+    followIfAllowed(newConsole, consoleShouldFollow);
+    followIfAllowed(messages, outerShouldFollow);
   }
 }
 
