@@ -175,6 +175,20 @@ def _candidate_project_roots() -> list[Path]:
 
 
 def _call_ollama_json_planner(*, host: str, model: str, model_source: str, prompt: str, force_json: bool, timeout: float, prompt_stage: str) -> dict[str, Any]:
+    _emit_planner_event(
+        event="PlannerModelAttempt",
+        status="running",
+        message="Planner model attempt started",
+        data={
+            "stage_label": "BlueprintPlanner",
+            "action": f"Calling planner model {model}",
+            "console_message": f"Planner model attempt started: {model}",
+            "model": model,
+            "model_source": model_source,
+            "force_json": force_json,
+            "prompt_stage": prompt_stage,
+        },
+    )
     body_payload = {
         "model": model,
         "prompt": prompt,
@@ -193,12 +207,39 @@ def _call_ollama_json_planner(*, host: str, model: str, model_source: str, promp
         parsed = _parse_json_object(text)
         if not isinstance(parsed, dict):
             _audit_model_prompt(stage=prompt_stage, model=model, model_source=model_source, prompt=prompt, status="model_returned_non_json", route="local_model")
-            return {"status": "planner_failed", "reason": "model_returned_non_json", "raw_excerpt": text[:500], "model": model, "model_source": model_source, "force_json": force_json}
+            _emit_planner_event(
+                event="PlannerModelAttempt",
+                status="failed",
+                message="Planner model did not return valid JSON",
+                data={
+                    "stage_label": "BlueprintPlanner",
+                    "action": "Planner model returned non-JSON; retry or fallback will be used",
+                    "console_message": "Planner model returned non-JSON",
+                    "model": model,
+                    "model_source": model_source,
+                    "force_json": force_json,
+                    "raw_empty": not bool(text),
+                },
+            )
+            return {"status": "planner_failed", "reason": "model_returned_non_json", "raw_excerpt": text[:500], "model": model, "model_source": model_source, "force_json": force_json, "raw_empty": not bool(text)}
         blueprint = parsed.get("blueprint") if isinstance(parsed.get("blueprint"), dict) else parsed
         if not isinstance(blueprint, dict):
             _audit_model_prompt(stage=prompt_stage, model=model, model_source=model_source, prompt=prompt, status="model_returned_no_blueprint", route="local_model")
             return {"status": "planner_failed", "reason": "model_returned_no_blueprint", "raw_excerpt": text[:500], "model": model, "model_source": model_source, "force_json": force_json}
         _audit_model_prompt(stage=prompt_stage, model=model, model_source=model_source, prompt=prompt, status="planned", route="local_model")
+        _emit_planner_event(
+            event="PlannerModelAttempt",
+            status="completed",
+            message="Planner model returned a valid blueprint",
+            data={
+                "stage_label": "BlueprintPlanner",
+                "action": "Planner model produced valid blueprint JSON",
+                "console_message": "Planner model returned a valid blueprint",
+                "model": model,
+                "model_source": model_source,
+                "force_json": force_json,
+            },
+        )
         return {
             "status": "planned",
             "confidence_score": float(parsed.get("confidence_score") or parsed.get("confidence") or 0.76),
@@ -210,39 +251,86 @@ def _call_ollama_json_planner(*, host: str, model: str, model_source: str, promp
         }
     except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
         _audit_model_prompt(stage=prompt_stage, model=model, model_source=model_source, prompt=prompt, status=f"{exc.__class__.__name__}", route="local_model")
+        _emit_planner_event(
+            event="PlannerModelAttempt",
+            status="failed",
+            message=f"Planner model attempt failed: {exc.__class__.__name__}",
+            data={
+                "stage_label": "BlueprintPlanner",
+                "action": f"Planner model attempt failed: {exc.__class__.__name__}",
+                "console_message": f"Planner model attempt failed: {exc.__class__.__name__}",
+                "model": model,
+                "model_source": model_source,
+                "force_json": force_json,
+            },
+        )
         return {"status": "planner_failed", "reason": f"local_model_unavailable_or_invalid: {exc.__class__.__name__}", "model": model, "model_source": model_source, "force_json": force_json}
     except Exception as exc:
         _audit_model_prompt(stage=prompt_stage, model=model, model_source=model_source, prompt=prompt, status=f"{exc.__class__.__name__}", route="local_model")
+        _emit_planner_event(
+            event="PlannerModelAttempt",
+            status="failed",
+            message=f"Planner model error: {exc.__class__.__name__}",
+            data={
+                "stage_label": "BlueprintPlanner",
+                "action": f"Planner model error: {exc.__class__.__name__}",
+                "console_message": f"Planner model error: {exc.__class__.__name__}",
+                "model": model,
+                "model_source": model_source,
+                "force_json": force_json,
+            },
+        )
         return {"status": "planner_failed", "reason": f"local_model_error: {exc.__class__.__name__}: {str(exc)[:300]}", "model": model, "model_source": model_source, "force_json": force_json}
 
+
+def _emit_planner_event(*, event: str, status: str, message: str, data: dict[str, Any] | None = None) -> None:
+    try:
+        from ai_core.runtime.observability.runtime_console import emit_console_event
+        emit_console_event(area="capability_acquisition", event=event, status=status, message=message, data=data or {})
+    except Exception:
+        return
 
 
 def _deterministic_blueprint_fallback(*, request_text: str, identity: dict[str, Any], evidence: dict[str, Any], model_attempt: dict[str, Any]) -> dict[str, Any]:
     """Create a minimal blueprint when the model cannot produce valid JSON.
 
-    This is a generic structural fallback.  It never generates concrete behavior,
-    protocol logic, endpoint values, or secrets.  It only lets the runtime-owned
-    ArtifactGenerator create a dry-run-capable adapter candidate so the pipeline
-    can continue through validation and registration gates.
+    This fallback is structural and generic. It does not implement a concrete
+    capability and it does not hardcode runtime values. It extracts only fields
+    that the user explicitly declared as schema fields; otherwise it creates
+    neutral placeholder fields so ArtifactGenerator can produce a dry-run
+    candidate for validation.
     """
     text = str(request_text or "")
     lowered = text.casefold()
 
-    requires_connection = any(token in lowered for token in ("connection", "connect", "server", "endpoint", "url", "host", "port", "api"))
-    requires_secret = any(token in lowered for token in ("secret", "credential", "token", "key", "password", "auth"))
+    connection_fields = _extract_schema_section_fields(text, section_name="connection")
+    secret_fields = _extract_schema_section_fields(text, section_name="secret")
+    input_fields = _extract_schema_section_fields(text, section_name="input")
 
-    required_inputs = _extract_declared_fields(text, section_markers=("input", "parameter", "field"))
-    if not required_inputs:
-        required_inputs = ["field_1"]
+    requires_connection = bool(connection_fields) or any(token in lowered for token in ("connection", "endpoint", "host", "port", "url"))
+    requires_secret = bool(secret_fields) or any(token in lowered for token in ("secret", "credential", "token", "key", "password", "auth"))
 
-    connection_fields = _extract_declared_fields(text, section_markers=("connection", "connect")) if requires_connection else []
+    if not input_fields:
+        input_fields = _extract_backticked_fields(text) or ["field_1"]
     if requires_connection and not connection_fields:
         connection_fields = ["connection_value"]
-
-    secret_fields = _extract_declared_fields(text, section_markers=("secret", "credential")) if requires_secret else []
     if requires_secret and not secret_fields:
         secret_fields = ["secret_value"]
 
+    _emit_planner_event(
+        event="DeterministicBlueprintFallback",
+        status="completed",
+        message="Deterministic blueprint fallback generated",
+        data={
+            "stage_label": "BlueprintPlanner",
+            "action": "Model blueprint was unavailable; generated a neutral fallback blueprint",
+            "console_message": "Deterministic blueprint fallback generated",
+            "fallback_reason": str(model_attempt.get("reason") or model_attempt.get("status") or "model_blueprint_unavailable"),
+            "required_inputs_count": len(input_fields),
+            "connection_fields_count": len(connection_fields),
+            "secret_fields_count": len(secret_fields),
+        },
+    )
     return {
         "status": "planned",
         "confidence_score": 0.51,
@@ -255,7 +343,7 @@ def _deterministic_blueprint_fallback(*, request_text: str, identity: dict[str, 
             "capability_category": "adapter",
             "requires_connection": bool(requires_connection),
             "requires_secret": bool(requires_secret),
-            "required_inputs": required_inputs,
+            "required_inputs": input_fields,
             "required_connection_fields": connection_fields,
             "required_secret_fields": secret_fields,
             "approval_mode": "always",
@@ -265,28 +353,62 @@ def _deterministic_blueprint_fallback(*, request_text: str, identity: dict[str, 
     }
 
 
-def _extract_declared_fields(text: str, *, section_markers: tuple[str, ...]) -> list[str]:
-    """Extract only explicitly declared neutral field-like names.
-
-    The extractor is intentionally conservative.  It is not a domain parser and
-    does not contain concrete capability vocabulary.
-    """
+def _extract_backticked_fields(text: str) -> list[str]:
     found: list[str] = []
     for raw in re.findall(r"`([^`]{1,64})`", text):
         name = _safe_field_name(raw)
         if name and name not in found:
             found.append(name)
-    if found:
-        return found[:8]
-    for line in text.splitlines():
-        folded = line.casefold()
-        if not any(marker in folded for marker in section_markers):
+    return found[:12]
+
+
+def _extract_schema_section_fields(text: str, *, section_name: str) -> list[str]:
+    """Extract explicitly declared schema fields from neutral schema sections.
+
+    Accepted patterns are intentionally generic, for example:
+    - "Input schema must include:" followed by bullet lines
+    - "Connection schema must include only:" followed by bullet lines
+    - inline: "input schema: a, b, c"
+    Ordinary instruction lines such as "store connection values through UI" are
+    ignored so they do not become schema field names.
+    """
+    section = section_name.casefold()
+    found: list[str] = []
+    lines = text.splitlines()
+    active = False
+    for line in lines:
+        stripped = line.strip()
+        folded = stripped.casefold()
+        if re.search(rf"\b{re.escape(section)}\s+schema\b", folded):
+            active = True
+            after = re.split(r":", stripped, maxsplit=1)
+            if len(after) == 2 and after[1].strip():
+                for item in re.split(r"[,;]", after[1]):
+                    name = _safe_field_name(item)
+                    if name and name not in found and name not in _SCHEMA_STOP_WORDS:
+                        found.append(name)
             continue
-        for raw in re.findall(r"[a-zA-Z][a-zA-Z0-9_]{1,63}", line):
-            name = _safe_field_name(raw)
-            if name and name not in found and name not in {"input", "inputs", "field", "fields", "parameter", "parameters", "connection", "secret", "schema", "generate", "required"}:
-                found.append(name)
-    return found[:8]
+        if active:
+            if not stripped:
+                continue
+            if re.search(r"\b(input|connection|secret|approval|output|verification|runtime)\s+schema\b", folded) and not re.search(rf"\b{re.escape(section)}\s+schema\b", folded):
+                break
+            bullet = re.match(r"^[*\-•]\s*([A-Za-z_][A-Za-z0-9_]{0,63})\b", stripped)
+            if bullet:
+                name = _safe_field_name(bullet.group(1))
+                if name and name not in found and name not in _SCHEMA_STOP_WORDS:
+                    found.append(name)
+                continue
+            # Stop the section when natural prose resumes.
+            if not stripped.startswith(("*", "-", "•")):
+                break
+    return found[:12]
+
+
+_SCHEMA_STOP_WORDS = {
+    "schema", "include", "includes", "must", "only", "required", "field", "fields",
+    "input", "connection", "secret", "approval", "policy", "support", "default",
+}
 
 
 def _safe_field_name(value: Any) -> str:

@@ -1008,7 +1008,7 @@ class RuntimeCapabilityGapImplementer:
         if stage == "SandboxValidator" and status == "running":
             return str(data.get("console_message") or "Sandbox validation started")
         if stage == "SandboxValidator" and status == "completed":
-            return "Sandbox validation completed"
+            return str(data.get("console_message") or "Sandbox validation completed")
         if stage == "VerificationRun" and status == "running":
             return "Verification run started"
         if stage == "VerificationRun" and status == "completed":
