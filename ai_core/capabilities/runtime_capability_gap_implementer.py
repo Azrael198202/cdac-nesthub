@@ -235,10 +235,12 @@ class RuntimeCapabilityGapImplementer:
                 "generated_at": datetime.now(timezone.utc).isoformat(),
             }
 
+        mark("SandboxValidator", "running", tool_id=artifact.get("tool_id"), tool_dir=artifact.get("tool_dir"))
         validation = self._validate_artifact(artifact)
         mark("SandboxValidator", "completed" if validation.get("passed") else "sandbox_failed", result=validation)
         verification_run: dict[str, Any] | None = None
         if validation.get("passed"):
+            mark("VerificationRun", "running", tool_id=artifact.get("tool_id"))
             verification_run = self._execute_verification_run(template=template, artifact=artifact)
             mark("VerificationRun", "completed" if verification_run.get("passed") else "failed", result=verification_run)
 
@@ -749,13 +751,13 @@ class RuntimeCapabilityGapImplementer:
         """
         candidates: list[str] = []
         base_executable = getattr(sys, "_base_executable", None)
-        for item in [base_executable, sys.executable, "python", "python3"]:
+        for item in [base_executable, sys.executable, "python3"]:
             value = str(item or "").strip()
             if value and value not in candidates:
                 candidates.append(value)
         return candidates
 
-    def _run_isolated_python(self, args: list[str], *, cwd: Path, timeout: int = 30, pythonpath: str | None = None) -> dict[str, Any]:
+    def _run_isolated_python(self, args: list[str], *, cwd: Path, timeout: int = 15, pythonpath: str | None = None) -> dict[str, Any]:
         """Run a generated-artifact validation command with debugger isolation.
 
         A failure caused by debugger bootstrap, not by generated code, should
@@ -952,7 +954,7 @@ class RuntimeCapabilityGapImplementer:
         checks: list[dict[str, Any]] = []
         py_files = [str(p) for p in tool_dir.rglob("*.py")]
         if py_files:
-            proc = self._run_isolated_python(["-m", "py_compile", *py_files], cwd=tool_dir, timeout=30)
+            proc = self._run_isolated_python(["-m", "py_compile", *py_files], cwd=tool_dir, timeout=15)
             checks.append({
                 "name": "python_compile",
                 "returncode": proc.get("returncode"),
@@ -975,7 +977,7 @@ class RuntimeCapabilityGapImplementer:
                 f"sys.path.insert(0, {json.dumps(str(tool_dir))}); "
                 f"runpy.run_path({json.dumps(str(test_file))}, run_name='__main__')"
             )
-            proc = self._run_isolated_python(["-c", runner], cwd=tool_dir, timeout=30)
+            proc = self._run_isolated_python(["-c", runner], cwd=tool_dir, timeout=15)
             check = {
                 "name": "unit_test",
                 "test_file": str(test_file),

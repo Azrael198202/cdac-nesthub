@@ -9,6 +9,7 @@ from uuid import uuid4
 import json
 import base64
 import time
+import os
 
 from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
 from ai_core.artifacts.artifact_edit_service import ArtifactEditService
@@ -95,10 +96,13 @@ def _save_job(run_id: str, job: dict[str, Any]) -> dict[str, Any]:
     return job
 
 
+TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "blocked", "requires_input", "pending_review", "timed_out"}
+
+
 def _terminal_status(value: str | None) -> str:
     status = str(value or "").strip().lower()
-    if status in {"completed", "failed", "cancelled", "blocked", "requires_input", "pending_review"}:
-        return status
+    if status in TERMINAL_RUN_STATUSES:
+        return "failed" if status == "timed_out" else status
     return "completed" if status else "completed"
 
 
@@ -106,15 +110,14 @@ def _job_progress(stage: str, status: str = "running", detail: str | None = None
     return {"stage": stage, "status": status, "detail": detail or ""}
 
 
-def _console_terminal_event_for_run(run_id: str) -> dict[str, Any] | None:
+def _console_events_for_run(run_id: str, *, limit: int = 80) -> list[dict[str, Any]]:
     safe = _safe_run_id(run_id)
     if not safe:
-        return None
+        return []
     path = Path("runtime") / "logs" / "runtime_console.jsonl"
     if not path.exists():
-        return None
-    terminal_events = {"REQUEST_FINISHED", "REQUEST_FAILED", "REQUEST_CANCELLED"}
-    found: dict[str, Any] | None = None
+        return []
+    events: list[dict[str, Any]] = []
     try:
         with path.open("r", encoding="utf-8") as fh:
             for line in fh:
@@ -123,13 +126,77 @@ def _console_terminal_event_for_run(run_id: str) -> dict[str, Any] | None:
                 except Exception:
                     continue
                 data = event.get("data") if isinstance(event.get("data"), dict) else {}
-                if str(data.get("run_id") or "") != safe:
+                # Agent Studio events carry run_id. Capability events are emitted from the
+                # same background request and may not always include run_id in older traces,
+                # so only attach them when a run is currently active in memory and recent.
+                event_run_id = str(data.get("run_id") or data.get("client_run_id") or data.get("ui_run_id") or "")
+                if event_run_id and event_run_id != safe:
                     continue
-                if str(event.get("event") or "") in terminal_events:
-                    found = event
+                if event_run_id == safe:
+                    events.append(event)
+                elif str(event.get("area") or "") == "capability_acquisition":
+                    # Keep only capability stage events that were written after the run started.
+                    job = AGENT_STUDIO_RUNS.get(safe)
+                    started = float((job or {}).get("started_at") or 0)
+                    try:
+                        from datetime import datetime
+                        ts = datetime.fromisoformat(str(event.get("ts")).replace("Z", "+00:00")).timestamp()
+                    except Exception:
+                        ts = 0
+                    if started and ts >= started:
+                        events.append(event)
     except Exception:
-        return None
+        return events[-limit:]
+    return events[-limit:]
+
+
+def _console_progress_for_run(run_id: str) -> list[dict[str, Any]]:
+    progress: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for event in _console_events_for_run(run_id):
+        name = str(event.get("event") or event.get("area") or "runtime")
+        status = str(event.get("status") or "running").lower()
+        if name == "REQUEST_HEARTBEAT":
+            continue
+        if name == "REQUEST_STARTED":
+            label = "request accepted"
+        elif name == "REQUEST_FINISHED":
+            label = "final answer"
+        elif name == "REQUEST_FAILED":
+            label = "failed"
+        else:
+            label = name
+        key = (label, status)
+        if key in seen:
+            continue
+        seen.add(key)
+        progress.append(_job_progress(label, status, str(event.get("message") or "")))
+    return progress
+
+
+def _console_terminal_event_for_run(run_id: str) -> dict[str, Any] | None:
+    terminal_events = {"REQUEST_FINISHED", "REQUEST_FAILED", "REQUEST_CANCELLED", "REQUEST_TIMED_OUT"}
+    found: dict[str, Any] | None = None
+    for event in _console_events_for_run(run_id, limit=200):
+        if str(event.get("event") or "") in terminal_events:
+            found = event
     return found
+
+def _merge_progress_events(existing: list[dict[str, Any]], updates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for ev in [*(existing or []), *(updates or [])]:
+        if not isinstance(ev, dict):
+            continue
+        stage = str(ev.get("stage") or ev.get("label") or "step")
+        status = str(ev.get("status") or "running")
+        detail = str(ev.get("detail") or "")
+        key = (stage, status, detail[:120])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(_job_progress(stage, status, detail))
+    return merged[-30:]
 
 
 def _normalize_agent_studio_job(run_id: str, job: dict[str, Any]) -> dict[str, Any]:
@@ -139,37 +206,57 @@ def _normalize_agent_studio_job(run_id: str, job: dict[str, Any]) -> dict[str, A
     job.setdefault("run_id", safe)
     job.setdefault("client_run_id", safe)
     job.setdefault("ui_run_id", safe)
+    existing_events = job.get("progress_events") if isinstance(job.get("progress_events"), list) else []
+    console_progress = _console_progress_for_run(safe)
+    if console_progress:
+        job["progress_events"] = _merge_progress_events(existing_events, console_progress)
     events = job.get("progress_events") if isinstance(job.get("progress_events"), list) else []
     result = job.get("result") if isinstance(job.get("result"), dict) else {}
     status = str(job.get("status") or "").strip().lower()
-    last_status = ""
-    if events:
-        last = events[-1] if isinstance(events[-1], dict) else {}
-        last_status = str(last.get("status") or "").strip().lower()
-    if status == "running" and (result.get("final_answer") or result.get("message") or result.get("status") or last_status in {"completed", "failed", "blocked", "requires_input", "pending_review"}):
-        status = last_status if last_status in {"failed", "blocked", "requires_input", "pending_review"} else "completed"
-        job["status"] = status
-        job["stage"] = job.get("stage") or "final_synthesis"
+
+    terminal_event = _console_terminal_event_for_run(safe)
+    if terminal_event:
+        terminal = _terminal_status(str(terminal_event.get("status") or "completed"))
+        job["status"] = terminal
+        job["stage"] = "final_synthesis" if terminal == "completed" else terminal
+        if not result and isinstance(terminal_event.get("data"), dict):
+            maybe_result = terminal_event["data"].get("result")
+            if isinstance(maybe_result, dict):
+                job["result"] = maybe_result
         job["updated_at"] = time.time()
         _save_job(safe, job)
         return job
+
+    if status == "running" and (result.get("final_answer") or result.get("message") or str(result.get("status") or "").lower() in TERMINAL_RUN_STATUSES):
+        result_status = str(result.get("status") or "").lower()
+        terminal = _terminal_status(result_status or "completed")
+        job["status"] = terminal
+        job["stage"] = "final_synthesis" if terminal == "completed" else terminal
+        job["progress_events"] = _merge_progress_events(events, [_job_progress("final answer", "completed" if terminal == "completed" else terminal)])
+        job["updated_at"] = time.time()
+        _save_job(safe, job)
+        return job
+
+    # Do not infer completion from a completed sub-step such as "request accepted".
+    # A run becomes terminal only from result payload or explicit terminal event.
     if status == "running":
-        terminal_event = _console_terminal_event_for_run(safe)
-        if terminal_event:
-            terminal = _terminal_status(str(terminal_event.get("status") or "completed"))
-            job["status"] = terminal
-            job["stage"] = "final_synthesis" if terminal == "completed" else terminal
-            if not events or str((events[-1] if isinstance(events[-1], dict) else {}).get("stage") or "") != "final answer":
-                events = [
-                    _job_progress("request accepted", "completed"),
-                    _job_progress("execution", "completed" if terminal == "completed" else terminal),
-                    _job_progress("final answer", "completed" if terminal == "completed" else terminal),
-                ]
-                job["progress_events"] = events
+        started = float(job.get("started_at") or 0)
+        max_seconds = int(os.environ.get("AGENT_STUDIO_RUN_TIMEOUT_SECONDS", "600"))
+        if started and (time.time() - started) > max_seconds:
+            job["ok"] = False
+            job["status"] = "failed"
+            job["stage"] = "timed_out"
+            job["result"] = {
+                "ok": False,
+                "status": "failed",
+                "message": f"Run timed out after {max_seconds} seconds.",
+                "diagnostic_log": "runtime/logs/runtime_console.jsonl",
+            }
+            job["progress_events"] = _merge_progress_events(events, [_job_progress("timeout guard", "failed", f"exceeded {max_seconds}s")])
             job["updated_at"] = time.time()
             _save_job(safe, job)
+            emit_console_event(area="agent_studio", event="REQUEST_TIMED_OUT", status="failed", message=f"runtime request exceeded {max_seconds}s", data={"run_id": safe})
     return job
-
 
 async def _run_agent_studio_job(run_id: str, req: "AgentStudioRequest", active_session_id: str) -> None:
     job = AGENT_STUDIO_RUNS.setdefault(run_id, {})
@@ -206,28 +293,37 @@ async def _run_agent_studio_job(run_id: str, req: "AgentStudioRequest", active_s
             job["stage"] = "execution"
             job["status"] = "running"
             job["elapsed_seconds"] = elapsed
-            job["progress_events"] = [
+            current_events = job.get("progress_events") if isinstance(job.get("progress_events"), list) else []
+            job["progress_events"] = _merge_progress_events(current_events, [
                 _job_progress("request accepted", "completed"),
                 _job_progress("execution", "running", f"elapsed {elapsed}s"),
-            ]
+            ])
             job["updated_at"] = time.time()
             _save_job(run_id, job)
+            # Heartbeat is for liveness only; the UI should not render it as a separate row.
             emit_console_event(area="agent_studio", event="REQUEST_HEARTBEAT", status="running", message=f"execution running {elapsed}s", data={"run_id": run_id, "tick": tick})
 
     heartbeat_task = asyncio.create_task(_heartbeat())
     try:
         emit_console_event(area="agent_studio", event="REQUEST_STARTED", status="running", message="runtime request accepted", data={"run_id": run_id})
-        payload = await asyncio.to_thread(
-            lambda: asyncio.run(
-                studio_service.handle_message(
-                    req.message,
-                    provided_inputs=req.provided_inputs,
-                    uploaded_artifacts=req.uploaded_artifacts,
-                    session_id=active_session_id,
-                    client_run_id=run_id,
+        async def _execute_request_payload() -> dict[str, Any]:
+            return await asyncio.to_thread(
+                lambda: asyncio.run(
+                    studio_service.handle_message(
+                        req.message,
+                        provided_inputs=req.provided_inputs,
+                        uploaded_artifacts=req.uploaded_artifacts,
+                        session_id=active_session_id,
+                        client_run_id=run_id,
+                    )
                 )
             )
-        )
+
+        request_timeout = int(os.environ.get("AGENT_STUDIO_RUN_TIMEOUT_SECONDS", "600"))
+        try:
+            payload = await asyncio.wait_for(_execute_request_payload(), timeout=request_timeout)
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(f"Agent Studio request exceeded {request_timeout} seconds") from exc
         heartbeat_stop.set()
         heartbeat_task.cancel()
         try:
@@ -289,7 +385,7 @@ async def _run_agent_studio_job(run_id: str, req: "AgentStudioRequest", active_s
         job.update({
             "ok": False,
             "status": "failed",
-            "stage": "failed",
+            "stage": "timed_out" if isinstance(exc, TimeoutError) else "failed",
             "result": error_payload,
             "completed_at": time.time(),
             "elapsed_seconds": int(time.time() - float(job.get("started_at") or time.time())),
