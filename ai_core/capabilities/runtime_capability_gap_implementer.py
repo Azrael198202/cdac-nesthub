@@ -1033,12 +1033,12 @@ class RuntimeCapabilityGapImplementer:
         py_files = sorted([p.resolve() for p in tool_dir.rglob("*.py") if p.is_file()])
         emit("running", action="Preparing artifact validation", message=f"Sandbox validation target prepared: {tool_dir.name}", target_dir=str(tool_dir), file_count=len(py_files))
         if py_files:
-            import py_compile
-            emit("running", action="Compiling generated Python files", message=f"Validation case 1 running: python compile ({len(py_files)} files)", target_dir=str(tool_dir), file_count=len(py_files))
+            emit("running", action="Compiling generated Python files", message=f"Validation case 1 running: python compile ({len(py_files)} files)", target_dir=str(tool_dir), file_count=len(py_files), timeout_seconds=10)
             compile_started = time.monotonic()
             for file_index, py_file in enumerate(py_files, start=1):
-                # Guard against accidental workspace-wide scans. Validation may only
-                # inspect files inside the generated artifact directory.
+                # Validation must only inspect the generated artifact directory.
+                # Never compile the workspace, runtime logs, traces, .venv, or any
+                # path outside this artifact.
                 try:
                     py_file.relative_to(tool_dir)
                 except ValueError:
@@ -1046,21 +1046,37 @@ class RuntimeCapabilityGapImplementer:
                     checks.append(check)
                     emit("failed", action="Python compile target escaped artifact directory", message="Validation case 1 failed: compile target outside artifact directory", target_dir=str(tool_dir), current_file=str(py_file))
                     return {"passed": False, "status": "failed", "checks": checks}
-                emit("running", action=f"Compiling {py_file.name}", message=f"Validation case 1 running: compile {py_file.name}", target_dir=str(tool_dir), current_file=str(py_file), case_index=1, file_index=file_index, file_count=len(py_files))
-                try:
-                    py_compile.compile(str(py_file), doraise=True)
-                    checks.append({"name": "python_compile", "file": str(py_file), "passed": True})
-                except Exception as exc:
-                    check = {"name": "python_compile", "file": str(py_file), "passed": False, "error_type": exc.__class__.__name__, "error": str(exc)[-2000:]}
-                    checks.append(check)
-                    emit("failed", action="Python compile failed", message=f"Validation case 1 failed: compile {py_file.name}", target_dir=str(tool_dir), current_file=str(py_file), error_type=exc.__class__.__name__, detail=str(exc)[-500:])
-                    return {"passed": False, "status": "failed", "checks": checks}
-                if (time.monotonic() - compile_started) > 10:
-                    check = {"name": "python_compile", "passed": False, "reason": "compile_timeout_guard", "elapsed_seconds": round(time.monotonic() - compile_started, 3)}
+
+                emit("running", action=f"Compiling {py_file.name}", message=f"Validation case 1 running: compile {py_file.name}", target_dir=str(tool_dir), current_file=str(py_file), case_index=1, file_index=file_index, file_count=len(py_files), timeout_seconds=5)
+                # Compile in an isolated subprocess instead of calling py_compile in
+                # the main worker.  If interpreter startup, file IO, bytecode cache,
+                # or generated code validation ever blocks, the timeout returns a
+                # concrete failure and the run can terminate instead of hanging.
+                proc = self._run_isolated_python(["-m", "py_compile", str(py_file)], cwd=tool_dir, timeout=5)
+                check = {
+                    "name": "python_compile",
+                    "file": str(py_file),
+                    "passed": proc.get("returncode") == 0,
+                    "returncode": proc.get("returncode"),
+                    "stdout": str(proc.get("stdout") or "")[-1000:],
+                    "stderr": str(proc.get("stderr") or "")[-2000:],
+                    "timed_out": bool(proc.get("timed_out")),
+                    "timeout_seconds": proc.get("timeout_seconds"),
+                    "attempts": proc.get("attempts", []),
+                }
+                checks.append(check)
+                if proc.get("returncode") != 0:
+                    reason = "compile_timeout" if proc.get("timed_out") else "compile_failed"
+                    emit("failed", action="Python compile failed", message=f"Validation case 1 failed: compile {py_file.name}", target_dir=str(tool_dir), current_file=str(py_file), error_type=reason, detail=str(proc.get("stderr") or proc.get("stdout") or "")[-500:], timeout_seconds=proc.get("timeout_seconds"))
+                    return {"passed": False, "status": "failed", "checks": checks, "reason": reason, "target_dir": str(tool_dir)}
+                emit("running", action=f"Compiled {py_file.name}", message=f"Validation case 1 passed: compile {py_file.name}", target_dir=str(tool_dir), current_file=str(py_file), case_index=1, file_index=file_index, file_count=len(py_files))
+
+                if (time.monotonic() - compile_started) > 15:
+                    check = {"name": "python_compile", "passed": False, "reason": "compile_batch_timeout_guard", "elapsed_seconds": round(time.monotonic() - compile_started, 3)}
                     checks.append(check)
                     emit("failed", action="Python compile timeout guard triggered", message="Validation case 1 failed: python compile timeout guard", target_dir=str(tool_dir), elapsed_seconds=check["elapsed_seconds"])
-                    return {"passed": False, "status": "failed", "checks": checks}
-            emit("completed", action="Python compile passed; preparing unit tests", message="Validation case 1 passed: python compile", target_dir=str(tool_dir), file_count=len(py_files))
+                    return {"passed": False, "status": "failed", "checks": checks, "reason": "compile_batch_timeout", "target_dir": str(tool_dir)}
+            emit("completed", action="Python compile passed; preparing unit tests", message="Validation case 1 passed: python compile", target_dir=str(tool_dir), file_count=len(py_files), elapsed_seconds=round(time.monotonic() - compile_started, 3))
 
         test_candidates: list[Path] = []
         test_dir = Path(str(artifact.get("test_dir") or "")).resolve()
