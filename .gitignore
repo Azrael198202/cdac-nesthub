@@ -709,3 +709,17 @@ runtime_assets/seeds/capability_planners/__pycache__/default_capability_planner.
 ai_core/runtime/observability/__pycache__/runtime_console.cpython-313.pyc
 ai_core/runtime/external_runtimes/__pycache__/__init__.cpython-313.pyc
 ai_core/runtime/external_runtimes/__pycache__/gguf_model_resolver.cpython-313.pyc
+ai_core/events/__pycache__/need_capability_event.cpython-311.pyc
+ai_core/runtime/external_runtimes/__pycache__/__init__.cpython-311.pyc
+ai_core/runtime/external_runtimes/__pycache__/gguf_model_resolver.cpython-311.pyc
+ai_core/runtime/observability/__pycache__/__init__.cpython-311.pyc
+ai_core/runtime/observability/__pycache__/runtime_console.cpython-311.pyc
+ai_core/runtime/observability/__pycache__/stage_observer.cpython-311.pyc
+auxiliary_brain/capability_acquisition/__pycache__/__init__.cpython-311.pyc
+auxiliary_brain/capability_acquisition/__pycache__/acquisition_router.cpython-311.pyc
+auxiliary_brain/capability_acquisition/__pycache__/blueprint_generator.cpython-311.pyc
+auxiliary_brain/capability_acquisition/__pycache__/code_generator.cpython-311.pyc
+auxiliary_brain/capability_acquisition/__pycache__/implementation_planner.cpython-311.pyc
+auxiliary_brain/runtime_codegen/__pycache__/__init__.cpython-311.pyc
+auxiliary_brain/runtime_codegen/__pycache__/dynamic_value_hardcode_detector.cpython-311.pyc
+auxiliary_brain/runtime_codegen/__pycache__/runtime_variable_inferencer.cpython-311.pyc
