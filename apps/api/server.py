@@ -27,7 +27,7 @@ from ai_core.config.paths import RUNTIME_DOWNLOADS
 from ai_core.tools.runtime_registered_tool_service import RuntimeRegisteredToolService
 from ai_core.runtime.approval_policy_store import RuntimeApprovalPolicyStore
 from ai_core.graph.graph_visualization import GraphVisualStateBuilder
-from ai_core.runtime.observability.runtime_console import emit_console_event, list_console_sources, read_console_source, iter_console_events, list_runtime_explorer_tree, resolve_runtime_explorer_file
+from ai_core.runtime.observability.runtime_console import emit_console_event, set_current_run_id, reset_current_run_id, list_console_sources, read_console_source, iter_console_events, list_runtime_explorer_tree, resolve_runtime_explorer_file
 
 import traceback
 approval_learning = ApprovalLearningService()
@@ -114,7 +114,7 @@ def _job_progress(stage: str, status: str = "running", detail: str | None = None
     return payload
 
 
-def _console_events_for_run(run_id: str, *, limit: int = 80) -> list[dict[str, Any]]:
+def _console_events_for_run(run_id: str, *, limit: int = 80, started_at: float | None = None) -> list[dict[str, Any]]:
     safe = _safe_run_id(run_id)
     if not safe:
         return []
@@ -140,8 +140,8 @@ def _console_events_for_run(run_id: str, *, limit: int = 80) -> list[dict[str, A
                     events.append(event)
                 elif str(event.get("area") or "") == "capability_acquisition":
                     # Keep only capability stage events that were written after the run started.
-                    job = AGENT_STUDIO_RUNS.get(safe)
-                    started = float((job or {}).get("started_at") or 0)
+                    job = AGENT_STUDIO_RUNS.get(safe) or _load_agent_studio_run(safe) or {}
+                    started = float(started_at or (job or {}).get("started_at") or 0)
                     try:
                         from datetime import datetime
                         ts = datetime.fromisoformat(str(event.get("ts")).replace("Z", "+00:00")).timestamp()
@@ -154,10 +154,10 @@ def _console_events_for_run(run_id: str, *, limit: int = 80) -> list[dict[str, A
     return events[-limit:]
 
 
-def _console_progress_for_run(run_id: str) -> list[dict[str, Any]]:
+def _console_progress_for_run(run_id: str, *, started_at: float | None = None) -> list[dict[str, Any]]:
     progress: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
-    for event in _console_events_for_run(run_id):
+    for event in _console_events_for_run(run_id, started_at=started_at):
         name = str(event.get("event") or event.get("area") or "runtime")
         status = str(event.get("status") or "running").lower()
         if name == "REQUEST_HEARTBEAT":
@@ -166,6 +166,7 @@ def _console_progress_for_run(run_id: str) -> list[dict[str, Any]]:
         if name == "REQUEST_STARTED":
             label = "request accepted"
             action = "Runtime request accepted"
+            status = "completed"
         elif name == "REQUEST_FINISHED":
             label = "final answer"
             action = "Runtime request finished"
@@ -215,8 +216,14 @@ def _merge_progress_events(existing: list[dict[str, Any]], updates: list[dict[st
         if key in seen:
             continue
         seen.add(key)
-        merged.append(_job_progress(stage, status, detail))
-    return merged[-30:]
+        item = _job_progress(stage, status, detail)
+        # Preserve operator-facing metadata. Without this the UI can only show
+        # generic stage names and may fall back to stale "request accepted".
+        for k in ("action", "message", "console_message", "ts", "stage_index", "total_stages", "source"):
+            if k in ev and ev.get(k) not in (None, ""):
+                item[k] = ev.get(k)
+        merged.append(item)
+    return merged[-60:]
 
 
 def _normalize_agent_studio_job(run_id: str, job: dict[str, Any]) -> dict[str, Any]:
@@ -227,7 +234,7 @@ def _normalize_agent_studio_job(run_id: str, job: dict[str, Any]) -> dict[str, A
     job.setdefault("client_run_id", safe)
     job.setdefault("ui_run_id", safe)
     existing_events = job.get("progress_events") if isinstance(job.get("progress_events"), list) else []
-    console_progress = _console_progress_for_run(safe)
+    console_progress = _console_progress_for_run(safe, started_at=float(job.get("started_at") or 0))
     if console_progress:
         job["progress_events"] = _merge_progress_events(existing_events, console_progress)
     events = job.get("progress_events") if isinstance(job.get("progress_events"), list) else []
@@ -272,7 +279,11 @@ def _normalize_agent_studio_job(run_id: str, job: dict[str, Any]) -> dict[str, A
         terminal = _terminal_status(str(terminal_event.get("status") or "completed"))
         job["status"] = terminal
         event_name = str(terminal_event.get("event") or "")
-        job["stage"] = "final_synthesis" if terminal == "completed" else ("timed_out" if event_name == "REQUEST_TIMED_OUT" else terminal)
+        terminal_stage = "final_synthesis" if terminal == "completed" else ("timed_out" if event_name == "REQUEST_TIMED_OUT" else terminal)
+        job["stage"] = terminal_stage
+        job["current_stage"] = terminal_stage
+        job["current_action"] = str(terminal_event.get("message") or terminal_stage)
+        job["last_event"] = str(terminal_event.get("message") or terminal_stage)
         if not result and isinstance(terminal_event.get("data"), dict):
             maybe_result = terminal_event["data"].get("result")
             if isinstance(maybe_result, dict):
@@ -307,6 +318,9 @@ def _normalize_agent_studio_job(run_id: str, job: dict[str, Any]) -> dict[str, A
                 "diagnostic_log": "runtime/logs/runtime_console.jsonl",
             }
             job["progress_events"] = _merge_progress_events(events, [_job_progress("timeout guard", "failed", f"exceeded {max_seconds}s")])
+            job["current_stage"] = "timed_out"
+            job["current_action"] = f"runtime request exceeded {max_seconds}s"
+            job["last_event"] = f"runtime request exceeded {max_seconds}s"
             job["updated_at"] = time.time()
             _save_job(safe, job)
             emit_console_event(area="agent_studio", event="REQUEST_TIMED_OUT", status="failed", message=f"runtime request exceeded {max_seconds}s", data={"run_id": safe})
@@ -360,21 +374,27 @@ async def _run_agent_studio_job(run_id: str, req: "AgentStudioRequest", active_s
     heartbeat_task = asyncio.create_task(_heartbeat())
     try:
         emit_console_event(area="agent_studio", event="REQUEST_STARTED", status="running", message="runtime request accepted", data={"run_id": run_id})
+        emit_console_event(area="agent_studio", event="WORKER_STARTED", status="running", message="background worker started", data={"run_id": run_id, "stage_label": "BackgroundWorker", "action": "Background worker started", "console_message": "Background worker started"})
         async def _execute_request_payload() -> dict[str, Any]:
-            return await asyncio.to_thread(
-                lambda: asyncio.run(
-                    studio_service.handle_message(
-                        req.message,
-                        provided_inputs=req.provided_inputs,
-                        uploaded_artifacts=req.uploaded_artifacts,
-                        session_id=active_session_id,
-                        client_run_id=run_id,
+            def _thread_main() -> dict[str, Any]:
+                token = set_current_run_id(run_id)
+                try:
+                    return asyncio.run(
+                        studio_service.handle_message(
+                            req.message,
+                            provided_inputs=req.provided_inputs,
+                            uploaded_artifacts=req.uploaded_artifacts,
+                            session_id=active_session_id,
+                            client_run_id=run_id,
+                        )
                     )
-                )
-            )
+                finally:
+                    reset_current_run_id(token)
+            return await asyncio.to_thread(_thread_main)
 
         request_timeout = int(os.environ.get("AGENT_STUDIO_RUN_TIMEOUT_SECONDS", "600"))
         try:
+            emit_console_event(area="agent_studio", event="RUNTIME_EXECUTION_STARTED", status="running", message="runtime execution started", data={"run_id": run_id, "stage_label": "RuntimeExecution", "action": "Executing runtime request", "console_message": "Runtime execution started"})
             payload = await asyncio.wait_for(_execute_request_payload(), timeout=request_timeout)
         except asyncio.TimeoutError as exc:
             raise TimeoutError(f"Agent Studio request exceeded {request_timeout} seconds") from exc

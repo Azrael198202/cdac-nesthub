@@ -71,7 +71,7 @@ def _try_model_planner(*, request_text: str, identity: dict[str, Any], evidence:
         model_source=model_source,
         prompt=first_prompt,
         force_json=True,
-        timeout=float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_TIMEOUT", "45")),
+        timeout=float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_TIMEOUT", "15")),
         prompt_stage="capability_blueprint_planning",
     )
     attempts.append(first)
@@ -88,7 +88,7 @@ def _try_model_planner(*, request_text: str, identity: dict[str, Any], evidence:
         model_source=model_source,
         prompt=retry_prompt,
         force_json=False,
-        timeout=float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_COMPACT_TIMEOUT", os.environ.get("AI_CORE_CAPABILITY_PLANNER_TIMEOUT", "45"))),
+        timeout=float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_COMPACT_TIMEOUT", os.environ.get("AI_CORE_CAPABILITY_PLANNER_TIMEOUT", "15"))),
         prompt_stage="capability_blueprint_planning_compact",
     )
     attempts.append(retry)
@@ -179,7 +179,7 @@ def _call_ollama_json_planner(*, host: str, model: str, model_source: str, promp
         "model": model,
         "prompt": prompt,
         "stream": False,
-        "options": {"temperature": 0, "num_ctx": int(os.environ.get("AI_CORE_CAPABILITY_PLANNER_NUM_CTX", "3072")), "num_predict": int(os.environ.get("AI_CORE_CAPABILITY_PLANNER_NUM_PREDICT", "1600")), "think": False},
+        "options": {"temperature": 0, "num_ctx": int(os.environ.get("AI_CORE_CAPABILITY_PLANNER_NUM_CTX", "3072")), "num_predict": int(os.environ.get("AI_CORE_CAPABILITY_PLANNER_NUM_PREDICT", "512")), "think": False},
     }
     if force_json:
         body_payload["format"] = "json"

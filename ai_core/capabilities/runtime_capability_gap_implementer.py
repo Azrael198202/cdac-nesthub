@@ -125,6 +125,7 @@ class RuntimeCapabilityGapImplementer:
             mark("TemplateResolver", "matched", template_id=template.get("template_id"), score=match.score)
         else:
             mark("TemplateResolver", "template_not_found", template_locations=[str(p) for p in self.template_store.candidate_paths()])
+            mark("BlueprintPlanner", "running", action="Generating compact blueprint", console_message="Blueprint planning started")
             planner_record = self._plan_capability_with_runtime_planner(user_input=user_input, identity_contract=identity_contract, evidence=evidence)
             mark("BlueprintPlanner", str(planner_record.get("status") or "planner_failed"), planner=planner_record)
             if planner_record.get("status") != "planned" or not isinstance(planner_record.get("blueprint"), dict):

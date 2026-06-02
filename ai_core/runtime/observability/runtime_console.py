@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,23 @@ from ai_core.config.paths import PROJECT_ROOT
 
 RUNTIME_ROOT = PROJECT_ROOT / "runtime"
 CONSOLE_LOG = RUNTIME_ROOT / "logs" / "runtime_console.jsonl"
+CURRENT_RUN_ID: ContextVar[str] = ContextVar("runtime_console_current_run_id", default="")
+
+
+def set_current_run_id(run_id: str | None):
+    """Bind operator-visible events emitted in this execution context to a run.
+
+    This is observability metadata only. It prevents UI state from losing stage
+    events when generic runtime layers emit events without knowing the UI run id.
+    """
+    return CURRENT_RUN_ID.set(str(run_id or ""))
+
+
+def reset_current_run_id(token: object) -> None:
+    try:
+        CURRENT_RUN_ID.reset(token)
+    except Exception:
+        return
 
 
 def emit_console_event(*, area: str, event: str, status: str = "info", message: str = "", data: dict[str, Any] | None = None) -> None:
@@ -24,13 +42,17 @@ def emit_console_event(*, area: str, event: str, status: str = "info", message: 
     """
     try:
         CONSOLE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        clean_data = _redact_data(data or {})
+        bound_run_id = CURRENT_RUN_ID.get("")
+        if bound_run_id and isinstance(clean_data, dict) and not clean_data.get("run_id"):
+            clean_data["run_id"] = bound_run_id
         payload = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "area": str(area or "runtime"),
             "event": str(event or "event"),
             "status": str(status or "info"),
             "message": _redact(str(message or ""))[-4000:],
-            "data": _redact_data(data or {}),
+            "data": clean_data,
         }
         with CONSOLE_LOG.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
