@@ -93,7 +93,8 @@ class GenericToolRunner:
                 return self.provenance.attach(output, trace)
 
             output_schema = tool_spec.get("output_schema")
-            output_validation = self.schema_validator.validate_output(output_schema, output)
+            output_for_schema = self._output_for_schema_validation(output_schema, output)
+            output_validation = self.schema_validator.validate_output(output_schema, output_for_schema)
             if not output_validation.get("valid"):
                 data_payload = output.get("data") if isinstance(output.get("data"), dict) else None
                 data_validation = self.schema_validator.validate_output(output_schema, data_payload) if data_payload is not None else {"valid": False, "errors": output_validation.get("errors", [])}
@@ -132,6 +133,23 @@ class GenericToolRunner:
             return nested if isinstance(nested, dict) else {"value": nested}
         return input_data
 
+    def _output_for_schema_validation(self, output_schema: Any, output: dict[str, Any]) -> dict[str, Any]:
+        """Return the tool-contract output view for output_schema validation.
+
+        The runner may add generic runtime metadata such as ``source`` and
+        ``requires_human_confirmation`` for UI/orchestration. Those keys are
+        not part of every runtime-generated tool's declared output contract,
+        especially when the manifest sets ``additionalProperties: false``.
+        Validate only the declared contract fields instead of failing a real
+        tool execution because of runner-added envelope metadata.
+        """
+        if not isinstance(output_schema, dict) or not isinstance(output, dict):
+            return output
+        properties = output_schema.get("properties")
+        if not isinstance(properties, dict):
+            return output
+        return {key: value for key, value in output.items() if key in properties}
+
     def _redact_runtime_sensitive(self, value: Any) -> Any:
         if isinstance(value, dict):
             redacted: dict[str, Any] = {}
@@ -168,7 +186,7 @@ class GenericToolRunner:
                 "source": output.get("source") or source,
                 "requires_human_confirmation": bool(output.get("requires_human_confirmation", False)),
             }
-        if raw_status in {"success", "ok", "executed"}:
+        if raw_status in {"success", "ok", "executed", "completed", "complete"}:
             normalized = dict(output)
             normalized["status"] = "success"
             normalized.setdefault("source", source)

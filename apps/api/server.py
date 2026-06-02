@@ -75,6 +75,41 @@ def _write_api_error_log(*, area: str, exc: Exception, context: dict[str, Any] |
         return
 
 
+
+
+def _runtime_tool_execute_http_status(payload: dict[str, Any]) -> int:
+    """Map registered-tool execution payloads to HTTP status codes.
+
+    Schema/profile/request problems are client request errors. A runtime tool
+    that executed and returned a domain/runtime failure should still be sent to
+    the UI as a normal JSON response, otherwise the frontend can only show a
+    generic "form submit failed" message and hides the real tool error.
+    """
+    if not isinstance(payload, dict):
+        return 500
+    if payload.get("ok") is True:
+        return 200
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else payload
+    error = result.get("error") if isinstance(result, dict) and isinstance(result.get("error"), dict) else {}
+    code = str(error.get("code") or payload.get("code") or "").strip()
+    client_error_codes = {
+        "tool_input_schema_validation_failed",
+        "tool_connection_schema_validation_failed",
+        "tool_secret_schema_validation_failed",
+        "profile_not_found",
+        "tool_not_found",
+        "invalid_tool_spec",
+        "unsupported_tool_implementation",
+        "missing_module_path",
+        "module_not_found",
+    }
+    if code in client_error_codes:
+        return 400
+    if code in {"requires_human_confirmation", "approval_required"}:
+        return 409
+    return 200
+
+
 class ChatRequest(BaseModel):
     message: str
     local_model: str | None = None
@@ -705,12 +740,12 @@ async def agent_studio_execute_runtime_tool(req: RegisteredToolExecuteRequest):
             approval_confirmed=bool(req.approval_confirmed),
             remember_approval=bool(req.remember_approval),
         )
-        status = 200 if payload.get("ok") else 400
-        if status >= 400:
+        status = _runtime_tool_execute_http_status(payload)
+        if status >= 400 or payload.get("ok") is not True:
             _write_api_failure_log(
                 area="agent_studio_execute_runtime_tool",
                 payload=payload,
-                context={"tool_id": req.tool_id, "profile_id": req.profile_id or "default"},
+                context={"tool_id": req.tool_id, "profile_id": req.profile_id or "default", "http_status": status},
             )
         return JSONResponse(payload, status_code=status)
     except Exception as exc:
