@@ -31,16 +31,27 @@ def plan(payload: dict[str, Any]) -> dict[str, Any]:
         evidence=evidence,
         contract=contract,
     )
-    if isinstance(model_payload, dict) and isinstance(model_payload.get("template"), dict):
+    if isinstance(model_payload, dict) and (isinstance(model_payload.get("blueprint"), dict) or isinstance(model_payload.get("template"), dict)):
         model_payload.setdefault("status", "planned")
         model_payload.setdefault("confidence_score", 0.76)
         model_payload.setdefault("needs_external_evidence", False)
         model_payload.setdefault("planner_engine", "local_model")
         return model_payload
 
+    fallback_allowed = os.environ.get("AI_CORE_DISABLE_NEUTRAL_BLUEPRINT_FALLBACK", "").lower() not in {"1", "true", "yes"}
+    if fallback_allowed:
+        return {
+            "status": "planned",
+            "confidence_score": 0.72,
+            "needs_external_evidence": False,
+            "planner_engine": "neutral_blueprint_fallback",
+            "model_planner_attempt": model_payload if isinstance(model_payload, dict) else {"status": "skipped"},
+            "blueprint": _neutral_blueprint(request_text=request_text, identity=identity),
+        }
+
     return {
         "status": "planner_failed",
-        "reason": "local_model_template_unavailable_or_invalid",
+        "reason": "local_model_blueprint_unavailable_or_invalid",
         "confidence_score": 0,
         "needs_external_evidence": True,
         "model_planner_attempt": model_payload if isinstance(model_payload, dict) else {"status": "skipped"},
@@ -61,7 +72,7 @@ def _try_model_planner(*, request_text: str, identity: dict[str, Any], evidence:
         timeout=float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_TIMEOUT", "45")),
     )
     attempts.append(first)
-    if isinstance(first.get("template"), dict):
+    if isinstance(first.get("blueprint"), dict) or isinstance(first.get("template"), dict):
         return first
 
     # Small local models sometimes return an empty response when Ollama JSON mode
@@ -75,7 +86,7 @@ def _try_model_planner(*, request_text: str, identity: dict[str, Any], evidence:
         timeout=float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_COMPACT_TIMEOUT", os.environ.get("AI_CORE_CAPABILITY_PLANNER_TIMEOUT", "45"))),
     )
     attempts.append(retry)
-    if isinstance(retry.get("template"), dict):
+    if isinstance(retry.get("blueprint"), dict) or isinstance(retry.get("template"), dict):
         retry["attempts"] = attempts
         retry["compact_retry_used"] = True
         retry["model_source"] = model_source
@@ -146,14 +157,14 @@ def _call_ollama_json_planner(*, host: str, model: str, prompt: str, force_json:
         parsed = _parse_json_object(text)
         if not isinstance(parsed, dict):
             return {"status": "planner_failed", "reason": "model_returned_non_json", "raw_excerpt": text[:500], "model": model, "force_json": force_json}
-        template = parsed.get("template") if isinstance(parsed.get("template"), dict) else parsed
-        if not isinstance(template, dict):
-            return {"status": "planner_failed", "reason": "model_returned_no_template", "raw_excerpt": text[:500], "model": model, "force_json": force_json}
+        blueprint = parsed.get("blueprint") if isinstance(parsed.get("blueprint"), dict) else parsed.get("template") if isinstance(parsed.get("template"), dict) else parsed
+        if not isinstance(blueprint, dict):
+            return {"status": "planner_failed", "reason": "model_returned_no_blueprint", "raw_excerpt": text[:500], "model": model, "force_json": force_json}
         return {
             "status": "planned",
             "confidence_score": float(parsed.get("confidence_score") or parsed.get("confidence") or 0.76),
             "needs_external_evidence": _to_bool(parsed.get("needs_external_evidence", False), default=False),
-            "template": template,
+            "blueprint": blueprint,
             "model": model,
             "force_json": force_json,
         }
@@ -178,14 +189,14 @@ def _model_prompt(*, request_text: str, identity: dict[str, Any], evidence: dict
     compact_request = str(request_text or "")[:1600]
     compact_contract = _compact_contract(contract)
     return (
-        "You are a runtime capability template planner. Return ONLY one JSON object. "
+        "You are a runtime capability blueprint planner. Return ONLY one JSON object. "
         "Do not include markdown. Do not ask questions. "
-        "Generate a sandbox-verifiable Python capability template from the user request and evidence. "
+        "Generate a sandbox-verifiable Python capability blueprint from the user request and evidence. "
         "Do not invent fixed runtime values. Do not hardcode endpoints, credentials, addresses, tokens, paths, or user data. "
         "Runtime values must be declared in JSON schemas and supplied at execution time. "
         "Prefer standard library only when requested. External packages must be declared as dependencies. "
-        "The JSON object must contain: confidence_score, needs_external_evidence, template. "
-        "template must contain: template_id, description, capabilities, match_terms, entrypoint, files, "
+        "The JSON object must contain: confidence_score, needs_external_evidence, blueprint. "
+        "blueprint must contain: capability_id, description, capabilities, match_terms, entrypoint, files, "
         "input_schema, output_schema, connection_schema, secret_schema, approval_policy, runtime_interface, "
         "runtime_execution_policy, verification_input, verification_expectations, acquisition_policy, capability_match_contract. "
         "files must contain one Python implementation file exposing the entrypoint function and one isolated test file. "
@@ -226,7 +237,7 @@ def _compact_model_prompt(*, request_text: str, identity: dict[str, Any], eviden
     }
     return (
         "Return ONLY valid JSON. No markdown. No explanation. "
-        "Create one runtime capability template. "
+        "Create one runtime capability blueprint. "
         "Do not hardcode runtime values. Put runtime values in schemas. "
         "Use only neutral generic structure. "
         "Required shape: {\"confidence_score\":0.0-1.0,\"needs_external_evidence\":false,\"template\":{...}}. "
@@ -239,6 +250,36 @@ def _compact_model_prompt(*, request_text: str, identity: dict[str, Any], eviden
         f"DATA={json.dumps(compact_payload, ensure_ascii=False)}"
     )
 
+
+
+def _neutral_blueprint(*, request_text: str, identity: dict[str, Any]) -> dict[str, Any]:
+    requested = str(identity.get("requested_capability_id") or "").strip()
+    if not requested:
+        match = re.search(r"Acquire\s+runtime\s+capability\s*:\s*\n?\s*([^\n.]+)", request_text, flags=re.I)
+        requested = _safe_name(match.group(1)) if match else "generated_capability"
+    return {
+        "capability_id": _safe_name(requested),
+        "description": "Neutral runtime-generated capability blueprint created without embedded domain behavior.",
+        "capabilities": [_safe_name(requested)],
+        "match_terms": [],
+        "entrypoint": {"module": "tool.py", "function": "run"},
+        "input_schema": {"type": "object", "additionalProperties": True},
+        "output_schema": {"type": "object", "properties": {"status": {"type": "string"}, "data": {"type": "object"}}, "additionalProperties": True},
+        "verification_input": {"_runtime": {"dry_run": True}},
+        "verification_expectations": {"status": "completed"},
+        "acquisition_policy": {"allow_policy_backed_basic_acquisition_without_external_evidence": True},
+        "capability_match_contract": {
+            "expected_tool_id": _safe_name(requested),
+            "expected_template_id": _safe_name(requested),
+            "required_artifact_dir_name": _safe_name(requested),
+            "required_markers": [_safe_name(requested)],
+            "forbidden_markers": [],
+        },
+    }
+
+
+def _safe_name(value: str) -> str:
+    return "".join(c if c.isalnum() else "_" for c in str(value)).strip("_").lower() or "generated_capability"
 
 def _compact_contract(contract: Any) -> Any:
     if not isinstance(contract, dict):

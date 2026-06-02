@@ -20,6 +20,7 @@ from ai_core.validation.recoverable_validation_error import RecoverableValidatio
 from ai_core.execution.continuation_engine import ContinuationEngine
 from ai_core.workflow.workflow_state_merger import WorkflowStateMerger
 from ai_core.runtime.modeling.feedback_escalator import FeedbackEscalator
+from ai_core.runtime.observability.stage_observer import RuntimeStageObserver
 
 
 class WorkflowRuntime:
@@ -39,6 +40,7 @@ class WorkflowRuntime:
         self.continuation_engine = ContinuationEngine()
         self.workflow_state_merger = WorkflowStateMerger()
         self.model_feedback = FeedbackEscalator()
+        self.stage_observer = RuntimeStageObserver()
         self._event_listeners: dict[str, list[Callable[[dict], Any]]] = {}
 
     def _load_workflow(self) -> Dict[str, Any]:
@@ -494,6 +496,19 @@ class WorkflowRuntime:
                 "message": f"Loading runtime node config: {workflow_node.get('node_config')}",
                 "progress": progress
             })
+            stage_started_at = __import__("time").perf_counter()
+            self.stage_observer.emit(
+                run_id=run_id,
+                stage_id=node_id,
+                area="workflow",
+                event="node_started",
+                status="running",
+                message=f"node started: {node_id}",
+                duration_ms=0,
+                model_id=state.get("runtime_options", {}).get("local_model") if isinstance(state.get("runtime_options"), dict) else None,
+                provider=None,
+                metadata={"attempt_number": attempt_number, "executor_type": node_config.get("executor_type")},
+            )
 
             ok, cap_result = await self.capabilities.ensure_capabilities(
                 run_id,
@@ -683,6 +698,22 @@ class WorkflowRuntime:
             done = self._progress(workflow, state["node_index"])
             state["progress"] = done
 
+            elapsed_ms = int((__import__("time").perf_counter() - stage_started_at) * 1000)
+            self.stage_observer.emit(
+                run_id=run_id,
+                stage_id=node_id,
+                area="workflow",
+                event="node_completed",
+                status="completed",
+                message=f"node completed: {node_id}",
+                duration_ms=elapsed_ms,
+                model_id=result.get("_model_id") if isinstance(result, dict) else None,
+                provider=result.get("_provider") if isinstance(result, dict) else None,
+                prompt_trace_path=result.get("_prompt_trace_path") if isinstance(result, dict) else None,
+                output_trace_path=result.get("_output_trace_path") if isinstance(result, dict) else None,
+                metadata={"attempt_number": attempt_number, "executor_type": node_config.get("executor_type")},
+            )
+
             await self._emit(run_id, {
                 "type": "NODE_RESULT",
                 "title": f"{node_id} result",
@@ -690,6 +721,7 @@ class WorkflowRuntime:
                 "attempt_number": attempt_number,
                 "message": "Node executed by generic executor.",
                 "result": result,
+                "duration_ms": elapsed_ms,
                 "progress": done
             })
 

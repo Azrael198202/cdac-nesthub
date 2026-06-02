@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Execution Monitor</title>
+<style>
+:root{--bg:#05070b;--panel:#0b111a;--line:#1e293b;--text:#e5edf7;--muted:#94a3b8;--ok:#41d37e;--warn:#facc15;--err:#fb7185;--info:#60a5fa}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,Arial,sans-serif;height:100vh;display:grid;grid-template-columns:340px 1fr;overflow:hidden}aside{border-right:1px solid var(--line);background:#08101a;padding:14px;overflow:auto}main{display:grid;grid-template-rows:auto 1fr 38%;min-width:0}h1{font-size:18px;margin:0 0 8px}.hint{font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:12px}button,input{background:#101827;color:var(--text);border:1px solid #334155;border-radius:8px;padding:8px 10px}button{cursor:pointer}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.source{padding:10px;border:1px solid #243244;border-radius:10px;margin:8px 0;background:#0c1420;cursor:pointer;word-break:break-all}.source.active{border-color:var(--info);background:#102033}.meta{font-size:11px;color:var(--muted);margin-top:4px}.toolbar{padding:10px 14px;border-bottom:1px solid var(--line);background:#08101a}.grid{overflow:auto;padding:12px}.events{overflow:auto;padding:12px;border-top:1px solid var(--line);background:#03060a;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;white-space:pre-wrap}.card{border:1px solid #223047;border-radius:12px;background:#0a121d;margin-bottom:10px;padding:12px}.card h3{margin:0 0 6px;font-size:14px}.pill{font-size:11px;border-radius:999px;padding:2px 7px;background:#172033;color:var(--muted)}.ok{color:var(--ok)}.failed,.error{color:var(--err)}.running{color:var(--info)}.warn{color:var(--warn)}.small{font-size:12px;color:var(--muted)}.kv{display:grid;grid-template-columns:130px 1fr;gap:4px;font-size:12px}.link{color:#93c5fd;text-decoration:none}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.tabs{display:flex;gap:8px;margin-top:8px}.tab{font-size:12px}.tab.active{border-color:var(--info)}
+</style>
+</head>
+<body>
+<aside>
+  <h1>Execution Monitor</h1>
+  <div class="hint">Live monitor for workflow stages, model selection, prompts, outputs, duration, capability generation, downloads, and runtime traces. It tails files incrementally and does not block execution.</div>
+  <div class="row"><button onclick="loadSources()">refresh</button><button onclick="clearView()">clear</button><label class="small"><input id="auto" type="checkbox" checked/> auto tail</label></div>
+  <div id="sources"></div>
+</aside>
+<main>
+  <div class="toolbar">
+    <div class="row"><b id="current">runtime/traces/stage_observer</b><span class="pill" id="status">ready</span><a class="link" href="/runtime-console" style="margin-left:auto">Runtime Console</a><a class="link" href="/agent-studio">Agent Studio</a></div>
+    <div class="tabs"><button class="tab active" onclick="setMode('cards')" id="tabCards">stage cards</button><button class="tab" onclick="setMode('raw')" id="tabRaw">raw tail</button></div>
+  </div>
+  <div class="grid" id="cards"></div>
+  <div class="events" id="raw"></div>
+</main>
+<script>
+let selected='runtime/logs/runtime_console.jsonl';let cursor=0;let rawBuffer='';let mode='cards';let records=[];
+function esc(s){return String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function st(t){document.getElementById('status').textContent=t;}
+async function api(url){const r=await fetch(url,{cache:'no-store'});if(!r.ok)throw new Error(await r.text());return r.json();}
+function cls(s){s=String(s||'').toLowerCase();if(s.includes('fail')||s.includes('error'))return 'failed';if(s.includes('run'))return 'running';if(s.includes('warn'))return 'warn';return 'ok';}
+async function loadSources(){try{const data=await api('/api/runtime-console/sources');const box=document.getElementById('sources');box.innerHTML='';let src=(data.sources||[]).filter(x=>String(x.path).includes('stage_observer')||String(x.path).includes('runtime_console')||String(x.path).includes('/llm/')||String(x.path).includes('download')||String(x.path).includes('capability'));
+src.sort((a,b)=>String(b.modified_at).localeCompare(String(a.modified_at)));src.forEach(s=>{const d=document.createElement('div');d.className='source '+(s.path===selected?'active':'');d.onclick=()=>selectSource(s.path);d.innerHTML='<div>'+esc(s.path)+'</div><div class="meta">'+esc(s.type)+' · '+(s.size_bytes||0)+' bytes · '+esc(s.modified_at||'')+'</div>';box.appendChild(d)});st('sources '+src.length)}catch(e){st('source error '+e.message)}}
+function selectSource(path){selected=path;cursor=0;rawBuffer='';records=[];document.getElementById('current').textContent=path;render();loadSources();tail(true)}
+function clearView(){rawBuffer='';records=[];render()}
+function setMode(m){mode=m;document.getElementById('tabCards').classList.toggle('active',m==='cards');document.getElementById('tabRaw').classList.toggle('active',m==='raw');render()}
+function parseNew(text){text.split(/\n/).forEach(line=>{if(!line.trim())return;try{const o=JSON.parse(line);records.push(o)}catch(e){records.push({ts:'',status:'raw',message:line,event:'raw'})}});if(records.length>500)records=records.slice(-500)}
+function render(){document.getElementById('raw').textContent=rawBuffer;const box=document.getElementById('cards');if(mode==='raw'){box.innerHTML='<div class="small">Raw mode enabled. See tail panel below.</div>';return}const stageRecords=records.filter(r=>r.stage_id||r.node_id||r.area);box.innerHTML=stageRecords.slice(-120).reverse().map(r=>{const status=esc(r.status||'info');const c=cls(status);const prompt=r.prompt_trace_path?'<a class="link" href="#" onclick="selectSource(\''+esc(String(r.prompt_trace_path).replace(/^.*?(runtime\/)/,'runtime/'))+'\')">prompt</a>':'';const output=r.output_trace_path?'<a class="link" href="#" onclick="selectSource(\''+esc(String(r.output_trace_path).replace(/^.*?(runtime\/)/,'runtime/'))+'\')">output</a>':'';return '<div class="card"><h3>'+esc(r.stage_id||r.node_id||r.event)+' <span class="'+c+'">'+status+'</span></h3><div class="kv"><div>time</div><div class="mono">'+esc(r.ts||'')+'</div><div>duration</div><div>'+esc(r.duration_ms??'')+' ms</div><div>model</div><div>'+esc(r.model_id||'')+'</div><div>provider</div><div>'+esc(r.provider||'')+'</div><div>event</div><div>'+esc(r.event||'')+'</div><div>trace</div><div>'+prompt+' '+output+'</div><div>message</div><div>'+esc(r.message||'')+'</div></div></div>'}).join('')||'<div class="small">No stage records yet. Select runtime_console.jsonl or a stage_observer trace.</div>'}
+async function tail(reset){try{const url='/api/runtime-console/read?source='+encodeURIComponent(selected)+'&cursor='+cursor+'&limit_bytes=131072&tail='+(reset?'true':'false');const data=await api(url);if(!data.ok){st(data.status||'not found');return}cursor=data.next_cursor||cursor;const text=data.content||'';if(reset){rawBuffer='';records=[]}if(text){rawBuffer+=text;parseNew(text);render()}st('cursor '+cursor+' / '+(data.size_bytes||0))}catch(e){st('tail error '+e.message)}}
+setInterval(()=>{if(document.getElementById('auto').checked)tail(false)},1500);loadSources().then(()=>tail(true));
+</script>
+</body>
+</html>

@@ -16,6 +16,8 @@ from ai_core.runtime.capability.acquisition_gate import RuntimeCapabilityAcquisi
 from ai_core.runtime.capability.runtime_capability_template_store import RuntimeCapabilityTemplateStore
 from ai_core.runtime.self_repair.engine import RuntimeSelfRepairEngine
 from ai_core.runtime.observability.runtime_console import emit_console_event
+from ai_core.runtime.observability.stage_observer import RuntimeStageObserver
+from ai_core.capabilities.runtime_blueprint_artifact_generator import RuntimeBlueprintArtifactGenerator
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,8 @@ class RuntimeCapabilityGapImplementer:
         self.module_registry_path = RUNTIME_REGISTRY / "module_registry.json"
         self.acquisition_gate = RuntimeCapabilityAcquisitionGate()
         self.self_repair = RuntimeSelfRepairEngine(storage_root=RUNTIME_GENERATED / "self_repair")
+        self.stage_observer = RuntimeStageObserver()
+        self.blueprint_artifact_generator = RuntimeBlueprintArtifactGenerator()
 
     def implement_if_requested(
         self,
@@ -87,42 +91,53 @@ class RuntimeCapabilityGapImplementer:
         mark("CapabilityIdentityExtractor", "completed", identity=identity_contract)
 
         urls = evidence.get("urls") if isinstance(evidence.get("urls"), list) else []
-        templates = self._load_templates()
-        match = self._select_template(str(user_input or ""), templates)
-        template_source = "template_first"
+        match: TemplateMatch | None = None
+        template_source = "runtime_blueprint_planner"
         planner_record: dict[str, Any] | None = None
-        if match:
-            template = self._merge_identity_contract_into_template(match.template, identity_contract)
-            mark("TemplateResolver", "matched", template_id=template.get("template_id"), score=match.score)
+
+        # v16: template-less acquisition is the default. The small/runtime model
+        # creates a neutral blueprint, then ai_core materializes and verifies it.
+        # Existing runtime templates may be used only when explicitly enabled for
+        # compatibility by AI_CORE_ALLOW_TEMPLATE_FALLBACK=true.
+        mark("TemplateResolver", "skipped", reason="template_less_blueprint_generation_is_default")
+        planner_record = self._plan_capability_with_runtime_planner(user_input=user_input, identity_contract=identity_contract, evidence=evidence)
+        mark("BlueprintPlanner", str(planner_record.get("status") or "planner_failed"), planner=planner_record)
+
+        if planner_record.get("status") == "planned" and isinstance(planner_record.get("template"), dict):
+            template = self._merge_identity_contract_into_template(dict(planner_record["template"]), identity_contract)
+            persisted_template = self._persist_runtime_planned_template(template=template, run_id=run_id, planner_record=planner_record)
+            mark("BlueprintMaterializer", "completed" if persisted_template.get("passed") else "failed", result=persisted_template)
+            match = TemplateMatch(template=template, score=int(float(planner_record.get("confidence_score") or 1) * 100))
         else:
-            mark("TemplateResolver", "template_not_found", template_locations=[str(p) for p in self.template_store.candidate_paths()])
-            planner_record = self._plan_capability_with_runtime_planner(user_input=user_input, identity_contract=identity_contract, evidence=evidence)
-            mark("LLMCapabilityPlanner", str(planner_record.get("status") or "planner_failed"), planner=planner_record)
-            if planner_record.get("status") != "planned" or not isinstance(planner_record.get("template"), dict):
+            if self._allow_template_fallback():
+                templates = self._load_templates()
+                match = self._select_template(str(user_input or ""), templates)
+                if match:
+                    template = self._merge_identity_contract_into_template(match.template, identity_contract)
+                    template_source = "compatibility_template_fallback"
+                    mark("TemplateFallback", "matched", template_id=template.get("template_id"), score=match.score)
+                else:
+                    mark("TemplateFallback", "not_found", template_locations=[str(p) for p in self.template_store.candidate_paths()])
+            if not match:
                 repair = self._runtime_self_repair(
                     run_id=run_id,
-                    stage="LLMCapabilityPlanner",
+                    stage="BlueprintPlanner",
                     status=str(planner_record.get("status") or "planner_failed"),
-                    reason=str(planner_record.get("reason") or "planner_did_not_return_template"),
+                    reason=str(planner_record.get("reason") or "planner_did_not_return_blueprint"),
                     payload={"identity": identity_contract, "planner": planner_record},
-                    expected={"required_status": "planned", "required_payload": "template"},
+                    expected={"required_status": "planned", "required_payload": "blueprint_or_template"},
                 )
                 mark("RuntimeSelfRepairEngine", str(repair.get("status") or "repair_checked"), repair=repair)
                 return {
                     "status": str(planner_record.get("status") or "planner_failed"),
-                    "reason": str(planner_record.get("reason") or "template_not_found_and_planner_failed"),
+                    "reason": str(planner_record.get("reason") or "blueprint_planner_failed"),
                     "requested_identity_contract": identity_contract,
                     "pipeline": pipeline,
                     "self_repair": repair,
                     "evidence_present": bool(urls),
-                    "diagnosis": "planner_failed_after_verified_evidence" if urls else "planner_failed_before_verified_evidence",
+                    "diagnosis": "blueprint_planner_failed_after_verified_evidence" if urls else "blueprint_planner_failed_before_verified_evidence",
                     "generated_at": datetime.now(timezone.utc).isoformat(),
                 }
-            template = self._merge_identity_contract_into_template(dict(planner_record["template"]), identity_contract)
-            persisted_template = self._persist_runtime_planned_template(template=template, run_id=run_id, planner_record=planner_record)
-            mark("TemplateMaterializer", "completed" if persisted_template.get("passed") else "failed", result=persisted_template)
-            template_source = "llm_capability_planner"
-            match = TemplateMatch(template=template, score=int(planner_record.get("confidence_score") or 1))
 
         acquisition_policy = template.get("acquisition_policy") if isinstance(template.get("acquisition_policy"), dict) else {}
         planner_unknown = bool(planner_record and planner_record.get("needs_external_evidence"))
@@ -377,26 +392,29 @@ class RuntimeCapabilityGapImplementer:
                 planner = self._load_runtime_generated_default_planner()
             if not callable(planner):
                 raise TypeError("planner_hook_not_callable")
-            payload = planner({
-                "user_input": user_input,
-                "identity_contract": identity_contract,
-                "evidence": evidence,
-                "required_template_contract": self._runtime_planner_template_contract(),
-                "planner_origin": planner_origin,
-            })
+            with self.stage_observer.span(run_id="capability_planner", stage_id="blueprint_planning", area="capability_acquisition", metadata={"planner_origin": planner_origin}) as span:
+                payload = planner({
+                    "user_input": user_input,
+                    "identity_contract": identity_contract,
+                    "evidence": evidence,
+                    "required_template_contract": self._runtime_planner_template_contract(),
+                    "required_blueprint_contract": self._runtime_planner_template_contract(),
+                    "planner_origin": planner_origin,
+                })
             if not isinstance(payload, dict):
                 return {"status": "planner_failed", "reason": "planner_returned_non_object", "confidence_score": 0, "needs_external_evidence": True}
-            template = payload.get("template")
+            raw_blueprint = payload.get("blueprint") if isinstance(payload.get("blueprint"), dict) else payload.get("template")
             confidence = float(payload.get("confidence_score") or payload.get("confidence") or 0)
-            if not isinstance(template, dict):
-                return {"status": "planner_failed", "reason": "planner_returned_no_template", "confidence_score": confidence, "needs_external_evidence": True, "raw": payload}
+            if not isinstance(raw_blueprint, dict):
+                return {"status": "planner_failed", "reason": "planner_returned_no_blueprint", "confidence_score": confidence, "needs_external_evidence": True, "raw": payload}
+            template = self.blueprint_artifact_generator.materialize(raw_blueprint, identity_contract=identity_contract)
             validation = self._validate_runtime_template_shape(template)
             if not validation.get("passed"):
-                return {"status": "planner_failed", "reason": "planner_template_contract_failed", "confidence_score": confidence, "needs_external_evidence": True, "validation": validation}
+                return {"status": "planner_failed", "reason": "planner_blueprint_contract_failed", "confidence_score": confidence, "needs_external_evidence": True, "validation": validation}
             min_confidence = float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_MIN_CONFIDENCE", "0.70") or 0.70)
             if confidence < min_confidence:
                 return {"status": "planner_low_confidence", "reason": "planner_confidence_below_threshold", "confidence_score": confidence, "needs_external_evidence": True, "template": template, "validation": validation}
-            return {"status": "planned", "confidence_score": confidence, "needs_external_evidence": bool(payload.get("needs_external_evidence")), "template": template, "validation": validation, "planner_origin": planner_origin}
+            return {"status": "planned", "confidence_score": confidence, "needs_external_evidence": bool(payload.get("needs_external_evidence")), "template": template, "blueprint": raw_blueprint, "validation": validation, "planner_origin": planner_origin}
         except ValueError:
             return {
                 "status": "planner_failed",
@@ -413,6 +431,9 @@ class RuntimeCapabilityGapImplementer:
                 "needs_external_evidence": True,
             }
 
+
+    def _allow_template_fallback(self) -> bool:
+        return str(os.environ.get("AI_CORE_ALLOW_TEMPLATE_FALLBACK", "")).strip().casefold() in {"1", "true", "yes", "on"}
 
     def _load_runtime_generated_default_planner(self) -> Callable[[dict[str, Any]], dict[str, Any]]:
         """Load the runtime-owned default planner when no env hook is set.

@@ -43,14 +43,14 @@ Constraints:
         )
     try:
         assert result["status"] == "implemented_tested_registered", result
-        assert result["template_source"] == "llm_capability_planner", result
+        assert result["template_source"] == "runtime_blueprint_planner", result
         assert result["validation"]["passed"] is True, result
         assert result["verification_run"]["passed"] is True, result
         assert result["registration"]["status"] == "registered", result
         stages = [(item.get("stage"), item.get("status")) for item in result.get("pipeline", [])]
-        assert ("TemplateResolver", "template_not_found") in stages, stages
-        assert ("LLMCapabilityPlanner", "planned") in stages, stages
-        assert ("TemplateMaterializer", "completed") in stages, stages
+        assert ("TemplateResolver", "skipped") in stages, stages
+        assert ("BlueprintPlanner", "planned") in stages, stages
+        assert ("BlueprintMaterializer", "completed") in stages, stages
         assert ("ArtifactGenerator", "completed") in stages, stages
         assert ("SandboxValidator", "completed") in stages, stages
         assert ("RegistryWriter", "completed") in stages, stages

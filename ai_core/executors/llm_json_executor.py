@@ -19,6 +19,7 @@ from ai_core.roles import RoleProfileSelector, PromptPackLoader, RoleScopedConte
 from ai_core.runtime.modeling import ModelStagePolicy
 from ai_core.runtime.governance import RuntimeCostPolicy
 from ai_core.llm.prompt_io_recorder import PromptIORecorder
+from ai_core.runtime.observability.stage_observer import RuntimeStageObserver
 
 
 class LLMJsonExecutor:
@@ -46,6 +47,7 @@ class LLMJsonExecutor:
         self.stage_policy = ModelStagePolicy()
         self.runtime_cost_policy = RuntimeCostPolicy()
         self.prompt_io_recorder = PromptIORecorder()
+        self.stage_observer = RuntimeStageObserver()
 
     async def execute(self, workflow_node: dict, node_config: dict, state: dict, capability_result: dict) -> dict:
         run_id = state["run_id"]
@@ -241,6 +243,17 @@ class LLMJsonExecutor:
             "prompt_trace_path": prompt_trace_path,
             "node_id": node_id,
         })
+        self.stage_observer.emit(
+            run_id=run_id,
+            stage_id=str(node_id),
+            area="llm",
+            event="prompt_rendered",
+            status="completed",
+            message=f"prompt rendered for {node_id}",
+            duration_ms=0,
+            prompt_trace_path=prompt_trace_path,
+            metadata={"prompt_length": len(rendered), "schema_path": str(schema_path)},
+        )
 
         role_budget = role_profile.get("prompt_policy", {}).get("max_context_tokens")
         runtime_options = state.get("runtime_options", {}) if isinstance(state.get("runtime_options", {}), dict) else {}
@@ -255,6 +268,7 @@ class LLMJsonExecutor:
         adapter = self.runtime_cost_policy.apply_adapter_budget(adapter)
 
         try:
+            llm_started_at = __import__("time").perf_counter()
             result = await self.router.generate_json(
                 run_id=run_id,
                 node_id=node_id,
@@ -275,13 +289,29 @@ class LLMJsonExecutor:
                     "result": result,
                 },
             )
+            llm_elapsed_ms = int((__import__("time").perf_counter() - llm_started_at) * 1000)
             await event_bus.emit(run_id, {
                 "type": "LLM_OUTPUT_RECORDED",
                 "title": "LLM output recorded",
                 "message": f"LLM output trace={output_trace_path}",
                 "node_id": node_id,
                 "output_trace_path": output_trace_path,
+                "duration_ms": llm_elapsed_ms,
             })
+            self.stage_observer.emit(
+                run_id=run_id,
+                stage_id=str(node_id),
+                area="llm",
+                event="llm_output_recorded",
+                status="completed",
+                message=f"llm output recorded for {node_id}",
+                duration_ms=llm_elapsed_ms,
+                model_id=adapter.get("preferred_local_model") or adapter.get("model") or adapter.get("model_id"),
+                provider=adapter.get("provider") or adapter.get("provider_template"),
+                prompt_trace_path=prompt_trace_path,
+                output_trace_path=output_trace_path,
+                metadata={"adapter_id": adapter.get("adapter_id"), "prompt_id": prompt.get("id")},
+            )
         except Exception as exc:
             recovered = self._recover_stage_result_after_provider_error(
                 node_id=node_id,
@@ -550,6 +580,10 @@ class LLMJsonExecutor:
         result["_executor_type"] = "llm_json"
         result["_node_id"] = node_id
         result["_adapter_id"] = adapter.get("adapter_id")
+        result["_model_id"] = adapter.get("preferred_local_model") or adapter.get("model") or adapter.get("model_id")
+        result["_provider"] = adapter.get("provider") or adapter.get("provider_template")
+        result["_prompt_trace_path"] = prompt_trace_path
+        result["_output_trace_path"] = locals().get("output_trace_path")
         return result
 
     def _postprocess_stage_result(self, *, node_id: str | None, result: dict, state: dict, slim_user_input: str) -> dict:

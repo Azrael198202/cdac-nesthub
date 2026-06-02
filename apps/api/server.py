@@ -266,6 +266,20 @@ async def runtime_console_home():
     )
 
 
+@app.get("/execution-monitor")
+@app.get("/execution_monitor")
+async def execution_monitor_home():
+    html = open("apps/web/execution_monitor.html", "r", encoding="utf-8").read()
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
 @app.get("/api/runtime-console/sources")
 async def runtime_console_sources():
     return JSONResponse({"ok": True, "sources": list_console_sources()})
