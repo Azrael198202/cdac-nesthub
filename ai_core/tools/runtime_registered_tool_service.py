@@ -115,23 +115,71 @@ class RuntimeRegisteredToolService:
             }
         if approval_confirmed:
             self.approval_policy_store.record_confirmation(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id, remember=remember_approval)
-        payload = input_data if isinstance(input_data, dict) else {"input": input_data}
-        payload = self._coerce_by_schema(payload, spec.get("input_schema") if isinstance(spec.get("input_schema"), dict) else {})
-        payload = self._apply_runtime_invocation_defaults(spec=spec, payload=payload, approval_confirmed=approval_confirmed)
-        payload = self._coerce_by_schema(payload, spec.get("input_schema") if isinstance(spec.get("input_schema"), dict) else {})
-        runtime_context = self.connection_store.runtime_context_for(tool_spec=spec, profile_id=profile_id)
-        if runtime_context.get("connection") or runtime_context.get("secrets") or runtime_context.get("secret_refs"):
-            payload = dict(payload)
-            normalized_runtime = dict(runtime_context)
-            normalized_runtime["connection"] = self._coerce_by_schema(
-                runtime_context.get("connection") if isinstance(runtime_context.get("connection"), dict) else {},
-                spec.get("connection_schema") if isinstance(spec.get("connection_schema"), dict) else {},
+        input_schema = spec.get("input_schema") if isinstance(spec.get("input_schema"), dict) else {}
+        connection_schema = spec.get("connection_schema") if isinstance(spec.get("connection_schema"), dict) else {}
+        secret_schema = spec.get("secret_schema") if isinstance(spec.get("secret_schema"), dict) else {}
+
+        runtime_input = input_data if isinstance(input_data, dict) else {"value": input_data}
+        runtime_input = self._coerce_by_schema(runtime_input, input_schema)
+        runtime_input = self._apply_runtime_invocation_defaults(spec=spec, payload=runtime_input, approval_confirmed=approval_confirmed)
+        runtime_input = self._coerce_by_schema(runtime_input, input_schema)
+
+        input_validation = self.runner.schema_validator.validate_input(input_schema, runtime_input)
+        if not input_validation.get("valid"):
+            return self._validation_error(
+                code="tool_input_schema_validation_failed",
+                message="Runtime input values do not match the registered input schema.",
+                errors=input_validation.get("errors", []),
+                tool_id=tool_id,
+                profile_id=profile_id,
+                schema_section="input_schema",
             )
-            payload["_runtime"] = normalized_runtime
-            payload.setdefault("connection", normalized_runtime.get("connection", {}))
-            if normalized_runtime.get("secrets"):
-                payload.setdefault("secrets", normalized_runtime.get("secrets", {}))
-        result = self.runner.run_tool(spec, payload, run_id=run_id, node_id="agent_studio_registered_tool", step_id=str(tool_id), capability=str(spec.get("capability") or ""))
+
+        runtime_context = self.connection_store.runtime_context_for(tool_spec=spec, profile_id=profile_id)
+        connection_values = self._coerce_by_schema(
+            runtime_context.get("connection") if isinstance(runtime_context.get("connection"), dict) else {},
+            connection_schema,
+        )
+        secret_values = self._coerce_by_schema(
+            runtime_context.get("secrets") if isinstance(runtime_context.get("secrets"), dict) else {},
+            secret_schema,
+        )
+
+        connection_validation = self.runner.schema_validator.validate_input(connection_schema, connection_values)
+        if not connection_validation.get("valid"):
+            return self._validation_error(
+                code="tool_connection_schema_validation_failed",
+                message="Profile connection values do not match the registered connection schema.",
+                errors=connection_validation.get("errors", []),
+                tool_id=tool_id,
+                profile_id=profile_id,
+                schema_section="connection_schema",
+            )
+
+        secret_validation = self.runner.schema_validator.validate_input(secret_schema, secret_values)
+        if not secret_validation.get("valid"):
+            return self._validation_error(
+                code="tool_secret_schema_validation_failed",
+                message="Profile secret values do not match the registered secret schema.",
+                errors=secret_validation.get("errors", []),
+                tool_id=tool_id,
+                profile_id=profile_id,
+                schema_section="secret_schema",
+            )
+
+        invocation_payload = {
+            "input": runtime_input,
+            "connection": connection_values,
+            "secrets": secret_values,
+            "_runtime": {
+                "profile_id": profile_id,
+                "connection": connection_values,
+                "secrets": secret_values,
+                "secret_refs": runtime_context.get("secret_refs") if isinstance(runtime_context.get("secret_refs"), dict) else {},
+                "approval_confirmed": bool(approval_confirmed),
+            },
+        }
+        result = self.runner.run_tool(spec, invocation_payload, run_id=run_id, node_id="agent_studio_registered_tool", step_id=str(tool_id), capability=str(spec.get("capability") or ""))
         out = {
             "ok": str(result.get("status") or "").lower() in {"success", "ok", "executed"},
             "status": result.get("status"),
@@ -143,6 +191,24 @@ class RuntimeRegisteredToolService:
         }
         self._persist_tool_result(out)
         return out
+
+
+    def _validation_error(self, *, code: str, message: str, errors: Any, tool_id: str, profile_id: str, schema_section: str) -> dict[str, Any]:
+        normalized_errors = errors if isinstance(errors, list) else [str(errors)]
+        payload = {
+            "ok": False,
+            "status": "failed",
+            "tool_id": tool_id,
+            "profile_id": profile_id,
+            "error": {
+                "code": code,
+                "message": message,
+                "schema_section": schema_section,
+                "errors": normalized_errors,
+            },
+        }
+        self._persist_tool_result(payload)
+        return payload
 
     def list_tool_runs(self, limit: int = 20) -> list[dict[str, Any]]:
         result_dir = RUNTIME_GENERATED / "results" / "runtime_tool_runs"

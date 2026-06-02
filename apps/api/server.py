@@ -41,6 +41,22 @@ registered_tool_service = RuntimeRegisteredToolService()
 approval_policy_store = RuntimeApprovalPolicyStore()
 
 
+def _write_api_failure_log(*, area: str, payload: dict[str, Any] | None = None, context: dict[str, Any] | None = None) -> None:
+    try:
+        path = Path("runtime") / "logs" / "api_errors.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        event = {
+            "event_type": "api_failure",
+            "area": area,
+            "payload": payload if isinstance(payload, dict) else {},
+            "context": context or {},
+        }
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception:
+        return
+
+
 def _write_api_error_log(*, area: str, exc: Exception, context: dict[str, Any] | None = None) -> None:
     try:
         path = Path("runtime") / "logs" / "api_errors.jsonl"
@@ -666,6 +682,12 @@ async def agent_studio_save_runtime_tool_profile(req: RuntimeToolProfileRequest)
             secrets=req.secrets if req.secrets is not None else {},
         )
         status = 200 if payload.get("ok") else 400
+        if status >= 400:
+            _write_api_failure_log(
+                area="agent_studio_save_runtime_tool_profile",
+                payload=payload,
+                context={"tool_id": req.tool_id, "profile_id": req.profile_id or "default"},
+            )
         return JSONResponse(payload, status_code=status)
     except Exception as exc:
         _write_api_error_log(area="agent_studio_save_runtime_tool_profile", exc=exc, context={"tool_id": req.tool_id})
@@ -684,6 +706,12 @@ async def agent_studio_execute_runtime_tool(req: RegisteredToolExecuteRequest):
             remember_approval=bool(req.remember_approval),
         )
         status = 200 if payload.get("ok") else 400
+        if status >= 400:
+            _write_api_failure_log(
+                area="agent_studio_execute_runtime_tool",
+                payload=payload,
+                context={"tool_id": req.tool_id, "profile_id": req.profile_id or "default"},
+            )
         return JSONResponse(payload, status_code=status)
     except Exception as exc:
         _write_api_error_log(area="agent_studio_execute_runtime_tool", exc=exc, context={"tool_id": req.tool_id})

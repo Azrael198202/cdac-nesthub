@@ -33,7 +33,8 @@ class GenericToolRunner:
                 f"Unsupported implementation type: {implementation.get('type')}",
             )
 
-        input_validation = self.schema_validator.validate_input(tool_spec.get("input_schema"), input_data)
+        validation_target = self._runtime_input_for_schema_validation(input_data)
+        input_validation = self.schema_validator.validate_input(tool_spec.get("input_schema"), validation_target)
         if not input_validation.get("valid"):
             return self._error("tool_input_schema_validation_failed", "; ".join(input_validation.get("errors", [])))
 
@@ -111,6 +112,25 @@ class GenericToolRunner:
             result = self._error("tool_execution_failed", str(exc))
             trace = self.provenance.finish(trace, output=result, status="error", error=result.get("error"))
             return self.provenance.attach(result, trace)
+
+
+    def _runtime_input_for_schema_validation(self, input_data: Any) -> Any:
+        """Return only the runtime input part that should be checked by input_schema.
+
+        Registered runtime tools are invoked with a neutral execution envelope:
+        {"input": ..., "connection": ..., "secrets": ..., "_runtime": ...}.
+        The tool input schema must validate only the user/runtime input contract,
+        while connection_schema and secret_schema are validated by the registered
+        tool service before this runner is called.  Older tools may still receive
+        a flat payload, so flat dictionaries continue to be validated as-is.
+        """
+        if not isinstance(input_data, dict):
+            return input_data
+        envelope_keys = {"input", "connection", "secrets", "_runtime"}
+        if "input" in input_data and any(key in input_data for key in envelope_keys - {"input"}):
+            nested = input_data.get("input")
+            return nested if isinstance(nested, dict) else {"value": nested}
+        return input_data
 
     def _redact_runtime_sensitive(self, value: Any) -> Any:
         if isinstance(value, dict):
