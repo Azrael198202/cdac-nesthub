@@ -8,6 +8,7 @@ from ai_core.llm.provider_router import ProviderRouter
 from ai_core.events.event_bus import event_bus
 from ai_core.validation.recoverable_validation_error import RecoverableValidationError
 from ai_core.workflow.workflow_contract_builder import WorkflowContractBuilder
+from ai_core.input_parsing.structured_entity_extractor import StructuredEntityExtractor
 from ai_core.workflow.execution_options import ACTION_TO_METHOD, AGENT_ACTION_PROMPT_CONTRACT, fixed_options_for_prompt, normalize_action_type
 from ai_core.validation.schema_auto_repair import SchemaAutoRepair
 from ai_core.validation.result_auto_repair import ResultAutoRepair
@@ -34,6 +35,7 @@ class LLMJsonExecutor:
         self.template = TemplateEngine()
         self.validator = SchemaValidator()
         self.workflow_contract_builder = WorkflowContractBuilder()
+        self.structured_entity_extractor = StructuredEntityExtractor()
         self.schema_auto_repair = SchemaAutoRepair()
         self.result_auto_repair = ResultAutoRepair()
         self.router = ProviderRouter()
@@ -679,6 +681,10 @@ class LLMJsonExecutor:
                 parsed.setdefault(str(k), v)
         if payload.get("objective") not in (None, ""):
             parsed.setdefault("objective", payload.get("objective"))
+        entity_text = "\n".join(str(x) for x in (state.get("input"), slim_user_input, payload.get("objective"), payload.get("instruction"), values) if x not in (None, ""))
+        detected = self.structured_entity_extractor.extract(entity_text)
+        existing_detected = parsed.get("detected_entities") if isinstance(parsed.get("detected_entities"), dict) else {}
+        parsed["detected_entities"] = self._merge_detected_structural_entities(existing_detected, detected)
         result["parsed_entities"] = parsed
         result.setdefault("original_input", str(payload.get("objective") or payload.get("instruction") or state.get("input") or "")[:1000])
         result.setdefault("missing_information", [])
@@ -1025,6 +1031,8 @@ class LLMJsonExecutor:
                 "parameters": values,
             }.items() if v not in (None, "", [], {})
         }
+        entity_text = "\n".join(str(x) for x in (payload.get("objective"), payload.get("instruction"), values, slim_user_input, state.get("input")) if x not in (None, ""))
+        parsed_entities["detected_entities"] = self.structured_entity_extractor.extract(entity_text)
         return {
             "language": "unknown",
             "original_input": str(payload.get("objective") or payload.get("instruction") or slim_user_input)[:300],

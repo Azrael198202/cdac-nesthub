@@ -8,6 +8,7 @@ from typing import Any
 from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import PROJECT_ROOT
 from ai_core.validation.schema_validator import SchemaValidator
+from ai_core.input_parsing.structured_entity_extractor import StructuredEntityExtractor
 
 
 class GenericInputParsingExecutor:
@@ -30,6 +31,7 @@ class GenericInputParsingExecutor:
     def __init__(self) -> None:
         self.loader = ConfigLoader()
         self.validator = SchemaValidator()
+        self.entity_extractor = StructuredEntityExtractor()
 
     async def execute(self, workflow_node: dict, node_config: dict, state: dict, capability_result: dict) -> dict:
         schema = self.loader.load_json(PROJECT_ROOT / node_config["output_schema"])
@@ -41,7 +43,7 @@ class GenericInputParsingExecutor:
         result = {
             "language": self._detect_language(combined_text),
             "original_input": str(raw_input),
-            "parsed_entities": self._build_parsed_entities(parsed_payload, text_fields),
+            "parsed_entities": self._build_parsed_entities(parsed_payload, text_fields, combined_text),
             "semantic_modifiers": [],
             "constraints": self._extract_constraints(parsed_payload),
             "temporal_expressions": self._extract_temporal_expressions(combined_text),
@@ -79,7 +81,7 @@ class GenericInputParsingExecutor:
                             fields[f"{key}.{sub_key}"] = sub_val
         return fields
 
-    def _build_parsed_entities(self, payload: Any, text_fields: dict[str, str]) -> dict[str, Any]:
+    def _build_parsed_entities(self, payload: Any, text_fields: dict[str, str], combined_text: str = "") -> dict[str, Any]:
         if isinstance(payload, dict):
             scalar_fields = {
                 str(k): v
@@ -92,10 +94,11 @@ class GenericInputParsingExecutor:
                 "scalar_fields": scalar_fields,
                 "text_fields": text_fields,
                 "collection_keys": collection_keys,
+                "detected_entities": self.entity_extractor.extract(combined_text),
             }
         if isinstance(payload, list):
-            return {"input_format": "json_array", "item_count": len(payload)}
-        return {"input_format": "text"}
+            return {"input_format": "json_array", "item_count": len(payload), "detected_entities": self.entity_extractor.extract(combined_text)}
+        return {"input_format": "text", "detected_entities": self.entity_extractor.extract(combined_text)}
 
     def _extract_constraints(self, payload: Any) -> dict[str, Any]:
         if isinstance(payload, dict):

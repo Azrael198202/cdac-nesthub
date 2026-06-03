@@ -94,14 +94,14 @@ class RuntimeBlueprintArtifactGenerator:
         input_schema = {
             "type": "object", "required": ["to", "subject", "body"],
             "properties": {
-                "to": {"type": "array", "items": {"type": "string", "minLength": 3}, "minItems": 1},
-                "cc": {"type": "array", "items": {"type": "string"}, "default": []},
-                "bcc": {"type": "array", "items": {"type": "string"}, "default": []},
+                "to": {"type": "array", "items": {"type": "string", "format": "email", "minLength": 3}, "minItems": 1},
+                "cc": {"type": "array", "items": {"type": "string", "format": "email"}, "default": []},
+                "bcc": {"type": "array", "items": {"type": "string", "format": "email"}, "default": []},
                 "subject": {"type": "string", "minLength": 1},
                 "body": {"type": "string", "minLength": 1},
                 "body_subtype": {"type": "string", "enum": ["plain", "html"], "default": "plain"},
-                "from_email": {"type": "string", "minLength": 3},
-                "reply_to": {"type": "string"},
+                "from_email": {"type": "string", "format": "email", "minLength": 3},
+                "reply_to": {"type": "string", "format": "email"},
                 "dry_run": {"type": "boolean", "default": False},
             },
             "additionalProperties": False,
@@ -119,13 +119,13 @@ class RuntimeBlueprintArtifactGenerator:
                 "use_tls": {"type": "boolean", "default": True},
                 "starttls": {"type": "boolean", "default": False},
                 "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 120, "default": 20},
-                "default_from_email": {"type": "string"},
+                "default_from_email": {"type": "string", "format": "email"},
             },
             "additionalProperties": False,
         }
         secret_schema = {
             "type": "object", "required": [],
-            "properties": {"username": {"type": "string"}, "password": {"type": "string", "format": "password"}},
+            "properties": {"username": {"type": "string", "format": "email"}, "password": {"type": "string", "format": "password"}},
             "additionalProperties": False,
         }
         return input_schema, output_schema, connection_schema, secret_schema

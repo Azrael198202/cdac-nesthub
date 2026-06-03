@@ -4,6 +4,8 @@ import copy
 import re
 from typing import Any
 
+from ai_core.input_parsing.structured_entity_extractor import StructuredEntityExtractor
+
 
 class RegisteredToolParameterBridge:
     """Bridge participant/task parameter values into a registered-tool payload.
@@ -15,6 +17,9 @@ class RegisteredToolParameterBridge:
     This class performs that stable conversion without deciding what the tool
     does.
     """
+
+    def __init__(self) -> None:
+        self.entity_extractor = StructuredEntityExtractor()
 
     def build_invocation(
         self,
@@ -30,10 +35,13 @@ class RegisteredToolParameterBridge:
         payload: dict[str, Any] = {}
         for name, prop in properties.items():
             field_name = str(name)
+            prop_dict = prop if isinstance(prop, dict) else {}
             raw = self._lookup_field_value(field_name, participant=participant, values=value_sources)
+            raw = self._repair_or_supply_structural_value(field_name, raw, prop_dict, participant=participant, values=value_sources)
             if self._is_empty(raw):
                 continue
-            normalized = self._normalize_for_schema(raw, prop if isinstance(prop, dict) else {})
+            normalized = self._normalize_for_schema(raw, prop_dict)
+            normalized = self._repair_or_supply_structural_value(field_name, normalized, prop_dict, participant=participant, values=value_sources)
             if not self._is_empty(normalized):
                 payload[field_name] = normalized
         missing = [name for name in required if self._is_empty(payload.get(name))]
@@ -98,9 +106,86 @@ class RegisteredToolParameterBridge:
             name = str(param.get("name") or "").strip()
             if name and name not in merged and not self._is_empty(param.get("values")):
                 merged[name] = param.get("values")
+        structural = self._collect_structural_values(participant=participant, provided_values=provided_values)
+        if structural:
+            merged.setdefault("_detected_structural_values", structural)
         if isinstance(provided_values, dict):
             merged.update(provided_values)
         return merged
+
+    def _repair_or_supply_structural_value(self, field_name: str, raw: Any, prop: dict[str, Any], *, participant: dict[str, Any], values: dict[str, Any]) -> Any:
+        """Use exact structural tokens from original text when the schema asks for one.
+
+        This is schema/format driven, not capability driven. If a generated
+        tool declares a field as an electronic address, the bridge protects
+        that field from small-model truncation by taking the full span captured
+        during input parsing. If the field is not address-shaped, this method
+        returns the original value unchanged.
+        """
+        if not self._expects_electronic_address(field_name, prop):
+            return raw
+        candidates = self._structural_electronic_address_candidates(participant=participant, values=values)
+        if not candidates:
+            return raw
+        schema_type = str(prop.get("type") or "string").strip().lower()
+        if schema_type == "array":
+            existing = self._as_list(raw)
+            valid_existing = [str(v).strip() for v in existing if isinstance(v, str) and self.entity_extractor.is_electronic_address(v.strip())]
+            if valid_existing:
+                return valid_existing
+            return candidates
+        if isinstance(raw, str) and self.entity_extractor.is_electronic_address(raw.strip()):
+            return raw.strip()
+        if isinstance(raw, list):
+            valid = [str(v).strip() for v in raw if isinstance(v, str) and self.entity_extractor.is_electronic_address(v.strip())]
+            if valid:
+                return valid[0]
+        return candidates[0]
+
+    def _expects_electronic_address(self, field_name: str, prop: dict[str, Any]) -> bool:
+        item_schema = prop.get("items") if isinstance(prop.get("items"), dict) else {}
+        schema_markers = [
+            prop.get("format"),
+            item_schema.get("format"),
+            prop.get("contentFormat"),
+            item_schema.get("contentFormat"),
+            prop.get("x-value-type"),
+            item_schema.get("x-value-type"),
+        ]
+        if any(str(marker or "").casefold() in {"email", "electronic_address", "address_spec"} for marker in schema_markers):
+            return True
+        # Fallback for generated schemas that lack JSON Schema format metadata.
+        # These are generic communication/address labels, not capability names.
+        text = " ".join(str(x or "") for x in (
+            field_name,
+            prop.get("title"),
+            prop.get("description"),
+            item_schema.get("title"),
+            item_schema.get("description"),
+        )).casefold()
+        structural_tokens = {"electronic address", "email", "e-mail", "recipient", "address", "addressee"}
+        return any(token in text for token in structural_tokens)
+
+    def _structural_electronic_address_candidates(self, *, participant: dict[str, Any], values: dict[str, Any]) -> list[str]:
+        structural = values.get("_detected_structural_values") if isinstance(values.get("_detected_structural_values"), dict) else {}
+        candidates = list(structural.get("electronic_address") or [])
+        if not candidates:
+            candidates = self.entity_extractor.extract_electronic_address_values(participant, values)
+        out: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if not text or not self.entity_extractor.is_electronic_address(text):
+                continue
+            key = text.casefold()
+            if key not in seen:
+                seen.add(key)
+                out.append(text)
+        return out
+
+    def _collect_structural_values(self, *, participant: dict[str, Any], provided_values: dict[str, Any] | None) -> dict[str, list[str]]:
+        values = self.entity_extractor.extract_electronic_address_values(participant, provided_values or {})
+        return {"electronic_address": values} if values else {}
 
     def _lookup_field_value(self, field_name: str, *, participant: dict[str, Any], values: dict[str, Any]) -> Any:
         aliases = [field_name]
