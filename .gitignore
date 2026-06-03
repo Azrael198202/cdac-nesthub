@@ -781,3 +781,5 @@ tools/__pycache__/verify_runtime_value_type_coercion.cpython-313.pyc
 tools/__pycache__/verify_structural_entity_parameter_binding.cpython-313.pyc
 tools/__pycache__/verify_web_cleaning_batch_optimizer.cpython-313.pyc
 tools/__pycache__/verify_web_evidence_optimizer.cpython-313.pyc
+ai_core/input_parsing/__pycache__/__init__.cpython-311.pyc
+ai_core/input_parsing/__pycache__/structured_entity_extractor.cpython-311.pyc
