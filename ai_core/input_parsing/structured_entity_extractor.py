@@ -42,18 +42,26 @@ class StructuredEntityExtractor:
     )
 
     _URI_RE = re.compile(r"\b[a-z][a-z0-9+.-]{1,31}://[^\s<>\"']+", re.IGNORECASE)
+    _DURATION_RE = re.compile(
+        r"(?<![A-Za-z0-9])(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
 
     def extract(self, text: str, *, source: str = "text") -> dict[str, Any]:
         text = str(text or "")
         electronic = self._dedupe(self._extract_electronic_addresses(text, source=source))
         uris = self._dedupe(self._extract_uris(text, source=source))
+        durations = self._dedupe(self._extract_durations(text, source=source))
         values_by_type = {
             "electronic_address": [item.value for item in electronic],
             "uri": [item.value for item in uris],
+            "duration": [item.value for item in durations],
+            "duration_seconds": [self.duration_to_seconds(item.value) for item in durations if self.duration_to_seconds(item.value) is not None],
         }
         return {
             "electronic_addresses": [item.to_dict() for item in electronic],
             "uris": [item.to_dict() for item in uris],
+            "durations": [item.to_dict() for item in durations],
             "values_by_type": {k: v for k, v in values_by_type.items() if v},
             # Compatibility alias for existing UI/LLM prompts that already use
             # this common structural label.  It is still a generic address
@@ -92,6 +100,42 @@ class StructuredEntityExtractor:
         return [
             ExtractedEntity(value=m.group(0), start=m.start(), end=m.end(), value_type="uri", source=source)
             for m in self._URI_RE.finditer(text or "")
+        ]
+
+    def duration_to_seconds(self, value: Any) -> int | None:
+        if isinstance(value, (int, float)):
+            return int(value) if value > 0 else None
+        text = str(value or "").strip()
+        match = self._DURATION_RE.search(text)
+        if not match:
+            return None
+        amount = float(match.group("num"))
+        unit = match.group("unit").casefold()
+        multiplier = 1
+        if unit.startswith("m") and unit not in {"ms"}:
+            multiplier = 60
+        elif unit.startswith("h"):
+            multiplier = 3600
+        elif unit.startswith("d"):
+            multiplier = 86400
+        return max(1, int(amount * multiplier))
+
+    def extract_duration_seconds_values(self, *values: Any) -> list[int]:
+        found: list[int] = []
+        seen: set[int] = set()
+        for value in values:
+            for text in self._flatten_text(value):
+                for item in self._extract_durations(text, source="value"):
+                    seconds = self.duration_to_seconds(item.value)
+                    if seconds is not None and seconds not in seen:
+                        seen.add(seconds)
+                        found.append(seconds)
+        return found
+
+    def _extract_durations(self, text: str, *, source: str) -> list[ExtractedEntity]:
+        return [
+            ExtractedEntity(value=m.group(0), start=m.start(), end=m.end(), value_type="duration", source=source)
+            for m in self._DURATION_RE.finditer(text or "")
         ]
 
     def _dedupe(self, items: list[ExtractedEntity]) -> list[ExtractedEntity]:

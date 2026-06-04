@@ -37,6 +37,7 @@ class RuntimeCapabilitySandboxValidator:
         checks.append({"name": "no_stub_markers", "passed": not present, "present": present})
         if present:
             return {"passed": False, "status": "not_registered", "reason": "stub_markers_present", "checks": checks}
+        capability_blob = json.dumps({"manifest": manifest}, ensure_ascii=False).replace("_", " ").replace("-", " ").casefold()
         if "smtp" in text or any("smtp" in str(x).casefold() for x in manifest.get("capabilities", [])):
             required = ["smtplib", "emailmessage", "send_message"]
             missing = [item for item in required if item not in text]
@@ -52,6 +53,8 @@ class RuntimeCapabilitySandboxValidator:
             return {"passed": False, "reason": "schema_is_not_object"}
         properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
         if not properties:
+            if schema.get("additionalProperties") is False and bool(schema.get("x-empty-schema-allowed")):
+                return {"passed": True, "property_count": 0, "required": schema.get("required", []), "empty_schema_allowed": True}
             return {"passed": False, "reason": "schema_has_no_properties"}
         if schema.get("additionalProperties") is True and not schema.get("required"):
             return {"passed": False, "reason": "schema_is_too_open"}

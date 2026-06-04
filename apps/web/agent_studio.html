@@ -1177,12 +1177,15 @@ function runtimeToolCard(t){
     '<div class="small">configuration: '+escapeHtml(cfg.configured?'ready':'needs setup')+'</div>'+
     '<div class="small">approval required: '+escapeHtml(!!approval.required)+'</div>'+
     '<div class="small">profiles: '+escapeHtml(profiles.map(p=>p.profile_id).join(', ')||'(none)')+'</div>';
-  const configureBtn=document.createElement('button');
-  configureBtn.className='btn';
-  configureBtn.style.marginTop='8px';
-  configureBtn.textContent='Configure profile';
-  configureBtn.onclick=()=>configureRuntimeToolProfile(t);
-  el.appendChild(configureBtn);
+  const hasProfileFields=Object.keys(((t.connection_schema||{}).properties)||{}).length>0 || Object.keys(((t.secret_schema||{}).properties)||{}).length>0;
+  if(hasProfileFields){
+    const configureBtn=document.createElement('button');
+    configureBtn.className='btn';
+    configureBtn.style.marginTop='8px';
+    configureBtn.textContent='Configure profile';
+    configureBtn.onclick=()=>configureRuntimeToolProfile(t);
+    el.appendChild(configureBtn);
+  }
   const btn=document.createElement('button');
   btn.className='btn primary';
   btn.style.marginTop='8px';

@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -760,6 +761,10 @@ class RuntimeCapabilityGapImplementer:
     ) -> dict[str, Any]:
         safe_id = self._safe_name(str(template.get("template_id") or "generated_capability"))
         tool_dir = self.generated_dir / safe_id
+        # A capability acquisition run must be isolated.  Never reuse files,
+        # schemas, or manifests left by a previous capability with the same id.
+        if tool_dir.exists():
+            shutil.rmtree(tool_dir)
         tool_dir.mkdir(parents=True, exist_ok=True)
         files = template.get("files") if isinstance(template.get("files"), list) else []
         written: list[str] = []
@@ -990,6 +995,8 @@ class RuntimeCapabilityGapImplementer:
             return {"passed": False, "reason": "schema_is_not_object"}
         properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
         if not properties:
+            if schema.get("additionalProperties") is False and bool(schema.get("x-empty-schema-allowed")):
+                return {"passed": True, "property_count": 0, "required": schema.get("required", []), "empty_schema_allowed": True}
             return {"passed": False, "reason": "schema_has_no_properties"}
         if schema.get("additionalProperties") is True and len(properties) == 0:
             return {"passed": False, "reason": "schema_accepts_anything"}

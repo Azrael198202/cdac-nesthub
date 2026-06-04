@@ -798,3 +798,6 @@ tools/__pycache__/verify_feedback_repair_phase2.cpython-313.pyc
 tools/__pycache__/verify_feedback_repair_resume_checkpoint.cpython-313.pyc
 tools/__pycache__/verify_phase2_repair_and_deletion.cpython-313.pyc
 ai_core/feedback_repair/__pycache__/__init__.cpython-313.pyc
+tools/__pycache__/verify_capability_acquisition_generic_isolation.cpython-313.pyc
+tools/__pycache__/verify_phase21_repair_routing.cpython-313.pyc
+tools/__pycache__/verify_repair_source_material_chain.cpython-313.pyc
