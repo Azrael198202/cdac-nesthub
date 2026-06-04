@@ -43,7 +43,6 @@ class RuntimeCapabilityGapImplementer:
         self.template_store = RuntimeCapabilityTemplateStore(explicit_path=template_path)
         self.generated_dir = RUNTIME_GENERATED / "tools"
         self.generated_tests_dir = RUNTIME_GENERATED / "tests"
-        self.generated_services_dir = RUNTIME_GENERATED / "services"
         self.registry_path = RUNTIME_REGISTRY / "tool_registry.json"
         self.module_registry_path = RUNTIME_REGISTRY / "module_registry.json"
         self.acquisition_gate = RuntimeCapabilityAcquisitionGate()
@@ -846,45 +845,6 @@ class RuntimeCapabilityGapImplementer:
                 target = tests_dir / source_path.name
                 target.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
                 test_files.append(str(target))
-
-        service_artifacts: list[dict[str, Any]] = []
-        generated_services = template.get("generated_services") if isinstance(template.get("generated_services"), list) else []
-        for service in generated_services:
-            if not isinstance(service, dict):
-                continue
-            service_id = self._safe_name(str(service.get("service_id") or f"{safe_id}_service"))
-            service_dir = self.generated_services_dir / service_id
-            if service_dir.exists():
-                shutil.rmtree(service_dir)
-            service_dir.mkdir(parents=True, exist_ok=True)
-            service_written: list[str] = []
-            service_tests: list[str] = []
-            for item in service.get("files") if isinstance(service.get("files"), list) else []:
-                if not isinstance(item, dict):
-                    continue
-                rel = self._safe_relative_path(str(item.get("path") or ""))
-                if not rel:
-                    continue
-                target = service_dir / rel
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(str(item.get("content") or ""), encoding="utf-8")
-                service_written.append(str(target))
-                if target.name.startswith("test_") and target.suffix == ".py":
-                    service_tests.append(str(target))
-            entrypoint = service.get("entrypoint") if isinstance(service.get("entrypoint"), dict) else {"module": "service.py", "start": "start", "stop": "stop", "health": "health"}
-            service_manifest = {
-                "service_id": service_id,
-                "tool_id": safe_id,
-                "enabled": bool(service.get("enabled", True)),
-                "entrypoint": entrypoint,
-                "lifecycle": service.get("lifecycle") if isinstance(service.get("lifecycle"), dict) else {"start": "start", "stop": "stop", "health": "health"},
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "written_files": service_written,
-                "test_files": service_tests,
-            }
-            service_manifest_path = service_dir / "service_manifest.json"
-            service_manifest_path.write_text(json.dumps(service_manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-            service_artifacts.append({"service_id": service_id, "service_dir": str(service_dir), "manifest_path": str(service_manifest_path), "written_files": service_written, "test_files": service_tests})
         manifest = {
             "tool_id": safe_id,
             "template_id": template.get("template_id"),
@@ -907,11 +867,10 @@ class RuntimeCapabilityGapImplementer:
             "written_files": written,
             "test_dir": str(tests_dir),
             "test_files": test_files,
-            "generated_services": service_artifacts,
         }
         manifest_path = tool_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"tool_id": safe_id, "tool_dir": str(tool_dir), "test_dir": str(tests_dir), "manifest_path": str(manifest_path), "written_files": written, "test_files": test_files, "generated_services": service_artifacts}
+        return {"tool_id": safe_id, "tool_dir": str(tool_dir), "test_dir": str(tests_dir), "manifest_path": str(manifest_path), "written_files": written, "test_files": test_files}
 
 
     def _verify_capability_match(self, *, template: dict[str, Any], artifact: dict[str, Any], user_input: str) -> dict[str, Any]:
@@ -999,24 +958,6 @@ class RuntimeCapabilityGapImplementer:
             proc = self._run_isolated_python(["-m", "py_compile", *py_files], cwd=tool_dir, timeout=30)
             checks.append({
                 "name": "python_compile",
-                "returncode": proc.get("returncode"),
-                "stdout": str(proc.get("stdout") or "")[-2000:],
-                "stderr": str(proc.get("stderr") or "")[-2000:],
-                "attempts": proc.get("attempts", []),
-            })
-            if proc.get("returncode") != 0:
-                return {"passed": False, "status": "failed", "checks": checks}
-        service_files: list[str] = []
-        for service in artifact.get("generated_services") if isinstance(artifact.get("generated_services"), list) else []:
-            if not isinstance(service, dict):
-                continue
-            service_dir = Path(str(service.get("service_dir") or ""))
-            if service_dir.exists():
-                service_files.extend(str(p) for p in service_dir.rglob("*.py"))
-        if service_files:
-            proc = self._run_isolated_python(["-m", "py_compile", *service_files], cwd=tool_dir, timeout=30)
-            checks.append({
-                "name": "generated_service_python_compile",
                 "returncode": proc.get("returncode"),
                 "stdout": str(proc.get("stdout") or "")[-2000:],
                 "stderr": str(proc.get("stderr") or "")[-2000:],

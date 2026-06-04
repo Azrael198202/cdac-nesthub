@@ -28,7 +28,6 @@ from ai_core.graph.graph_visualization import GraphVisualStateBuilder
 from ai_core.runtime.observability.runtime_console import emit_console_event, list_console_sources, read_console_source
 from ai_core.runtime.self_repair.repair_orchestrator import FeedbackRepairOrchestrator
 from ai_core.runtime.scheduler import ScheduledTaskRunner
-from runtime_assets.service_lifecycle import DynamicGeneratedServiceLoader
 
 import traceback
 approval_learning = ApprovalLearningService()
@@ -44,53 +43,37 @@ registered_tool_service = RuntimeRegisteredToolService()
 approval_policy_store = RuntimeApprovalPolicyStore()
 feedback_repair_orchestrator = FeedbackRepairOrchestrator()
 scheduled_task_runner = ScheduledTaskRunner()
-dynamic_service_loader = DynamicGeneratedServiceLoader()
 
 
 @app.on_event("startup")
-async def _start_runtime_background_services():
-    async def _execute_due_task(task_name: str) -> dict[str, Any]:
-        return await studio_service.execute_task(task_name, provided_inputs={"_scheduled_dispatch": True}, instruction="")
-
-    async def _execute_generated_dispatch(dispatch: dict[str, Any]) -> dict[str, Any]:
-        if not isinstance(dispatch, dict):
-            return {"status": "failed", "error": "dispatch_must_be_object"}
-        target_type = str(dispatch.get("target_type") or dispatch.get("type") or "task").strip().casefold()
-        target_name = str(dispatch.get("target") or dispatch.get("target_name") or dispatch.get("name") or "").strip()
-        parameters = dispatch.get("parameters") if isinstance(dispatch.get("parameters"), dict) else {}
-        if not target_name:
-            return {"status": "failed", "error": "target_name_required"}
-        if target_type == "agent":
-            instruction = "Call " + target_name
-            if parameters:
-                assignments = " ".join(f"{key} = {value}" for key, value in parameters.items())
-                instruction = instruction + ". Parameters: " + assignments
-            result = await studio_service._maybe_execute_direct_participant_invocation(
-                instruction,
-                provided_inputs=parameters,
-                uploaded_artifacts=[],
-            )
-            return result or {"status": "failed", "error": "agent_target_not_found", "target": target_name}
-        return await studio_service.execute_task(target_name, provided_inputs=parameters, instruction="")
-
-    # Backward-compatible built-in scheduled-task runner for persisted task graphs.
+async def _start_scheduled_task_runner():
+    async def _execute_due_task(task_name: str, task_graph: dict[str, Any] | None = None) -> dict[str, Any]:
+        task_graph = task_graph if isinstance(task_graph, dict) else {}
+        policy = task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {}
+        controller_ids = {str(x).strip() for x in (policy.get("controller_participant_ids") or []) if str(x).strip()}
+        selected_ids = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
+        payload_ids = [x for x in selected_ids if x not in controller_ids]
+        if not payload_ids:
+            tasks = task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []
+            for item in tasks:
+                if not isinstance(item, dict):
+                    continue
+                pid = str(item.get("participant_id") or "").strip()
+                if pid and pid not in controller_ids:
+                    payload_ids.append(pid)
+        return await studio_service.execute_task(
+            task_name,
+            provided_inputs={
+                "_scheduled_payload_dispatch": True,
+                "_payload_only_selected_participant_ids": payload_ids,
+            },
+            instruction="",
+        )
     scheduled_task_runner.start(_execute_due_task, tick_seconds=5)
-
-    # Generic dynamic lifecycle loader for runtime-generated services.
-    # It discovers services written under runtime/generated/services while this
-    # process is running; no restart is required.
-    dynamic_service_loader.start(
-        context={
-            "execute_task": _execute_due_task,
-            "execute_dispatch": _execute_generated_dispatch,
-        },
-        scan_seconds=3,
-    )
 
 
 @app.on_event("shutdown")
-async def _stop_runtime_background_services():
-    await dynamic_service_loader.stop()
+async def _stop_scheduled_task_runner():
     await scheduled_task_runner.stop()
 
 

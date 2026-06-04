@@ -801,10 +801,6 @@ class AgentStudioService:
         explicit_runtime_parameters.update(
             self._extract_step_scoped_runtime_parameters_from_tasks(workflow_plan.tasks)
         )
-        if isinstance(schedule_policy, dict) and schedule_policy.get("enabled"):
-            controller_ids = self._schedule_controller_participant_ids_from_tasks(workflow_plan.tasks)
-            if controller_ids:
-                schedule_policy["controller_participant_ids"] = controller_ids
         for generated_participant in workflow_plan.generated_participants:
             generated_participant.setdefault("created_at", self._now())
             pid = str(generated_participant.get("participant_id") or "").strip()
@@ -938,7 +934,11 @@ class AgentStudioService:
         # only receives a boolean confirmation.
         runtime_parameters.update(self._structural_source_runtime_context(task_graph={"instruction": str(message or "")}, instruction=message))
         if isinstance(provided_inputs, dict):
-            runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+            runtime_parameters.update({
+                k: v
+                for k, v in provided_inputs.items()
+                if v not in (None, "", [], {}) and not str(k).startswith("_scheduled_") and str(k) != "_payload_only_selected_participant_ids"
+            })
         artifact_refs = uploaded_artifacts if isinstance(uploaded_artifacts, list) else []
         task_graph = {
             "graph_id": graph_id,
@@ -1093,6 +1093,10 @@ class AgentStudioService:
                 "status": "not_found",
                 "task_name": task_name,
             }
+        provided_inputs = provided_inputs or {}
+        payload_only_ids = self._scheduled_payload_only_ids(task_graph, provided_inputs)
+        if payload_only_ids:
+            task_graph = self._task_graph_with_payload_only_participants(task_graph, payload_only_ids)
         all_participants = self.store.list_json("generated/agents")
         selected_ids = {str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()}
         if selected_ids:
@@ -1111,16 +1115,11 @@ class AgentStudioService:
         runtime_parameters.update(self._extract_runtime_parameters_from_instruction(instruction or ""))
         runtime_parameters.update(self._structural_source_runtime_context(task_graph=task_graph, instruction=instruction))
         if isinstance(provided_inputs, dict):
-            runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
-        schedule_policy = task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {}
-        scheduled_dispatch = bool(runtime_parameters.get("_scheduled_dispatch"))
-        if self._should_pause_for_durable_schedule(schedule_policy, scheduled_dispatch):
-            return self._scheduled_task_armed_response(task_name=task_name, task_graph=task_graph, schedule_policy=schedule_policy)
-        if scheduled_dispatch and isinstance(schedule_policy, dict):
-            controller_ids = [str(x).strip() for x in (schedule_policy.get("controller_participant_ids") or []) if str(x).strip()]
-            if controller_ids:
-                task_graph = dict(task_graph)
-                task_graph["runtime_skip_participant_ids"] = controller_ids
+            runtime_parameters.update({
+                k: v
+                for k, v in provided_inputs.items()
+                if v not in (None, "", [], {}) and not str(k).startswith("_scheduled_") and str(k) != "_payload_only_selected_participant_ids"
+            })
         preflight = self._preflight_runtime_parameters(task_graph, participants, runtime_parameters)
         if preflight.get("status") == "requires_input":
             run_id = new_id("delegation_run")
@@ -1281,6 +1280,41 @@ class AgentStudioService:
             }
             response["message"] = self._paused_message(response["missing_inputs"], pending_action)
         return response
+
+    def _scheduled_payload_only_ids(self, task_graph: dict[str, Any], provided_inputs: dict[str, Any] | None) -> list[str]:
+        provided_inputs = provided_inputs or {}
+        explicit = provided_inputs.get("_payload_only_selected_participant_ids")
+        if isinstance(explicit, list):
+            values = [str(x).strip() for x in explicit if str(x).strip()]
+            if values:
+                return values
+        if not bool(provided_inputs.get("_scheduled_payload_dispatch")):
+            return []
+        policy = task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {}
+        controllers = {str(x).strip() for x in (policy.get("controller_participant_ids") or []) if str(x).strip()}
+        selected = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
+        payload = [x for x in selected if x and x not in controllers]
+        if payload:
+            return payload
+        tasks = task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []
+        derived: list[str] = []
+        for item in tasks:
+            if not isinstance(item, dict):
+                continue
+            pid = str(item.get("participant_id") or "").strip()
+            if pid and pid not in controllers:
+                derived.append(pid)
+        return derived
+
+    def _task_graph_with_payload_only_participants(self, task_graph: dict[str, Any], payload_ids: list[str]) -> dict[str, Any]:
+        payload_set = {str(x).strip() for x in payload_ids if str(x).strip()}
+        graph = dict(task_graph)
+        graph["selected_participant_ids"] = [x for x in (graph.get("selected_participant_ids") or []) if str(x).strip() in payload_set] or list(payload_set)
+        tasks = graph.get("tasks") if isinstance(graph.get("tasks"), list) else []
+        if tasks:
+            graph["tasks"] = [dict(t) for t in tasks if isinstance(t, dict) and str(t.get("participant_id") or "").strip() in payload_set]
+        graph["scheduled_payload_dispatch"] = True
+        return graph
 
     def _participants_from_task_graph(self, task_graph: dict[str, Any], participant_ids: set[str]) -> list[dict[str, Any]]:
         """Rebuild task-scoped generated participants when they are not durable agents.
@@ -1547,21 +1581,6 @@ class AgentStudioService:
         selected = self.delegation_runtime._fresh_task_participants(
             self.delegation_runtime._select_participants(task_graph, participants)
         )
-        # During scheduled dispatch, controller participants only define the
-        # durable schedule policy and must not be treated as payload runtime
-        # participants.  Otherwise preflight asks for controller-only internal
-        # inputs again on every tick and the scheduled payload never runs.
-        if bool(runtime_parameters.get("_scheduled_dispatch")):
-            controller_ids = {
-                str(x).strip()
-                for x in (task_graph.get("schedule_policy") or {}).get("controller_participant_ids", [])
-                if str(x).strip()
-            } if isinstance(task_graph.get("schedule_policy"), dict) else set()
-            if controller_ids:
-                selected = [
-                    participant for participant in selected
-                    if str(participant.get("participant_id") or participant.get("id") or "").strip() not in controller_ids
-                ]
         self.delegation_runtime._apply_task_runtime_parameters_to_selected(selected, runtime_parameters)
         task_mind_graph = self.delegation_runtime._build_task_mind_graph(task_graph, selected)
         dependency_plan = (task_mind_graph.get("agent_relation_analysis") or {}) if isinstance(task_mind_graph, dict) else {}
@@ -1987,67 +2006,6 @@ class AgentStudioService:
         return "|".join(part for part in (name, objective, artifact_sig) if part)
 
 
-    def _should_pause_for_durable_schedule(self, schedule_policy: dict[str, Any], scheduled_dispatch: bool) -> bool:
-        """Return True when a task run is only arming a durable schedule.
-
-        This is generic task lifecycle behavior.  The runtime must not execute
-        the payload immediately when the user is creating/enabling a recurring
-        task definition.  Background dispatches pass an internal flag so the
-        same task graph can later execute normally.
-        """
-        if scheduled_dispatch:
-            return False
-        if not isinstance(schedule_policy, dict):
-            return False
-        if not bool(schedule_policy.get("enabled")):
-            return False
-        return str(schedule_policy.get("mode") or "").strip().casefold() in {"recurring", "scheduled", "one_time"}
-
-    def _scheduled_task_armed_response(self, *, task_name: str, task_graph: dict[str, Any], schedule_policy: dict[str, Any]) -> dict[str, Any]:
-        stored = dict(task_graph) if isinstance(task_graph, dict) else {}
-        policy = dict(schedule_policy) if isinstance(schedule_policy, dict) else {}
-        if not policy.get("next_run_at"):
-            policy["next_run_at"] = self._now()
-        policy.setdefault("armed_at", self._now())
-        stored["schedule_policy"] = policy
-        stored["status"] = "scheduled"
-        self.store.write_json(f"generated/tasks/{task_name}.json", stored)
-        return {
-            "action": "execute_task_graph",
-            "origin": "auxiliary_brain",
-            "status": "scheduled",
-            "task_name": task_name,
-            "run_id": new_id("scheduled_task_arm"),
-            "final_answer": "Task schedule has been saved. The workflow will run when the schedule becomes due.",
-            "delivery": None,
-            "schedule_policy": policy,
-        }
-
-    def _schedule_controller_participant_ids_from_tasks(self, tasks: list[dict[str, Any]]) -> list[str]:
-        """Identify steps that define schedule policy rather than payload work.
-
-        This uses generic structural signals from the step fragment, not any
-        concrete capability or business name.  The ids are skipped during the
-        background dispatch so only the payload steps run when the schedule is
-        due.
-        """
-        ids: list[str] = []
-        for task in tasks or []:
-            if not isinstance(task, dict):
-                continue
-            fragment = str(task.get("source_instruction_fragment") or "")
-            if self._fragment_declares_schedule_policy(fragment):
-                pid = str(task.get("participant_id") or "").strip()
-                if pid and pid not in ids:
-                    ids.append(pid)
-        return ids
-
-    def _fragment_declares_schedule_policy(self, fragment: str) -> bool:
-        text = str(fragment or "").casefold()
-        if not text:
-            return False
-        return any(token in text for token in ("execution policy", "repeat", "run every", "every ", "once at", "schedule", "interval"))
-
     def _extract_schedule_policy_from_instruction(self, instruction: str) -> dict[str, Any]:
         """Extract a generic durable execution policy from user language.
 
@@ -2057,7 +2015,7 @@ class AgentStudioService:
         """
         text = str(instruction or "")
         lower = text.casefold()
-        if not any(token in lower for token in ("execution policy", "repeat", "every", "run every", "once at", "schedule", "interval")):
+        if not any(token in lower for token in ("execution policy", "repeat", "every", "run every", "once at", "schedule")):
             return {"enabled": False, "mode": "none"}
         interval_seconds = self._extract_generic_interval_seconds(text)
         if interval_seconds:

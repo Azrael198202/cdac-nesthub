@@ -21,7 +21,7 @@ class ScheduledTaskRunner:
         self._task: asyncio.Task[Any] | None = None
         self._stopped = asyncio.Event()
 
-    def start(self, executor: Callable[[str], Awaitable[dict[str, Any]]], *, tick_seconds: int = 5) -> None:
+    def start(self, executor: Callable[..., Awaitable[dict[str, Any]]], *, tick_seconds: int = 5) -> None:
         if self._task and not self._task.done():
             return
         self._stopped = asyncio.Event()
@@ -36,7 +36,7 @@ class ScheduledTaskRunner:
             except asyncio.CancelledError:
                 pass
 
-    async def _loop(self, executor: Callable[[str], Awaitable[dict[str, Any]]], tick_seconds: int) -> None:
+    async def _loop(self, executor: Callable[..., Awaitable[dict[str, Any]]], tick_seconds: int) -> None:
         while not self._stopped.is_set():
             try:
                 await self.run_once(executor)
@@ -47,7 +47,7 @@ class ScheduledTaskRunner:
             except asyncio.TimeoutError:
                 pass
 
-    async def run_once(self, executor: Callable[[str], Awaitable[dict[str, Any]]]) -> list[dict[str, Any]]:
+    async def run_once(self, executor: Callable[..., Awaitable[dict[str, Any]]]) -> list[dict[str, Any]]:
         now = datetime.now(timezone.utc)
         executed: list[dict[str, Any]] = []
         for path in sorted(self.tasks_dir.glob("*.json")):
@@ -65,8 +65,24 @@ class ScheduledTaskRunner:
             task_name = str(task_graph.get("task_name") or path.stem)
             self._trace({"event": "scheduled_task_due", "task_name": task_name, "next_run_at": next_run_at.isoformat()})
             try:
-                result = await executor(task_name)
+                controller_ids = self._controller_participant_ids(task_graph)
+                payload_ids = self._payload_participant_ids(task_graph, controller_ids)
+                self._trace({
+                    "event": "payload_dispatch_started",
+                    "task_name": task_name,
+                    "skipped_controller_participants": controller_ids,
+                    "payload_participants": payload_ids,
+                })
+                result = await executor(task_name, task_graph)
                 executed.append({"task_name": task_name, "status": result.get("status"), "run_id": result.get("run_id")})
+                self._trace({
+                    "event": "payload_dispatch_completed",
+                    "task_name": task_name,
+                    "result_status": result.get("status"),
+                    "run_id": result.get("run_id"),
+                    "missing_inputs": result.get("missing_inputs") or [],
+                    "pending_action_kind": ((result.get("pending_action") or {}).get("kind") if isinstance(result.get("pending_action"), dict) else None),
+                })
                 self._trace({"event": "scheduled_task_executed", "task_name": task_name, "result_status": result.get("status"), "run_id": result.get("run_id")})
             except Exception as exc:
                 executed.append({"task_name": task_name, "status": "failed", "error": str(exc)})
@@ -78,6 +94,26 @@ class ScheduledTaskRunner:
                 task_graph["schedule_policy"] = policy
                 self._write(path, task_graph)
         return executed
+
+    def _controller_participant_ids(self, task_graph: dict[str, Any]) -> list[str]:
+        policy = task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {}
+        return [str(x).strip() for x in (policy.get("controller_participant_ids") or []) if str(x).strip()]
+
+    def _payload_participant_ids(self, task_graph: dict[str, Any], controller_ids: list[str]) -> list[str]:
+        selected = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
+        controllers = set(controller_ids)
+        payload = [x for x in selected if x not in controllers]
+        if payload:
+            return payload
+        tasks = task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []
+        derived: list[str] = []
+        for item in tasks:
+            if not isinstance(item, dict):
+                continue
+            pid = str(item.get("participant_id") or "").strip()
+            if pid and pid not in controllers:
+                derived.append(pid)
+        return derived
 
     def _read(self, path: Path) -> dict[str, Any] | None:
         try:
