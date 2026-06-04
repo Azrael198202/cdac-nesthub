@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -49,6 +50,7 @@ class ScheduledTaskRunner:
 
     async def run_once(self, executor: Callable[..., Awaitable[dict[str, Any]]]) -> list[dict[str, Any]]:
         now = datetime.now(timezone.utc)
+        self._trace({"event": "scheduler_tick"})
         executed: list[dict[str, Any]] = []
         for path in sorted(self.tasks_dir.glob("*.json")):
             task_graph = self._read(path)
@@ -63,20 +65,21 @@ class ScheduledTaskRunner:
             if next_run_at > now:
                 continue
             task_name = str(task_graph.get("task_name") or path.stem)
+            self._trace({"event": "due_task_found", "task_name": task_name, "next_run_at": next_run_at.isoformat()})
             self._trace({"event": "scheduled_task_due", "task_name": task_name, "next_run_at": next_run_at.isoformat()})
             try:
                 controller_ids = self._controller_participant_ids(task_graph)
                 payload_ids = self._payload_participant_ids(task_graph, controller_ids)
                 self._trace({
-                    "event": "payload_dispatch_started",
+                    "event": "dispatch_started",
                     "task_name": task_name,
                     "skipped_controller_participants": controller_ids,
                     "payload_participants": payload_ids,
                 })
-                result = await executor(task_name, task_graph)
+                result = await self._call_executor(executor, task_name, task_graph)
                 executed.append({"task_name": task_name, "status": result.get("status"), "run_id": result.get("run_id")})
                 self._trace({
-                    "event": "payload_dispatch_completed",
+                    "event": "dispatch_completed",
                     "task_name": task_name,
                     "result_status": result.get("status"),
                     "run_id": result.get("run_id"),
@@ -93,7 +96,28 @@ class ScheduledTaskRunner:
                 policy["next_run_at"] = (now + timedelta(seconds=interval)).isoformat()
                 task_graph["schedule_policy"] = policy
                 self._write(path, task_graph)
+                self._trace({"event": "next_run_at_updated", "task_name": task_name, "next_run_at": policy.get("next_run_at"), "last_run_at": policy.get("last_run_at")})
         return executed
+
+
+    async def _call_executor(self, executor: Callable[..., Awaitable[dict[str, Any]]], task_name: str, task_graph: dict[str, Any]) -> dict[str, Any]:
+        """Call either legacy one-argument or graph-aware executors."""
+        try:
+            signature = inspect.signature(executor)
+            positional = [
+                p for p in signature.parameters.values()
+                if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+                and p.default is p.empty
+            ]
+            accepts_varargs = any(p.kind == p.VAR_POSITIONAL for p in signature.parameters.values())
+            if accepts_varargs or len(positional) >= 2:
+                return await executor(task_name, task_graph)
+            return await executor(task_name)
+        except (TypeError, ValueError):
+            try:
+                return await executor(task_name, task_graph)
+            except TypeError:
+                return await executor(task_name)
 
     def _controller_participant_ids(self, task_graph: dict[str, Any]) -> list[str]:
         policy = task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {}
@@ -140,8 +164,23 @@ class ScheduledTaskRunner:
     def _trace(self, payload: dict[str, Any]) -> None:
         try:
             self.trace_dir.mkdir(parents=True, exist_ok=True)
-            payload = {"timestamp": datetime.now(timezone.utc).isoformat(), **payload}
+            event_payload = {"timestamp": datetime.now(timezone.utc).isoformat(), **payload}
             with (self.trace_dir / "scheduler.jsonl").open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                fh.write(json.dumps(event_payload, ensure_ascii=False) + "\n")
+            lifecycle_dir = Path("runtime") / "traces" / "service_lifecycle"
+            lifecycle_dir.mkdir(parents=True, exist_ok=True)
+            with (lifecycle_dir / "scheduled_task_runner.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event_payload, ensure_ascii=False) + "\n")
+            try:
+                from ai_core.runtime.observability.runtime_console import emit_console_event
+                emit_console_event(
+                    area="scheduler",
+                    event=str(payload.get("event") or "scheduler_event"),
+                    status="info",
+                    message=str(payload.get("event") or "scheduler_event"),
+                    data={k: v for k, v in payload.items() if k != "event"},
+                )
+            except Exception:
+                pass
         except Exception:
             return

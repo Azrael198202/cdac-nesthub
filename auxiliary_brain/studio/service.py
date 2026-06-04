@@ -807,6 +807,15 @@ class AgentStudioService:
             if pid:
                 self.store.write_json(f"generated/agents/{pid}.json", generated_participant)
         selected_ids = [p.get("participant_id") for p in workflow_plan.selected_participants]
+        if schedule_policy.get("enabled"):
+            controller_ids = self._derive_execution_controller_participant_ids(
+                tasks=workflow_plan.tasks,
+                participants=workflow_plan.selected_participants,
+                runtime_parameters=explicit_runtime_parameters,
+            )
+            if controller_ids:
+                schedule_policy = dict(schedule_policy)
+                schedule_policy["controller_participant_ids"] = controller_ids
         # Task graphs do not own durable parameter values.  Parameter schemas live
         # on participants, while uploaded artifact parameters are discovered from
         # the selected artifact during execution_preparation.  Keeping a blank
@@ -846,6 +855,16 @@ class AgentStudioService:
             "final_synthesis_owner": "ai_core",
         }
         path = self.store.write_json(f"generated/tasks/{task_name}.json", payload)
+        if isinstance(schedule_policy, dict) and schedule_policy.get("enabled"):
+            self._emit_schedule_observation(
+                "schedule_saved",
+                task_name=task_name,
+                data={
+                    "interval_seconds": schedule_policy.get("interval_seconds"),
+                    "next_run_at": schedule_policy.get("next_run_at"),
+                    "controller_participant_ids": schedule_policy.get("controller_participant_ids") or [],
+                },
+            )
         self._update_community()
         return {
             "action": "create_task_graph",
@@ -1456,33 +1475,61 @@ class AgentStudioService:
     def _extract_runtime_parameters_from_instruction(self, instruction: str) -> dict[str, Any]:
         """Extract explicit task-run parameters from user-authored text.
 
-        Extraction is intentionally syntax based. It accepts simple assignment
-        lines such as `name: value`, `- name: value`, or `name=value`, and avoids
-        treating section headers such as `Parameters for X:` or `Step 1:` as
-        runtime values. Values are task-scoped and are not stored back onto the
-        durable agent profile.
+        This parser is syntax based and domain-neutral. It accepts assignment
+        material in either one-key-per-line form or compact multi-assignment
+        form, including section-prefixed lines such as `Parameters: a = 1 b = 2`.
+        Section headers without values remain ignored.
         """
         text = str(instruction or "")
         out: dict[str, Any] = {}
         header_prefixes = {"step", "parameters", "parameter", "params"}
-        assignment_line = re.compile(r"^\s*(?:[-*]\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:)\s*(.+?)\s*$")
+        single_assignment = re.compile(r"^\s*(?:[-*]\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:)\s*(.+?)\s*$")
+        pair_scan = re.compile(
+            r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:)\s*(.*?)"
+            r"(?=\s+\b[A-Za-z_][A-Za-z0-9_]*\s*(?:=|:)|\s*$)",
+            flags=re.S,
+        )
+
+        def clean_value(value: Any) -> str:
+            return str(value or "").strip().strip("'\"").strip()
+
+        def add_pair(key: str, value: Any) -> None:
+            key = str(key or "").strip()
+            value = clean_value(value)
+            if not key or not value:
+                return
+            lowered_key = key.casefold()
+            if lowered_key in header_prefixes:
+                return
+            if value.endswith(":") and len(value.split()) <= 5:
+                return
+            out[key] = value
+
         for raw_line in text.splitlines():
             line = raw_line.strip()
             if not line:
                 continue
             lowered = line.casefold()
-            if any(lowered.startswith(prefix + " ") or lowered.startswith(prefix + ":") for prefix in header_prefixes):
+            scan_line = line
+            header_match = re.match(r"^\s*(?:[-*]\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$", line)
+            if header_match and header_match.group(1).casefold() in header_prefixes:
+                remainder = header_match.group(2).strip()
+                if not remainder:
+                    continue
+                scan_line = remainder
+            elif any(lowered.startswith(prefix + " ") for prefix in header_prefixes):
                 continue
-            match = assignment_line.match(line)
-            if not match:
+
+            matches = list(pair_scan.finditer(scan_line))
+            if len(matches) > 1:
+                for match in matches:
+                    add_pair(match.group(1), match.group(2))
                 continue
-            key = match.group(1).strip()
-            value = match.group(2).strip().strip("'\"")
-            if not key or not value:
-                continue
-            if value.endswith(":") and len(value.split()) <= 5:
-                continue
-            out[key] = value
+
+            match = single_assignment.match(scan_line)
+            if match:
+                add_pair(match.group(1), match.group(2))
+
         for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:用|为|是)\s*([A-Za-z0-9_.:/-]+)", text, flags=re.I):
             key = match.group(1).strip()
             value = match.group(2).strip().strip("'\"")
@@ -2005,6 +2052,50 @@ class AgentStudioService:
         artifact_sig = ",".join(sorted(str(a.get("artifact_id") or a.get("path") or a.get("filename") or "") for a in artifacts if isinstance(a, dict)))
         return "|".join(part for part in (name, objective, artifact_sig) if part)
 
+
+    def _derive_execution_controller_participant_ids(self, *, tasks: list[dict[str, Any]], participants: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> list[str]:
+        """Identify task participants that only define durable execution timing.
+
+        The rule is structural: a controller step is the step whose source
+        fragment declares timing policy fields. It does not depend on any
+        concrete business capability, message type, recipient, provider, or tool.
+        """
+        participant_ids = {str(p.get("participant_id") or p.get("id") or "").strip() for p in participants if isinstance(p, dict)}
+        participant_ids.discard("")
+        controller_ids: list[str] = []
+        timing_keys = {"interval", "interval_seconds", "every", "repeat", "repeat_every"}
+        for task in tasks or []:
+            if not isinstance(task, dict):
+                continue
+            pid = str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
+            if not pid or pid not in participant_ids:
+                continue
+            fragment = str(task.get("source_instruction_fragment") or task.get("objective") or "")
+            values = self._extract_runtime_parameters_from_instruction(fragment)
+            normalized_keys = {str(k).casefold() for k in values.keys()}
+            has_timing_assignment = bool(normalized_keys & timing_keys)
+            has_timing_phrase = bool(self._extract_generic_interval_seconds(fragment))
+            if has_timing_assignment or has_timing_phrase:
+                if pid not in controller_ids:
+                    controller_ids.append(pid)
+        return controller_ids
+
+    def _emit_schedule_observation(self, event: str, *, task_name: str, data: dict[str, Any] | None = None) -> None:
+        """Write operator-visible scheduler observations without affecting execution."""
+        payload = {"event": event, "task_name": task_name, **(data or {})}
+        try:
+            from ai_core.runtime.observability.runtime_console import emit_console_event
+            emit_console_event(area="scheduler", event=event, status="info", message=event, data=payload)
+        except Exception:
+            pass
+        try:
+            from datetime import datetime, timezone
+            trace_dir = Path("runtime") / "traces" / "scheduled_tasks"
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            with (trace_dir / "scheduler.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(), **payload}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
     def _extract_schedule_policy_from_instruction(self, instruction: str) -> dict[str, Any]:
         """Extract a generic durable execution policy from user language.

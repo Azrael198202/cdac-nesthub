@@ -35,7 +35,7 @@ async def main():
         await runner.run_once(executor)
         assert seen['payload']==['payload'], seen
         log=(traces/'scheduler.jsonl').read_text(encoding='utf-8')
-        assert 'payload_dispatch_started' in log
+        assert '"event": "dispatch_started"' in log
         assert 'skipped_controller_participants' in log
         print('scheduled payload dispatch fix2 verified')
 
