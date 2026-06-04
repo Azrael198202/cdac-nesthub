@@ -1547,6 +1547,21 @@ class AgentStudioService:
         selected = self.delegation_runtime._fresh_task_participants(
             self.delegation_runtime._select_participants(task_graph, participants)
         )
+        # During scheduled dispatch, controller participants only define the
+        # durable schedule policy and must not be treated as payload runtime
+        # participants.  Otherwise preflight asks for controller-only internal
+        # inputs again on every tick and the scheduled payload never runs.
+        if bool(runtime_parameters.get("_scheduled_dispatch")):
+            controller_ids = {
+                str(x).strip()
+                for x in (task_graph.get("schedule_policy") or {}).get("controller_participant_ids", [])
+                if str(x).strip()
+            } if isinstance(task_graph.get("schedule_policy"), dict) else set()
+            if controller_ids:
+                selected = [
+                    participant for participant in selected
+                    if str(participant.get("participant_id") or participant.get("id") or "").strip() not in controller_ids
+                ]
         self.delegation_runtime._apply_task_runtime_parameters_to_selected(selected, runtime_parameters)
         task_mind_graph = self.delegation_runtime._build_task_mind_graph(task_graph, selected)
         dependency_plan = (task_mind_graph.get("agent_relation_analysis") or {}) if isinstance(task_mind_graph, dict) else {}
