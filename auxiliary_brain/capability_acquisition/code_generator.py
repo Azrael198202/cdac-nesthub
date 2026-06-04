@@ -79,6 +79,13 @@ class RuntimeBlueprintArtifactGenerator:
                 verification_input = blueprint.get("verification_input") if isinstance(blueprint.get("verification_input"), dict) else {"_runtime": {"dry_run": True}}
                 artifact_kind = "blueprint_only_not_registerable"
 
+        generated_services = self._materialize_generated_services(
+            blueprint=blueprint,
+            tool_id=tool_id,
+            input_schema=input_schema,
+            identity_contract=identity_contract,
+        )
+
         return {
             "template_id": tool_id,
             "description": str(blueprint.get("description") or "Runtime-generated capability artifact."),
@@ -98,6 +105,7 @@ class RuntimeBlueprintArtifactGenerator:
             "verification_expectations": verification_expectations,
             "acquisition_policy": blueprint.get("acquisition_policy") if isinstance(blueprint.get("acquisition_policy"), dict) else {"allow_policy_backed_basic_acquisition_without_external_evidence": True},
             "capability_match_contract": capability_contract,
+            "generated_services": generated_services,
             "artifact_kind": artifact_kind,
             "blueprint_source": blueprint.get("blueprint_source") or "runtime_blueprint_planner",
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -512,6 +520,215 @@ def test_generated_tool_verification_input():
     assert result["status"] == "completed"
 '''
         return [{"path": module, "content": code}, {"path": f"test_{tool_id}.py", "content": test}]
+
+    def _materialize_generated_services(self, *, blueprint: dict[str, Any], tool_id: str, input_schema: dict[str, Any], identity_contract: dict[str, Any]) -> list[dict[str, Any]]:
+        declared = blueprint.get("generated_services")
+        if isinstance(declared, list) and declared:
+            return [svc for svc in declared if isinstance(svc, dict)]
+        if not self._needs_dynamic_runtime_service(blueprint=blueprint, identity_contract=identity_contract):
+            return []
+        service_id = f"{tool_id}_service"
+        return [self._generic_record_dispatch_service(service_id=service_id, tool_id=tool_id)]
+
+    def _needs_dynamic_runtime_service(self, *, blueprint: dict[str, Any], identity_contract: dict[str, Any]) -> bool:
+        policy = blueprint.get("runtime_execution_policy") if isinstance(blueprint.get("runtime_execution_policy"), dict) else {}
+        if bool(policy.get("requires_dynamic_service") or policy.get("requires_background_service") or policy.get("continuous_runtime_service")):
+            return True
+        text = json.dumps({"blueprint": blueprint, "identity": identity_contract}, ensure_ascii=False).casefold()
+        recurring_markers = ["recurring", "repeat", "interval", "every ", "due", "one-time", "one time", "dispatch", "trigger"]
+        durable_markers = ["persist", "local runtime storage", "multiple named", "enabled", "disabled"]
+        return any(m in text for m in recurring_markers) and any(m in text for m in durable_markers)
+
+    def _generic_record_dispatch_service(self, *, service_id: str, tool_id: str) -> dict[str, Any]:
+        service_template = r'''from __future__ import annotations
+
+import asyncio
+import json
+import os
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+SERVICE_ID = __SERVICE_ID__
+TOOL_ID = __TOOL_ID__
+_STOP = asyncio.Event()
+_TASK: asyncio.Task[Any] | None = None
+
+def _as_mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().casefold()
+    if text in {"true", "1", "yes", "y", "on"}:
+        return True
+    if text in {"false", "0", "no", "n", "off"}:
+        return False
+    return default
+
+def _parse_time(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+def _store_path(context: dict[str, Any]) -> Path:
+    root = context.get("runtime_data_dir") or os.environ.get("AI_RUNTIME_DATA_DIR") or "runtime/data"
+    path = Path(str(root)) / "runtime_capabilities" / TOOL_ID / "records.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+def _load(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+def _save(path: Path, data: dict[str, Any]) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+def _trace(context: dict[str, Any], payload: dict[str, Any]) -> None:
+    try:
+        trace_dir = Path(str(context.get("trace_dir") or "runtime/traces/service_lifecycle"))
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        event = {"timestamp": datetime.now(timezone.utc).isoformat(), "service_id": SERVICE_ID, **payload}
+        with (trace_dir / f"{SERVICE_ID}.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception:
+        return
+
+def _interval_seconds(record: dict[str, Any]) -> int:
+    for key in ("interval_seconds", "interval", "seconds", "repeat_seconds"):
+        value = record.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return int(value)
+        text = str(value or "").strip().casefold()
+        if text.endswith("s") and text[:-1].strip().isdigit():
+            return int(text[:-1].strip())
+        if text.isdigit():
+            return int(text)
+    schedule = _as_mapping(record.get("schedule") or record.get("schedule_definition"))
+    for key in ("interval_seconds", "seconds"):
+        value = schedule.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return int(value)
+    return 0
+
+def _dispatch_payload(record: dict[str, Any]) -> dict[str, Any]:
+    target = _as_mapping(record.get("target"))
+    params = record.get("parameters") or record.get("target_parameters") or target.get("parameters") or {}
+    return {
+        "target_type": record.get("target_type") or target.get("type") or "task",
+        "target": record.get("target_agent") or record.get("target_task") or record.get("target_name") or target.get("name") or target.get("id"),
+        "parameters": params if isinstance(params, dict) else {},
+        "record_name": record.get("name"),
+    }
+
+async def start(context: dict[str, Any] | None = None) -> dict[str, Any]:
+    global _TASK, _STOP
+    context = _as_mapping(context)
+    if _TASK and not _TASK.done():
+        return {"status": "already_running", "service_id": SERVICE_ID}
+    _STOP = asyncio.Event()
+    _TASK = asyncio.create_task(_loop(context))
+    _trace(context, {"event": "service_started", "tool_id": TOOL_ID})
+    return {"status": "started", "service_id": SERVICE_ID}
+
+async def stop(start_result: Any = None) -> dict[str, Any]:
+    global _TASK, _STOP
+    _STOP.set()
+    if _TASK:
+        _TASK.cancel()
+        try:
+            await _TASK
+        except asyncio.CancelledError:
+            pass
+    return {"status": "stopped", "service_id": SERVICE_ID}
+
+async def health(context: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {"status": "running" if _TASK and not _TASK.done() else "stopped", "service_id": SERVICE_ID}
+
+async def _loop(context: dict[str, Any]) -> None:
+    while not _STOP.is_set():
+        try:
+            await _tick(context)
+        except Exception as exc:
+            _trace(context, {"event": "service_tick_error", "error_type": exc.__class__.__name__, "error": str(exc)})
+        try:
+            await asyncio.wait_for(_STOP.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            pass
+
+async def _tick(context: dict[str, Any]) -> None:
+    dispatch = context.get("execute_dispatch")
+    if not callable(dispatch):
+        _trace(context, {"event": "dispatch_callable_missing"})
+        return
+    path = _store_path(context)
+    records = _load(path)
+    changed = False
+    now = datetime.now(timezone.utc)
+    for name, record in list(records.items()):
+        if not isinstance(record, dict) or not _as_bool(record.get("enabled"), default=True):
+            continue
+        next_run = _parse_time(record.get("next_run_at") or record.get("run_at")) or now
+        if next_run > now:
+            continue
+        payload = _dispatch_payload(record)
+        if not payload.get("target"):
+            _trace(context, {"event": "record_missing_target", "record_name": name})
+            continue
+        _trace(context, {"event": "record_due", "record_name": name, "target_type": payload.get("target_type"), "target": payload.get("target")})
+        result = dispatch(payload)
+        if hasattr(result, "__await__"):
+            result = await result
+        _trace(context, {"event": "record_dispatched", "record_name": name, "result": result if isinstance(result, dict) else str(result)})
+        interval = _interval_seconds(record)
+        if interval > 0:
+            record["last_run_at"] = now.isoformat()
+            record["next_run_at"] = (now + timedelta(seconds=interval)).isoformat()
+        else:
+            record["enabled"] = False
+            record["last_run_at"] = now.isoformat()
+        records[name] = record
+        changed = True
+    if changed:
+        _save(path, records)
+'''
+        service_py = service_template.replace("__SERVICE_ID__", repr(service_id)).replace("__TOOL_ID__", repr(tool_id))
+        test_py = """from pathlib import Path
+import importlib.util
+
+ROOT = Path(__file__).resolve().parents[2] / "services" / SERVICE_ID_PLACEHOLDER
+SPEC = importlib.util.spec_from_file_location("generated_service_under_test", ROOT / "service.py")
+mod = importlib.util.module_from_spec(SPEC)
+assert SPEC and SPEC.loader
+SPEC.loader.exec_module(mod)
+
+def test_service_contract_has_lifecycle():
+    assert callable(getattr(mod, "start"))
+    assert callable(getattr(mod, "stop"))
+    assert callable(getattr(mod, "health"))
+""".replace("SERVICE_ID_PLACEHOLDER", repr(service_id))
+        return {
+            "service_id": service_id,
+            "enabled": True,
+            "entrypoint": {"module": "service.py", "start": "start", "stop": "stop", "health": "health"},
+            "files": [
+                {"path": "service.py", "content": service_py},
+                {"path": f"test_{service_id}.py", "content": test_py},
+            ],
+            "lifecycle": {"start": "start", "stop": "stop", "health": "health"},
+        }
 
     def _neutral_files(self, *, tool_id: str, entrypoint: dict[str, Any]) -> list[dict[str, str]]:
         module = str(entrypoint.get("module") or "tool.py")

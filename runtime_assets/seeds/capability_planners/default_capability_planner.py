@@ -202,6 +202,8 @@ def _model_prompt(*, request_text: str, identity: dict[str, Any], evidence: dict
         "blueprint must contain: capability_id, description, capabilities, match_terms, entrypoint, files, "
         "input_schema, output_schema, connection_schema, secret_schema, approval_policy, runtime_interface, "
         "runtime_execution_policy, verification_input, verification_expectations, acquisition_policy, capability_match_contract. "
+        "Include generated_services only when continuous/background lifecycle is required. "
+        "If the requested capability requires continuous/background lifecycle while runtime is running, include generated_services with service_id, entrypoint, lifecycle, and files. "
         "files must contain one Python implementation file exposing the entrypoint function and one isolated test file. "
         "Sandbox verification must not contact external services and must use declared test-mode input. "
         "Live execution must be possible when the user passes false boolean values for test-mode fields and confirms approval. "
@@ -249,6 +251,7 @@ def _compact_model_prompt(*, request_text: str, identity: dict[str, Any], eviden
         "The template must include template_id, description, capabilities, match_terms, entrypoint, files, "
         "input_schema, output_schema, connection_schema, secret_schema, approval_policy, runtime_interface, "
         "runtime_execution_policy, verification_input, verification_expectations, acquisition_policy, capability_match_contract. "
+        "Include generated_services only when continuous/background lifecycle is required. "
         "files must include one Python implementation and one isolated unit test. "
         "Sandbox verification must not call external services. "
         "Boolean form values may arrive as strings and must be parsed robustly.\n"
@@ -262,6 +265,7 @@ def _neutral_blueprint(*, request_text: str, identity: dict[str, Any], event_con
     if not requested:
         match = re.search(r"Acquire\s+runtime\s+capability\s*:\s*\n?\s*([^\n.]+)", request_text, flags=re.I)
         requested = _safe_name(match.group(1)) if match else "generated_capability"
+    service_needed = _neutral_request_needs_dynamic_service(request_text)
     return {
         "capability_id": _safe_name(requested),
         "description": "Neutral runtime-generated capability blueprint created without embedded domain behavior.",
@@ -272,6 +276,7 @@ def _neutral_blueprint(*, request_text: str, identity: dict[str, Any], event_con
         "output_schema": {"type": "object", "properties": {"status": {"type": "string"}, "data": {"type": "object"}}, "additionalProperties": True},
         "verification_input": {"_runtime": {"dry_run": True}},
         "verification_expectations": {"status": "completed"},
+        "runtime_execution_policy": {"requires_dynamic_service": service_needed} if service_needed else {"side_effects": "runtime_declared"},
         "acquisition_policy": {"allow_policy_backed_basic_acquisition_without_external_evidence": True},
         "capability_match_contract": {
             "expected_tool_id": _safe_name(requested),
@@ -282,6 +287,12 @@ def _neutral_blueprint(*, request_text: str, identity: dict[str, Any], event_con
         },
     }
 
+
+def _neutral_request_needs_dynamic_service(request_text: str) -> bool:
+    text = str(request_text or "").casefold()
+    recurring = ["recurring", "repeat", "interval", "every ", "due", "dispatch", "trigger", "one-time", "one time"]
+    durable = ["persist", "local runtime storage", "multiple named", "enabled", "disabled"]
+    return any(item in text for item in recurring) and any(item in text for item in durable)
 
 def _schema_from_event_contract(event_contract: dict[str, Any]) -> dict[str, Any]:
     workflow = event_contract.get("workflow_contract") if isinstance(event_contract.get("workflow_contract"), dict) else {}
