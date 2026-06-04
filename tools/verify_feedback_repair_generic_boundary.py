@@ -96,7 +96,8 @@ def verify_generic_behavior() -> None:
         expected_contract={"input_schema": {"type": "object", "properties": {"target": {"type": "string"}}, "required": ["target"]}},
         runtime_state={},
     )
-    assert proposal["requires_user_confirmation"] is True
+    assert proposal["requires_user_action"] is True
+    assert proposal["interaction_kind"] == "input_update_required"
     assert proposal["diagnosis"]["category"] == "parameter_problem"
     trace = trace_dir / "verify_feedback_repair_generic_boundary.jsonl"
     assert trace.exists(), trace

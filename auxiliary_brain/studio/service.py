@@ -669,7 +669,26 @@ class AgentStudioService:
             if key not in seen:
                 seen.add(key)
                 deduped.append(text)
-        return {"_source_texts": deduped, "_source_text": "\n".join(deduped)} if deduped else {}
+        if not deduped:
+            return {}
+        material = "\n".join(deduped)
+        context: dict[str, Any] = {
+            "_source_texts": deduped,
+            "_source_text": material,
+            # Durable generic source material for later repair/resume.  This is
+            # not a business parameter; it lets structural binding recover exact
+            # user-provided spans after a delegated run has paused.
+            "_original_user_material": material,
+        }
+        try:
+            from ai_core.input_parsing.structured_entity_extractor import StructuredEntityExtractor
+            parsed = StructuredEntityExtractor().extract(material, source="original_user_material")
+            values = parsed.get("values_by_type") if isinstance(parsed, dict) else {}
+            if isinstance(values, dict) and values:
+                context["_detected_structural_values"] = values
+        except Exception:
+            pass
+        return context
 
     def snapshot(self) -> dict[str, Any]:
         conversation_runs = self.store.list_json("traces/conversation_core")
@@ -908,6 +927,10 @@ class AgentStudioService:
         runtime_parameters: dict[str, Any] = {}
         runtime_parameters.update(self._extract_runtime_parameters_from_instruction(message))
         runtime_parameters.update(self._extract_participant_schema_parameters_from_instruction(message, participant))
+        # Store generic original source material at creation time so one-off
+        # delegated executions can resume repair even if the later resume call
+        # only receives a boolean confirmation.
+        runtime_parameters.update(self._structural_source_runtime_context(task_graph={"instruction": str(message or "")}, instruction=message))
         if isinstance(provided_inputs, dict):
             runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
         artifact_refs = uploaded_artifacts if isinstance(uploaded_artifacts, list) else []

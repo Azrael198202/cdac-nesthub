@@ -911,6 +911,34 @@ class AgentDelegationRuntime:
                 participants=selected,
                 provided_inputs=provided_inputs,
             )
+        if str(pending.get("kind") or "") == "runtime_input_update_required":
+            selected = self._fresh_task_participants(selected)
+            runtime_parameters = {}
+            if isinstance(task_graph.get("runtime_parameters"), dict):
+                runtime_parameters.update(task_graph.get("runtime_parameters") or {})
+            if isinstance(run_payload.get("runtime_parameters"), dict):
+                runtime_parameters.update(run_payload.get("runtime_parameters") or {})
+            checkpoint = pending.get("resume_checkpoint") if isinstance(pending.get("resume_checkpoint"), dict) else {}
+            if checkpoint.get("original_user_material"):
+                runtime_parameters.setdefault("_original_user_material", checkpoint.get("original_user_material"))
+            if isinstance(checkpoint.get("detected_structural_values"), dict):
+                runtime_parameters.setdefault("_detected_structural_values", checkpoint.get("detected_structural_values"))
+            if isinstance(provided_inputs, dict):
+                runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+            self._apply_task_runtime_parameters_to_selected(selected, runtime_parameters)
+            task_graph = dict(task_graph)
+            task_graph["runtime_parameters"] = runtime_parameters
+            return await self._execute_task_with_selected(task_graph, selected)
+        if str(pending.get("kind") or "") in {"profile_secret_update_required", "profile_configuration_update_required"}:
+            run_payload.update({
+                "status": "paused",
+                "current_stage": str(pending.get("kind") or "profile_update_required"),
+                "message": str((pending.get("request") or {}).get("message") or pending.get("message") or "Update the selected profile and retry the task."),
+                "pending_action": pending,
+                "completed_at": self._now(),
+            })
+            self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+            return run_payload
         task_mind_graph = self._build_task_mind_graph(task_graph, selected)
         dependency_plan = task_mind_graph.get("agent_relation_analysis") or self._build_participant_dependency_plan(task_graph, selected)
         run_payload["participant_dependency_plan"] = dependency_plan
@@ -1359,13 +1387,22 @@ class AgentDelegationRuntime:
 
         This lets commands such as `topic=fukuoka` or UI-provided values satisfy
         agent parameter contracts for the current run without persisting those
-        values to the agent profile.
+        values to the agent profile.  The full task-run parameter map is also
+        copied onto the in-memory participant so schema-driven registered-tool
+        binding and repair resume can use generic structural context such as
+        original source material and extracted structural spans.  The registered
+        tool bridge still filters by the declared tool schema before execution.
         """
         if not isinstance(runtime_parameters, dict) or not runtime_parameters:
             return
         for participant in participants:
             if not isinstance(participant, dict):
                 continue
+            scoped = participant.setdefault("runtime_parameters", {})
+            if isinstance(scoped, dict):
+                for key, value in runtime_parameters.items():
+                    if value not in (None, "", [], {}) and key not in scoped:
+                        scoped[key] = copy.deepcopy(value)
             self.parameter_contract_service.apply_values(participant, runtime_parameters)
 
     def _collect_missing_agent_parameter_fields(self, participants: list[dict[str, Any]], dependency_plan: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -1807,6 +1844,34 @@ class AgentDelegationRuntime:
             origin="auxiliary_brain",
         )
 
+    def _ensure_participant_structural_context(self, *, participant: dict[str, Any], task_name: str) -> None:
+        """Ensure delegated registered-tool participants carry source spans.
+
+        The first execution and later repair resume both run through participant
+        copies.  If a copied participant is missing generic source material,
+        recover it from the durable task graph and task step fragments.  This
+        keeps repair deterministic without adding capability-specific rules.
+        """
+        if not isinstance(participant, dict):
+            return
+        values = participant.setdefault("runtime_parameters", {})
+        if not isinstance(values, dict):
+            values = {}
+            participant["runtime_parameters"] = values
+        has_material = bool(str(values.get("_original_user_material") or values.get("_source_text") or "").strip())
+        has_structural = isinstance(values.get("_detected_structural_values"), dict) and bool(values.get("_detected_structural_values"))
+        if has_material and has_structural:
+            return
+        task_graph = self.store.read_json(f"generated/tasks/{task_name}.json") if task_name else None
+        source_material = self._task_source_material(task_graph=task_graph if isinstance(task_graph, dict) else {}, fallback_values=[values.get("_source_text")])
+        if source_material and not has_material:
+            values.setdefault("_original_user_material", source_material)
+            values.setdefault("_source_text", source_material)
+        if not has_structural:
+            structural = self._extract_structural_values_from_material(source_material or values.get("_original_user_material") or values.get("_source_text"))
+            if structural:
+                values.setdefault("_detected_structural_values", structural)
+
     async def _execute_registered_tool_capability(self, *, participant: dict[str, Any], task_name: str, completed_results: list[Any] | None = None, dependency_plan: dict[str, Any] | None = None) -> AgentExecutionResult | None:
         profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
         tool_id = str(profile.get("tool_id") or "").strip()
@@ -1817,6 +1882,7 @@ class AgentDelegationRuntime:
             completed_results=completed_results or [],
             dependency_plan=dependency_plan or {},
         )
+        self._ensure_participant_structural_context(participant=participant, task_name=task_name)
         values = participant.get("runtime_parameters") if isinstance(participant.get("runtime_parameters"), dict) else {}
         bridge_result = self.registered_tool_parameter_bridge.build_invocation(participant=participant, provided_values=values)
         input_data = bridge_result.get("input_data") if isinstance(bridge_result.get("input_data"), dict) else {}
@@ -1895,7 +1961,7 @@ class AgentDelegationRuntime:
         final_answer = self._registered_tool_final_answer(result)
         if not ok:
             repair = result.get("repair") if isinstance(result.get("repair"), dict) else {}
-            if repair and bool(repair.get("requires_user_confirmation")):
+            if repair and (bool(repair.get("requires_user_confirmation")) or bool(repair.get("requires_user_action"))):
                 source_material = str(values.get("_original_user_material") or "").strip()
                 detected_structural_values = values.get("_detected_structural_values") if isinstance(values.get("_detected_structural_values"), dict) else {}
                 if source_material and not detected_structural_values:
@@ -1911,6 +1977,15 @@ class AgentDelegationRuntime:
                     "original_user_material": source_material,
                     "detected_structural_values": detected_structural_values,
                 }
+                pending = self._build_feedback_repair_pending_action(
+                    participant=participant,
+                    tool_id=tool_id,
+                    repair=repair,
+                    result=result,
+                    final_answer=final_answer,
+                    checkpoint=repair_resume_checkpoint,
+                    input_data=input_data,
+                )
                 return AgentExecutionResult(
                     participant_id=self._participant_identity(participant),
                     participant_name=self._participant_name(participant),
@@ -1918,7 +1993,7 @@ class AgentDelegationRuntime:
                     status="paused",
                     final_answer=str(result.get("human_readable_error") or repair.get("user_message") or final_answer),
                     workflow_results={
-                        "status": "repair_confirmation_required",
+                        "status": str(repair.get("status") or "repair_required"),
                         "capability_type": "runtime_registered_tool",
                         "tool_id": tool_id,
                         "input_keys": sorted(input_data.keys()),
@@ -1926,20 +2001,7 @@ class AgentDelegationRuntime:
                         "repair": repair,
                         "repair_resume_checkpoint": repair_resume_checkpoint,
                     },
-                    pending_action={
-                        "kind": "feedback_repair_confirmation",
-                        "tool_id": tool_id,
-                        "repair_id": repair.get("repair_id"),
-                        "message": str(repair.get("user_message") or result.get("human_readable_error") or "A repair proposal is available."),
-                        "diagnosis": repair.get("diagnosis") if isinstance(repair.get("diagnosis"), dict) else {},
-                        "repair": repair,
-                        "resume_checkpoint": repair_resume_checkpoint,
-                        "original_user_material": source_material,
-                        "detected_structural_values": detected_structural_values,
-                        "request": {"input_mode": "repair_confirmation", "fields": [
-                            {"field": f"{self._participant_identity(participant)}.repair_confirmed", "name": f"{self._participant_identity(participant)}.repair_confirmed", "label": "Confirm repair", "message": "Confirm whether the runtime should apply this repair path.", "input_type": "boolean", "required": True}
-                        ]},
-                    },
+                    pending_action=pending,
                     missing_inputs=[],
                     origin="auxiliary_brain",
                 )
@@ -1958,6 +2020,97 @@ class AgentDelegationRuntime:
             },
             origin="auxiliary_brain",
         )
+
+
+    def _build_feedback_repair_pending_action(
+        self,
+        *,
+        participant: dict[str, Any],
+        tool_id: str,
+        repair: dict[str, Any],
+        result: dict[str, Any],
+        final_answer: str,
+        checkpoint: dict[str, Any],
+        input_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Create a user interaction for a generic repair route.
+
+        User-owned value/profile issues must not be shown as a blind
+        confirmation loop. System-owned generated implementation repairs may be
+        confirmed and resumed through the feedback-repair resume path.
+        """
+        pid = self._participant_identity(participant)
+        diagnosis = repair.get("diagnosis") if isinstance(repair.get("diagnosis"), dict) else {}
+        category = str(diagnosis.get("category") or "").strip()
+        interaction_kind = str(repair.get("interaction_kind") or "").strip()
+        base_message = str(repair.get("user_message") or result.get("human_readable_error") or final_answer or "A repair action is required.")
+        common = {
+            "tool_id": tool_id,
+            "repair_id": repair.get("repair_id"),
+            "message": base_message,
+            "diagnosis": diagnosis,
+            "repair": repair,
+            "resume_checkpoint": checkpoint,
+            "original_user_material": checkpoint.get("original_user_material"),
+            "detected_structural_values": checkpoint.get("detected_structural_values") if isinstance(checkpoint.get("detected_structural_values"), dict) else {},
+        }
+        if interaction_kind == "profile_secret_update_required" or category == "secret_problem":
+            return {
+                **common,
+                "kind": "profile_secret_update_required",
+                "request": {
+                    "input_mode": "profile_secret_update_required",
+                    "fields": [],
+                    "message": "Update the selected profile secret values, save them, and retry the task. Secret values cannot be repaired automatically.",
+                },
+            }
+        if interaction_kind == "profile_configuration_update_required" or category == "configuration_problem":
+            return {
+                **common,
+                "kind": "profile_configuration_update_required",
+                "request": {
+                    "input_mode": "profile_configuration_update_required",
+                    "fields": [],
+                    "message": "Update the selected profile connection values, save them, and retry the task.",
+                },
+            }
+        if interaction_kind == "input_update_required" or category == "parameter_problem":
+            return {
+                **common,
+                "kind": "runtime_input_update_required",
+                "request": {
+                    "input_mode": "runtime_input_update_required",
+                    "fields": self._repair_input_fields(participant=participant, input_data=input_data),
+                    "message": "Correct the runtime input values and submit again. If the original request contained a complete structural value, it is shown in the trace and can be reused.",
+                },
+            }
+        return {
+            **common,
+            "kind": "feedback_repair_confirmation",
+            "request": {"input_mode": "repair_confirmation", "fields": [
+                {"field": f"{pid}.repair_confirmed", "name": f"{pid}.repair_confirmed", "label": "Confirm system repair", "message": "Confirm whether the runtime should apply this system-owned repair path.", "input_type": "boolean", "required": True}
+            ]},
+        }
+
+    def _repair_input_fields(self, *, participant: dict[str, Any], input_data: dict[str, Any]) -> list[dict[str, Any]]:
+        pid = self._participant_identity(participant)
+        fields: list[dict[str, Any]] = []
+        for key in sorted((input_data or {}).keys()):
+            fields.append({
+                "field": f"{pid}.{key}",
+                "name": f"{pid}.{key}",
+                "parameter_name": key,
+                "participant_id": pid,
+                "label": str(key).replace("_", " ").title(),
+                "message": f"Review or correct {key}.",
+                "input_type": "list" if isinstance((input_data or {}).get(key), list) else "string",
+                "required": True,
+                "collection_mode": "single_value",
+                "runtime_required": True,
+                "blocking": True,
+                "execution_required": True,
+            })
+        return fields
 
     def _build_registered_tool_input(self, *, participant: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
         bridge_result = self.registered_tool_parameter_bridge.build_invocation(participant=participant, provided_values=values)

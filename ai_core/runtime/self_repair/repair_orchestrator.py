@@ -66,13 +66,18 @@ class FeedbackRepairOrchestrator:
             deterministic_plan = self.engine.plan(report).to_dict()
             self.logger.record(run_id=run_id, stage="deterministic_repair_planned", status=str(deterministic_plan.get("status")), payload=deterministic_plan)
 
+        interaction = self._repair_interaction_contract(diagnosis=diagnosis, deterministic_plan=deterministic_plan)
         proposal = {
             "repair_id": self._new_repair_id(tool_id),
             "run_id": run_id,
             "tool_id": tool_id,
             "profile_id": profile_id,
-            "status": "repair_confirmation_required" if diagnosis.repairable else "repair_not_available",
-            "requires_user_confirmation": bool(diagnosis.repairable),
+            "status": interaction["status"] if diagnosis.repairable else "repair_not_available",
+            "requires_user_confirmation": bool(interaction.get("requires_user_confirmation")),
+            "requires_user_action": bool(interaction.get("requires_user_action")),
+            "repair_route": interaction.get("repair_route"),
+            "repair_owner": interaction.get("repair_owner"),
+            "interaction_kind": interaction.get("interaction_kind"),
             "diagnosis": diagnosis.to_dict(),
             "user_message": self._user_message(diagnosis),
             "deterministic_plan": deterministic_plan,
@@ -173,6 +178,71 @@ class FeedbackRepairOrchestrator:
         path = out_dir / f"{repair_id}.json"
         path.write_text(json.dumps(request, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         return {"ok": True, "status": "capability_patch_request_created", "repair_id": repair_id, "request_path": str(path), "request": request}
+
+
+    def _repair_interaction_contract(self, *, diagnosis: Any, deterministic_plan: dict[str, Any] | None) -> dict[str, Any]:
+        """Return the generic repair route for a diagnosed failure.
+
+        The route is intentionally domain-neutral. It separates: user-owned
+        material repair, user-owned runtime profile repair, and system-owned
+        generated implementation repair.
+        """
+        category = str(getattr(diagnosis, "category", "") or "")
+        plan = deterministic_plan if isinstance(deterministic_plan, dict) else {}
+        can_auto_apply = bool(plan.get("can_auto_apply"))
+        if category == "parameter_problem":
+            if can_auto_apply:
+                return {
+                    "status": "system_parameter_repair_available",
+                    "repair_route": "system_generated_binding_repair",
+                    "repair_owner": "system",
+                    "interaction_kind": "system_repair_confirmation",
+                    "requires_user_confirmation": True,
+                    "requires_user_action": False,
+                }
+            return {
+                "status": "user_input_update_required",
+                "repair_route": "user_input_repair",
+                "repair_owner": "user",
+                "interaction_kind": "input_update_required",
+                "requires_user_confirmation": False,
+                "requires_user_action": True,
+            }
+        if category == "configuration_problem":
+            return {
+                "status": "profile_configuration_update_required",
+                "repair_route": "profile_configuration_repair",
+                "repair_owner": "user",
+                "interaction_kind": "profile_configuration_update_required",
+                "requires_user_confirmation": False,
+                "requires_user_action": True,
+            }
+        if category == "secret_problem":
+            return {
+                "status": "profile_secret_update_required",
+                "repair_route": "profile_secret_repair",
+                "repair_owner": "user",
+                "interaction_kind": "profile_secret_update_required",
+                "requires_user_confirmation": False,
+                "requires_user_action": True,
+            }
+        if category == "tool_implementation_problem":
+            return {
+                "status": "system_capability_patch_confirmation_required",
+                "repair_route": "system_generated_capability_patch",
+                "repair_owner": "auxiliary_brain",
+                "interaction_kind": "capability_patch_confirmation",
+                "requires_user_confirmation": True,
+                "requires_user_action": False,
+            }
+        return {
+            "status": "manual_review_required" if getattr(diagnosis, "repairable", False) else "repair_not_available",
+            "repair_route": "manual_review",
+            "repair_owner": "user",
+            "interaction_kind": "manual_review_required",
+            "requires_user_confirmation": False,
+            "requires_user_action": bool(getattr(diagnosis, "repairable", False)),
+        }
 
     def _user_message(self, diagnosis: Any) -> str:
         return f"{diagnosis.user_title}\n{diagnosis.user_message}\nSuggested action: {diagnosis.suggested_action}"

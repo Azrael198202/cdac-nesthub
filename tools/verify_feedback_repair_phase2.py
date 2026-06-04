@@ -29,7 +29,8 @@ def main() -> None:
         expected_contract={'input_schema': {'type': 'object', 'properties': {'target': {'type': 'string'}}, 'required': ['target']}},
         runtime_state={},
     )
-    assert proposal['requires_user_confirmation'] is True
+    assert proposal['requires_user_action'] is True
+    assert proposal['interaction_kind'] == 'input_update_required'
     assert proposal['diagnosis']['category'] == 'parameter_problem'
     apply = orch.apply(repair_id=proposal['repair_id'], approved=False)
     assert apply['status'] == 'repair_declined'
