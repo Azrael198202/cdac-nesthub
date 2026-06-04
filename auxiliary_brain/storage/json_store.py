@@ -42,6 +42,16 @@ class JsonStore:
         except Exception:
             return {}
 
+    def delete_json(self, relative: str) -> dict[str, Any]:
+        path = self.root / relative
+        if not path.exists() or not path.is_file():
+            return {"ok": False, "status": "not_found", "path": str(path)}
+        try:
+            path.unlink()
+            return {"ok": True, "status": "deleted", "path": str(path)}
+        except Exception as exc:
+            return {"ok": False, "status": "failed", "path": str(path), "error": str(exc)}
+
     def list_json(self, relative: str, *, limit: int | None = None) -> list[dict[str, Any]]:
         self.ensure_workspace()
         path = self.root / relative

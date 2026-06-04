@@ -624,6 +624,53 @@ class AgentStudioService:
         runs.sort(key=lambda item: str(item.get("completed_at") or item.get("started_at") or ""), reverse=True)
         return runs[0]
 
+
+    def delete_participant(self, participant_id: str) -> dict[str, Any]:
+        participant_id = str(participant_id or "").strip()
+        if not participant_id:
+            return {"ok": False, "status": "failed", "error": {"code": "missing_participant_id", "message": "An agent id is required."}}
+        result = self.store.delete_json(f"generated/agents/{participant_id}.json")
+        if result.get("ok"):
+            self._update_community()
+            return {"ok": True, "status": "deleted", "participant_id": participant_id}
+        return {"ok": False, "status": result.get("status") or "failed", "participant_id": participant_id, "error": result.get("error")}
+
+    def delete_task_graph(self, task_name: str) -> dict[str, Any]:
+        task_name = str(task_name or "").strip()
+        if not task_name:
+            return {"ok": False, "status": "failed", "error": {"code": "missing_task_name", "message": "A task name is required."}}
+        resolved = self._resolve_task_name(task_name) or task_name
+        result = self.store.delete_json(f"generated/tasks/{resolved}.json")
+        if result.get("ok"):
+            self._update_community()
+            return {"ok": True, "status": "deleted", "task_name": resolved}
+        return {"ok": False, "status": result.get("status") or "failed", "task_name": resolved, "error": result.get("error")}
+
+    def delete_runtime_capability(self, tool_id: str, *, delete_artifacts: bool = False, delete_profiles: bool = False) -> dict[str, Any]:
+        return self.registered_tool_service.delete_tool(tool_id, delete_artifacts=delete_artifacts, delete_profiles=delete_profiles)
+
+    def _structural_source_runtime_context(self, *, task_graph: dict[str, Any], instruction: str | None = None) -> dict[str, Any]:
+        texts: list[str] = []
+        for value in (instruction, task_graph.get("instruction"), task_graph.get("task_name")):
+            if isinstance(value, str) and value.strip():
+                texts.append(value.strip())
+        tasks = task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            for key in ("source_instruction_fragment", "instruction", "description"):
+                value = task.get(key)
+                if isinstance(value, str) and value.strip():
+                    texts.append(value.strip())
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for text in texts:
+            key = text.casefold()
+            if key not in seen:
+                seen.add(key)
+                deduped.append(text)
+        return {"_source_texts": deduped, "_source_text": "\n".join(deduped)} if deduped else {}
+
     def snapshot(self) -> dict[str, Any]:
         conversation_runs = self.store.list_json("traces/conversation_core")
         agent_traces = self.store.list_json("traces/agent_delegation")
@@ -1033,6 +1080,7 @@ class AgentStudioService:
             runtime_parameters.update(task_graph.get("runtime_parameters") or {})
         runtime_parameters.update(self._extract_step_scoped_runtime_parameters_from_tasks(task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []))
         runtime_parameters.update(self._extract_runtime_parameters_from_instruction(instruction or ""))
+        runtime_parameters.update(self._structural_source_runtime_context(task_graph=task_graph, instruction=instruction))
         if isinstance(provided_inputs, dict):
             runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
         preflight = self._preflight_runtime_parameters(task_graph, participants, runtime_parameters)

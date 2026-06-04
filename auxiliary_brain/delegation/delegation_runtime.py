@@ -1693,6 +1693,37 @@ class AgentDelegationRuntime:
             )
         ok = bool(result.get("ok"))
         final_answer = self._registered_tool_final_answer(result)
+        if not ok:
+            repair = result.get("repair") if isinstance(result.get("repair"), dict) else {}
+            if repair and bool(repair.get("requires_user_confirmation")):
+                return AgentExecutionResult(
+                    participant_id=self._participant_identity(participant),
+                    participant_name=self._participant_name(participant),
+                    core_run_id=new_id("registered_tool_repair_required"),
+                    status="paused",
+                    final_answer=str(result.get("human_readable_error") or repair.get("user_message") or final_answer),
+                    workflow_results={
+                        "status": "repair_confirmation_required",
+                        "capability_type": "runtime_registered_tool",
+                        "tool_id": tool_id,
+                        "input_keys": sorted(input_data.keys()),
+                        "tool_execution": result,
+                        "repair": repair,
+                    },
+                    pending_action={
+                        "kind": "feedback_repair_confirmation",
+                        "tool_id": tool_id,
+                        "repair_id": repair.get("repair_id"),
+                        "message": str(repair.get("user_message") or result.get("human_readable_error") or "A repair proposal is available."),
+                        "diagnosis": repair.get("diagnosis") if isinstance(repair.get("diagnosis"), dict) else {},
+                        "repair": repair,
+                        "request": {"input_mode": "repair_confirmation", "fields": [
+                            {"field": f"{self._participant_identity(participant)}.repair_confirmed", "name": f"{self._participant_identity(participant)}.repair_confirmed", "label": "Confirm repair", "message": "Confirm whether the runtime should apply this repair path.", "input_type": "boolean", "required": True}
+                        ]},
+                    },
+                    missing_inputs=[],
+                    origin="auxiliary_brain",
+                )
         return AgentExecutionResult(
             participant_id=self._participant_identity(participant),
             participant_name=self._participant_name(participant),

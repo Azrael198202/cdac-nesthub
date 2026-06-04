@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -243,6 +244,42 @@ class RuntimeRegisteredToolService:
             pass
         self._persist_tool_result(payload)
         return payload
+
+
+    def delete_tool(self, tool_id: str, *, delete_artifacts: bool = False, delete_profiles: bool = False) -> dict[str, Any]:
+        tool_id = str(tool_id or "").strip()
+        if not tool_id:
+            return {"ok": False, "status": "failed", "error": {"code": "missing_tool_id", "message": "A runtime capability id is required."}}
+        registry = self._load_registry()
+        if tool_id not in registry:
+            return {"ok": False, "status": "not_found", "tool_id": tool_id}
+        spec = registry.pop(tool_id)
+        self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+        self.registry_path.write_text(json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
+        removed: dict[str, Any] = {"registry": True}
+        if delete_profiles:
+            profile_dir = Path("runtime") / "connections" / tool_id
+            if profile_dir.exists():
+                shutil.rmtree(profile_dir, ignore_errors=True)
+                removed["profiles"] = str(profile_dir)
+        if delete_artifacts:
+            paths = []
+            for key in ("module_path", "spec_path"):
+                value = spec.get(key) if isinstance(spec, dict) else None
+                if value:
+                    paths.append(Path(str(value)))
+            artifact_dir = Path("runtime") / "generated" / "tools" / tool_id
+            paths.append(artifact_dir)
+            for path in paths:
+                try:
+                    if path.is_dir():
+                        shutil.rmtree(path, ignore_errors=True)
+                    elif path.is_file():
+                        path.unlink()
+                except Exception:
+                    pass
+            removed["artifacts"] = True
+        return {"ok": True, "status": "deleted", "tool_id": tool_id, "removed": removed}
 
     def list_tool_runs(self, limit: int = 20) -> list[dict[str, Any]]:
         result_dir = RUNTIME_GENERATED / "results" / "runtime_tool_runs"

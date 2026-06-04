@@ -37,6 +37,8 @@ class RegisteredToolParameterBridge:
             field_name = str(name)
             prop_dict = prop if isinstance(prop, dict) else {}
             raw = self._lookup_field_value(field_name, participant=participant, values=value_sources)
+            if self._is_empty(raw) and field_name not in required:
+                continue
             raw = self._repair_or_supply_structural_value(field_name, raw, prop_dict, participant=participant, values=value_sources)
             if self._is_empty(raw):
                 continue

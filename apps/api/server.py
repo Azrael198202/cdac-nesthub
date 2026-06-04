@@ -156,6 +156,11 @@ class RuntimeToolProfileRequest(BaseModel):
     config: dict[str, Any] | None = None
     secrets: dict[str, Any] | None = None
 
+
+class DeleteRuntimeCapabilityRequest(BaseModel):
+    delete_artifacts: bool = False
+    delete_profiles: bool = False
+
 class AgentStudioRequest(BaseModel):
     message: str
     provided_inputs: dict[str, Any] | None = None
@@ -775,6 +780,39 @@ async def agent_studio_apply_feedback_repair(req: FeedbackRepairApplyRequest):
         return JSONResponse(payload, status_code=200)
     except Exception as exc:
         _write_api_error_log(area="agent_studio_feedback_repair_apply", exc=exc, context={"repair_id": req.repair_id})
+        return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
+
+
+
+
+@app.delete("/api/agent-studio/agents/{participant_id}")
+async def agent_studio_delete_agent(participant_id: str):
+    try:
+        payload = studio_service.delete_participant(participant_id)
+        return JSONResponse(payload, status_code=200 if payload.get("ok") else 404)
+    except Exception as exc:
+        _write_api_error_log(area="agent_studio_delete_agent", exc=exc, context={"participant_id": participant_id})
+        return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
+
+
+@app.delete("/api/agent-studio/tasks/{task_name}")
+async def agent_studio_delete_task(task_name: str):
+    try:
+        payload = studio_service.delete_task_graph(task_name)
+        return JSONResponse(payload, status_code=200 if payload.get("ok") else 404)
+    except Exception as exc:
+        _write_api_error_log(area="agent_studio_delete_task", exc=exc, context={"task_name": task_name})
+        return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
+
+
+@app.delete("/api/agent-studio/runtime-tools/{tool_id}")
+async def agent_studio_delete_runtime_tool(tool_id: str, req: DeleteRuntimeCapabilityRequest | None = None):
+    try:
+        req = req or DeleteRuntimeCapabilityRequest()
+        payload = studio_service.delete_runtime_capability(tool_id, delete_artifacts=bool(req.delete_artifacts), delete_profiles=bool(req.delete_profiles))
+        return JSONResponse(payload, status_code=200 if payload.get("ok") else 404)
+    except Exception as exc:
+        _write_api_error_log(area="agent_studio_delete_runtime_tool", exc=exc, context={"tool_id": tool_id})
         return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
 
 

@@ -1043,6 +1043,25 @@ async function ensureSelectedModelCredential(){
   return false;
 }
 
+
+async function deleteStudioItem(kind, id, options){
+  if(!id){ return; }
+  const label = kind + ' ' + id;
+  if(!confirm('Delete ' + label + '?')){ return; }
+  let url = '';
+  let body = null;
+  if(kind === 'agent'){ url = '/api/agent-studio/agents/' + encodeURIComponent(id); }
+  else if(kind === 'task'){ url = '/api/agent-studio/tasks/' + encodeURIComponent(id); }
+  else if(kind === 'capability'){
+    url = '/api/agent-studio/runtime-tools/' + encodeURIComponent(id);
+    body = JSON.stringify(options || {delete_artifacts:false, delete_profiles:false});
+  }
+  else { return; }
+  const payload = await apiFetchRuntimeToolJson(url, {method:'DELETE', headers:{'Content-Type':'application/json'}, body:body});
+  addMessage('assistant', (payload.ok?'Deleted: ':'Delete result: ') + renderJson(payload), payload.ok?'final':'error');
+  refreshState();
+}
+
 function quickExecute(){ const name=prompt('Task name to execute'); if(name){ document.getElementById('input').value='execute '+name; sendMessage(); }}
 
 function toggleTracePanel(){
@@ -1057,7 +1076,7 @@ function toggleTracePanel(){
 
 async function refreshState(){ try{ const res=await fetch('/api/agent-studio/state'); const data=await res.json(); renderState(data); }catch(e){ console.error(e); }}
 function renderState(data){
-  const ps=data.participants||[]; document.getElementById('participantCount').textContent=ps.length; const pbox=document.getElementById('participants'); pbox.innerHTML=''; if(!ps.length)pbox.innerHTML='<div class="empty">No participant.</div>'; ps.forEach(p=>{ const el=document.createElement('div'); el.className='item'; el.innerHTML=`<b>${escapeHtml(p.name||p.participant_id)}</b><div class="small">${escapeHtml(p.participant_id||'')}</div><span class="pill">${escapeHtml(p.status||'created')}</span><span class="pill">delegate_to_ai_core</span><div class="path">${escapeHtml(p._path||'')}</div>`; pbox.appendChild(el); });
+  const ps=data.participants||[]; document.getElementById('participantCount').textContent=ps.length; const pbox=document.getElementById('participants'); pbox.innerHTML=''; if(!ps.length)pbox.innerHTML='<div class="empty">No participant.</div>'; ps.forEach(p=>{ const el=document.createElement('div'); el.className='item'; const pid=p.participant_id||p.id||''; el.innerHTML=`<div class="cardHeader"><b>${escapeHtml(p.name||pid)}</b><span class="pill">${escapeHtml(p.status||'created')}</span></div><div class="small">${escapeHtml(pid||'')}</div><span class="pill">delegate_to_ai_core</span><div class="path">${escapeHtml(p._path||'')}</div>`; const del=document.createElement('button'); del.className='btn danger'; del.style.marginTop='8px'; del.textContent='Delete agent'; del.onclick=()=>deleteStudioItem('agent', pid); el.appendChild(del); pbox.appendChild(el); });
   const right=document.getElementById('rightPane'); const graphs=data.task_graphs||[]; const runs=data.task_runs||[]; const conversationRuns=data.conversation_runs||[]; const runtimeToolRuns=data.runtime_tool_runs||[]; const deliveries=data.deliveries||[]; const traces=data.traces||[]; document.getElementById('graphCount').textContent=graphs.length + conversationRuns.length; right.innerHTML='';
   right.insertAdjacentHTML('beforeend','<div class="sectionTitle">Execution Flow</div>');
   const latestRun = conversationRuns.length ? conversationRuns[0] : (runs.length ? runs[0] : null);
@@ -1172,6 +1191,13 @@ function runtimeToolCard(t){
   btn.disabled=!executable;
   btn.onclick=()=>executeRuntimeTool(t);
   el.appendChild(btn);
+  const delBtn=document.createElement('button');
+  delBtn.className='btn danger';
+  delBtn.style.marginTop='8px';
+  delBtn.style.marginLeft='6px';
+  delBtn.textContent='Delete capability';
+  delBtn.onclick=()=>deleteStudioItem('capability', t.tool_id||t.name, {delete_artifacts:false, delete_profiles:false});
+  el.appendChild(delBtn);
   const schemaDetails=document.createElement('details');
   schemaDetails.className='detailsBox';
   schemaDetails.innerHTML='<summary>Runtime interface schemas</summary><div class="pre compact"></div>';
@@ -1367,6 +1393,13 @@ function progressLine(label, status){
 
 function taskGraphCard(g){
   const el=compactJsonCard(g.task_name||g.graph_id, g);
+  const taskId=g.task_name||g.graph_id||'';
+  const del=document.createElement('button');
+  del.className='btn danger';
+  del.style.marginTop='8px';
+  del.textContent='Delete task';
+  del.onclick=()=>deleteStudioItem('task', taskId);
+  el.appendChild(del);
   const selected=Array.isArray(g.selected_participant_ids)?g.selected_participant_ids:[];
   if(selected.length){
     const info=document.createElement('div');
