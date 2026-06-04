@@ -32,10 +32,5 @@ class FinalAnswerGuard:
             "completed",
             "done",
             "executed successfully",
-            "已成功",
-            "完成",
-            "成功",
-            "正常終了",
-            "完了",
         ]
         return any(m in text for m in markers)

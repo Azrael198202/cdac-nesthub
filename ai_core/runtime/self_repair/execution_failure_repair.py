@@ -40,10 +40,10 @@ class ExecutionFailureRepairClassifier:
         if self._schema_or_parameter_signal(code, text):
             return ExecutionFailureDiagnosis(
                 category="parameter_problem",
-                user_title="输入参数需要修复",
-                user_message="执行所需的输入值缺失、格式不正确，或没有通过运行时 schema 校验。",
+                user_title="Input values need repair",
+                user_message="The runtime input values are missing, malformed, or did not pass the declared runtime schema validation.",
                 repairable=True,
-                suggested_action="检查并修复输入参数；如果原文中存在完整结构化值，可以用结构化抽取结果自动修复。",
+                suggested_action="Review and repair the input values. If the original request contains a complete structural value, the runtime can use the extracted structural value to repair the input.",
                 technical_reason=message,
                 confidence=0.86,
                 evidence=evidence,
@@ -51,10 +51,10 @@ class ExecutionFailureRepairClassifier:
         if self._configuration_signal(code, text):
             return ExecutionFailureDiagnosis(
                 category="configuration_problem",
-                user_title="运行配置需要修复",
-                user_message="工具配置文件缺少必要连接参数，或配置值没有通过 connection schema 校验。",
+                user_title="Runtime configuration needs repair",
+                user_message="The selected runtime profile is missing required connection settings, or the values did not pass the declared connection schema validation.",
                 repairable=True,
-                suggested_action="打开对应 profile，补齐或修正连接配置后重新执行。",
+                suggested_action="Open the selected profile, complete or correct the connection settings, and run the task again.",
                 technical_reason=message,
                 confidence=0.86,
                 evidence=evidence,
@@ -62,10 +62,10 @@ class ExecutionFailureRepairClassifier:
         if self._secret_signal(code, text):
             return ExecutionFailureDiagnosis(
                 category="secret_problem",
-                user_title="认证信息需要修复",
-                user_message="外部服务拒绝了当前凭证，或 secret 值没有通过 secret schema 校验。",
+                user_title="Credential values need repair",
+                user_message="The runtime rejected the current credential values, or the secret values did not pass the declared secret schema validation.",
                 repairable=True,
-                suggested_action="重新保存正确的账号凭证或访问令牌后重新执行。系统不会在日志中显示 secret 明文。",
+                suggested_action="Save the correct credential or access-token values in the selected profile and run the task again. Secret values are not shown in logs.",
                 technical_reason=message,
                 confidence=0.82,
                 evidence=evidence,
@@ -73,10 +73,10 @@ class ExecutionFailureRepairClassifier:
         if self._external_service_signal(code, text):
             return ExecutionFailureDiagnosis(
                 category="external_service_problem",
-                user_title="外部服务暂时无法完成请求",
-                user_message="工具已经执行到外部服务，但外部服务返回失败、拒绝、超时或连接中断。",
+                user_title="The external runtime could not complete the request",
+                user_message="The tool reached the external runtime, but the external runtime returned a failure, refusal, timeout, or connection interruption.",
                 repairable=False,
-                suggested_action="确认外部服务状态、网络、配额、权限或稍后重试。",
+                suggested_action="Check the external runtime status, network, quota, permissions, or retry later.",
                 technical_reason=message,
                 confidence=0.72,
                 evidence=evidence,
@@ -84,20 +84,20 @@ class ExecutionFailureRepairClassifier:
         if self._implementation_signal(code, text, tool_spec):
             return ExecutionFailureDiagnosis(
                 category="tool_implementation_problem",
-                user_title="运行时工具实现需要修复",
-                user_message="工具代码、输出契约或运行时实现可能存在问题，需要由 auxiliary_brain 读取 trace 后生成补丁并重新验证。",
+                user_title="Runtime tool implementation needs repair",
+                user_message="The tool code, output contract, or runtime implementation may be incorrect. The auxiliary layer should read the trace, generate a patch, and revalidate it.",
                 repairable=True,
-                suggested_action="生成工具修复请求，由 auxiliary_brain 创建 patch、运行 sandbox 验证，并在验证通过后注册新版本。",
+                suggested_action="Create a tool repair request. The auxiliary layer will generate a patch, run sandbox validation, and register a new version only after verification passes.",
                 technical_reason=message,
                 confidence=0.77,
                 evidence=evidence,
             )
         return ExecutionFailureDiagnosis(
             category="unknown_problem",
-            user_title="执行失败，需要人工确认修复方向",
-            user_message="系统没有足够结构化信号判断失败类型。",
+            user_title="Execution failed and needs human review",
+            user_message="The runtime did not provide enough structured signals to classify the failure safely.",
             repairable=False,
-            suggested_action="查看 runtime/traces 与 runtime/logs 中的详细信息后再决定是否修复。",
+            suggested_action="Review the detailed runtime traces and logs before deciding how to repair it.",
             technical_reason=message,
             confidence=0.3,
             evidence=evidence,

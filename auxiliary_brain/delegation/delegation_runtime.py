@@ -48,6 +48,13 @@ class AgentDelegationRuntime:
         task_name = str(task_graph.get("task_name") or task_graph.get("graph_id") or "task")
         task_instruction = str(task_graph.get("instruction") or task_graph.get("objective") or "")
         community_id = str(task_graph.get("community_id") or "default")
+        runtime_parameters = dict(task_graph.get("runtime_parameters") or {}) if isinstance(task_graph.get("runtime_parameters"), dict) else {}
+        source_material = self._task_source_material(task_graph=task_graph, fallback_values=[task_instruction])
+        if source_material:
+            runtime_parameters.setdefault("_original_user_material", source_material)
+            structural_values = self._extract_structural_values_from_material(source_material)
+            if structural_values:
+                runtime_parameters.setdefault("_detected_structural_values", structural_values)
         task_mind_graph = self._build_task_mind_graph(task_graph, selected)
         dependency_plan = task_mind_graph.get("agent_relation_analysis") or self._build_participant_dependency_plan(task_graph, selected)
 
@@ -73,7 +80,7 @@ class AgentDelegationRuntime:
             # the approval resume must re-create the same registered-tool
             # invocation without asking the old primary-runtime checkpoint to
             # restore it.  This is task-run state, not persisted agent state.
-            "runtime_parameters": task_graph.get("runtime_parameters") if isinstance(task_graph.get("runtime_parameters"), dict) else {},
+            "runtime_parameters": runtime_parameters,
         }
         self._record_progress(run_payload, "prepare", "Preparing delegation run", "running")
         self._record_global_mind_graph_progress(run_payload, task_mind_graph)
@@ -81,7 +88,7 @@ class AgentDelegationRuntime:
         # Apply task-scoped parameters before checking missing agent values.
         # Values supplied in the task instruction or resume form belong only to
         # this in-memory run and are not written back to durable agent profiles.
-        self._apply_task_runtime_parameters_to_selected(selected, task_graph.get("runtime_parameters") if isinstance(task_graph, dict) else {})
+        self._apply_task_runtime_parameters_to_selected(selected, runtime_parameters)
         missing_parameter_fields = self._collect_missing_agent_parameter_fields(selected, dependency_plan=dependency_plan)
         if missing_parameter_fields:
             pending_action = {
@@ -537,8 +544,18 @@ class AgentDelegationRuntime:
             )
             if str(x or "").strip()
         )
+        checkpoint = pending.get("resume_checkpoint") if isinstance(pending.get("resume_checkpoint"), dict) else {}
+        checkpoint_material = str(checkpoint.get("original_user_material") or "").strip()
+        if checkpoint_material:
+            source_material = "\n".join(x for x in (source_material, checkpoint_material) if x)
         if source_material:
             runtime_parameters.setdefault("_original_user_material", source_material)
+            structural_values = self._extract_structural_values_from_material(source_material)
+            if structural_values:
+                runtime_parameters.setdefault("_detected_structural_values", structural_values)
+        checkpoint_structural = checkpoint.get("detected_structural_values") if isinstance(checkpoint.get("detected_structural_values"), dict) else {}
+        if checkpoint_structural:
+            runtime_parameters.setdefault("_detected_structural_values", checkpoint_structural)
         if isinstance(provided_inputs, dict):
             runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
 
@@ -1879,6 +1896,21 @@ class AgentDelegationRuntime:
         if not ok:
             repair = result.get("repair") if isinstance(result.get("repair"), dict) else {}
             if repair and bool(repair.get("requires_user_confirmation")):
+                source_material = str(values.get("_original_user_material") or "").strip()
+                detected_structural_values = values.get("_detected_structural_values") if isinstance(values.get("_detected_structural_values"), dict) else {}
+                if source_material and not detected_structural_values:
+                    detected_structural_values = self._extract_structural_values_from_material(source_material)
+                repair_resume_checkpoint = {
+                    "resume_owner": "auxiliary_brain",
+                    "resume_kind": "registered_capability_feedback_repair",
+                    "participant_id": self._participant_identity(participant),
+                    "participant_name": self._participant_name(participant),
+                    "tool_id": tool_id,
+                    "failed_input": input_data,
+                    "runtime_parameter_keys": sorted(values.keys()),
+                    "original_user_material": source_material,
+                    "detected_structural_values": detected_structural_values,
+                }
                 return AgentExecutionResult(
                     participant_id=self._participant_identity(participant),
                     participant_name=self._participant_name(participant),
@@ -1892,15 +1924,7 @@ class AgentDelegationRuntime:
                         "input_keys": sorted(input_data.keys()),
                         "tool_execution": result,
                         "repair": repair,
-                        "repair_resume_checkpoint": {
-                            "resume_owner": "auxiliary_brain",
-                            "resume_kind": "registered_capability_feedback_repair",
-                            "participant_id": self._participant_identity(participant),
-                            "participant_name": self._participant_name(participant),
-                            "tool_id": tool_id,
-                            "failed_input": input_data,
-                            "runtime_parameter_keys": sorted(values.keys()),
-                        },
+                        "repair_resume_checkpoint": repair_resume_checkpoint,
                     },
                     pending_action={
                         "kind": "feedback_repair_confirmation",
@@ -1909,15 +1933,9 @@ class AgentDelegationRuntime:
                         "message": str(repair.get("user_message") or result.get("human_readable_error") or "A repair proposal is available."),
                         "diagnosis": repair.get("diagnosis") if isinstance(repair.get("diagnosis"), dict) else {},
                         "repair": repair,
-                        "resume_checkpoint": {
-                            "resume_owner": "auxiliary_brain",
-                            "resume_kind": "registered_capability_feedback_repair",
-                            "participant_id": self._participant_identity(participant),
-                            "participant_name": self._participant_name(participant),
-                            "tool_id": tool_id,
-                            "failed_input": input_data,
-                            "runtime_parameter_keys": sorted(values.keys()),
-                        },
+                        "resume_checkpoint": repair_resume_checkpoint,
+                        "original_user_material": source_material,
+                        "detected_structural_values": detected_structural_values,
                         "request": {"input_mode": "repair_confirmation", "fields": [
                             {"field": f"{self._participant_identity(participant)}.repair_confirmed", "name": f"{self._participant_identity(participant)}.repair_confirmed", "label": "Confirm repair", "message": "Confirm whether the runtime should apply this repair path.", "input_type": "boolean", "required": True}
                         ]},
@@ -2511,6 +2529,45 @@ class AgentDelegationRuntime:
                 "status": "completed",
             }
         return None
+
+
+    def _task_source_material(self, *, task_graph: dict[str, Any], fallback_values: list[Any] | None = None) -> str:
+        """Collect original task text for structural binding without capability rules."""
+        materials: list[str] = []
+        if isinstance(task_graph, dict):
+            for key in ("original_instruction", "user_input", "instruction", "objective", "description", "prompt"):
+                value = task_graph.get(key)
+                if isinstance(value, str) and value.strip():
+                    materials.append(value.strip())
+            raw = task_graph.get("raw_input")
+            if isinstance(raw, dict):
+                for key in ("text", "content", "message"):
+                    value = raw.get(key)
+                    if isinstance(value, str) and value.strip():
+                        materials.append(value.strip())
+        for value in fallback_values or []:
+            if isinstance(value, str) and value.strip():
+                materials.append(value.strip())
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in materials:
+            key = item.casefold()
+            if key not in seen:
+                seen.add(key)
+                out.append(item)
+        return "\n".join(out)
+
+    def _extract_structural_values_from_material(self, material: Any) -> dict[str, list[str]]:
+        """Return generic structural values extracted from original user material."""
+        text = str(material or "").strip()
+        if not text:
+            return {}
+        try:
+            parsed = self.registered_tool_parameter_bridge.entity_extractor.extract(text, source="original_user_material")
+            values = parsed.get("values_by_type") if isinstance(parsed, dict) else {}
+            return values if isinstance(values, dict) else {}
+        except Exception:
+            return {}
 
     def _record_progress(self, run_payload: dict[str, Any], stage: str, label: str, status: str) -> None:
         run_payload["current_stage"] = stage

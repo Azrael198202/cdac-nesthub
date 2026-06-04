@@ -175,7 +175,7 @@ class FeedbackRepairOrchestrator:
         return {"ok": True, "status": "capability_patch_request_created", "repair_id": repair_id, "request_path": str(path), "request": request}
 
     def _user_message(self, diagnosis: Any) -> str:
-        return f"{diagnosis.user_title}\n{diagnosis.user_message}\n建议：{diagnosis.suggested_action}"
+        return f"{diagnosis.user_title}\n{diagnosis.user_message}\nSuggested action: {diagnosis.suggested_action}"
 
     def _new_repair_id(self, value: str) -> str:
         safe = self._safe_name(value or "repair")
