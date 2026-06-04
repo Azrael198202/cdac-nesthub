@@ -50,7 +50,7 @@ dynamic_service_loader = DynamicGeneratedServiceLoader()
 @app.on_event("startup")
 async def _start_runtime_background_services():
     async def _execute_due_task(task_name: str) -> dict[str, Any]:
-        return await studio_service.execute_task(task_name, provided_inputs={}, instruction="")
+        return await studio_service.execute_task(task_name, provided_inputs={"_scheduled_dispatch": True}, instruction="")
 
     async def _execute_generated_dispatch(dispatch: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(dispatch, dict):

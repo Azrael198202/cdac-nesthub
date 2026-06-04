@@ -135,7 +135,7 @@ class ExecutionFailureRepairClassifier:
         return any(term in text for term in ["authentication", "auth", "credential", "password", "username", "token", "login", "not accepted", "unauthorized", "forbidden"])
 
     def _external_service_signal(self, code: str, text: str) -> bool:
-        return any(term in text for term in ["timeout", "temporarily", "rate limit", "quota", "connection closed", "connection reset", "service unavailable", "too many", "refused"])
+        return any(term in text for term in ["timeout", "timed out", "temporarily", "rate limit", "quota", "connection closed", "connection reset", "service unavailable", "too many", "refused"])
 
     def _implementation_signal(self, code: str, text: str, tool_spec: dict[str, Any]) -> bool:
         impl = tool_spec.get("implementation") if isinstance(tool_spec.get("implementation"), dict) else {}

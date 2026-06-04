@@ -801,6 +801,10 @@ class AgentStudioService:
         explicit_runtime_parameters.update(
             self._extract_step_scoped_runtime_parameters_from_tasks(workflow_plan.tasks)
         )
+        if isinstance(schedule_policy, dict) and schedule_policy.get("enabled"):
+            controller_ids = self._schedule_controller_participant_ids_from_tasks(workflow_plan.tasks)
+            if controller_ids:
+                schedule_policy["controller_participant_ids"] = controller_ids
         for generated_participant in workflow_plan.generated_participants:
             generated_participant.setdefault("created_at", self._now())
             pid = str(generated_participant.get("participant_id") or "").strip()
@@ -1108,6 +1112,15 @@ class AgentStudioService:
         runtime_parameters.update(self._structural_source_runtime_context(task_graph=task_graph, instruction=instruction))
         if isinstance(provided_inputs, dict):
             runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+        schedule_policy = task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {}
+        scheduled_dispatch = bool(runtime_parameters.get("_scheduled_dispatch"))
+        if self._should_pause_for_durable_schedule(schedule_policy, scheduled_dispatch):
+            return self._scheduled_task_armed_response(task_name=task_name, task_graph=task_graph, schedule_policy=schedule_policy)
+        if scheduled_dispatch and isinstance(schedule_policy, dict):
+            controller_ids = [str(x).strip() for x in (schedule_policy.get("controller_participant_ids") or []) if str(x).strip()]
+            if controller_ids:
+                task_graph = dict(task_graph)
+                task_graph["runtime_skip_participant_ids"] = controller_ids
         preflight = self._preflight_runtime_parameters(task_graph, participants, runtime_parameters)
         if preflight.get("status") == "requires_input":
             run_id = new_id("delegation_run")
@@ -1959,6 +1972,67 @@ class AgentStudioService:
         return "|".join(part for part in (name, objective, artifact_sig) if part)
 
 
+    def _should_pause_for_durable_schedule(self, schedule_policy: dict[str, Any], scheduled_dispatch: bool) -> bool:
+        """Return True when a task run is only arming a durable schedule.
+
+        This is generic task lifecycle behavior.  The runtime must not execute
+        the payload immediately when the user is creating/enabling a recurring
+        task definition.  Background dispatches pass an internal flag so the
+        same task graph can later execute normally.
+        """
+        if scheduled_dispatch:
+            return False
+        if not isinstance(schedule_policy, dict):
+            return False
+        if not bool(schedule_policy.get("enabled")):
+            return False
+        return str(schedule_policy.get("mode") or "").strip().casefold() in {"recurring", "scheduled", "one_time"}
+
+    def _scheduled_task_armed_response(self, *, task_name: str, task_graph: dict[str, Any], schedule_policy: dict[str, Any]) -> dict[str, Any]:
+        stored = dict(task_graph) if isinstance(task_graph, dict) else {}
+        policy = dict(schedule_policy) if isinstance(schedule_policy, dict) else {}
+        if not policy.get("next_run_at"):
+            policy["next_run_at"] = self._now()
+        policy.setdefault("armed_at", self._now())
+        stored["schedule_policy"] = policy
+        stored["status"] = "scheduled"
+        self.store.write_json(f"generated/tasks/{task_name}.json", stored)
+        return {
+            "action": "execute_task_graph",
+            "origin": "auxiliary_brain",
+            "status": "scheduled",
+            "task_name": task_name,
+            "run_id": new_id("scheduled_task_arm"),
+            "final_answer": "Task schedule has been saved. The workflow will run when the schedule becomes due.",
+            "delivery": None,
+            "schedule_policy": policy,
+        }
+
+    def _schedule_controller_participant_ids_from_tasks(self, tasks: list[dict[str, Any]]) -> list[str]:
+        """Identify steps that define schedule policy rather than payload work.
+
+        This uses generic structural signals from the step fragment, not any
+        concrete capability or business name.  The ids are skipped during the
+        background dispatch so only the payload steps run when the schedule is
+        due.
+        """
+        ids: list[str] = []
+        for task in tasks or []:
+            if not isinstance(task, dict):
+                continue
+            fragment = str(task.get("source_instruction_fragment") or "")
+            if self._fragment_declares_schedule_policy(fragment):
+                pid = str(task.get("participant_id") or "").strip()
+                if pid and pid not in ids:
+                    ids.append(pid)
+        return ids
+
+    def _fragment_declares_schedule_policy(self, fragment: str) -> bool:
+        text = str(fragment or "").casefold()
+        if not text:
+            return False
+        return any(token in text for token in ("execution policy", "repeat", "run every", "every ", "once at", "schedule", "interval"))
+
     def _extract_schedule_policy_from_instruction(self, instruction: str) -> dict[str, Any]:
         """Extract a generic durable execution policy from user language.
 
@@ -1968,7 +2042,7 @@ class AgentStudioService:
         """
         text = str(instruction or "")
         lower = text.casefold()
-        if not any(token in lower for token in ("execution policy", "repeat", "every", "run every", "once at", "schedule")):
+        if not any(token in lower for token in ("execution policy", "repeat", "every", "run every", "once at", "schedule", "interval")):
             return {"enabled": False, "mode": "none"}
         interval_seconds = self._extract_generic_interval_seconds(text)
         if interval_seconds:

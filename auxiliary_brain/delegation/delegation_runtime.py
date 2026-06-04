@@ -112,9 +112,25 @@ class AgentDelegationRuntime:
 
         agent_results = []
         execution_order = self._participants_in_mind_graph_order(selected, task_mind_graph)
+        runtime_skip_participant_ids = {str(x).strip() for x in (task_graph.get("runtime_skip_participant_ids") or []) if str(x).strip()}
         for index, participant in enumerate(execution_order):
             participant_id = str(participant.get("participant_id") or participant.get("id") or "").strip()
             participant_name = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant.get("participant_id") or "participant")
+            if participant_id and participant_id in runtime_skip_participant_ids:
+                result = AgentExecutionResult(
+                    participant_id=participant_id,
+                    participant_name=participant_name,
+                    core_run_id=new_id("participant_skipped_by_schedule_policy"),
+                    status="skipped",
+                    final_answer="Participant skipped during scheduled dispatch because it only defines the schedule policy.",
+                    workflow_results={"status": "skipped", "reason": "schedule_policy_controller"},
+                    origin="auxiliary_brain",
+                )
+                result_payload = self._sanitize_result_payload(result.__dict__)
+                agent_results.append(result)
+                run_payload["agent_results"].append(result_payload)
+                self._record_progress(run_payload, f"participant_{index + 1}_skipped", f"Participant skipped by schedule policy: {participant_name}", "skipped")
+                continue
             blocked_by = self._blocked_dependency_ids(
                 participant_id=participant_id,
                 completed_results=agent_results,
