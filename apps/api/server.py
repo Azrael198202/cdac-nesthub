@@ -26,6 +26,7 @@ from ai_core.tools.runtime_registered_tool_service import RuntimeRegisteredToolS
 from ai_core.runtime.approval_policy_store import RuntimeApprovalPolicyStore
 from ai_core.graph.graph_visualization import GraphVisualStateBuilder
 from ai_core.runtime.observability.runtime_console import emit_console_event, list_console_sources, read_console_source
+from ai_core.runtime.self_repair.repair_orchestrator import FeedbackRepairOrchestrator
 
 import traceback
 approval_learning = ApprovalLearningService()
@@ -39,6 +40,7 @@ graph_visual_builder = GraphVisualStateBuilder()
 knowledge_service = KnowledgeService()
 registered_tool_service = RuntimeRegisteredToolService()
 approval_policy_store = RuntimeApprovalPolicyStore()
+feedback_repair_orchestrator = FeedbackRepairOrchestrator()
 
 
 def _write_api_failure_log(*, area: str, payload: dict[str, Any] | None = None, context: dict[str, Any] | None = None) -> None:
@@ -133,6 +135,14 @@ class RegisteredToolExecuteRequest(BaseModel):
     remember_approval: bool = False
 
 
+
+
+
+
+class FeedbackRepairApplyRequest(BaseModel):
+    repair_id: str
+    approved: bool = True
+    modified_input: dict[str, Any] | None = None
 
 
 class RuntimeApprovalPolicyRequest(BaseModel):
@@ -751,6 +761,22 @@ async def agent_studio_execute_runtime_tool(req: RegisteredToolExecuteRequest):
     except Exception as exc:
         _write_api_error_log(area="agent_studio_execute_runtime_tool", exc=exc, context={"tool_id": req.tool_id})
         return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
+
+
+
+@app.post("/api/agent-studio/feedback-repair/apply")
+async def agent_studio_apply_feedback_repair(req: FeedbackRepairApplyRequest):
+    try:
+        payload = feedback_repair_orchestrator.apply(
+            repair_id=req.repair_id,
+            approved=bool(req.approved),
+            modified_input=req.modified_input if isinstance(req.modified_input, dict) else None,
+        )
+        return JSONResponse(payload, status_code=200)
+    except Exception as exc:
+        _write_api_error_log(area="agent_studio_feedback_repair_apply", exc=exc, context={"repair_id": req.repair_id})
+        return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
+
 
 @app.get("/api/agent-studio/state")
 async def agent_studio_state():

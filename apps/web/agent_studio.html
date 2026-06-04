@@ -672,6 +672,70 @@ async function apiFetchJson(url, options){
     throw new Error('API request failed: '+detail.error+'; url='+url+'; see runtime/logs/frontend_errors.jsonl and runtime/logs/api_errors.jsonl');
   }
 }
+
+async function apiFetchRuntimeToolJson(url, options){
+  const started = Date.now();
+  try{
+    const res = await fetch(url, options || {});
+    const text = await res.text();
+    let data = {};
+    if(text){
+      try{ data = JSON.parse(text); }
+      catch(e){ data = {ok:false, status:'invalid_json_response', raw:text.slice(0,2000), message:'Backend returned non-JSON response.'}; }
+    }
+    if(!res.ok){
+      const errObj = (data && data.error) || {};
+      const msg = (data && (data.message || (errObj && errObj.message) || errObj || data.status)) || ('HTTP '+res.status);
+      throw new Error(formatApiErrorMessage(msg) + ' [' + url + ']');
+    }
+    return data;
+  }catch(e){
+    const detail = {
+      url:url,
+      error:String(e && e.message ? e.message : e),
+      elapsed_ms:Date.now()-started,
+      hint:'Backend API is unreachable or the request was blocked. Check backend console and runtime/logs/api_errors.jsonl.'
+    };
+    try{
+      await fetch('/api/agent-studio/client-error',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(detail)});
+    }catch(_ignored){}
+    throw new Error('API request failed: '+detail.error+'; url='+url+'; see runtime/logs/frontend_errors.jsonl and runtime/logs/api_errors.jsonl');
+  }
+}
+
+function formatApiErrorMessage(value){
+  if(value == null){ return ''; }
+  if(typeof value === 'string'){ return value; }
+  if(typeof value === 'object'){
+    if(value.message){ return String(value.message); }
+    if(value.detail){ return String(value.detail); }
+    if(value.code){ return String(value.code); }
+    try{ return JSON.stringify(value); }catch(e){ return String(value); }
+  }
+  return String(value);
+}
+
+async function maybeApplyRepairProposal(data, toolId, profileId){
+  const repair = data && data.repair;
+  if(!repair || repair.requires_user_confirmation !== true){ return; }
+  const message = repair.user_message || (repair.diagnosis && repair.diagnosis.user_message) || 'A repair proposal is available.';
+  const approved = confirm(message + '\n\n是否允许系统执行该修复步骤？');
+  if(!approved){
+    await apiFetchRuntimeToolJson('/api/agent-studio/feedback-repair/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repair_id:repair.repair_id,approved:false})});
+    addMessage('assistant','Repair declined by user.\n'+renderJson(repair),'error');
+    return;
+  }
+  const applied = await apiFetchRuntimeToolJson('/api/agent-studio/feedback-repair/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repair_id:repair.repair_id,approved:true})});
+  addMessage('assistant','Repair result:\n'+renderJson(applied), applied.ok?'final':'error');
+  if(applied && applied.ok && applied.repaired_input){
+    const rerun = confirm('修复后的输入已经生成，是否立即重新执行该工具？');
+    if(rerun){
+      const again = await apiFetchRuntimeToolJson('/api/agent-studio/runtime-tools/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:toolId,input_data:applied.repaired_input,profile_id:profileId,approval_confirmed:true})});
+      addMessage('assistant', again.ok ? ('Runtime tool executed after repair:\n'+renderJson(again.result)) : ('Runtime tool still failed after repair:\n'+renderJson(again)), again.ok?'final':'error');
+    }
+  }
+}
+
 async function skipCredentialAndContinue(){
   closeMissingInputModal();
   const provided={action:'skip_credential', choice:'skip_credential', skip_credential:true, credential_mode:'skip'};
@@ -1232,8 +1296,9 @@ async function executeRuntimeTool(tool){
         approvalConfirmed=confirm('Approval required before external runtime execution. Continue?\n\n'+renderJson(inputData));
         if(!approvalConfirmed){ return; }
       }
-      const data=await apiFetchJson('/api/agent-studio/runtime-tools/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:toolId,input_data:inputData,profile_id:profileId,approval_confirmed:approvalConfirmed})});
-      addMessage('assistant', data.ok ? ('Runtime tool executed:\n'+renderJson(data.result)) : ('Runtime tool execution requires action or failed:\n'+renderJson(data)), data.ok?'final':'error');
+      const data=await apiFetchRuntimeToolJson('/api/agent-studio/runtime-tools/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:toolId,input_data:inputData,profile_id:profileId,approval_confirmed:approvalConfirmed})});
+      addMessage('assistant', data.ok ? ('Runtime tool executed:\n'+renderJson(data.result)) : ((data.human_readable_error||'Runtime tool execution requires action or failed')+'\n'+renderJson(data)), data.ok?'final':'error');
+      if(!data.ok){ await maybeApplyRepairProposal(data, toolId, profileId); }
       refreshState();
     }
   );

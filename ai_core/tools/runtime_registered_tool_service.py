@@ -8,6 +8,7 @@ from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_REGISTRY, RUNTIME_TR
 from ai_core.connections.connection_profile_store import ConnectionProfileStore
 from ai_core.tools.generic_tool_runner import GenericToolRunner
 from ai_core.runtime.approval_policy_store import RuntimeApprovalPolicyStore
+from ai_core.runtime.self_repair.repair_orchestrator import FeedbackRepairOrchestrator
 
 
 class RuntimeRegisteredToolService:
@@ -23,6 +24,7 @@ class RuntimeRegisteredToolService:
         self.runner = GenericToolRunner()
         self.connection_store = connection_store or ConnectionProfileStore()
         self.approval_policy_store = approval_policy_store or RuntimeApprovalPolicyStore()
+        self.repair_orchestrator = FeedbackRepairOrchestrator()
 
     def list_tools(self) -> list[dict[str, Any]]:
         registry = self._load_registry()
@@ -180,8 +182,9 @@ class RuntimeRegisteredToolService:
             },
         }
         result = self.runner.run_tool(spec, invocation_payload, run_id=run_id, node_id="agent_studio_registered_tool", step_id=str(tool_id), capability=str(spec.get("capability") or ""))
+        success = str(result.get("status") or "").lower() in {"success", "ok", "executed", "completed"}
         out = {
-            "ok": str(result.get("status") or "").lower() in {"success", "ok", "executed"},
+            "ok": success,
             "status": result.get("status"),
             "tool_id": tool_id,
             "profile_id": profile_id,
@@ -189,6 +192,22 @@ class RuntimeRegisteredToolService:
             "tool": self._public_tool_summary(spec),
             "approval_settings": self.approval_policy_store.get_tool_policy(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id),
         }
+        if not success:
+            try:
+                repair = self.repair_orchestrator.propose_for_tool_result(
+                    run_id=run_id,
+                    tool_id=tool_id,
+                    profile_id=profile_id,
+                    result=result,
+                    tool_spec=spec,
+                    input_payload=runtime_input,
+                    expected_contract={"input_schema": input_schema, "connection_schema": connection_schema, "secret_schema": secret_schema},
+                    runtime_state={"profile_id": profile_id, "tool_id": tool_id},
+                )
+                out["repair"] = repair
+                out["human_readable_error"] = repair.get("user_message")
+            except Exception as exc:
+                out["repair"] = {"status": "repair_proposal_failed", "error": str(exc)}
         self._persist_tool_result(out)
         return out
 
@@ -207,6 +226,21 @@ class RuntimeRegisteredToolService:
                 "errors": normalized_errors,
             },
         }
+        try:
+            repair = self.repair_orchestrator.propose_for_tool_result(
+                run_id=f"validation_{tool_id}",
+                tool_id=tool_id,
+                profile_id=profile_id,
+                result=payload,
+                tool_spec=self.get_tool(tool_id) or {},
+                input_payload={},
+                expected_contract={schema_section: {}},
+                runtime_state={"schema_section": schema_section, "errors": normalized_errors},
+            )
+            payload["repair"] = repair
+            payload["human_readable_error"] = repair.get("user_message")
+        except Exception:
+            pass
         self._persist_tool_result(payload)
         return payload
 

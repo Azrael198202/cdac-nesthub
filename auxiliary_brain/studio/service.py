@@ -25,7 +25,6 @@ from ai_core.execution.parameter_resolution import ParameterResolutionPipeline, 
 from auxiliary_brain.studio.instruction_workflow_planner import InstructionWorkflowPlanner
 from auxiliary_brain.studio.runtime_semantic_planner import RuntimeSemanticPlanner
 from ai_core.runtime.capability.registered_tool_agent_binder import RegisteredToolAgentBinder
-from ai_core.input_parsing.structured_entity_extractor import StructuredEntityExtractor
 
 
 class AgentStudioService:
@@ -51,7 +50,6 @@ class AgentStudioService:
         self.runtime_semantic_planner = RuntimeSemanticPlanner()
         self.registered_tool_service = RuntimeRegisteredToolService()
         self.registered_tool_agent_binder = RegisteredToolAgentBinder()
-        self.structured_entity_extractor = StructuredEntityExtractor()
         self.direct_capability_dispatcher = CapabilityDispatcher(handlers={
             "image_generation": self._handle_direct_image_generation,
             "video_generation": self._handle_direct_video_generation,
@@ -736,22 +734,6 @@ class AgentStudioService:
         explicit_runtime_parameters.update(
             self._extract_step_scoped_runtime_parameters_from_tasks(workflow_plan.tasks)
         )
-        # Before persisting the graph, repair schema-shaped structural values
-        # from exact source spans.  This prevents small models from freezing a
-        # corrupted value into runtime_parameters and keeps the correction
-        # domain-neutral: it is driven by JSON Schema/field shape only.
-        explicit_runtime_parameters = self._repair_runtime_parameters_from_structural_spans(
-            instruction=instruction,
-            tasks=workflow_plan.tasks,
-            participants=participants + workflow_plan.generated_participants,
-            runtime_parameters=explicit_runtime_parameters,
-        )
-        self._repair_task_runtime_parameters_from_structural_spans(
-            instruction=instruction,
-            tasks=workflow_plan.tasks,
-            participants=participants + workflow_plan.generated_participants,
-            runtime_parameters=explicit_runtime_parameters,
-        )
         for generated_participant in workflow_plan.generated_participants:
             generated_participant.setdefault("created_at", self._now())
             pid = str(generated_participant.get("participant_id") or "").strip()
@@ -1053,22 +1035,6 @@ class AgentStudioService:
         runtime_parameters.update(self._extract_runtime_parameters_from_instruction(instruction or ""))
         if isinstance(provided_inputs, dict):
             runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
-        runtime_parameters = self._repair_runtime_parameters_from_structural_spans(
-            instruction="\n".join(str(x or "") for x in (
-                task_graph.get("instruction"),
-                instruction,
-                *(task.get("source_instruction_fragment") for task in (task_graph.get("tasks") or []) if isinstance(task, dict)),
-            )),
-            tasks=task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else [],
-            participants=participants,
-            runtime_parameters=runtime_parameters,
-        )
-        self._repair_task_runtime_parameters_from_structural_spans(
-            instruction=str(task_graph.get("instruction") or instruction or ""),
-            tasks=task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else [],
-            participants=participants,
-            runtime_parameters=runtime_parameters,
-        )
         preflight = self._preflight_runtime_parameters(task_graph, participants, runtime_parameters)
         if preflight.get("status") == "requires_input":
             run_id = new_id("delegation_run")
@@ -1366,184 +1332,6 @@ class AgentStudioService:
         return "Delegated primary-runtime execution is paused."
 
 
-
-
-    def _repair_runtime_parameters_from_structural_spans(
-        self,
-        *,
-        instruction: str,
-        tasks: list[dict[str, Any]],
-        participants: list[dict[str, Any]],
-        runtime_parameters: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Repair schema-shaped runtime parameters using exact structural spans.
-
-        This method is intentionally capability-neutral.  It does not know what
-        a participant will do.  It only checks whether a registered tool schema
-        declares a field that expects an electronic address-shaped value, then
-        binds the exact value found in the original instruction/task fragments.
-        This prevents a model-generated graph from persisting a truncated token.
-        """
-        repaired = dict(runtime_parameters or {})
-        candidates = self._collect_structural_address_candidates(instruction=instruction, tasks=tasks, values=repaired)
-        if not candidates:
-            return repaired
-        participant_by_id = {str(p.get("participant_id") or p.get("id") or "").strip(): p for p in participants or [] if isinstance(p, dict)}
-        for participant in participants or []:
-            if not isinstance(participant, dict):
-                continue
-            pid = str(participant.get("participant_id") or participant.get("id") or "").strip()
-            pname = str(participant.get("display_name") or participant.get("name") or participant.get("agent_name") or "").strip()
-            safe_pname = re.sub(r"[^A-Za-z0-9_]+", "_", pname).strip("_")
-            schema = self._participant_registered_input_schema(participant)
-            properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
-            for field_name, prop in properties.items():
-                if not self._schema_property_expects_structural_address(str(field_name), prop if isinstance(prop, dict) else {}):
-                    continue
-                aliases = [str(field_name)]
-                for prefix in (pid, pname, safe_pname):
-                    if prefix:
-                        aliases.extend([f"{prefix}.{field_name}", f"{prefix}_{field_name}"])
-                candidate = self._best_structural_address_candidate(aliases=aliases, current_values=repaired, candidates=candidates)
-                if not candidate:
-                    continue
-                for alias in aliases:
-                    current = repaired.get(alias)
-                    if self._structural_value_needs_repair(current, candidate):
-                        repaired[alias] = [candidate] if self._schema_property_is_array(prop if isinstance(prop, dict) else {}) else candidate
-                # Ensure the participant-scoped key exists so downstream graph
-                # execution cannot fall back to an unscoped corrupted value.
-                scoped_key = f"{pid}.{field_name}" if pid else str(field_name)
-                if scoped_key and self._structural_value_needs_repair(repaired.get(scoped_key), candidate):
-                    repaired[scoped_key] = [candidate] if self._schema_property_is_array(prop if isinstance(prop, dict) else {}) else candidate
-        return repaired
-
-    def _repair_task_runtime_parameters_from_structural_spans(
-        self,
-        *,
-        instruction: str,
-        tasks: list[dict[str, Any]],
-        participants: list[dict[str, Any]],
-        runtime_parameters: dict[str, Any],
-    ) -> None:
-        """Repair each planned step before the graph is saved or executed."""
-        candidates = self._collect_structural_address_candidates(instruction=instruction, tasks=tasks, values=runtime_parameters)
-        if not candidates:
-            return
-        participants_by_id = {str(p.get("participant_id") or p.get("id") or "").strip(): p for p in participants or [] if isinstance(p, dict)}
-        for task in tasks or []:
-            if not isinstance(task, dict):
-                continue
-            pid = str(task.get("participant_id") or "").strip()
-            participant = participants_by_id.get(pid) or {}
-            schema = self._participant_registered_input_schema(participant)
-            properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
-            task_params = task.get("runtime_parameters") if isinstance(task.get("runtime_parameters"), dict) else {}
-            merged_values = dict(runtime_parameters or {})
-            merged_values.update(task_params)
-            fragment = str(task.get("source_instruction_fragment") or "")
-            local_candidates = self._collect_structural_address_candidates(instruction="\n".join([instruction or "", fragment]), tasks=[], values=merged_values) or candidates
-            repaired_task_params = dict(task_params)
-            pname = str(task.get("participant_display_name") or participant.get("display_name") or participant.get("name") or "").strip()
-            safe_pname = re.sub(r"[^A-Za-z0-9_]+", "_", pname).strip("_")
-            for field_name, prop in properties.items():
-                if not self._schema_property_expects_structural_address(str(field_name), prop if isinstance(prop, dict) else {}):
-                    continue
-                aliases = [str(field_name)]
-                for prefix in (pid, pname, safe_pname):
-                    if prefix:
-                        aliases.extend([f"{prefix}.{field_name}", f"{prefix}_{field_name}"])
-                candidate = self._best_structural_address_candidate(aliases=aliases, current_values=merged_values, candidates=local_candidates)
-                if not candidate:
-                    continue
-                for alias in aliases:
-                    current = repaired_task_params.get(alias, merged_values.get(alias))
-                    if self._structural_value_needs_repair(current, candidate):
-                        repaired_task_params[alias] = [candidate] if self._schema_property_is_array(prop if isinstance(prop, dict) else {}) else candidate
-                if self._structural_value_needs_repair(repaired_task_params.get(str(field_name)), candidate):
-                    repaired_task_params[str(field_name)] = [candidate] if self._schema_property_is_array(prop if isinstance(prop, dict) else {}) else candidate
-            if repaired_task_params:
-                task["runtime_parameters"] = repaired_task_params
-
-    def _participant_registered_input_schema(self, participant: dict[str, Any]) -> dict[str, Any]:
-        profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
-        summary = profile.get("tool_summary") if isinstance(profile.get("tool_summary"), dict) else {}
-        schema = summary.get("input_schema") if isinstance(summary.get("input_schema"), dict) else {}
-        return schema
-
-    def _collect_structural_address_candidates(self, *, instruction: str, tasks: list[dict[str, Any]], values: dict[str, Any]) -> list[str]:
-        material: list[Any] = [instruction or "", values or {}]
-        for task in tasks or []:
-            if isinstance(task, dict):
-                material.append(task.get("source_instruction_fragment") or "")
-                material.append(task.get("objective") or "")
-                material.append(task.get("runtime_parameters") if isinstance(task.get("runtime_parameters"), dict) else {})
-        found = self.structured_entity_extractor.extract_electronic_address_values(*material)
-        out: list[str] = []
-        seen: set[str] = set()
-        for item in found:
-            text = str(item or "").strip()
-            if not self.structured_entity_extractor.is_electronic_address(text):
-                continue
-            key = text.casefold()
-            if key not in seen:
-                seen.add(key)
-                out.append(text)
-        return out
-
-    def _schema_property_expects_structural_address(self, field_name: str, prop: dict[str, Any]) -> bool:
-        item_schema = prop.get("items") if isinstance(prop.get("items"), dict) else {}
-        markers = [
-            prop.get("format"),
-            item_schema.get("format"),
-            prop.get("contentFormat"),
-            item_schema.get("contentFormat"),
-            prop.get("x-value-type"),
-            item_schema.get("x-value-type"),
-        ]
-        if any(str(marker or "").casefold() in {"email", "electronic_address", "address_spec"} for marker in markers):
-            return True
-        text = " ".join(str(x or "") for x in (
-            field_name,
-            prop.get("title"),
-            prop.get("description"),
-            item_schema.get("title"),
-            item_schema.get("description"),
-        )).casefold()
-        structural_tokens = {"electronic address", "email", "e-mail", "recipient", "address", "addressee"}
-        return any(token in text for token in structural_tokens)
-
-    def _schema_property_is_array(self, prop: dict[str, Any]) -> bool:
-        return str(prop.get("type") or "").strip().casefold() == "array"
-
-    def _best_structural_address_candidate(self, *, aliases: list[str], current_values: dict[str, Any], candidates: list[str]) -> str | None:
-        for alias in aliases:
-            current = current_values.get(alias)
-            current_items = current if isinstance(current, list) else [current]
-            for item in current_items:
-                text = str(item or "").strip()
-                if not text:
-                    continue
-                if self.structured_entity_extractor.is_electronic_address(text):
-                    return text
-                for candidate in candidates:
-                    local = candidate.split("@", 1)[0]
-                    if text.casefold() in {local.casefold(), candidate.casefold()}:
-                        return candidate
-                    if text and candidate.casefold().startswith(text.casefold()):
-                        return candidate
-        return candidates[0] if candidates else None
-
-    def _structural_value_needs_repair(self, current: Any, candidate: str) -> bool:
-        if current in (None, "", [], {}):
-            return True
-        if isinstance(current, list):
-            return not any(self.structured_entity_extractor.is_electronic_address(str(x).strip()) for x in current if x not in (None, ""))
-        text = str(current or "").strip()
-        if self.structured_entity_extractor.is_electronic_address(text):
-            return False
-        local = candidate.split("@", 1)[0]
-        return text.casefold() in {local.casefold(), candidate.casefold()} or candidate.casefold().startswith(text.casefold())
 
     def _extract_runtime_parameters_from_instruction(self, instruction: str) -> dict[str, Any]:
         """Extract explicit task-run parameters from user-authored text.
