@@ -496,6 +496,182 @@ class AgentDelegationRuntime:
         self.store.write_json(f"generated/results/{run_id}.json", run_payload)
         return run_payload
 
+    async def _resume_feedback_repair_confirmation(
+        self,
+        *,
+        run_payload: dict[str, Any],
+        task_graph: dict[str, Any],
+        participants: list[dict[str, Any]],
+        provided_inputs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Resume a paused feedback-repair proposal without primary checkpoints.
+
+        Feedback repair for a runtime-registered capability is owned by the
+        auxiliary layer.  The paused state must therefore be resumed from the
+        saved delegation payload and participant/tool binding, not from a
+        primary-runtime checkpoint.  This method rebuilds the original tool
+        invocation, preserves the original user material for structural binding,
+        and re-executes the failed registered-tool participant after the user
+        confirms the repair path.
+        """
+        run_id = str(run_payload.get("run_id") or new_id("delegation_run"))
+        task_name = str(task_graph.get("task_name") or run_payload.get("task_name") or "task")
+        task_instruction = str(task_graph.get("instruction") or "")
+        community_id = str(task_graph.get("community_id") or run_payload.get("community_id") or "default")
+        pending = run_payload.get("pending_action") if isinstance(run_payload.get("pending_action"), dict) else {}
+
+        runtime_parameters: dict[str, Any] = {}
+        if isinstance(task_graph.get("runtime_parameters"), dict):
+            runtime_parameters.update(task_graph.get("runtime_parameters") or {})
+        if isinstance(run_payload.get("runtime_parameters"), dict):
+            runtime_parameters.update(run_payload.get("runtime_parameters") or {})
+        # Keep original task material available to schema-driven structural
+        # binding.  This is generic source material, not a capability rule.
+        source_material = "\n".join(
+            str(x or "").strip()
+            for x in (
+                task_instruction,
+                run_payload.get("instruction"),
+                (run_payload.get("task_graph") or {}).get("instruction") if isinstance(run_payload.get("task_graph"), dict) else "",
+                pending.get("original_user_material"),
+            )
+            if str(x or "").strip()
+        )
+        if source_material:
+            runtime_parameters.setdefault("_original_user_material", source_material)
+        if isinstance(provided_inputs, dict):
+            runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+
+        if not self._submitted_confirmation(runtime_parameters):
+            run_payload.update({
+                "status": "paused",
+                "current_stage": "repair_confirmation_required",
+                "pending_action": pending,
+                "runtime_parameters": runtime_parameters,
+                "completed_at": self._now(),
+                "message": "Repair confirmation is required before continuing.",
+            })
+            self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+            return run_payload
+
+        tool_id = str(pending.get("tool_id") or "").strip()
+        selected = self._fresh_task_participants(participants)
+        self._apply_task_runtime_parameters_to_selected(selected, runtime_parameters)
+        task_mind_graph = self._build_task_mind_graph(task_graph, selected)
+        dependency_plan = task_mind_graph.get("agent_relation_analysis") or self._build_participant_dependency_plan(task_graph, selected)
+        run_payload.update({
+            "status": "resuming",
+            "current_stage": "resuming_feedback_repair",
+            "runtime_parameters": runtime_parameters,
+            "participant_dependency_plan": dependency_plan,
+            "task_mind_graph": task_mind_graph,
+        })
+        self._clear_waiting_fields(run_payload)
+        self._record_progress(run_payload, "feedback_repair_resume", "Resuming confirmed feedback repair", "running")
+
+        existing_payloads = [x for x in (run_payload.get("agent_results") or []) if isinstance(x, dict)]
+        existing_by_participant = {str(item.get("participant_id") or ""): item for item in existing_payloads}
+        agent_results: list[AgentExecutionResult] = []
+        updated_payloads: list[dict[str, Any]] = []
+        resumed_any = False
+
+        for index, participant in enumerate(self._participants_in_mind_graph_order(selected, task_mind_graph)):
+            pid = self._participant_identity(participant)
+            profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+            participant_tool_id = str(profile.get("tool_id") or "").strip()
+            existing = existing_by_participant.get(pid)
+            should_resume = bool(participant_tool_id) and (not tool_id or participant_tool_id == tool_id)
+            if not should_resume and isinstance(existing, dict):
+                try:
+                    restored = AgentExecutionResult(**existing)
+                    agent_results.append(restored)
+                    updated_payloads.append(self._sanitize_result_payload(restored.__dict__))
+                except Exception:
+                    updated_payloads.append(existing)
+                continue
+            if not should_resume:
+                continue
+            self._record_progress(run_payload, f"participant_{index + 1}_feedback_repair", f"Re-executing repaired participant: {self._participant_name(participant)}", "running")
+            result = await self._execute_registered_tool_capability(participant=participant, task_name=task_name, completed_results=agent_results, dependency_plan=dependency_plan)
+            if result is None:
+                result = AgentExecutionResult(
+                    participant_id=pid,
+                    participant_name=self._participant_name(participant),
+                    core_run_id=new_id("feedback_repair_resume_failed"),
+                    status="failed",
+                    final_answer="Registered capability binding was not available during repair resume.",
+                    workflow_results={"status": "failed", "reason": "registered_capability_binding_missing"},
+                    origin="auxiliary_brain",
+                )
+            resumed_any = True
+            agent_results.append(result)
+            result_payload = self._sanitize_result_payload(result.__dict__)
+            updated_payloads.append(result_payload)
+            self._record_progress(run_payload, f"participant_{index + 1}_feedback_repair_complete", f"Repaired participant finished: {result.participant_name}", "completed" if result.status == "completed" else result.status)
+            if result.status in {"requires_key", "requires_input", "paused"}:
+                run_payload.update({
+                    "status": result.status,
+                    "current_stage": "waiting_for_required_input",
+                    "pending_action": result.pending_action,
+                    "missing_inputs": result.missing_inputs or [],
+                    "agent_results": updated_payloads,
+                    "completed_at": self._now(),
+                })
+                self._record_progress(run_payload, "waiting_input", "Waiting for required input", "waiting")
+                self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+                return run_payload
+
+        if not resumed_any:
+            run_payload.update({
+                "status": "failed",
+                "current_stage": "failed",
+                "message": "No registered capability participant matched the repair request.",
+                "completed_at": self._now(),
+            })
+            self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+            return run_payload
+
+        run_payload["agent_results"] = self._dedupe_result_payloads(updated_payloads)
+        agent_results = self._to_agent_results(run_payload["agent_results"])
+        synthesis_results = self._terminal_results_for_synthesis(agent_results, task_mind_graph)
+        run_payload["synthesis_input_policy"] = {
+            "mode": "terminal_graph_outputs_after_feedback_repair",
+            "source_result_count": len(agent_results),
+            "synthesis_result_count": len(synthesis_results),
+        }
+        self._record_progress(run_payload, "final_synthesis", "Primary runtime synthesizing repaired delegated results", "running")
+        synthesis = await self.primary_client.synthesize_delegated_results(
+            task_name=task_name,
+            task_instruction=task_instruction,
+            agent_results=synthesis_results,
+            shared_context={"community_id": community_id, "task_mind_graph": task_mind_graph},
+        )
+        self._record_progress(run_payload, "final_synthesis_complete", "Final synthesis completed after repair", "completed")
+        delivery_id = new_id("delivery")
+        delivery_payload = {
+            "delivery_id": delivery_id,
+            "origin": "auxiliary_brain",
+            "upstream_origin": "ai_core",
+            "task_name": task_name,
+            "run_id": run_id,
+            "final_answer": synthesis.get("final_answer"),
+            "generated_files": self._collect_generated_files(agent_results),
+            "synthesis": synthesis,
+            "created_at": self._now(),
+        }
+        delivery_path = self.store.write_json(f"deliveries/{delivery_id}.json", delivery_payload)
+        final_status = str(synthesis.get("status") or "")
+        failed_statuses = {"failed", "completed_with_no_participant_result", "partial_failed", "no_usable_result"}
+        run_payload.update({
+            "status": "failed" if final_status in failed_statuses else "completed",
+            "current_stage": "failed" if final_status in failed_statuses else "completed",
+            "completed_at": self._now(),
+            "synthesis": synthesis,
+            "delivery": str(delivery_path),
+        })
+        self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+        return run_payload
+
     def _submitted_confirmation(self, values: dict[str, Any]) -> bool:
         if not isinstance(values, dict):
             return False
@@ -706,6 +882,13 @@ class AgentDelegationRuntime:
             return await self._execute_task_with_selected(task_graph, selected)
         if str(pending.get("kind") or "") == "runtime_tool_human_confirmation":
             return await self._resume_registered_tool_confirmation(
+                run_payload=run_payload,
+                task_graph=task_graph,
+                participants=selected,
+                provided_inputs=provided_inputs,
+            )
+        if str(pending.get("kind") or "") == "feedback_repair_confirmation":
+            return await self._resume_feedback_repair_confirmation(
                 run_payload=run_payload,
                 task_graph=task_graph,
                 participants=selected,
@@ -1709,6 +1892,15 @@ class AgentDelegationRuntime:
                         "input_keys": sorted(input_data.keys()),
                         "tool_execution": result,
                         "repair": repair,
+                        "repair_resume_checkpoint": {
+                            "resume_owner": "auxiliary_brain",
+                            "resume_kind": "registered_capability_feedback_repair",
+                            "participant_id": self._participant_identity(participant),
+                            "participant_name": self._participant_name(participant),
+                            "tool_id": tool_id,
+                            "failed_input": input_data,
+                            "runtime_parameter_keys": sorted(values.keys()),
+                        },
                     },
                     pending_action={
                         "kind": "feedback_repair_confirmation",
@@ -1717,6 +1909,15 @@ class AgentDelegationRuntime:
                         "message": str(repair.get("user_message") or result.get("human_readable_error") or "A repair proposal is available."),
                         "diagnosis": repair.get("diagnosis") if isinstance(repair.get("diagnosis"), dict) else {},
                         "repair": repair,
+                        "resume_checkpoint": {
+                            "resume_owner": "auxiliary_brain",
+                            "resume_kind": "registered_capability_feedback_repair",
+                            "participant_id": self._participant_identity(participant),
+                            "participant_name": self._participant_name(participant),
+                            "tool_id": tool_id,
+                            "failed_input": input_data,
+                            "runtime_parameter_keys": sorted(values.keys()),
+                        },
                         "request": {"input_mode": "repair_confirmation", "fields": [
                             {"field": f"{self._participant_identity(participant)}.repair_confirmed", "name": f"{self._participant_identity(participant)}.repair_confirmed", "label": "Confirm repair", "message": "Confirm whether the runtime should apply this repair path.", "input_type": "boolean", "required": True}
                         ]},
