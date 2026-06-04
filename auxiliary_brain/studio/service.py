@@ -649,15 +649,760 @@ class AgentStudioService:
     def delete_runtime_capability(self, tool_id: str, *, delete_artifacts: bool = False, delete_profiles: bool = False) -> dict[str, Any]:
         return self.registered_tool_service.delete_tool(tool_id, delete_artifacts=delete_artifacts, delete_profiles=delete_profiles)
 
-    def _project_control_dispatch_task(self, *, instruction: str, task_name: str, workflow_plan: Any, runtime_parameters: dict[str, Any]) -> dict[str, Any]:
-        """No fixed control-route projection is applied by Studio.
+    def _structural_source_runtime_context(self, *, task_graph: dict[str, Any], instruction: str | None = None) -> dict[str, Any]:
+        texts: list[str] = []
+        for value in (instruction, task_graph.get("instruction"), task_graph.get("task_name")):
+            if isinstance(value, str) and value.strip():
+                texts.append(value.strip())
+        tasks = task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            for key in ("source_instruction_fragment", "instruction", "description"):
+                value = task.get(key)
+                if isinstance(value, str) and value.strip():
+                    texts.append(value.strip())
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for text in texts:
+            key = text.casefold()
+            if key not in seen:
+                seen.add(key)
+                deduped.append(text)
+        if not deduped:
+            return {}
+        material = "\n".join(deduped)
+        context: dict[str, Any] = {
+            "_source_texts": deduped,
+            "_source_text": material,
+            # Durable generic source material for later repair/resume.  This is
+            # not a business parameter; it lets structural binding recover exact
+            # user-provided spans after a delegated run has paused.
+            "_original_user_material": material,
+        }
+        try:
+            from ai_core.input_parsing.structured_entity_extractor import StructuredEntityExtractor
+            parsed = StructuredEntityExtractor().extract(material, source="original_user_material")
+            values = parsed.get("values_by_type") if isinstance(parsed, dict) else {}
+            if isinstance(values, dict) and values:
+                context["_detected_structural_values"] = values
+        except Exception:
+            pass
+        return context
 
-        Runtime behavior must come from the user-created task graph and the
-        selected participants' generated schemas.  This prevents Studio from
-        embedding capability-specific routes such as a particular trigger type
-        or target parameter shape.
+    def snapshot(self) -> dict[str, Any]:
+        conversation_runs = self.store.list_json("traces/conversation_core")
+        agent_traces = self.store.list_json("traces/agent_delegation")
+        runtime_tool_runs = self.registered_tool_service.list_tool_runs()
+        runtime_execution_traces = self.registered_tool_service.list_execution_traces()
+        return {
+            "origin": "auxiliary_brain",
+            "community_id": self.community_id,
+            "participants": self.store.list_json("generated/agents"),
+            "task_graphs": self.store.list_json("generated/tasks"),
+            "task_runs": self.store.list_json("generated/results"),
+            "conversation_runs": conversation_runs,
+            "runtime_tools": self.registered_tool_service.list_tools(),
+            "runtime_tool_runs": runtime_tool_runs,
+            "runtime_execution_traces": runtime_execution_traces,
+            "deliveries": self.store.list_json("deliveries"),
+            "traces": agent_traces + conversation_runs + runtime_execution_traces,
+        }
+
+    async def create_participant(self, instruction: str, name: str | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        participant_id = new_id("participant")
+        participant_name = name or participant_id
+        execution_objective = self._derive_execution_objective(instruction, participant_name)
+        parameter_contract = await self.parameter_contract_service.build_contract_runtime(
+            definition_instruction=instruction,
+            execution_objective=execution_objective,
+            participant_name=participant_name,
+        )
+        artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
+        explicit_runtime_parameters = self._extract_runtime_parameters_from_instruction(instruction)
+        # Agent profiles own capability and parameter schema, but never durable
+        # task-run values.  Keep the LLM/config-derived schema and clear values
+        # so each task execution must collect fresh runtime parameters unless
+        # the task instruction explicitly supplies them.
+        schema_contract = self._parameter_contract_schema_only(parameter_contract)
+        capability_binding = self.registered_tool_agent_binder.bind(
+            instruction=instruction,
+            participant_name=participant_name,
+        )
+        if capability_binding:
+            schema_contract = capability_binding.get("parameter_contract") or schema_contract
+        payload = {
+            "participant_id": participant_id,
+            "name": participant_name,
+            "agent_name": participant_name,
+            "display_name": participant_name,
+            "role_name": participant_name,
+            "instruction": execution_objective,
+            "execution_objective": execution_objective,
+            "definition_instruction": instruction,
+            "parameter_contract": schema_contract,
+            "runtime_parameters": {},
+            "missing_information": schema_contract.get("missing_information", []),
+            "origin": "auxiliary_brain",
+            "status": "created",
+            "created_at": self._now(),
+            "execution_policy": "runtime_registered_tool" if capability_binding else "delegate_to_ai_core",
+            "capability_profile": {
+                "capability_type": "runtime_registered_tool",
+                "tool_id": capability_binding.get("tool_id"),
+                "capability": capability_binding.get("capability"),
+                "capabilities": capability_binding.get("capabilities") or [],
+                "binding_status": capability_binding.get("binding_status"),
+                "match_score": capability_binding.get("match_score"),
+                "tool_summary": capability_binding.get("tool_summary") or {},
+                "execution_policy": capability_binding.get("execution_policy") or {},
+            } if capability_binding else {},
+            "uploaded_artifacts": artifact_refs,
+            "artifact_policy": {
+                "bind_uploaded_artifacts_to_agent": bool(artifact_refs),
+                "allowed_action": "use_uploaded_file" if artifact_refs else "",
+                "parameter_collection_owner": "ui" if artifact_refs else "agent_runtime",
+            },
+        }
+        path = self.store.write_json(f"generated/agents/{participant_id}.json", payload)
+        self._update_community()
+        return {
+            "action": "create_participant",
+            "origin": "auxiliary_brain",
+            "status": "completed",
+            "participant_id": participant_id,
+            "agent_name": participant_name,
+            "display_name": participant_name,
+            "path": str(path),
+            "uploaded_artifacts": artifact_refs,
+            "capability_profile": payload.get("capability_profile") or {},
+            "bound_tool_id": (payload.get("capability_profile") or {}).get("tool_id"),
+        }
+
+    def create_task_graph(self, instruction: str, name: str | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        graph_id = new_id("graph")
+        task_name = name or graph_id
+        participants = self.store.list_json("generated/agents")
+        artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
+        explicit_runtime_parameters = self._extract_runtime_parameters_from_instruction(instruction)
+        semantic_plan = self.runtime_semantic_planner.build_plan(
+            instruction=instruction,
+            participants=participants,
+            run_id=graph_id,
+        )
+        workflow_plan = self.instruction_workflow_planner.plan(
+            instruction=instruction,
+            participants=participants,
+            graph_id=graph_id,
+            new_id_fn=new_id,
+            semantic_plan=semantic_plan,
+        )
+        explicit_runtime_parameters.update(
+            self._extract_step_scoped_runtime_parameters_from_tasks(workflow_plan.tasks)
+        )
+        for generated_participant in workflow_plan.generated_participants:
+            generated_participant.setdefault("created_at", self._now())
+            pid = str(generated_participant.get("participant_id") or "").strip()
+            if pid:
+                self.store.write_json(f"generated/agents/{pid}.json", generated_participant)
+        selected_ids = [p.get("participant_id") for p in workflow_plan.selected_participants]
+        # Task graphs do not own durable parameter values.  Parameter schemas live
+        # on participants, while uploaded artifact parameters are discovered from
+        # the selected artifact during execution_preparation.  Keeping a blank
+        # task-level contract here prevents stale values from leaking into
+        # unrelated future runs and avoids referencing an undefined
+        # participant-only parameter_contract.
+        schema_contract = {
+            "contract_type": "task_runtime_parameter_contract",
+            "parameters": [],
+            "missing_information": [],
+            "runtime_scope": "task_run",
+        }
+        payload = {
+            "graph_id": graph_id,
+            "task_name": task_name,
+            "community_id": self.community_id,
+            "instruction": instruction,
+            "origin": "auxiliary_brain",
+            "status": "created",
+            "created_at": self._now(),
+            "execution_policy": "delegated_participant_execution_via_ai_core",
+            "selected_participant_ids": selected_ids,
+            "uploaded_artifacts": artifact_refs,
+            "parameter_contract": schema_contract,
+            "runtime_parameters": explicit_runtime_parameters,
+            "tasks": workflow_plan.tasks,
+            "instruction_coverage": workflow_plan.coverage,
+            "workflow_planning": {
+                "mode": workflow_plan.coverage.get("planning_mode"),
+                "semantic_step_count": workflow_plan.coverage.get("semantic_step_count"),
+                "semantic_plan_status": (semantic_plan.get("coverage_notes") or []),
+                "generated_participant_ids": [p.get("participant_id") for p in workflow_plan.generated_participants],
+                "step_count": len(workflow_plan.tasks),
+                "coverage_status": workflow_plan.coverage.get("status"),
+            },
+            "final_synthesis_owner": "ai_core",
+        }
+        path = self.store.write_json(f"generated/tasks/{task_name}.json", payload)
+        self._update_community()
+        return {
+            "action": "create_task_graph",
+            "origin": "auxiliary_brain",
+            "status": "completed",
+            "graph_id": graph_id,
+            "task_name": task_name,
+            "path": str(path),
+            "uploaded_artifacts": artifact_refs,
+        }
+
+    async def _maybe_execute_direct_participant_invocation(
+        self,
+        message: str,
+        *,
+        provided_inputs: dict[str, Any] | None = None,
+        uploaded_artifacts: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Execute a one-off task when the text names an existing participant.
+
+        This is a generic bridge from natural language into the existing
+        Agent/Task execution path.  It does not infer what a capability does;
+        it only resolves a durable participant by name and delegates to the
+        same task execution pipeline used by saved tasks.
         """
-        return {"applied": False, "reason": "no_static_projection"}
+        participant = self._find_participant_mentioned_in_message(message)
+        if not participant:
+            return None
+        task_name = self._create_direct_participant_task_graph(
+            message=message,
+            participant=participant,
+            provided_inputs=provided_inputs,
+            uploaded_artifacts=uploaded_artifacts,
+        )
+        return await self.execute_task(task_name, provided_inputs=provided_inputs, instruction=message)
+
+    def _find_participant_mentioned_in_message(self, message: str) -> dict[str, Any] | None:
+        text = str(message or "")
+        if not text.strip():
+            return None
+        participants = self.store.list_json("generated/agents")
+        candidates: list[tuple[int, dict[str, Any]]] = []
+        lowered = text.casefold()
+        for participant in participants:
+            if not isinstance(participant, dict):
+                continue
+            names = []
+            for key in ("display_name", "agent_name", "name", "role_name", "participant_id"):
+                value = str(participant.get(key) or "").strip()
+                if value and value not in names:
+                    names.append(value)
+            for name in names:
+                if self._contains_named_entity(lowered, name):
+                    candidates.append((len(name), participant))
+                    break
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    def _contains_named_entity(self, lowered_text: str, name: str) -> bool:
+        normalized_name = str(name or "").strip()
+        if not normalized_name:
+            return False
+        # Preserve exact multi-word identities while still allowing compact ids.
+        pattern = r"(?<![A-Za-z0-9_])" + re.escape(normalized_name.casefold()) + r"(?![A-Za-z0-9_])"
+        return re.search(pattern, lowered_text) is not None
+
+    def _create_direct_participant_task_graph(
+        self,
+        *,
+        message: str,
+        participant: dict[str, Any],
+        provided_inputs: dict[str, Any] | None = None,
+        uploaded_artifacts: list[dict[str, Any]] | None = None,
+    ) -> str:
+        graph_id = new_id("direct_agent_graph")
+        task_name = graph_id
+        participant_id = str(participant.get("participant_id") or participant.get("id") or "").strip()
+        participant_name = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant_id or "participant")
+        runtime_parameters: dict[str, Any] = {}
+        runtime_parameters.update(self._extract_runtime_parameters_from_instruction(message))
+        runtime_parameters.update(self._extract_participant_schema_parameters_from_instruction(message, participant))
+        # Store generic original source material at creation time so one-off
+        # delegated executions can resume repair even if the later resume call
+        # only receives a boolean confirmation.
+        runtime_parameters.update(self._structural_source_runtime_context(task_graph={"instruction": str(message or "")}, instruction=message))
+        if isinstance(provided_inputs, dict):
+            runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+        artifact_refs = uploaded_artifacts if isinstance(uploaded_artifacts, list) else []
+        task_graph = {
+            "graph_id": graph_id,
+            "task_name": task_name,
+            "community_id": self.community_id,
+            "instruction": str(message or ""),
+            "origin": "auxiliary_brain",
+            "status": "created",
+            "created_at": self._now(),
+            "execution_policy": "delegated_participant_execution_via_ai_core",
+            "selected_participant_ids": [participant_id] if participant_id else [],
+            "uploaded_artifacts": artifact_refs,
+            "parameter_contract": {
+                "contract_type": "task_runtime_parameter_contract",
+                "parameters": [],
+                "missing_information": [],
+                "runtime_scope": "task_run",
+            },
+            "runtime_parameters": runtime_parameters,
+            "tasks": [{
+                "task_id": f"{graph_id}_delegate_1",
+                "participant_id": participant_id,
+                "participant_display_name": participant_name,
+                "execution_owner": "ai_core",
+                "status": "pending",
+                "step_type": "participant_execution",
+                "depends_on": [],
+                "source_step_id": task_name,
+                "source_instruction_fragment": str(message or ""),
+                "capability_profile": participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {},
+                "input_contract": {
+                    "contract_type": "runtime_step_input_contract",
+                    "bound_from_upstream": [],
+                    "accepts_verified_material": False,
+                    "user_input_required_for_bound_material": False,
+                },
+                "output_contract": {
+                    "contract_type": "runtime_step_output_contract",
+                    "produces_verified_material": True,
+                    "planner_metadata_is_not_result_material": True,
+                },
+            }],
+            "workflow_planning": {
+                "mode": "direct_existing_participant_invocation",
+                "semantic_step_count": 1,
+                "generated_participant_ids": [],
+                "step_count": 1,
+                "coverage_status": "passed",
+            },
+            "instruction_coverage": {
+                "status": "passed",
+                "covered_actions": [{
+                    "step_id": task_name,
+                    "type": "participant_execution",
+                    "participant_id": participant_id,
+                }],
+                "uncovered_fragments": [],
+                "selected_participant_count": 1,
+                "generated_step_count": 0,
+                "planning_mode": "direct_existing_participant_invocation",
+            },
+            "final_synthesis_owner": "ai_core",
+        }
+        self.store.write_json(f"generated/tasks/{task_name}.json", task_graph)
+        return task_name
+
+    def _extract_participant_schema_parameters_from_instruction(self, instruction: str, participant: dict[str, Any]) -> dict[str, Any]:
+        """Extract values for fields declared by the participant contract.
+
+        This is field-name driven, not capability-specific.  It handles quoted
+        values and short unquoted values adjacent to declared parameter names so
+        a natural one-off invocation can prefill the same form fields that the
+        old Agent/Task parameter flow already exposes.
+        """
+        text = str(instruction or "")
+        contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}
+        params = contract.get("parameters") if isinstance(contract.get("parameters"), list) else []
+        names: list[str] = []
+        for param in params:
+            if not isinstance(param, dict):
+                continue
+            name = str(param.get("name") or param.get("parameter_name") or "").strip()
+            if name and name not in names:
+                names.append(name)
+        out: dict[str, Any] = {}
+        for name in names:
+            value = self._extract_named_value_from_instruction(text, name)
+            if value not in (None, "", [], {}):
+                out[name] = value
+                pid = str(participant.get("participant_id") or participant.get("id") or "").strip()
+                pname = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or "").strip()
+                safe_pname = re.sub(r"[^A-Za-z0-9_]+", "_", pname).strip("_")
+                if pid:
+                    out.setdefault(f"{pid}.{name}", value)
+                if pname:
+                    out.setdefault(f"{pname}.{name}", value)
+                if safe_pname:
+                    out.setdefault(f"{safe_pname}.{name}", value)
+        return out
+
+    def _extract_named_value_from_instruction(self, text: str, field_name: str) -> Any:
+        name = str(field_name or "").strip()
+        if not name:
+            return None
+        token_pattern = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])", flags=re.I)
+        candidates: list[str] = []
+        for match in token_pattern.finditer(text):
+            tail = text[match.end():].lstrip()
+            if not tail:
+                continue
+            if tail[0] in {"'", '"'}:
+                quote = tail[0]
+                closing = tail.find(quote, 1)
+                if closing > 0:
+                    value = tail[1:closing].strip()
+                    if value:
+                        candidates.append(value)
+                continue
+            # Stop before the next connector + declared-looking assignment, or
+            # at ordinary sentence/list delimiters.  This keeps extraction
+            # generic while preventing one field from swallowing following
+            # fields in a natural command.
+            stop_match = re.search(
+                r"\s+(?:with|and|using|for)\s+[A-Za-z_][A-Za-z0-9_]*\s+[\"']|"
+                r"\s+[A-Za-z_][A-Za-z0-9_]*\s+[\"']|"
+                r"[,;\n!?]",
+                tail,
+                flags=re.I,
+            )
+            value = tail[: stop_match.start()].strip() if stop_match else tail.strip()
+            value = value.strip().strip("'\"")
+            if value and len(value.split()) <= 6:
+                candidates.append(value)
+        if not candidates:
+            return None
+        return candidates[-1]
+
+
+    async def execute_task(self, task_name: str | None, provided_inputs: dict[str, Any] | None = None, instruction: str | None = None) -> dict[str, Any]:
+        if not task_name:
+            return {
+                "action": "execute_task_graph",
+                "origin": "auxiliary_brain",
+                "status": "blocked",
+                "message": "A task name is required.",
+            }
+        task_graph = self.store.read_json(f"generated/tasks/{task_name}.json")
+        if not task_graph:
+            return {
+                "action": "execute_task_graph",
+                "origin": "auxiliary_brain",
+                "status": "not_found",
+                "task_name": task_name,
+            }
+        all_participants = self.store.list_json("generated/agents")
+        selected_ids = {str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()}
+        if selected_ids:
+            participants = [p for p in all_participants if str(p.get("participant_id") or p.get("id") or "").strip() in selected_ids]
+            found_ids = {str(p.get("participant_id") or p.get("id") or "").strip() for p in participants}
+            missing_ids = selected_ids - found_ids
+            if missing_ids:
+                task_participants = self._participants_from_task_graph(task_graph, missing_ids)
+                participants.extend(task_participants)
+        else:
+            participants = all_participants
+        runtime_parameters = {}
+        if isinstance(task_graph.get("runtime_parameters"), dict):
+            runtime_parameters.update(task_graph.get("runtime_parameters") or {})
+        runtime_parameters.update(self._extract_step_scoped_runtime_parameters_from_tasks(task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []))
+        runtime_parameters.update(self._extract_runtime_parameters_from_instruction(instruction or ""))
+        runtime_parameters.update(self._structural_source_runtime_context(task_graph=task_graph, instruction=instruction))
+        if isinstance(provided_inputs, dict):
+            runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+        preflight = self._preflight_runtime_parameters(task_graph, participants, runtime_parameters)
+        if preflight.get("status") == "requires_input":
+            run_id = new_id("delegation_run")
+            run_payload = {
+                "run_id": run_id,
+                "origin": "auxiliary_brain",
+                "status": "requires_input",
+                "task_name": str(task_graph.get("task_name") or task_graph.get("graph_id") or task_name),
+                "current_stage": "waiting_for_runtime_parameters",
+                "pending_action": preflight.get("pending_action"),
+                "missing_inputs": preflight.get("missing_inputs") or [],
+                "runtime_parameters": runtime_parameters,
+                "pre_execution_parameter_analysis": preflight.get("analysis"),
+                "completed_at": self._now(),
+            }
+            self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+            status = "requires_input"
+            result = run_payload
+        else:
+            reuse_response = await self._try_reused_task_execution(task_name, task_graph, participants, runtime_parameters)
+            if reuse_response is not None:
+                return reuse_response
+            task_graph = dict(task_graph)
+            task_graph["runtime_parameters"] = runtime_parameters
+            result = await self.delegation_runtime.execute_task(task_graph, participants)
+        status = result.get("status", "completed")
+        if status == "completed":
+            try:
+                self.execution_reuse_store.register_success(task_graph=task_graph, participants=participants, run_payload=result)
+            except Exception:
+                pass
+        response = {
+            "action": "execute_task_graph",
+            "origin": "auxiliary_brain",
+            "status": status,
+            "task_name": task_name,
+            "run_id": result.get("run_id"),
+            "final_answer": self._compact_final_answer((result.get("synthesis") or {}).get("final_answer")),
+            "delivery": result.get("delivery"),
+        }
+        if status in {"requires_key", "requires_input", "paused"}:
+            pending_action = result.get("pending_action")
+            response["pending_action"] = pending_action
+            response["missing_inputs"] = self._normalize_missing_inputs(result.get("missing_inputs", []), pending_action)
+            response["interaction_request"] = {
+                "type": "collect_runtime_parameters",
+                "kind": str((pending_action or {}).get("kind") or "runtime_parameter_input"),
+                "fields": response["missing_inputs"],
+                "message": self._paused_message(response["missing_inputs"], pending_action),
+            }
+            response["message"] = self._paused_message(response["missing_inputs"], pending_action)
+        return response
+
+    async def resume_run(self, run_id: str, provided_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
+        run_id = (run_id or "").strip()
+        if not run_id:
+            return {
+                "action": "resume_task_graph",
+                "origin": "auxiliary_brain",
+                "status": "blocked",
+                "message": "A run id is required.",
+            }
+        run_payload = self.store.read_json(f"generated/results/{run_id}.json")
+        if not run_payload:
+            return {
+                "action": "resume_task_graph",
+                "origin": "auxiliary_brain",
+                "status": "not_found",
+                "run_id": run_id,
+            }
+        task_name = str(run_payload.get("task_name") or "").strip()
+        if not task_name:
+            return {
+                "action": "resume_task_graph",
+                "origin": "auxiliary_brain",
+                "status": "blocked",
+                "run_id": run_id,
+                "message": "The paused run does not reference a task name.",
+            }
+        task_graph = self.store.read_json(f"generated/tasks/{task_name}.json")
+        if not task_graph:
+            return {
+                "action": "resume_task_graph",
+                "origin": "auxiliary_brain",
+                "status": "not_found",
+                "run_id": run_id,
+                "task_name": task_name,
+            }
+        all_participants = self.store.list_json("generated/agents")
+        selected_ids = set(task_graph.get("selected_participant_ids") or [])
+        participants = [p for p in all_participants if p.get("participant_id") in selected_ids] or all_participants
+        pending = run_payload.get("pending_action") if isinstance(run_payload.get("pending_action"), dict) else {}
+        if str(pending.get("source") or "") == "execution_reuse_asset":
+            runtime_parameters = {}
+            if isinstance(run_payload.get("runtime_parameters"), dict):
+                runtime_parameters.update(run_payload.get("runtime_parameters") or {})
+            if isinstance(provided_inputs, dict):
+                runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+            reuse_response = await self._try_reused_task_execution(task_name, task_graph, participants, runtime_parameters)
+            if reuse_response is not None:
+                reuse_response["action"] = "resume_task_graph"
+                reuse_response["resumed_from_run_id"] = run_id
+                return reuse_response
+            task_graph = dict(task_graph)
+            task_graph["runtime_parameters"] = runtime_parameters
+            result = await self.delegation_runtime.execute_task(task_graph, participants)
+        elif str(pending.get("kind") or "") in {"studio_pre_execution_uploaded_artifact_parameters", "studio_pre_execution_runtime_parameters"}:
+            runtime_parameters = {}
+            if isinstance(task_graph.get("runtime_parameters"), dict):
+                runtime_parameters.update(task_graph.get("runtime_parameters") or {})
+            if isinstance(run_payload.get("runtime_parameters"), dict):
+                runtime_parameters.update(run_payload.get("runtime_parameters") or {})
+            if isinstance(provided_inputs, dict):
+                runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+            preflight = self._preflight_runtime_parameters(task_graph, participants, runtime_parameters)
+            if preflight.get("status") == "requires_input":
+                run_payload.update({
+                    "status": "requires_input",
+                    "current_stage": "waiting_for_runtime_parameters",
+                    "pending_action": preflight.get("pending_action"),
+                    "missing_inputs": preflight.get("missing_inputs") or [],
+                    "runtime_parameters": runtime_parameters,
+                    "completed_at": self._now(),
+                })
+                self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+                result = run_payload
+            else:
+                task_graph = dict(task_graph)
+                task_graph["runtime_parameters"] = runtime_parameters
+                result = await self.delegation_runtime.execute_task(task_graph, participants)
+        else:
+            result = await self.delegation_runtime.resume_task(run_payload, task_graph, participants, provided_inputs=provided_inputs)
+        status = result.get("status", "completed")
+        if status == "completed":
+            try:
+                self.execution_reuse_store.register_success(task_graph=task_graph, participants=participants, run_payload=result)
+            except Exception:
+                pass
+        response = {
+            "action": "resume_task_graph",
+            "origin": "auxiliary_brain",
+            "status": status,
+            "task_name": task_name,
+            "run_id": result.get("run_id"),
+            "resumed_from_run_id": run_id,
+            "final_answer": self._compact_final_answer((result.get("synthesis") or {}).get("final_answer")),
+            "delivery": result.get("delivery"),
+        }
+        if status in {"requires_key", "requires_input", "paused"}:
+            pending_action = result.get("pending_action")
+            response["pending_action"] = pending_action
+            response["missing_inputs"] = self._normalize_missing_inputs(result.get("missing_inputs", []), pending_action)
+            response["interaction_request"] = {
+                "type": "collect_runtime_parameters",
+                "kind": str((pending_action or {}).get("kind") or "runtime_parameter_input"),
+                "fields": response["missing_inputs"],
+                "message": self._paused_message(response["missing_inputs"], pending_action),
+            }
+            response["message"] = self._paused_message(response["missing_inputs"], pending_action)
+        return response
+
+    def _participants_from_task_graph(self, task_graph: dict[str, Any], participant_ids: set[str]) -> list[dict[str, Any]]:
+        """Rebuild task-scoped generated participants when they are not durable agents.
+
+        The task graph is the source of truth for runtime-generated steps. If a
+        task selected generated participants that are not present in the durable
+        agent store, execution must not fall back to unrelated agents from the
+        same community.
+        """
+        rebuilt: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for task in task_graph.get("tasks") or []:
+            if not isinstance(task, dict):
+                continue
+            pid = str(task.get("participant_id") or "").strip()
+            if not pid or pid not in participant_ids or pid in seen:
+                continue
+            seen.add(pid)
+            name = str(task.get("participant_display_name") or task.get("source_instruction_fragment") or pid).strip() or pid
+            objective = str(task.get("source_instruction_fragment") or task.get("objective") or name).strip()
+            rebuilt.append({
+                "participant_id": pid,
+                "name": name,
+                "agent_name": name,
+                "display_name": name,
+                "role_name": name,
+                "instruction": objective,
+                "execution_objective": objective,
+                "definition_instruction": objective,
+                "parameter_contract": task.get("parameter_contract") if isinstance(task.get("parameter_contract"), dict) else {
+                    "contract_type": "generated_intermediate_step_contract",
+                    "parameters": [],
+                    "missing_information": [],
+                    "runtime_scope": "task_run",
+                },
+                "capability_profile": task.get("capability_profile") if isinstance(task.get("capability_profile"), dict) else {},
+                "runtime_parameters": {},
+                "missing_information": [],
+                "origin": "auxiliary_brain",
+                "status": "created",
+                "execution_policy": "delegate_to_ai_core",
+                "generated_by": "task_graph_rebuild",
+                "depends_on": task.get("depends_on") or [],
+                "input_from": task.get("input_from") or task.get("depends_on") or [],
+                "workflow_step_type": task.get("step_type") or "semantic_intermediate_step",
+                "source_step_id": task.get("source_step_id") or "",
+                "input_contract": task.get("input_contract") if isinstance(task.get("input_contract"), dict) else {},
+                "output_contract": task.get("output_contract") if isinstance(task.get("output_contract"), dict) else {},
+            })
+        return rebuilt
+
+    def _normalize_missing_inputs(self, missing_inputs: Any, pending_action: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if isinstance(missing_inputs, list) and missing_inputs:
+            return [x for x in missing_inputs if isinstance(x, dict)]
+        pending = pending_action if isinstance(pending_action, dict) else {}
+        kind = str(pending.get("kind") or "")
+        if kind in {"secret_input", "optional_credential_choice"}:
+            request = pending.get("request") if isinstance(pending.get("request"), dict) else {}
+            api_source = request.get("api_source") if isinstance(request.get("api_source"), dict) else {}
+            api_sources = request.get("api_sources") if isinstance(request.get("api_sources"), list) else []
+            secret_fields = request.get("secret_fields") if isinstance(request.get("secret_fields"), list) else []
+            first_secret = secret_fields[0] if secret_fields and isinstance(secret_fields[0], dict) else {}
+            provider = str(api_source.get("provider") or first_secret.get("provider") or request.get("provider") or pending.get("provider") or "credential-protected provider")
+            source_url = str(api_source.get("url") or first_secret.get("source_url") or pending.get("source_url") or "")
+            field_name = str(first_secret.get("name") or api_source.get("secret_key") or pending.get("secret_key") or "runtime_access_key")
+            return [{
+                "kind": kind,
+                "field": field_name,
+                "message": str(pending.get("message") or request.get("message") or "A credential-protected method is available. Enter the key to use it, or continue without this key to try another allowed method."),
+                "input_type": "password",
+                "required": False,
+                "provider": provider,
+                "source_url": source_url,
+                "api_source": api_source,
+                "api_sources": api_sources,
+            }]
+        if kind in {"collect_runtime_parameters", "runtime_parameter_input", "uploaded_artifact_parameters", "studio_pre_execution_uploaded_artifact_parameters"}:
+            request = pending.get("request") if isinstance(pending.get("request"), dict) else {}
+            fields = request.get("fields") if isinstance(request.get("fields"), list) else []
+            normalized = []
+            for index, field in enumerate(fields):
+                if isinstance(field, dict):
+                    normalized.append({
+                        "kind": kind,
+                        "field": str(field.get("field") or field.get("name") or field.get("source_field") or f"field_{index}"),
+                        "label": str(field.get("label") or field.get("name") or field.get("field") or f"Input {index + 1}"),
+                        "message": str(field.get("question") or field.get("prompt") or field.get("message") or field.get("description") or field.get("label") or request.get("message") or "Please provide this runtime value."),
+                        "input_type": str(field.get("input_type") or field.get("type") or "text"),
+                        "placeholder": str(field.get("placeholder") or ""),
+                        "description": str(field.get("description") or ""),
+                        "required": bool(field.get("required", True)),
+                        "aliases": field.get("aliases") if isinstance(field.get("aliases"), list) else [],
+                        "merge_targets": field.get("merge_targets") if isinstance(field.get("merge_targets"), list) else [],
+                    })
+            if normalized:
+                return normalized
+            return [{"kind": kind, "field": "input", "message": str(request.get("message") or pending.get("message") or "Please provide runtime values required by the uploaded artifact."), "required": True}]
+
+        if kind == "human_information_required":
+            request = pending.get("request") if isinstance(pending.get("request"), dict) else {}
+            fields = request.get("fields") if isinstance(request.get("fields"), list) else []
+            normalized = []
+            for index, field in enumerate(fields):
+                if isinstance(field, dict):
+                    normalized.append({
+                        "kind": kind,
+                        "field": str(field.get("name") or field.get("field") or f"field_{index}"),
+                        "message": str(field.get("message") or field.get("label") or "Please provide this value."),
+                        "input_type": str(field.get("input_type") or "text"),
+                        "required": bool(field.get("required", True)),
+                    })
+            if normalized:
+                return normalized
+            return [{"kind": kind, "field": "input", "message": str(request.get("message") or pending.get("message") or "Please provide the required information."), "required": True}]
+        if kind == "validation_recovery":
+            # Validation recovery should normally be handled automatically by the runtime repair/escalation path.
+            # Expose a JSON editor only as a final fallback so the UI can still recover instead of silently pausing.
+            return [{
+                "kind": kind,
+                "field": "corrected_json",
+                "message": "Automatic repair could not fully validate this node result. Paste corrected JSON to continue.",
+                "validation_error": str(pending.get("validation_error") or ""),
+                "input_type": "textarea",
+                "required": True,
+            }]
+        return []
+
+    def _paused_message(self, missing_inputs: list[dict[str, Any]], pending_action: dict[str, Any] | None) -> str:
+        pending = pending_action if isinstance(pending_action, dict) else {}
+        kind = str(pending.get("kind") or "")
+        if missing_inputs:
+            return "Delegated primary-runtime execution is waiting for required input."
+        if kind == "validation_recovery":
+            return "Delegated primary-runtime execution paused after schema validation failed. Runtime auto repair should handle structural errors before asking the user."
+        return "Delegated primary-runtime execution is paused."
+
+
 
     def _extract_runtime_parameters_from_instruction(self, instruction: str) -> dict[str, Any]:
         """Extract explicit task-run parameters from user-authored text.
