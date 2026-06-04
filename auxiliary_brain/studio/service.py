@@ -1113,7 +1113,8 @@ class AgentStudioService:
                 "task_name": task_name,
             }
         provided_inputs = provided_inputs or {}
-        payload_only_ids = self._scheduled_payload_only_ids(task_graph, provided_inputs)
+        payload_only_ids = self._execution_payload_only_ids(task_graph, provided_inputs)
+        payload_only_execution = bool(payload_only_ids)
         if payload_only_ids:
             task_graph = self._task_graph_with_payload_only_participants(task_graph, payload_only_ids)
         all_participants = self.store.list_json("generated/agents")
@@ -1158,7 +1159,9 @@ class AgentStudioService:
             status = "requires_input"
             result = run_payload
         else:
-            reuse_response = await self._try_reused_task_execution(task_name, task_graph, participants, runtime_parameters)
+            reuse_response = None
+            if not payload_only_execution:
+                reuse_response = await self._try_reused_task_execution(task_name, task_graph, participants, runtime_parameters)
             if reuse_response is not None:
                 return reuse_response
             task_graph = dict(task_graph)
@@ -1300,17 +1303,30 @@ class AgentStudioService:
             response["message"] = self._paused_message(response["missing_inputs"], pending_action)
         return response
 
-    def _scheduled_payload_only_ids(self, task_graph: dict[str, Any], provided_inputs: dict[str, Any] | None) -> list[str]:
+    def _execution_payload_only_ids(self, task_graph: dict[str, Any], provided_inputs: dict[str, Any] | None) -> list[str]:
+        """Return executable payload participants for control-plane task graphs.
+
+        A saved task may contain participants that define runtime control policy
+        rather than payload work.  Once that policy is materialized on the task
+        graph, those controller participants must not be treated as ordinary
+        executable steps during preflight or scheduled dispatch.  The rule is
+        structural: it only uses the durable schedule policy and participant ids,
+        not any capability, agent, or business name.
+        """
         provided_inputs = provided_inputs or {}
         explicit = provided_inputs.get("_payload_only_selected_participant_ids")
         if isinstance(explicit, list):
             values = [str(x).strip() for x in explicit if str(x).strip()]
             if values:
                 return values
-        if not bool(provided_inputs.get("_scheduled_payload_dispatch")):
-            return []
         policy = task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {}
+        schedule_enabled = bool(policy.get("enabled"))
+        dispatch_requested = bool(provided_inputs.get("_scheduled_payload_dispatch"))
+        if not schedule_enabled and not dispatch_requested:
+            return []
         controllers = {str(x).strip() for x in (policy.get("controller_participant_ids") or []) if str(x).strip()}
+        if not controllers:
+            return []
         selected = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
         payload = [x for x in selected if x and x not in controllers]
         if payload:
