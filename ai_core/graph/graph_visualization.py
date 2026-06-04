@@ -67,6 +67,10 @@ class GraphVisualStateBuilder:
         self_check = self._self_check_from_run(run)
         raw_nodes = self._extract_nodes(graph, run)
         raw_edges = self._extract_edges(graph, run)
+        capability_nodes, capability_edges = self._capability_projection(raw_nodes)
+        if capability_nodes:
+            raw_nodes = raw_nodes + capability_nodes
+            raw_edges = raw_edges + capability_edges
         status_by_node = self._status_by_node(raw_nodes, scheduler_summary, run)
         nodes = [self._visual_node(node, index, status_by_node) for index, node in enumerate(raw_nodes)]
         node_ids = {str(node.get("id")) for node in nodes}
@@ -137,6 +141,61 @@ class GraphVisualStateBuilder:
             "label": label,
             "kind": task.get("step_type") or task.get("task_type") or "runtime_step",
         }
+
+    def _capability_projection(self, nodes: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Project declared runtime capabilities as graph nodes.
+
+        This is relationship visualization only.  It does not route, generate,
+        execute, or interpret any business capability.  The source of truth is
+        the task/agent-declared capability_profile produced by planning/binding.
+        """
+        out_nodes: list[dict[str, Any]] = []
+        out_edges: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for index, node in enumerate(nodes):
+            source_id = self._node_id(node, index)
+            profile = node.get("capability_profile") if isinstance(node.get("capability_profile"), dict) else {}
+            if not profile:
+                continue
+            identifiers: list[str] = []
+            for key in ("tool_id", "capability", "capability_type"):
+                value = str(profile.get(key) or "").strip()
+                if value:
+                    identifiers.append(value)
+            for item in self._as_list(profile.get("capabilities")):
+                value = str(item or "").strip()
+                if value:
+                    identifiers.append(value)
+            if not identifiers:
+                continue
+            primary = identifiers[0]
+            safe = re.sub(r"[^A-Za-z0-9_.:-]+", "_", primary).strip("_") or "runtime_capability"
+            cap_node_id = f"{source_id}::capability::{safe}"
+            if cap_node_id not in seen:
+                seen.add(cap_node_id)
+                summary_parts = []
+                for key in ("tool_id", "capability", "capability_type", "binding_status"):
+                    value = str(profile.get(key) or "").strip()
+                    if value:
+                        summary_parts.append(f"{key}: {value}")
+                out_nodes.append({
+                    "node_id": cap_node_id,
+                    "id": cap_node_id,
+                    "label": primary,
+                    "kind": "runtime_capability",
+                    "status": "metadata_only",
+                    "summary": " | ".join(summary_parts),
+                    "capability_profile": profile,
+                })
+            out_edges.append({
+                "edge_id": f"{source_id}__uses__{safe}",
+                "from": source_id,
+                "to": cap_node_id,
+                "label": "uses capability",
+                "data_contract": "capability_binding",
+                "status": "metadata_only",
+            })
+        return out_nodes, out_edges
 
     def _extract_edges(self, graph: dict[str, Any], run: dict[str, Any]) -> list[dict[str, Any]]:
         candidates = [

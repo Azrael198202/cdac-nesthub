@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+import json
 import re
 
 from auxiliary_brain.delegation import AgentDelegationRuntime
@@ -646,6 +648,75 @@ class AgentStudioService:
             return {"ok": True, "status": "deleted", "task_name": resolved}
         return {"ok": False, "status": result.get("status") or "failed", "task_name": resolved, "error": result.get("error")}
 
+    def set_task_schedule_enabled(self, task_name: str, enabled: bool) -> dict[str, Any]:
+        """Pause or resume a durable schedule policy on a task graph.
+
+        This is intentionally structural: it only toggles schedule_policy.enabled
+        and records operational timestamps.  It does not know which agents or
+        capabilities the task uses.
+        """
+        resolved = self._resolve_task_name(task_name) or str(task_name or "").strip()
+        if not resolved:
+            return {"ok": False, "status": "failed", "error": {"code": "missing_task_name", "message": "A task name is required."}}
+        graph = self.store.read_json(f"generated/tasks/{resolved}.json")
+        if not graph:
+            return {"ok": False, "status": "not_found", "task_name": resolved}
+        policy = graph.get("schedule_policy") if isinstance(graph.get("schedule_policy"), dict) else {}
+        if not policy or str(policy.get("mode") or "") in {"", "none"}:
+            return {"ok": False, "status": "not_scheduled", "task_name": resolved, "message": "The selected task does not declare a durable schedule policy."}
+        policy["enabled"] = bool(enabled)
+        now = self._now()
+        if enabled:
+            policy["resumed_at"] = now
+            policy["state"] = "active"
+            # Resume should be observable soon without waiting for a stale past
+            # or missing next_run_at value to be interpreted inconsistently.
+            if not policy.get("next_run_at"):
+                policy["next_run_at"] = now
+        else:
+            policy["paused_at"] = now
+            policy["state"] = "paused"
+        graph["schedule_policy"] = policy
+        graph["updated_at"] = now
+        self.store.write_json(f"generated/tasks/{resolved}.json", graph)
+        self._emit_schedule_observation("schedule_resumed" if enabled else "schedule_paused", task_name=resolved, data={"enabled": bool(enabled), "state": policy.get("state")})
+        return {"ok": True, "status": "resumed" if enabled else "paused", "task_name": resolved, "schedule_policy": policy}
+
+    def task_execution_history(self, task_name: str, *, limit: int = 80) -> list[dict[str, Any]]:
+        """Return recent scheduler/runtime observations for one task graph."""
+        resolved = self._resolve_task_name(task_name) or str(task_name or "").strip()
+        if not resolved:
+            return []
+        events: list[dict[str, Any]] = []
+        paths = [
+            Path("runtime") / "traces" / "scheduled_tasks" / "scheduler.jsonl",
+            Path("runtime") / "traces" / "service_lifecycle" / "scheduled_task_runner.jsonl",
+        ]
+        seen: set[str] = set()
+        for path in paths:
+            if not path.exists():
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except Exception:
+                continue
+            for line in lines[-max(200, int(limit) * 8):]:
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("task_name") or "") != resolved:
+                    continue
+                key = json.dumps(item, sort_keys=True, ensure_ascii=False)
+                if key in seen:
+                    continue
+                seen.add(key)
+                events.append(item)
+        events.sort(key=lambda item: str(item.get("timestamp") or item.get("time") or ""))
+        return events[-max(1, int(limit)):]
+
     def delete_runtime_capability(self, tool_id: str, *, delete_artifacts: bool = False, delete_profiles: bool = False) -> dict[str, Any]:
         return self.registered_tool_service.delete_tool(tool_id, delete_artifacts=delete_artifacts, delete_profiles=delete_profiles)
 
@@ -779,6 +850,44 @@ class AgentStudioService:
             "bound_tool_id": (payload.get("capability_profile") or {}).get("tool_id"),
         }
 
+
+    def _hydrate_task_step_bindings_from_participants(self, tasks: list[dict[str, Any]], participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Copy durable participant binding metadata into task steps.
+
+        The task graph remains a structural workflow record, but viewer and
+        execution recovery need the referenced agent's durable capability
+        binding to be visible at the step level.  This is a generic merge by
+        participant identity; it never checks task names, agent names, or tool
+        names.
+        """
+        by_id = {
+            str(p.get("participant_id") or p.get("id") or "").strip(): p
+            for p in (participants or [])
+            if isinstance(p, dict) and str(p.get("participant_id") or p.get("id") or "").strip()
+        }
+        hydrated: list[dict[str, Any]] = []
+        for task in tasks or []:
+            if not isinstance(task, dict):
+                continue
+            item = dict(task)
+            pid = str(item.get("participant_id") or item.get("participant") or item.get("agent_id") or "").strip()
+            participant = by_id.get(pid) or {}
+            profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+            current_profile = item.get("capability_profile") if isinstance(item.get("capability_profile"), dict) else {}
+            if profile and (not current_profile or not str(current_profile.get("capability_type") or current_profile.get("tool_id") or "").strip()):
+                item["capability_profile"] = copy.deepcopy(profile)
+            contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}
+            current_contract = item.get("parameter_contract") if isinstance(item.get("parameter_contract"), dict) else {}
+            params = contract.get("parameters") if isinstance(contract.get("parameters"), list) else []
+            current_params = current_contract.get("parameters") if isinstance(current_contract.get("parameters"), list) else []
+            if params and not current_params:
+                item["parameter_contract"] = copy.deepcopy(contract)
+            policy = str(participant.get("execution_policy") or "").strip()
+            if policy and not str(item.get("execution_policy") or "").strip():
+                item["execution_policy"] = policy
+            hydrated.append(item)
+        return hydrated
+
     def create_task_graph(self, instruction: str, name: str | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         graph_id = new_id("graph")
         task_name = name or graph_id
@@ -807,9 +916,13 @@ class AgentStudioService:
             if pid:
                 self.store.write_json(f"generated/agents/{pid}.json", generated_participant)
         selected_ids = [p.get("participant_id") for p in workflow_plan.selected_participants]
+        workflow_tasks = self._hydrate_task_step_bindings_from_participants(
+            workflow_plan.tasks,
+            workflow_plan.selected_participants,
+        )
         if schedule_policy.get("enabled"):
             controller_ids = self._derive_execution_controller_participant_ids(
-                tasks=workflow_plan.tasks,
+                tasks=workflow_tasks,
                 participants=workflow_plan.selected_participants,
                 runtime_parameters=explicit_runtime_parameters,
             )
@@ -842,14 +955,14 @@ class AgentStudioService:
             "parameter_contract": schema_contract,
             "runtime_parameters": explicit_runtime_parameters,
             "schedule_policy": schedule_policy,
-            "tasks": workflow_plan.tasks,
+            "tasks": workflow_tasks,
             "instruction_coverage": workflow_plan.coverage,
             "workflow_planning": {
                 "mode": workflow_plan.coverage.get("planning_mode"),
                 "semantic_step_count": workflow_plan.coverage.get("semantic_step_count"),
                 "semantic_plan_status": (semantic_plan.get("coverage_notes") or []),
                 "generated_participant_ids": [p.get("participant_id") for p in workflow_plan.generated_participants],
-                "step_count": len(workflow_plan.tasks),
+                "step_count": len(workflow_tasks),
                 "coverage_status": workflow_plan.coverage.get("status"),
             },
             "final_synthesis_owner": "ai_core",

@@ -390,6 +390,35 @@ async def runtime_console_read(source: str | None = None, cursor: int = 0, limit
     return JSONResponse(read_console_source(source, cursor=cursor, limit_bytes=limit_bytes, tail=tail))
 
 
+def _graph_runtime_schedule_payload(snapshot: dict[str, Any], graph_id: str | None) -> dict[str, Any]:
+    graphs = [item for item in snapshot.get("task_graphs", []) if isinstance(item, dict)] if isinstance(snapshot, dict) else []
+    selected = None
+    if graph_id:
+        for item in graphs:
+            candidate = str(item.get("graph_id") or item.get("task_name") or item.get("id") or "")
+            if candidate == graph_id:
+                selected = item
+                break
+    if selected is None and graphs:
+        selected = graphs[0]
+    if not selected:
+        return {"is_scheduled": False, "history": []}
+    task_name = str(selected.get("task_name") or selected.get("graph_id") or "").strip()
+    policy = selected.get("schedule_policy") if isinstance(selected.get("schedule_policy"), dict) else {}
+    is_scheduled = bool(policy) and str(policy.get("mode") or "") not in {"", "none"}
+    return {
+        "is_scheduled": is_scheduled,
+        "task_name": task_name,
+        "enabled": bool(policy.get("enabled")) if is_scheduled else False,
+        "state": str(policy.get("state") or ("active" if bool(policy.get("enabled")) else "paused" if is_scheduled else "none")),
+        "mode": str(policy.get("mode") or "none"),
+        "interval_seconds": policy.get("interval_seconds"),
+        "next_run_at": policy.get("next_run_at"),
+        "last_run_at": policy.get("last_run_at"),
+        "history": studio_service.task_execution_history(task_name, limit=80) if is_scheduled and task_name else [],
+    }
+
+
 @app.get("/api/graph-runtime/state")
 async def graph_runtime_state(graph_id: str | None = None):
     try:
@@ -412,6 +441,7 @@ async def graph_runtime_state(graph_id: str | None = None):
         visual_state = graph_visual_builder.from_snapshot(snapshot, graph_id=graph_id)
         payload = graph_visual_builder.to_dict(visual_state)
         payload["source"] = "agent_studio_snapshot"
+        payload["schedule_control"] = _graph_runtime_schedule_payload(snapshot, payload.get("graph_id") or graph_id)
         payload["available_graphs"] = [
             {
                 "graph_id": str(item.get("graph_id") or item.get("task_name") or item.get("id") or "runtime_graph"),
@@ -438,6 +468,21 @@ async def graph_runtime_state(graph_id: str | None = None):
             },
             status_code=200,
         )
+
+
+@app.post("/api/graph-runtime/tasks/{task_name}/schedule/pause")
+async def graph_runtime_pause_schedule(task_name: str):
+    return JSONResponse(studio_service.set_task_schedule_enabled(task_name, False))
+
+
+@app.post("/api/graph-runtime/tasks/{task_name}/schedule/resume")
+async def graph_runtime_resume_schedule(task_name: str):
+    return JSONResponse(studio_service.set_task_schedule_enabled(task_name, True))
+
+
+@app.get("/api/graph-runtime/tasks/{task_name}/schedule/history")
+async def graph_runtime_schedule_history(task_name: str, limit: int = 80):
+    return JSONResponse({"ok": True, "task_name": task_name, "history": studio_service.task_execution_history(task_name, limit=limit)})
 
 
 

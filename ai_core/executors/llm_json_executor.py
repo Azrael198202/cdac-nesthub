@@ -668,6 +668,58 @@ class LLMJsonExecutor:
             "message": "Agent actions and substeps planned with locked fixed execution options.",
         }
 
+    def _merge_detected_structural_entities(self, existing: dict, detected: dict) -> dict:
+        """Merge structurally detected entities without domain assumptions.
+
+        The extractor is a generic, deterministic helper used as fallback/carry-forward
+        material when an LLM provider is unavailable or times out. This method keeps
+        the shape stable and deduplicates scalar/list/dict values without changing
+        workflow decisions, tool choices, or business semantics.
+        """
+        def _as_dict(value: object) -> dict:
+            return dict(value) if isinstance(value, dict) else {}
+
+        def _marker(value: object) -> str:
+            try:
+                if isinstance(value, (dict, list)):
+                    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+            except Exception:
+                pass
+            return str(value)
+
+        def _merge_values(left: object, right: object) -> object:
+            if right in (None, "", [], {}):
+                return left
+            if left in (None, "", [], {}):
+                return right
+            if isinstance(left, dict) and isinstance(right, dict):
+                merged = dict(left)
+                for key, value in right.items():
+                    merged[str(key)] = _merge_values(merged.get(str(key)), value)
+                return merged
+            if isinstance(left, list) or isinstance(right, list):
+                values = left if isinstance(left, list) else [left]
+                incoming = right if isinstance(right, list) else [right]
+                seen: set[str] = set()
+                merged_list = []
+                for item in list(values) + list(incoming):
+                    if item in (None, "", [], {}):
+                        continue
+                    marker = _marker(item)
+                    if marker in seen:
+                        continue
+                    seen.add(marker)
+                    merged_list.append(item)
+                return merged_list
+            if left == right:
+                return left
+            return _merge_values([left], [right])
+
+        merged = _as_dict(existing)
+        for key, value in _as_dict(detected).items():
+            merged[str(key)] = _merge_values(merged.get(str(key)), value)
+        return merged
+
     def _ensure_input_carry_forward(self, *, result: dict, state: dict, slim_user_input: str) -> dict:
         if not isinstance(result, dict):
             result = {}

@@ -41,6 +41,7 @@ class AgentDelegationRuntime:
 
     async def execute_task(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
         selected = self._fresh_task_participants(self._select_participants(task_graph, participants))
+        selected = self._hydrate_runtime_bindings_for_task(task_graph, selected)
         return await self._execute_task_with_selected(task_graph, selected)
 
     async def _execute_task_with_selected(self, task_graph: dict[str, Any], selected: list[dict[str, Any]]) -> dict[str, Any]:
@@ -383,6 +384,7 @@ class AgentDelegationRuntime:
             runtime_parameters["approval_confirmed"] = True
 
         selected = self._fresh_task_participants(participants)
+        selected = self._hydrate_runtime_bindings_for_task(task_graph, selected)
         self._apply_task_runtime_parameters_to_selected(selected, runtime_parameters)
         task_mind_graph = self._build_task_mind_graph(task_graph, selected)
         dependency_plan = task_mind_graph.get("agent_relation_analysis") or self._build_participant_dependency_plan(task_graph, selected)
@@ -573,6 +575,7 @@ class AgentDelegationRuntime:
 
         tool_id = str(pending.get("tool_id") or "").strip()
         selected = self._fresh_task_participants(participants)
+        selected = self._hydrate_runtime_bindings_for_task(task_graph, selected)
         self._apply_task_runtime_parameters_to_selected(selected, runtime_parameters)
         task_mind_graph = self._build_task_mind_graph(task_graph, selected)
         dependency_plan = task_mind_graph.get("agent_relation_analysis") or self._build_participant_dependency_plan(task_graph, selected)
@@ -2731,6 +2734,96 @@ class AgentDelegationRuntime:
             "at": self._now(),
         })
         self.store.write_json(f"generated/results/{run_payload['run_id']}.json", run_payload)
+
+
+    def _hydrate_runtime_bindings_for_task(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Recover durable agent capability bindings before a task run.
+
+        Task graphs are allowed to store only step-level structure.  A step may
+        therefore contain an empty capability_profile even when the referenced
+        durable agent is bound to a runtime capability.  Execution must not let
+        that empty step metadata downgrade the agent into generic LLM planning.
+
+        This method is identity/schema driven and capability-agnostic: it only
+        restores durable participant fields such as capability_profile,
+        execution_policy, and parameter_contract by participant id or stable
+        display name.  It does not inspect task names, agent names, tool ids, or
+        business vocabulary.
+        """
+        if not participants:
+            return []
+        durable_by_id, durable_by_name = self._load_durable_participant_indexes()
+        task_step_by_pid: dict[str, dict[str, Any]] = {}
+        for step in task_graph.get("tasks") or []:
+            if not isinstance(step, dict):
+                continue
+            pid = str(step.get("participant_id") or step.get("participant") or step.get("agent_id") or "").strip()
+            if pid:
+                task_step_by_pid.setdefault(pid, step)
+
+        hydrated: list[dict[str, Any]] = []
+        for participant in participants:
+            if not isinstance(participant, dict):
+                continue
+            item = copy.deepcopy(participant)
+            pid = self._participant_identity(item)
+            name = self._participant_name(item).casefold()
+            durable = durable_by_id.get(pid) or durable_by_name.get(name) or {}
+            step = task_step_by_pid.get(pid) or {}
+            item = self._merge_runtime_binding_fields(item, durable)
+            item = self._merge_runtime_binding_fields(item, step)
+            hydrated.append(item)
+        return hydrated
+
+    def _load_durable_participant_indexes(self) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+        by_id: dict[str, dict[str, Any]] = {}
+        by_name: dict[str, dict[str, Any]] = {}
+        try:
+            records = self.store.list_json("generated/agents")
+        except Exception:
+            records = []
+        for record in records or []:
+            if not isinstance(record, dict):
+                continue
+            pid = self._participant_identity(record)
+            if pid:
+                by_id[pid] = record
+            name = self._participant_name(record).casefold()
+            if name:
+                existing = by_name.get(name)
+                if existing is None or str(record.get("created_at") or "") >= str(existing.get("created_at") or ""):
+                    by_name[name] = record
+        return by_id, by_name
+
+    def _merge_runtime_binding_fields(self, participant: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(source, dict) or not source:
+            return participant
+        out = participant
+
+        source_profile = source.get("capability_profile") if isinstance(source.get("capability_profile"), dict) else {}
+        current_profile = out.get("capability_profile") if isinstance(out.get("capability_profile"), dict) else {}
+        if source_profile and (not current_profile or not str(current_profile.get("capability_type") or current_profile.get("tool_id") or "").strip()):
+            out["capability_profile"] = copy.deepcopy(source_profile)
+
+        source_policy = str(source.get("execution_policy") or "").strip()
+        current_policy = str(out.get("execution_policy") or "").strip()
+        if source_policy and (not current_policy or current_policy == "delegate_to_ai_core"):
+            if source_policy != "delegate_to_ai_core" or not current_policy:
+                out["execution_policy"] = source_policy
+
+        source_contract = source.get("parameter_contract") if isinstance(source.get("parameter_contract"), dict) else {}
+        current_contract = out.get("parameter_contract") if isinstance(out.get("parameter_contract"), dict) else {}
+        source_params = source_contract.get("parameters") if isinstance(source_contract.get("parameters"), list) else []
+        current_params = current_contract.get("parameters") if isinstance(current_contract.get("parameters"), list) else []
+        if source_contract and source_params and not current_params:
+            out["parameter_contract"] = copy.deepcopy(source_contract)
+            out["missing_information"] = copy.deepcopy(source_contract.get("missing_information") or [])
+
+        for key in ("input_contract", "output_contract", "depends_on", "input_from", "workflow_step_type", "source_step_id"):
+            value = source.get(key)
+            if value not in (None, "", [], {}) and out.get(key) in (None, "", [], {}):
+                out[key] = copy.deepcopy(value)
+        return out
 
     def _fresh_task_participants(self, participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Return task-run copies with no persisted runtime values.
