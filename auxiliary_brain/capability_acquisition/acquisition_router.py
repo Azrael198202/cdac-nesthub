@@ -157,6 +157,15 @@ class RuntimeCapabilityGapImplementer:
                 }
 
         acquisition_policy = template.get("acquisition_policy") if isinstance(template.get("acquisition_policy"), dict) else {}
+        runtime_native_decision = self._classify_runtime_native_acquisition(user_input=user_input, template=template, planner_record=planner_record or {}, evidence=evidence)
+        mark("CapabilityAcquisitionClass", str(runtime_native_decision.get("class") or "unknown"), decision=runtime_native_decision)
+        if runtime_native_decision.get("runtime_native"):
+            acquisition_policy = dict(acquisition_policy)
+            acquisition_policy["allow_policy_backed_basic_acquisition_without_external_evidence"] = True
+            acquisition_policy["runtime_native_policy_backed"] = True
+            template["acquisition_policy"] = acquisition_policy
+            if planner_record is not None:
+                planner_record["needs_external_evidence"] = False
         planner_unknown = bool(planner_record and planner_record.get("needs_external_evidence"))
         allow_policy_backed_basic = bool(acquisition_policy.get("allow_policy_backed_basic_acquisition_without_external_evidence"))
         if not urls and planner_unknown:
@@ -553,6 +562,54 @@ class RuntimeCapabilityGapImplementer:
         checks.append({"name": "files_have_paths_and_content", "passed": files_ok})
         passed = all(bool(item.get("passed")) for item in checks)
         return {"passed": passed, "status": "completed" if passed else "failed", "checks": checks}
+
+    def _classify_runtime_native_acquisition(self, *, user_input: str, template: dict[str, Any], planner_record: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any]:
+        """Classify whether acquisition can proceed without external evidence.
+
+        This is capability-class logic, not capability-name logic. It uses
+        generic constraints such as standard-library-only, local runtime storage,
+        no external package requirement, and basic complexity. It does not know
+        concrete business domains.
+        """
+        text = json.dumps({
+            "user_input": user_input,
+            "template_policy": template.get("acquisition_policy") if isinstance(template, dict) else {},
+            "dependencies": template.get("dependencies") if isinstance(template, dict) else [],
+            "planner": {"needs_external_evidence": planner_record.get("needs_external_evidence")},
+        }, ensure_ascii=False).casefold()
+        has_external_evidence = bool(isinstance(evidence, dict) and evidence.get("urls"))
+        positive_markers = [
+            "standard library",
+            "standard-library",
+            "no external package",
+            "do not require external",
+            "local runtime",
+            "local storage",
+            "runtime storage",
+            "basic",
+        ]
+        external_markers = [
+            "external api",
+            "oauth",
+            "browser automation",
+            "third-party sdk",
+            "pip install",
+            "requires external package",
+        ]
+        dependencies = template.get("dependencies") if isinstance(template.get("dependencies"), list) else []
+        declares_external_dependency = any(isinstance(item, dict) and str(item.get("package") or item.get("name") or "").strip() for item in dependencies)
+        positive = [item for item in positive_markers if item in text]
+        negative = [item for item in external_markers if item in text]
+        runtime_native = bool(positive) and not negative and not declares_external_dependency
+        return {
+            "runtime_native": runtime_native,
+            "class": "runtime_native" if runtime_native else "evidence_or_dependency_backed",
+            "positive_markers": positive,
+            "negative_markers": negative,
+            "declares_external_dependency": declares_external_dependency,
+            "has_external_evidence": has_external_evidence,
+            "policy": "policy_backed_without_external_evidence" if runtime_native and not has_external_evidence else "normal",
+        }
 
     def _runtime_self_repair(
         self,

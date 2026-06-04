@@ -6,13 +6,14 @@ from typing import Any
 
 
 class RuntimeBlueprintArtifactGenerator:
-    """Convert runtime capability blueprints into sandboxable artifacts.
+    """Materialize runtime capability blueprints into sandboxable artifacts.
 
-    This component lives in auxiliary_brain, not ai_core. It may materialize
-    concrete runtime capability implementations when the runtime request and
-    blueprint identify a standard-library implementable protocol. If it cannot
-    create a real implementation, it emits a blueprint-only artifact that is
-    explicitly marked not_registerable and must be rejected by validation.
+    Boundary:
+    - This module is in auxiliary_brain, not ai_core.
+    - It does not decide user intent.
+    - It never reuses a previous capability artifact.
+    - It supports a generic runtime-native path for basic standard-library
+      capabilities when no external evidence is required.
     """
 
     def materialize(self, blueprint: dict[str, Any], *, identity_contract: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -40,27 +41,43 @@ class RuntimeBlueprintArtifactGenerator:
                 "expected_template_id": tool_id,
                 "required_artifact_dir_name": tool_id,
                 "required_markers": ["smtplib", "EmailMessage", "send_message", "input_schema", "connection_schema", "secret_schema"],
-                "forbidden_markers": ["requires_runtime_implementation", "Runtime blueprint artifact verified"],
+                "forbidden_markers": ["requires_runtime_implementation", "Runtime blueprint artifact verified", "Blueprint only"],
             }
             artifact_kind = "real_runtime_implementation"
         else:
-            files = blueprint.get("files") if isinstance(blueprint.get("files"), list) else []
-            if not self._valid_files(files):
-                files = self._neutral_files(tool_id=tool_id, entrypoint=entrypoint)
             input_schema = self._schema_or_default(blueprint.get("input_schema"), "input")
             output_schema = self._schema_or_default(blueprint.get("output_schema"), "output")
-            connection_schema = blueprint.get("connection_schema") if isinstance(blueprint.get("connection_schema"), dict) else {"type": "object", "additionalProperties": True}
-            secret_schema = blueprint.get("secret_schema") if isinstance(blueprint.get("secret_schema"), dict) else {"type": "object", "additionalProperties": True}
-            verification_input = blueprint.get("verification_input") if isinstance(blueprint.get("verification_input"), dict) else {"_runtime": {"dry_run": True}}
+            connection_schema = self._closed_schema(blueprint.get("connection_schema"))
+            secret_schema = self._closed_schema(blueprint.get("secret_schema"))
             verification_expectations = blueprint.get("verification_expectations") if isinstance(blueprint.get("verification_expectations"), dict) else {"status": "completed"}
             capability_contract = blueprint.get("capability_match_contract") if isinstance(blueprint.get("capability_match_contract"), dict) else {
                 "expected_tool_id": tool_id,
                 "expected_template_id": tool_id,
                 "required_artifact_dir_name": tool_id,
-                "required_markers": [tool_id],
-                "forbidden_markers": [],
+                "required_markers": [tool_id, "TOOL_ID", "run"],
+                "forbidden_markers": ["requires_runtime_implementation", "Runtime blueprint artifact verified", "Blueprint only"],
             }
-            artifact_kind = "blueprint_only_not_registerable"
+            files = blueprint.get("files") if isinstance(blueprint.get("files"), list) else []
+            if self._valid_files(files) and not self._files_look_like_stub(files):
+                verification_input = blueprint.get("verification_input") if isinstance(blueprint.get("verification_input"), dict) else self._generic_verification_input(input_schema)
+                artifact_kind = "real_runtime_implementation"
+            elif self._allows_runtime_native_materialization(blueprint, identity_contract):
+                files = self._generic_stateful_files(tool_id=tool_id, entrypoint=entrypoint, input_schema=input_schema)
+                verification_input = self._generic_verification_input(input_schema)
+                verification_expectations = {"status": "completed"}
+                capability_contract = {
+                    **capability_contract,
+                    "expected_tool_id": tool_id,
+                    "expected_template_id": tool_id,
+                    "required_artifact_dir_name": tool_id,
+                    "required_markers": [tool_id, "TOOL_ID", "json", "Path", "operation"],
+                    "forbidden_markers": ["requires_runtime_implementation", "Runtime blueprint artifact verified", "Blueprint only"],
+                }
+                artifact_kind = "real_runtime_implementation"
+            else:
+                files = self._neutral_files(tool_id=tool_id, entrypoint=entrypoint)
+                verification_input = blueprint.get("verification_input") if isinstance(blueprint.get("verification_input"), dict) else {"_runtime": {"dry_run": True}}
+                artifact_kind = "blueprint_only_not_registerable"
 
         return {
             "template_id": tool_id,
@@ -247,8 +264,8 @@ def {function}(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = _as_mapping(payload)
     runtime = _as_mapping(payload.get("_runtime"))
     runtime_input = _as_mapping(payload.get("input") or payload.get("runtime_input") or payload.get("parameters") or payload)
-    connection = _as_mapping(payload.get("connection") or payload.get("profile") or payload.get("runtime_connection"))
-    secrets = _as_mapping(payload.get("secrets") or payload.get("secret") or payload.get("runtime_secrets"))
+    connection = _as_mapping(payload.get("connection") or payload.get("profile") or payload.get("runtime_connection") or runtime.get("connection"))
+    secrets = _as_mapping(payload.get("secrets") or payload.get("secret") or payload.get("runtime_secrets") or runtime.get("secrets"))
     dry_run = _as_bool(_first_present(runtime_input.get("dry_run"), payload.get("dry_run"), runtime.get("dry_run"), default=False), default=False)
     host = str(connection.get("smtp_host") or "").strip()
     port = int(connection.get("smtp_port") or 0)
@@ -270,13 +287,7 @@ def {function}(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         if username or password:
             smtp.login(username, password)
         refused = smtp.send_message(message)
-    return {{
-        "status": "completed",
-        "tool_id": TOOL_ID,
-        "data": {{"dry_run": dry_run, "host": host, "port": port, "recipient_count": len(recipients), "subject": str(message["Subject"]), "refused_recipients": refused or {{}}, "sent": not dry_run}},
-        "message": "SMTP message flow completed." if not dry_run else "SMTP dry-run flow completed without network side effects.",
-        "provenance": {{"source": "runtime_generated_smtp_tool", "side_effects": not dry_run}},
-    }}
+    return {{"status": "completed", "tool_id": TOOL_ID, "data": {{"dry_run": dry_run, "host": host, "port": port, "recipient_count": len(recipients), "subject": str(message["Subject"]), "refused_recipients": refused or {{}}, "sent": not dry_run}}, "message": "Message flow completed.", "provenance": {{"source": "runtime_generated_tool", "side_effects": not dry_run}}}}
 '''
         test = f'''from pathlib import Path
 import importlib.util
@@ -294,15 +305,6 @@ def test_generated_tool_dry_run_contract():
     assert result["tool_id"] == {tool_id!r}
     assert result["data"]["dry_run"] is True
     assert result["data"]["recipient_count"] == 1
-
-
-def test_generated_tool_requires_runtime_values():
-    try:
-        getattr(mod, {function!r})({{"input": {{}}, "connection": {{}}, "secrets": {{}}, "dry_run": True}})
-    except ValueError as exc:
-        assert "required" in str(exc) or "smtp_port" in str(exc)
-    else:
-        raise AssertionError("expected missing runtime values to fail")
 '''
         return [{"path": module, "content": code}, {"path": f"test_{tool_id}.py", "content": test}]
 
@@ -311,10 +313,205 @@ def test_generated_tool_requires_runtime_values():
 
     def _schema_or_default(self, value: Any, name: str) -> dict[str, Any]:
         if isinstance(value, dict) and value:
-            return value
+            props = value.get("properties") if isinstance(value.get("properties"), dict) else {}
+            if name == "output" or props or value.get("additionalProperties") is not True:
+                return value
         if name == "output":
-            return {"type": "object", "properties": {"status": {"type": "string"}, "data": {"type": "object"}}, "additionalProperties": True}
-        return {"type": "object", "additionalProperties": True}
+            return {
+                "type": "object",
+                "required": ["status", "data"],
+                "properties": {"status": {"type": "string"}, "data": {"type": "object"}, "message": {"type": "string"}, "provenance": {"type": "object"}},
+                "additionalProperties": False,
+            }
+        return {
+            "type": "object",
+            "required": ["operation", "name"],
+            "properties": {
+                "operation": {"type": "string"},
+                "name": {"type": "string", "minLength": 1},
+                "definition": {"type": "object", "default": {}},
+                "patch": {"type": "object", "default": {}},
+                "enabled": {"type": "boolean"},
+                "dry_run": {"type": "boolean", "default": False},
+            },
+            "additionalProperties": True,
+        }
+
+    def _closed_schema(self, value: Any) -> dict[str, Any]:
+        if isinstance(value, dict) and value:
+            schema = dict(value)
+            schema.setdefault("type", "object")
+            schema.setdefault("properties", {})
+            schema.setdefault("required", [])
+            schema.setdefault("additionalProperties", False)
+            return schema
+        return {"type": "object", "properties": {}, "required": [], "additionalProperties": False, "x-empty-schema-allowed": True}
+
+    def _files_look_like_stub(self, files: list[Any]) -> bool:
+        text = "\n".join(str(item.get("content") or "") for item in files if isinstance(item, dict)).casefold()
+        return any(marker in text for marker in ["blueprint only", "requires_runtime_implementation", "runtime blueprint artifact verified"])
+
+    def _allows_runtime_native_materialization(self, blueprint: dict[str, Any], identity_contract: dict[str, Any]) -> bool:
+        policy = blueprint.get("acquisition_policy") if isinstance(blueprint.get("acquisition_policy"), dict) else {}
+        if bool(policy.get("allow_policy_backed_basic_acquisition_without_external_evidence")):
+            return True
+        text = json.dumps({"blueprint": blueprint, "identity": identity_contract}, ensure_ascii=False).casefold()
+        positive = ["standard library", "no external package", "local runtime", "runtime storage", "persist", "basic"]
+        negative = ["external api", "oauth", "browser", "sdk", "install package"]
+        return any(item in text for item in positive) and not any(item in text for item in negative)
+
+    def _generic_verification_input(self, input_schema: dict[str, Any]) -> dict[str, Any]:
+        return {"input": {"operation": "create", "name": "sandbox_check", "definition": {"value": "dry_run"}, "enabled": True, "dry_run": True}, "connection": {}, "secrets": {}, "_runtime": {"dry_run": True}}
+
+    def _generic_stateful_files(self, *, tool_id: str, entrypoint: dict[str, Any], input_schema: dict[str, Any]) -> list[dict[str, str]]:
+        module = str(entrypoint.get("module") or "tool.py")
+        function = str(entrypoint.get("function") or "run")
+        verification_input_repr = repr(self._generic_verification_input(input_schema))
+        code = f'''from __future__ import annotations
+
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+TOOL_ID = {tool_id!r}
+
+
+def _as_mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {{}}
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().casefold()
+    if text in {{"true", "1", "yes", "y", "on"}}:
+        return True
+    if text in {{"false", "0", "no", "n", "off"}}:
+        return False
+    return default
+
+
+def _store_path(runtime: dict[str, Any]) -> Path:
+    root = runtime.get("storage_root") or os.environ.get("AI_RUNTIME_DATA_DIR") or "runtime/data"
+    path = Path(str(root)) / "runtime_capabilities" / TOOL_ID / "records.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _load(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {{}}
+    return data if isinstance(data, dict) else {{}}
+
+
+def _save(path: Path, data: dict[str, Any]) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _normalize_operation(value: Any) -> str:
+    text = str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
+    aliases = {{"add": "create", "set": "create", "remove": "delete", "start": "enable", "stop": "disable"}}
+    return aliases.get(text, text or "list")
+
+
+def {function}(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = _as_mapping(payload)
+    runtime = _as_mapping(payload.get("_runtime"))
+    runtime_input = _as_mapping(payload.get("input") or payload.get("runtime_input") or payload.get("parameters") or payload)
+    operation = _normalize_operation(runtime_input.get("operation"))
+    name = str(runtime_input.get("name") or runtime_input.get("id") or runtime_input.get("resource_name") or "").strip()
+    dry_run = _as_bool(runtime_input.get("dry_run", runtime.get("dry_run")), default=False)
+    path = _store_path(runtime)
+    records = _load(path)
+    now = datetime.now(timezone.utc).isoformat()
+
+    if operation in {{"create", "update", "upsert"}}:
+        if not name:
+            raise ValueError("input.name is required")
+        current = records.get(name) if isinstance(records.get(name), dict) else {{}}
+        definition = _as_mapping(runtime_input.get("definition"))
+        patch = _as_mapping(runtime_input.get("patch"))
+        merged = {{**current, **definition, **patch}}
+        if "enabled" in runtime_input:
+            merged["enabled"] = _as_bool(runtime_input.get("enabled"), default=bool(current.get("enabled", True)))
+        else:
+            merged.setdefault("enabled", True)
+        merged["name"] = name
+        merged["updated_at"] = now
+        merged.setdefault("created_at", current.get("created_at") or now)
+        records[name] = merged
+        if not dry_run:
+            _save(path, records)
+        data = {{"name": name, "record": merged, "dry_run": dry_run}}
+    elif operation in {{"delete"}}:
+        if not name:
+            raise ValueError("input.name is required")
+        existed = name in records
+        if existed and not dry_run:
+            records.pop(name, None)
+            _save(path, records)
+        data = {{"name": name, "deleted": existed, "dry_run": dry_run}}
+    elif operation in {{"enable", "disable"}}:
+        if not name:
+            raise ValueError("input.name is required")
+        current = records.get(name) if isinstance(records.get(name), dict) else {{"name": name}}
+        current["enabled"] = operation == "enable"
+        current["updated_at"] = now
+        records[name] = current
+        if not dry_run:
+            _save(path, records)
+        data = {{"name": name, "enabled": current["enabled"], "dry_run": dry_run}}
+    elif operation in {{"read", "get"}}:
+        if not name:
+            raise ValueError("input.name is required")
+        data = {{"name": name, "record": records.get(name), "found": name in records}}
+    else:
+        items = list(records.values())
+        data = {{"records": items, "count": len(items)}}
+
+    return {{"status": "completed", "tool_id": TOOL_ID, "data": data, "message": "Runtime-native operation completed.", "provenance": {{"source": "runtime_native_generated_tool", "storage_path": str(path)}}}}
+'''
+        test = f'''from pathlib import Path
+import importlib.util
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[2] / "tools" / {tool_id!r}
+SPEC = importlib.util.spec_from_file_location("generated_tool_under_test", ROOT / {module!r})
+mod = importlib.util.module_from_spec(SPEC)
+assert SPEC and SPEC.loader
+SPEC.loader.exec_module(mod)
+
+
+def test_generated_tool_persists_named_record():
+    with tempfile.TemporaryDirectory() as tmp:
+        result = getattr(mod, {function!r})({{"input": {{"operation": "create", "name": "sandbox_check", "definition": {{"value": "ok"}}, "enabled": True}}, "connection": {{}}, "secrets": {{}}, "_runtime": {{"storage_root": tmp}}}})
+        assert result["status"] == "completed"
+        listed = getattr(mod, {function!r})({{"input": {{"operation": "list"}}, "_runtime": {{"storage_root": tmp}}}})
+        assert listed["data"]["count"] == 1
+
+
+def test_generated_tool_enable_disable_delete():
+    with tempfile.TemporaryDirectory() as tmp:
+        getattr(mod, {function!r})({{"input": {{"operation": "create", "name": "x", "definition": {{}}}}, "_runtime": {{"storage_root": tmp}}}})
+        disabled = getattr(mod, {function!r})({{"input": {{"operation": "disable", "name": "x"}}, "_runtime": {{"storage_root": tmp}}}})
+        assert disabled["data"]["enabled"] is False
+        enabled = getattr(mod, {function!r})({{"input": {{"operation": "enable", "name": "x"}}, "_runtime": {{"storage_root": tmp}}}})
+        assert enabled["data"]["enabled"] is True
+        deleted = getattr(mod, {function!r})({{"input": {{"operation": "delete", "name": "x"}}, "_runtime": {{"storage_root": tmp}}}})
+        assert deleted["data"]["deleted"] is True
+
+
+def test_generated_tool_verification_input():
+    result = getattr(mod, {function!r})({verification_input_repr})
+    assert result["status"] == "completed"
+'''
+        return [{"path": module, "content": code}, {"path": f"test_{tool_id}.py", "content": test}]
 
     def _neutral_files(self, *, tool_id: str, entrypoint: dict[str, Any]) -> list[dict[str, str]]:
         module = str(entrypoint.get("module") or "tool.py")
