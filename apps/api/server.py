@@ -27,6 +27,7 @@ from ai_core.runtime.approval_policy_store import RuntimeApprovalPolicyStore
 from ai_core.graph.graph_visualization import GraphVisualStateBuilder
 from ai_core.runtime.observability.runtime_console import emit_console_event, list_console_sources, read_console_source
 from ai_core.runtime.self_repair.repair_orchestrator import FeedbackRepairOrchestrator
+from ai_core.runtime.scheduler import ScheduledTaskRunner
 
 import traceback
 approval_learning = ApprovalLearningService()
@@ -41,6 +42,19 @@ knowledge_service = KnowledgeService()
 registered_tool_service = RuntimeRegisteredToolService()
 approval_policy_store = RuntimeApprovalPolicyStore()
 feedback_repair_orchestrator = FeedbackRepairOrchestrator()
+scheduled_task_runner = ScheduledTaskRunner()
+
+
+@app.on_event("startup")
+async def _start_scheduled_task_runner():
+    async def _execute_due_task(task_name: str) -> dict[str, Any]:
+        return await studio_service.execute_task(task_name, provided_inputs={}, instruction="")
+    scheduled_task_runner.start(_execute_due_task, tick_seconds=5)
+
+
+@app.on_event("shutdown")
+async def _stop_scheduled_task_runner():
+    await scheduled_task_runner.stop()
 
 
 def _write_api_failure_log(*, area: str, payload: dict[str, Any] | None = None, context: dict[str, Any] | None = None) -> None:

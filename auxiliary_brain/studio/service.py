@@ -785,6 +785,7 @@ class AgentStudioService:
         participants = self.store.list_json("generated/agents")
         artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
         explicit_runtime_parameters = self._extract_runtime_parameters_from_instruction(instruction)
+        schedule_policy = self._extract_schedule_policy_from_instruction(instruction)
         semantic_plan = self.runtime_semantic_planner.build_plan(
             instruction=instruction,
             participants=participants,
@@ -831,6 +832,7 @@ class AgentStudioService:
             "uploaded_artifacts": artifact_refs,
             "parameter_contract": schema_contract,
             "runtime_parameters": explicit_runtime_parameters,
+            "schedule_policy": schedule_policy,
             "tasks": workflow_plan.tasks,
             "instruction_coverage": workflow_plan.coverage,
             "workflow_planning": {
@@ -1955,6 +1957,52 @@ class AgentStudioService:
         artifacts = participant.get("uploaded_artifacts") if isinstance(participant.get("uploaded_artifacts"), list) else []
         artifact_sig = ",".join(sorted(str(a.get("artifact_id") or a.get("path") or a.get("filename") or "") for a in artifacts if isinstance(a, dict)))
         return "|".join(part for part in (name, objective, artifact_sig) if part)
+
+
+    def _extract_schedule_policy_from_instruction(self, instruction: str) -> dict[str, Any]:
+        """Extract a generic durable execution policy from user language.
+
+        This is intentionally capability-agnostic. It does not know what the
+        task does and it does not inject any domain behavior. It only recognizes
+        that the task graph itself should be executed repeatedly or once later.
+        """
+        text = str(instruction or "")
+        lower = text.casefold()
+        if not any(token in lower for token in ("execution policy", "repeat", "every", "run every", "once at", "schedule")):
+            return {"enabled": False, "mode": "none"}
+        interval_seconds = self._extract_generic_interval_seconds(text)
+        if interval_seconds:
+            return {
+                "enabled": True,
+                "mode": "recurring",
+                "interval_seconds": interval_seconds,
+                "next_run_at": self._now(),
+                "created_at": self._now(),
+                "source": "user_declared_execution_policy",
+            }
+        return {"enabled": False, "mode": "unresolved", "source": "user_declared_execution_policy"}
+
+    def _extract_generic_interval_seconds(self, text: str) -> int | None:
+        patterns = [
+            r"(?:repeat|run)\s+every\s+(\d+)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)",
+            r"every\s+(\d+)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)",
+            r"interval\s*[:=]\s*(\d+)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)",
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, text, flags=re.IGNORECASE)
+            if not m:
+                continue
+            value = int(m.group(1))
+            unit = m.group(2).casefold()
+            if unit in {"s", "sec", "secs", "second", "seconds"}:
+                return max(1, value)
+            if unit in {"m", "min", "mins", "minute", "minutes"}:
+                return max(1, value * 60)
+            if unit in {"h", "hr", "hrs", "hour", "hours"}:
+                return max(1, value * 3600)
+        if re.search(r"every\s+an?\s+hour", text, flags=re.IGNORECASE):
+            return 3600
+        return None
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
