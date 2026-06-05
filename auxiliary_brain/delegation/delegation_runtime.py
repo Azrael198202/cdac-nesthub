@@ -1878,6 +1878,31 @@ class AgentDelegationRuntime:
             return self._first_scalar(resolved) or str(resolved)
         return pattern.sub(replace, value)
 
+    def _collect_unresolved_task_templates(self, value: Any, path: str = "") -> list[dict[str, Any]]:
+        """Return unresolved ``{{...}}`` task placeholders before side effects.
+
+        This is a generic guardrail for runtime-registered capabilities.  A
+        task may intentionally pass upstream material into a side-effecting
+        tool.  If a template reference could not be resolved, the runtime must
+        fail the participant and let verification_brain classify the error
+        instead of sending literal template text to the external system.
+        """
+        findings: list[dict[str, Any]] = []
+        if isinstance(value, dict):
+            for key, item in value.items():
+                child = f"{path}.{key}" if path else str(key)
+                findings.extend(self._collect_unresolved_task_templates(item, child))
+            return findings
+        if isinstance(value, list):
+            for idx, item in enumerate(value):
+                child = f"{path}[{idx}]" if path else f"[{idx}]"
+                findings.extend(self._collect_unresolved_task_templates(item, child))
+            return findings
+        if isinstance(value, str) and "{{" in value and "}}" in value:
+            refs = [m.group(1).strip() for m in re.finditer(r"\{\{\s*([^{}]+?)\s*\}\}", value)]
+            findings.append({"path": path or "$", "references": refs, "value_preview": value[:240]})
+        return findings
+
     def _normalize_task_variable_key(self, value: Any) -> str:
         text = str(value or "").strip().casefold()
         text = re.sub(r"\s+", "", text)
@@ -2153,6 +2178,24 @@ class AgentDelegationRuntime:
                     missing_inputs=fields,
                     origin="auxiliary_brain",
                 )
+        unresolved_templates = self._collect_unresolved_task_templates(input_data)
+        if unresolved_templates:
+            return AgentExecutionResult(
+                participant_id=self._participant_identity(participant),
+                participant_name=self._participant_name(participant),
+                core_run_id=new_id("registered_tool_unresolved_template"),
+                status="failed",
+                final_answer="Registered capability input still contains unresolved task template references.",
+                workflow_results={
+                    "status": "failed",
+                    "failure_class": "template_resolution_problem",
+                    "capability_type": "runtime_registered_tool",
+                    "tool_id": tool_id,
+                    "unresolved_templates": unresolved_templates,
+                    "input_keys": sorted(input_data.keys()),
+                },
+                origin="auxiliary_brain",
+            )
         execution_policy = profile.get("execution_policy") if isinstance(profile.get("execution_policy"), dict) else {}
         approval_policy = execution_policy.get("approval_policy") if isinstance(execution_policy.get("approval_policy"), dict) else {}
         approval_confirmed = bool(values.get("approval_confirmed") or values.get("confirm") or values.get("confirmed"))

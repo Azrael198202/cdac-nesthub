@@ -43,9 +43,10 @@ class RuntimeFailureReport:
 class RuntimeVerificationFoundation:
     """Detect failure, collect evidence, classify, and explain where to repair.
 
-    This is the v19 foundation layer.  It intentionally avoids editing code.
+    This is the v20 verification foundation layer.  It intentionally avoids editing code.
     It turns raw runtime execution output into a small, durable failure report
-    that later repair_brain versions can use for semi/auto repair.
+    using six generic verification levels: template, schema, dependency,
+    capability, expectation, and side-effect.
     """
 
     FAILURE_STATUSES = {"failed", "error", "blocked", "requires_input", "requires_key", "paused", "not_found"}
@@ -74,19 +75,19 @@ class RuntimeVerificationFoundation:
         status = str(run_payload.get("status") or "completed").strip().lower()
 
         checks = self._structural_checks(task_graph=task_graph, participants=participants, run_payload=run_payload)
-        output_for_template_check = {
+        verification_context = {
             "run_payload": run_payload,
-            "task_graph": {
-                "task_name": task_name,
-                "graph_id": graph_id,
-                "runtime_parameters": task_graph.get("runtime_parameters") if isinstance(task_graph.get("runtime_parameters"), dict) else {},
-            },
+            "task_graph": task_graph,
+            "participants": participants,
         }
         verify_result = self.verifier.verify(
-            output=output_for_template_check,
+            output=verification_context,
             expectation=VerificationExpectation(
-                name="runtime_post_execution_generic_expectation",
-                rules={"must_not_contain_unresolved_template": True},
+                name="runtime_post_execution_v20_six_level_expectation",
+                rules={
+                    "must_not_contain_unresolved_template": True,
+                    "final_answer_required": True,
+                },
             ),
         )
         checks.extend(verify_result.checks)
@@ -186,23 +187,49 @@ class RuntimeVerificationFoundation:
                     "passed": False,
                     "participant_id": item.get("participant_id"),
                     "status": item_status,
-                    "message": str(item.get("message") or item.get("error") or "")[:600],
+                    "message": str(item.get("message") or item.get("error") or item.get("final_answer") or "")[:600],
+                })
+            workflow_results = item.get("workflow_results") if isinstance(item.get("workflow_results"), dict) else {}
+            unresolved = workflow_results.get("unresolved_templates") if isinstance(workflow_results.get("unresolved_templates"), list) else []
+            if unresolved:
+                checks.append({
+                    "name": "participant_input_must_not_contain_unresolved_template",
+                    "passed": False,
+                    "participant_id": item.get("participant_id"),
+                    "unresolved_templates": unresolved[:20],
+                })
+            try:
+                item_text = json.dumps({"workflow_results": workflow_results, "final_answer": item.get("final_answer")}, ensure_ascii=False, default=str)
+            except Exception:
+                item_text = str(item)
+            if "{{" in item_text and "}}" in item_text:
+                checks.append({
+                    "name": "participant_result_must_not_contain_unresolved_template",
+                    "passed": False,
+                    "participant_id": item.get("participant_id"),
                 })
         return checks
 
     def _classify_failure(self, *, status: str, failed_checks: list[dict[str, Any]], run_payload: dict[str, Any]) -> str:
         names = {str(check.get("name") or "") for check in failed_checks}
+        levels = {int(check.get("level")) for check in failed_checks if str(check.get("level") or "").isdigit()}
         combined = json.dumps({"checks": failed_checks, "run": run_payload}, ensure_ascii=False, default=str).casefold()
-        if any("template" in name for name in names) or "{{" in combined or "}}" in combined:
+        if 1 in levels or any("template" in name for name in names) or "{{" in combined or "}}" in combined:
             return "template_resolution_problem"
+        if 2 in levels or "schema" in combined or "required_key" in names:
+            return "schema_contract_problem"
+        if 3 in levels or "selected_participants_have_results" in names or "dependency" in combined:
+            return "dependency_mapping_problem"
+        if 4 in levels or "capability" in combined or "tool" in combined:
+            return "capability_execution_problem"
+        if 5 in levels or "expectation" in combined or "placeholder" in combined:
+            return "expectation_mismatch_problem"
+        if 6 in levels or "side_effect" in combined:
+            return "side_effect_verification_problem"
         if status in {"requires_input", "paused", "requires_key"} or "missing_inputs" in combined:
             return "parameter_binding_problem"
         if "not_found" in status or "not_found" in combined:
             return "runtime_artifact_lookup_problem"
-        if "capability" in combined or "tool" in combined:
-            return "capability_execution_problem"
-        if "selected_participants_have_results" in names:
-            return "graph_execution_mapping_problem"
         return "execution_verification_problem"
 
     def _first_failed_participant(self, failed_checks: list[dict[str, Any]], run_payload: dict[str, Any]) -> str:
@@ -216,9 +243,13 @@ class RuntimeVerificationFoundation:
     def _suggest_repair_location(self, failure_class: str, failed_checks: list[dict[str, Any]], repair_plan: dict[str, Any]) -> tuple[str, list[str]]:
         mapping = {
             "template_resolution_problem": ("ai_core", ["template resolution", "dependency mapping", "final_synthesis"]),
+            "schema_contract_problem": ("verification_brain", ["schema contract", "result normalization", "parameter bridge"]),
+            "dependency_mapping_problem": ("task_runtime", ["TaskGraph generation", "dependency mapping", "resume state"]),
             "parameter_binding_problem": ("auxiliary_brain", ["task parameter extraction", "preflight binding", "resume binding"]),
             "runtime_artifact_lookup_problem": ("task_runtime", ["task revision", "graph revision", "artifact lookup"]),
-            "capability_execution_problem": ("auxiliary_brain", ["agent capability binding", "registered tool dispatch"]),
+            "capability_execution_problem": ("auxiliary_brain", ["agent capability binding", "registered tool dispatch", "execution lock"]),
+            "expectation_mismatch_problem": ("verification_brain", ["expectation generation", "result verification", "final synthesis contract"]),
+            "side_effect_verification_problem": ("verification_brain", ["side-effect verification", "capability return schema", "external operation evidence"]),
             "graph_execution_mapping_problem": ("task_runtime", ["TaskGraph generation", "participant mapping"]),
         }
         return mapping.get(failure_class, (str(repair_plan.get("owner") or "repair_brain"), ["runtime traces", "failure evidence"]))

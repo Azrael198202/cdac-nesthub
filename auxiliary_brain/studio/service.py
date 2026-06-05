@@ -1070,7 +1070,7 @@ class AgentStudioService:
         task_name = name or graph_id
         participants = self._canonicalize_task_participant_catalog(
             self.store.list_json("generated/agents"),
-            instruction=message,
+            instruction=instruction,
         )
         artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
         explicit_runtime_parameters = self._extract_runtime_parameters_from_instruction(instruction)
