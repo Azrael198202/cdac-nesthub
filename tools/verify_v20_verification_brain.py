@@ -46,3 +46,40 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def _test_level5_llm_expectation_escalation() -> None:
+    class FakeResult:
+        status = "completed"
+        content = '{"passed": true, "confidence": 0.82, "reason": "Runtime output matches the stated expectation.", "suggested_location": ["expectation verifier"]}'
+        error = ""
+        route = {"brain": "verification_brain", "task_type": "expectation_judgment", "model": "policy_selected"}
+
+    class FakeLLM:
+        def __init__(self):
+            self.calls = []
+        def complete_sync(self, **kwargs):
+            self.calls.append(kwargs)
+            return FakeResult()
+
+    verifier = RuntimeVerificationBrain()
+    fake = FakeLLM()
+    verifier.llm = fake
+    result = verifier.verify(
+        output={
+            "task_graph": {"task_name": "GenericTask", "instruction": "Return a concise result for the requested operation."},
+            "run_payload": {"status": "completed", "final_answer": "Operation completed successfully.", "agent_results": []},
+        },
+        expectation=VerificationExpectation(name="llm_exp", rules={"enable_llm_expectation_verification": True}),
+    )
+    checks = result.checks
+    names = {c.get("name") for c in checks}
+    assert "llm_expectation_judgment" in names
+    llm_check = [c for c in checks if c.get("name") == "llm_expectation_judgment"][0]
+    assert llm_check.get("passed") is True
+    assert fake.calls and fake.calls[0]["brain"] == "verification_brain"
+    assert fake.calls[0]["task_type"] == "expectation_judgment"
+
+
+if __name__ == "__main__":
+    _test_level5_llm_expectation_escalation()

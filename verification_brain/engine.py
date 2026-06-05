@@ -185,17 +185,30 @@ class RuntimeVerificationBrain:
         return checks
 
     def _level5_expectation(self, context: dict[str, Any], rules: dict[str, Any]) -> list[dict[str, Any]]:
+        """Level 5 validates whether the result satisfies the stated runtime expectation.
+
+        The implementation is deliberately generic:
+        1. deterministic structural rules run first;
+        2. if those rules cannot decide goal satisfaction, the verifier may
+           escalate to LiteLLM through BrainModelRouter;
+        3. model output is treated as an advisory verification check, not as
+           execution evidence.
+        """
         checks: list[dict[str, Any]] = []
         run_payload = context.get("run_payload") if isinstance(context.get("run_payload"), dict) else context
+        task_graph = context.get("task_graph") if isinstance(context.get("task_graph"), dict) else {}
         final_answer = self._final_answer(run_payload)
+        agent_results = self._agent_results(context)
+
         if rules.get("final_answer_required", True):
             checks.append({
                 "level": 5,
                 "level_name": self.LEVELS[5],
                 "name": "final_answer_or_result_must_not_be_empty",
-                "passed": bool(str(final_answer or "").strip()) or bool(self._agent_results(context)),
+                "passed": bool(str(final_answer or "").strip()) or bool(agent_results),
                 "suggested_location": ["final synthesis", "participant result adapter", "output contract"],
             })
+
         forbidden_values = rules.get("forbidden_placeholder_values") or ["none", "null", "undefined", "nan"]
         if isinstance(final_answer, str) and final_answer.strip().casefold() in {str(v).casefold() for v in forbidden_values}:
             checks.append({
@@ -206,7 +219,187 @@ class RuntimeVerificationBrain:
                 "value": final_answer,
                 "suggested_location": ["result verification", "upstream participant output"],
             })
+
+        explicit_expectations = self._expectation_statements(context=context, rules=rules)
+        if explicit_expectations:
+            deterministic = self._deterministic_expectation_check(final_answer=final_answer, expectations=explicit_expectations, context=context)
+            checks.append(deterministic)
+            should_escalate = deterministic.get("passed") is None or bool(rules.get("force_llm_expectation_verification"))
+        else:
+            should_escalate = bool(rules.get("infer_expectation_with_llm", True)) and bool(final_answer or agent_results)
+
+        if should_escalate and rules.get("enable_llm_expectation_verification", True):
+            checks.append(self._llm_expectation_check(
+                context=context,
+                rules=rules,
+                final_answer=final_answer,
+                expectations=explicit_expectations,
+                task_graph=task_graph,
+            ))
         return checks
+
+    def _expectation_statements(self, *, context: dict[str, Any], rules: dict[str, Any]) -> list[str]:
+        values: list[str] = []
+        for key in ("expectations", "expected_outcomes", "must_satisfy"):
+            raw = rules.get(key)
+            if isinstance(raw, str) and raw.strip():
+                values.append(raw.strip())
+            elif isinstance(raw, list):
+                values.extend(str(x).strip() for x in raw if str(x).strip())
+        task_graph = context.get("task_graph") if isinstance(context.get("task_graph"), dict) else {}
+        for key in ("instruction", "raw_instruction", "task_instruction", "objective", "goal", "task_name"):
+            value = task_graph.get(key)
+            if isinstance(value, str) and value.strip():
+                values.append(value.strip())
+        run_payload = context.get("run_payload") if isinstance(context.get("run_payload"), dict) else {}
+        for key in ("instruction", "objective", "goal", "task_name"):
+            value = run_payload.get(key)
+            if isinstance(value, str) and value.strip():
+                values.append(value.strip())
+        # Keep this compact. Evidence-heavy logs belong to evidence_engine, not
+        # the model prompt.
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            clipped = value[:1200]
+            marker = clipped.casefold()
+            if marker not in seen:
+                seen.add(marker)
+                deduped.append(clipped)
+        return deduped[:8]
+
+    def _deterministic_expectation_check(self, *, final_answer: str, expectations: list[str], context: dict[str, Any]) -> dict[str, Any]:
+        text = self._stringify({"final_answer": final_answer, "agent_results": self._agent_results(context)})
+        if not str(final_answer or "").strip() and not self._agent_results(context):
+            return {
+                "level": 5,
+                "level_name": self.LEVELS[5],
+                "name": "declared_expectation_has_runtime_output",
+                "passed": False,
+                "expectations": expectations[:5],
+                "suggested_location": ["final synthesis", "participant output", "result adapter"],
+            }
+        if _TEMPLATE_RE.search(text):
+            return {
+                "level": 5,
+                "level_name": self.LEVELS[5],
+                "name": "declared_expectation_output_must_be_materialized",
+                "passed": False,
+                "expectations": expectations[:5],
+                "suggested_location": ["template resolution", "dependency mapping", "parameter hydration"],
+            }
+        # Generic deterministic rules cannot prove semantic goal satisfaction.
+        # Return indeterminate so the optional LLM judge can be used.
+        return {
+            "level": 5,
+            "level_name": self.LEVELS[5],
+            "name": "declared_expectation_semantic_match_requires_judgment",
+            "passed": None,
+            "expectations": expectations[:5],
+            "suggested_location": ["expectation verifier", "model orchestration"],
+        }
+
+    def _llm_expectation_check(
+        self,
+        *,
+        context: dict[str, Any],
+        rules: dict[str, Any],
+        final_answer: str,
+        expectations: list[str],
+        task_graph: dict[str, Any],
+    ) -> dict[str, Any]:
+        prompt_payload = {
+            "expectations": expectations[:8],
+            "task_identity": {
+                "task_name": task_graph.get("task_name") or task_graph.get("name") or "",
+                "graph_id": task_graph.get("graph_id") or "",
+            },
+            "final_answer": final_answer[:2000],
+            "participant_result_summaries": self._participant_result_summaries(context)[:12],
+            "verification_rules": {
+                "judge_only_goal_satisfaction": True,
+                "do_not_infer_unseen_external_state": True,
+                "return_json_only": True,
+            },
+        }
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a generic runtime verification judge. Decide whether the runtime output "
+                    "satisfies the stated expectation using only the provided evidence. Do not assume "
+                    "domain-specific facts. Return compact JSON with keys: passed, confidence, reason, "
+                    "suggested_location. If evidence is insufficient, set passed to null."
+                ),
+            },
+            {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False, default=str)},
+        ]
+        complexity = str(rules.get("llm_expectation_complexity") or "critical")
+        result = self.llm.complete_sync(
+            brain="verification_brain",
+            task_type="expectation_judgment",
+            complexity=complexity,
+            messages=messages,
+            context={"verification_level": 5, "task_graph_id": task_graph.get("graph_id")},
+            response_format={"type": "json_object"},
+        )
+        parsed = self._parse_llm_json(result.content)
+        if result.status != "completed":
+            return {
+                "level": 5,
+                "level_name": self.LEVELS[5],
+                "name": "llm_expectation_judgment_unavailable",
+                "passed": None,
+                "llm_status": result.status,
+                "error": result.error,
+                "route": result.route,
+                "suggested_location": ["brain model policy", "LiteLLM provider configuration"],
+            }
+        raw_passed = parsed.get("passed") if isinstance(parsed, dict) else None
+        passed = raw_passed if isinstance(raw_passed, bool) else None
+        return {
+            "level": 5,
+            "level_name": self.LEVELS[5],
+            "name": "llm_expectation_judgment",
+            "passed": passed,
+            "confidence": parsed.get("confidence") if isinstance(parsed, dict) else None,
+            "reason": str(parsed.get("reason") or "")[:800] if isinstance(parsed, dict) else "",
+            "route": result.route,
+            "suggested_location": parsed.get("suggested_location") if isinstance(parsed, dict) and isinstance(parsed.get("suggested_location"), list) else ["expectation", "result synthesis", "upstream output"],
+        }
+
+    def _participant_result_summaries(self, context: dict[str, Any]) -> list[dict[str, Any]]:
+        summaries: list[dict[str, Any]] = []
+        for item in self._agent_results(context):
+            workflow_results = item.get("workflow_results") if isinstance(item.get("workflow_results"), dict) else {}
+            summaries.append({
+                "participant_id": item.get("participant_id"),
+                "participant_name": item.get("participant_name"),
+                "status": item.get("status"),
+                "final_answer": str(item.get("final_answer") or workflow_results.get("final_answer") or workflow_results.get("message") or "")[:1200],
+                "tool_id": workflow_results.get("tool_id"),
+                "capability_type": workflow_results.get("capability_type"),
+            })
+        return summaries
+
+    def _parse_llm_json(self, content: str) -> dict[str, Any]:
+        text = str(content or "").strip()
+        if not text:
+            return {}
+        try:
+            value = json.loads(text)
+            return value if isinstance(value, dict) else {}
+        except Exception:
+            pass
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                value = json.loads(text[start:end + 1])
+                return value if isinstance(value, dict) else {}
+            except Exception:
+                return {}
+        return {}
 
     def _level6_side_effect(self, context: dict[str, Any], rules: dict[str, Any]) -> list[dict[str, Any]]:
         checks: list[dict[str, Any]] = []
