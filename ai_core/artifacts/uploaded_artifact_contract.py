@@ -337,10 +337,110 @@ class UploadedArtifactContractBuilder:
                 value = container.get(key)
                 if isinstance(value, dict):
                     src = value.get("known") if isinstance(value.get("known"), dict) else value
-                    for k, v in src.items():
-                        if self._is_usable_runtime_value(v):
-                            known[str(k)] = v
+                    self._merge_known_mapping(known, src)
+
+        # Delegated task execution sends participant requests to the primary
+        # runtime as an AGENT_REQUEST JSON envelope.  The envelope is an input
+        # transport format, not a business rule.  Earlier code only inspected
+        # dict containers and therefore missed task-declared values carried in
+        # state["input"], causing uploaded-artifact steps to ask for parameters
+        # that were already present in the task graph.
+        for envelope in self._agent_request_envelopes(state=state, step=step):
+            for mapping in self._known_mappings_from_agent_request(envelope):
+                self._merge_known_mapping(known, mapping)
         return known
+
+    def _merge_known_mapping(self, known: dict[str, Any], src: Any) -> None:
+        if not isinstance(src, dict):
+            return
+        for k, v in src.items():
+            if self._is_usable_runtime_value(v):
+                known[str(k)] = v
+
+    def _agent_request_envelopes(self, *, state: dict[str, Any], step: dict[str, Any]) -> list[dict[str, Any]]:
+        envelopes: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def add_candidate(value: Any) -> None:
+            if isinstance(value, dict):
+                payload = value.get("AGENT_REQUEST") if isinstance(value.get("AGENT_REQUEST"), dict) else value
+                key = json.dumps(payload, sort_keys=True, default=str)[:4000]
+                if key not in seen:
+                    seen.add(key)
+                    envelopes.append(payload)
+                return
+            if not isinstance(value, str):
+                return
+            text = value.strip()
+            if not text:
+                return
+            candidates = []
+            if text.startswith("AGENT_REQUEST="):
+                candidates.append(text.split("=", 1)[1].strip())
+            # A durable checkpoint can contain the AGENT_REQUEST string nested in
+            # a larger JSON/string value.  Extract only the balanced JSON object
+            # following the marker, without relying on task or agent names.
+            marker = "AGENT_REQUEST="
+            idx = text.find(marker)
+            if idx >= 0:
+                fragment = text[idx + len(marker):].lstrip()
+                if fragment.startswith("{"):
+                    obj = self._leading_json_object(fragment)
+                    if obj:
+                        candidates.append(obj)
+            for raw in candidates:
+                try:
+                    parsed = json.loads(raw)
+                except Exception:
+                    continue
+                if isinstance(parsed, dict):
+                    add_candidate(parsed)
+
+        for candidate in (state.get("input"), state.get("original_input"), state.get("user_input"), step.get("input"), step.get("original_input")):
+            add_candidate(candidate)
+        runtime_context = state.get("runtime_context") if isinstance(state.get("runtime_context"), dict) else {}
+        add_candidate(runtime_context.get("AGENT_REQUEST"))
+        return envelopes
+
+    def _leading_json_object(self, text: str) -> str:
+        depth = 0
+        in_string = False
+        escape = False
+        for index, ch in enumerate(text):
+            if escape:
+                escape = False
+                continue
+            if ch == "\\" and in_string:
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[: index + 1]
+        return ""
+
+    def _known_mappings_from_agent_request(self, envelope: dict[str, Any]) -> list[dict[str, Any]]:
+        mappings: list[dict[str, Any]] = []
+        context = envelope.get("context") if isinstance(envelope.get("context"), dict) else {}
+        agent_parameters = context.get("agent_parameters") if isinstance(context.get("agent_parameters"), dict) else {}
+        for value in (
+            agent_parameters.get("values"),
+            agent_parameters.get("known"),
+            context.get("runtime_parameters"),
+            context.get("known_parameters"),
+            envelope.get("runtime_parameters"),
+            envelope.get("parameters"),
+        ):
+            if isinstance(value, dict):
+                mappings.append(value)
+        return mappings
 
     def _is_usable_runtime_value(self, value: Any) -> bool:
         """Return True only for concrete user/runtime values.

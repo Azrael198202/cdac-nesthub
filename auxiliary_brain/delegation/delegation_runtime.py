@@ -887,8 +887,35 @@ class AgentDelegationRuntime:
         community_id = str(task_graph.get("community_id") or run_payload.get("community_id") or "default")
         selected = self._fresh_task_participants(self._select_participants(task_graph, participants))
         selected = self._hydrate_runtime_bindings_for_task(task_graph, selected)
+
+        # Resume must use the same task-run parameter map that was parsed when
+        # the task graph was created.  Previous code only applied these values
+        # on a brand-new run.  After a participant pause, the continuation path
+        # rebuilt fresh participant copies and then executed the remaining
+        # participants without re-applying run-scoped parameters.  That made
+        # downstream registered tools ask again for values that were already in
+        # the durable task graph.  Merge task, run, and newly provided values
+        # once here, then apply them to every in-memory participant copy.
+        runtime_parameters = {}
+        if isinstance(task_graph.get("runtime_parameters"), dict):
+            runtime_parameters.update(task_graph.get("runtime_parameters") or {})
+        if isinstance(run_payload.get("runtime_parameters"), dict):
+            runtime_parameters.update(run_payload.get("runtime_parameters") or {})
+        if isinstance(provided_inputs, dict):
+            runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+        if runtime_parameters:
+            task_graph = dict(task_graph)
+            task_graph["runtime_parameters"] = runtime_parameters
+            run_payload["runtime_parameters"] = runtime_parameters
+            self._apply_task_runtime_parameters_to_selected(selected, runtime_parameters)
+
         pending = run_payload.get("pending_action") if isinstance(run_payload.get("pending_action"), dict) else {}
-        if str(pending.get("kind") or "") == "agent_parameter_collection":
+        if str(pending.get("kind") or "") == "agent_parameter_collection" and not run_payload.get("agent_results"):
+            # Top-level agent parameter collection before any participant has
+            # executed may safely start a fresh task run with the completed
+            # runtime parameter map.  If agent_results already exist, this is a
+            # participant-level pause and must be resumed below without
+            # re-running completed upstream participants.
             selected = self._fresh_task_participants(selected)
             runtime_parameters = {}
             if isinstance(task_graph.get("runtime_parameters"), dict):
@@ -1497,6 +1524,62 @@ class AgentDelegationRuntime:
                 return True
         return False
 
+    def _runtime_value_for_field(self, participant: dict[str, Any], field_name: str) -> Any:
+        """Look up a run-scoped value for one participant field.
+
+        This mirrors the alias rules used for missing-field checks and keeps the
+        registered-tool dispatch path independent from task/agent names.
+        """
+        name = str(field_name or "").strip()
+        if "." in name:
+            name = name.rsplit(".", 1)[-1]
+        if not name:
+            return None
+        values = participant.get("runtime_parameters") if isinstance(participant.get("runtime_parameters"), dict) else {}
+        if not isinstance(values, dict):
+            return None
+        pid = self._participant_identity(participant)
+        pname = self._participant_name(participant)
+        safe = re.sub(r"[^A-Za-z0-9_]+", "_", pname).strip("_")
+        aliases = [name]
+        for prefix in (pid, pname, safe):
+            if prefix:
+                aliases.extend([f"{prefix}.{name}", f"{prefix}_{name}"])
+        lowered = {str(k).casefold(): k for k in values.keys()}
+        # Prefer scoped aliases over the plain field when both exist.
+        ordered_aliases = [alias for alias in aliases if alias != name] + [name]
+        for alias in ordered_aliases:
+            if alias in values and values[alias] not in (None, "", [], {}):
+                return values[alias]
+            matched = lowered.get(str(alias).casefold())
+            if matched is not None and values.get(matched) not in (None, "", [], {}):
+                return values[matched]
+        return None
+
+    def _fill_registered_tool_input_from_runtime(self, participant: dict[str, Any], input_data: dict[str, Any], missing: list[Any]) -> tuple[dict[str, Any], list[str]]:
+        """Last-mile schema-value reconciliation before asking the user.
+
+        Task creation stores parameters in a generic runtime map; registered
+        tools require a clean schema payload.  If the bridge reports a missing
+        field, reconcile once more against the participant runtime map using the
+        same alias rules as the UI missing-field filter.  This prevents stale
+        missing_information from forcing repeated prompts.
+        """
+        out = dict(input_data or {})
+        still_missing: list[str] = []
+        for raw in missing or []:
+            name = str(raw or "").strip()
+            if not name:
+                continue
+            if out.get(name) not in (None, "", [], {}):
+                continue
+            value = self._runtime_value_for_field(participant, name)
+            if value in (None, "", [], {}):
+                still_missing.append(name)
+            else:
+                out[name] = value
+        return out, still_missing
+
     def _capability_required_fields(self, participant: dict[str, Any]) -> list[dict[str, Any]]:
         """Build missing input fields from runtime capability metadata.
 
@@ -1934,11 +2017,42 @@ class AgentDelegationRuntime:
             if structural:
                 values.setdefault("_detected_structural_values", structural)
 
+    def _ensure_task_runtime_parameters_for_participant(self, *, participant: dict[str, Any], task_name: str) -> None:
+        """Hydrate a participant copy with durable task-run parameters.
+
+        This is a generic task/participant binding guard.  A task graph is a
+        durable execution snapshot; participant copies created during resume or
+        capability dispatch must not lose values that were already parsed from
+        the task instruction.  The method only merges runtime parameter maps and
+        applies the existing parameter contract service; it does not inspect
+        capability names or business words.
+        """
+        if not isinstance(participant, dict) or not task_name:
+            return
+        task_graph = self.store.read_json(f"generated/tasks/{task_name}.json")
+        if not isinstance(task_graph, dict):
+            return
+        values = task_graph.get("runtime_parameters") if isinstance(task_graph.get("runtime_parameters"), dict) else {}
+        if not values:
+            return
+        scoped = participant.setdefault("runtime_parameters", {})
+        if not isinstance(scoped, dict):
+            scoped = {}
+            participant["runtime_parameters"] = scoped
+        changed = False
+        for key, value in values.items():
+            if value not in (None, "", [], {}) and key not in scoped:
+                scoped[key] = copy.deepcopy(value)
+                changed = True
+        if changed:
+            self.parameter_contract_service.apply_values(participant, scoped)
+
     async def _execute_registered_tool_capability(self, *, participant: dict[str, Any], task_name: str, completed_results: list[Any] | None = None, dependency_plan: dict[str, Any] | None = None) -> AgentExecutionResult | None:
         profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
         tool_id = str(profile.get("tool_id") or "").strip()
         if not tool_id:
             return None
+        self._ensure_task_runtime_parameters_for_participant(participant=participant, task_name=task_name)
         self._resolve_task_variable_placeholders_for_participant(
             participant=participant,
             completed_results=completed_results or [],
@@ -1949,6 +2063,8 @@ class AgentDelegationRuntime:
         bridge_result = self.registered_tool_parameter_bridge.build_invocation(participant=participant, provided_values=values)
         input_data = bridge_result.get("input_data") if isinstance(bridge_result.get("input_data"), dict) else {}
         missing = bridge_result.get("missing") if isinstance(bridge_result.get("missing"), list) else []
+        if missing:
+            input_data, missing = self._fill_registered_tool_input_from_runtime(participant, input_data, missing)
         if missing:
             raw_fields = self.registered_tool_parameter_bridge.input_fields_from_schema(participant=participant)
             missing_set = {str(x).casefold() for x in missing}

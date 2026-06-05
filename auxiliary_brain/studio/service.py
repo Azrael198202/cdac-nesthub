@@ -921,6 +921,9 @@ class AgentStudioService:
             workflow_plan.tasks,
             workflow_plan.selected_participants,
         )
+        explicit_runtime_parameters.update(
+            self._extract_named_parameter_blocks_from_instruction(instruction, workflow_plan.selected_participants)
+        )
         if schedule_policy.get("enabled"):
             controller_ids = self._derive_execution_controller_participant_ids(
                 tasks=workflow_tasks,
@@ -1246,6 +1249,7 @@ class AgentStudioService:
         if isinstance(task_graph.get("runtime_parameters"), dict):
             runtime_parameters.update(task_graph.get("runtime_parameters") or {})
         runtime_parameters.update(self._extract_step_scoped_runtime_parameters_from_tasks(task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []))
+        runtime_parameters.update(self._extract_named_parameter_blocks_from_instruction(str(task_graph.get("instruction") or ""), participants))
         runtime_parameters.update(self._extract_runtime_parameters_from_instruction(instruction or ""))
         runtime_parameters.update(self._structural_source_runtime_context(task_graph=task_graph, instruction=instruction))
         if isinstance(provided_inputs, dict):
@@ -1705,6 +1709,114 @@ class AgentStudioService:
             if key not in conflicts:
                 out.setdefault(key, value)
         return out
+
+
+    def _extract_named_parameter_blocks_from_instruction(self, instruction: str, participants: list[dict[str, Any]]) -> dict[str, Any]:
+        """Extract parameter blocks addressed to a named participant.
+
+        This is a syntax-only, domain-neutral binding pass for task text such as
+        ``Parameters for <participant>:`` followed by assignment lines.  It does
+        not know what any field means; it only scopes declared key/value pairs
+        to the participant whose durable name/id matches the block label.
+        """
+        text = str(instruction or "")
+        if not text.strip() or not participants:
+            return {}
+        participant_aliases: dict[str, dict[str, Any]] = {}
+        for participant in participants or []:
+            if not isinstance(participant, dict):
+                continue
+            aliases = [
+                participant.get("participant_id"),
+                participant.get("id"),
+                participant.get("display_name"),
+                participant.get("participant_display_name"),
+                participant.get("agent_name"),
+                participant.get("name"),
+                participant.get("role_name"),
+            ]
+            for alias in aliases:
+                key = self._normalize_parameter_block_target(alias)
+                if key:
+                    participant_aliases.setdefault(key, participant)
+        if not participant_aliases:
+            return {}
+
+        out: dict[str, Any] = {}
+        lines = text.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            header = re.match(r"^\s*(?:[-*]\s*)?parameters\s+for\s+(.+?)\s*:\s*$", line, flags=re.I)
+            if not header:
+                i += 1
+                continue
+            target_text = header.group(1).strip()
+            participant = self._match_parameter_block_participant(target_text, participant_aliases)
+            block_lines: list[str] = []
+            i += 1
+            while i < len(lines):
+                current = lines[i]
+                stripped = current.strip()
+                if re.match(r"^\s*(?:[-*]\s*)?parameters\s+for\s+.+?:\s*$", stripped, flags=re.I):
+                    break
+                if re.match(r"^\s*step\s+\d+\s*:\s*$", stripped, flags=re.I):
+                    break
+                if re.match(r"^\s*call\s+.+", stripped, flags=re.I):
+                    break
+                if stripped:
+                    block_lines.append(current)
+                i += 1
+            if participant and block_lines:
+                values = self._extract_runtime_parameters_from_instruction("\n".join(block_lines))
+                if values:
+                    self._write_scoped_parameter_values(out, participant, values)
+            continue
+        return out
+
+    def _normalize_parameter_block_target(self, value: Any) -> str:
+        text = str(value or "").strip().casefold()
+        if not text:
+            return ""
+        text = re.sub(r"[^a-z0-9_]+", "_", text)
+        return text.strip("_")
+
+    def _match_parameter_block_participant(self, target_text: str, participant_aliases: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+        target = self._normalize_parameter_block_target(target_text)
+        if not target:
+            return None
+        if target in participant_aliases:
+            return participant_aliases[target]
+        # Allow harmless suffix/prefix differences caused by display labels.
+        for alias, participant in participant_aliases.items():
+            if alias and (alias in target or target in alias):
+                return participant
+        return None
+
+    def _write_scoped_parameter_values(self, out: dict[str, Any], participant: dict[str, Any], values: dict[str, Any]) -> None:
+        pid = str(participant.get("participant_id") or participant.get("id") or "").strip()
+        names = [
+            str(participant.get("display_name") or "").strip(),
+            str(participant.get("participant_display_name") or "").strip(),
+            str(participant.get("agent_name") or "").strip(),
+            str(participant.get("name") or "").strip(),
+        ]
+        safe_names = [re.sub(r"[^A-Za-z0-9_]+", "_", name).strip("_") for name in names if name]
+        for key, value in (values or {}).items():
+            if value in (None, "", [], {}):
+                continue
+            if pid:
+                out[f"{pid}.{key}"] = value
+                out[f"{pid}_{key}"] = value
+            for prefix in names + safe_names:
+                if prefix:
+                    out[f"{prefix}.{key}"] = value
+                    out[f"{prefix}_{key}"] = value
+            # Plain key is safe only when it is not already bound differently.
+            if key not in out:
+                out[key] = value
+            elif out.get(key) == value:
+                out[key] = value
 
     def _preflight_runtime_parameters(self, task_graph: dict[str, Any], participants: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> dict[str, Any]:
         """Resolve pre-execution requirements through typed context layers.
