@@ -6,6 +6,7 @@ from typing import Any
 
 from ai_core.config.paths import RUNTIME_GENERATED
 from memory_brain.contracts import MemoryRecord
+from ai_core.model_orchestration import LiteLLMBrainClient
 
 
 class RuntimeMemoryStore:
@@ -20,6 +21,7 @@ class RuntimeMemoryStore:
         self.root = root or (RUNTIME_GENERATED / "memory_brain")
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "runtime_experience.jsonl"
+        self.llm = LiteLLMBrainClient()
 
     def remember(self, record: MemoryRecord | dict[str, Any]) -> dict[str, Any]:
         data = record.to_dict() if isinstance(record, MemoryRecord) else dict(record)

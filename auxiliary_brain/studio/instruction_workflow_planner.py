@@ -325,13 +325,21 @@ class InstructionWorkflowPlanner:
         seen: set[str] = set()
         out: list[dict[str, Any]] = []
         for participant in participants:
-            pid = self._participant_id(participant)
-            key = pid or self._participant_name(participant).casefold()
+            key = self._logical_participant_key(participant)
             if not key or key in seen:
                 continue
             seen.add(key)
             out.append(participant)
         return out
+
+    def _logical_participant_key(self, participant: dict[str, Any]) -> str:
+        name = self._participant_name(participant).casefold()
+        profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+        tool_id = str(profile.get("tool_id") or profile.get("capability") or "").strip().casefold()
+        cap_type = str(profile.get("capability_type") or "").strip().casefold()
+        if name:
+            return "|".join([name, cap_type, tool_id])
+        return self._participant_id(participant).casefold()
 
     def _participant_id(self, participant: dict[str, Any]) -> str:
         return str(participant.get("participant_id") or participant.get("id") or participant.get("name") or "").strip()

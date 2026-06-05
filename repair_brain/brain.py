@@ -7,6 +7,7 @@ from evidence_engine import EvidenceRequest, RuntimeEvidenceCollector
 from memory_brain import MemoryRecord, RuntimeMemoryStore
 from repair_brain.contracts import RepairPlan, RepairRequest
 from verification_brain import RuntimeVerificationBrain, VerificationExpectation
+from ai_core.model_orchestration import LiteLLMBrainClient
 
 
 class RuntimeRepairBrain:
@@ -22,6 +23,7 @@ class RuntimeRepairBrain:
         self.evidence = RuntimeEvidenceCollector()
         self.memory = RuntimeMemoryStore()
         self.verifier = RuntimeVerificationBrain()
+        self.llm = LiteLLMBrainClient()
 
     def analyze(self, request: RepairRequest | dict[str, Any]) -> RepairPlan:
         req = request if isinstance(request, RepairRequest) else RepairRequest(

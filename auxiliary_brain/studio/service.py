@@ -1007,10 +1007,63 @@ class AgentStudioService:
         rebuilt = self.create_task_graph(str(instruction), resolved, uploaded_artifacts=artifacts)
         return {"ok": rebuilt.get("status") == "completed", "status": rebuilt.get("status"), "task_name": resolved, "revision": rebuilt}
 
+
+    def _canonicalize_task_participant_catalog(self, participants: list[dict[str, Any]], *, instruction: str = "") -> list[dict[str, Any]]:
+        """Return a clean durable participant catalog for task graph planning.
+
+        Task-local generated intermediate participants are persisted for old run
+        compatibility, but they must not be offered as reusable agents for a new
+        task.  Also, multiple durable files may point to the same logical agent
+        after repeated development/re-acquisition.  The task graph should bind a
+        logical agent once, then capability metadata should hang under that
+        participant rather than creating duplicate participant nodes.
+        """
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in participants or []:
+            if not isinstance(item, dict):
+                continue
+            if self._is_task_local_generated_participant(item):
+                continue
+            key = self._logical_participant_key(item)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+        return out
+
+    def _is_task_local_generated_participant(self, participant: dict[str, Any]) -> bool:
+        generated_by = str(participant.get("generated_by") or "").strip()
+        workflow_step_type = str(participant.get("workflow_step_type") or "").strip()
+        if workflow_step_type == "semantic_intermediate_step":
+            return True
+        if generated_by in {"semantic_workflow_planning", "structural_workflow_planning"}:
+            return True
+        return False
+
+    def _logical_participant_key(self, participant: dict[str, Any]) -> str:
+        name = str(
+            participant.get("display_name")
+            or participant.get("agent_name")
+            or participant.get("name")
+            or participant.get("participant_id")
+            or participant.get("id")
+            or ""
+        ).strip().casefold()
+        profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+        tool_id = str(profile.get("tool_id") or profile.get("capability") or "").strip().casefold()
+        cap_type = str(profile.get("capability_type") or "").strip().casefold()
+        execution_policy = participant.get("execution_policy") if isinstance(participant.get("execution_policy"), dict) else {}
+        method = str(execution_policy.get("execution_method") or participant.get("execution_policy") or "").strip().casefold()
+        return "|".join([name, cap_type, tool_id, method])
+
     def create_task_graph(self, instruction: str, name: str | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         graph_id = new_id("graph")
         task_name = name or graph_id
-        participants = self.store.list_json("generated/agents")
+        participants = self._canonicalize_task_participant_catalog(
+            self.store.list_json("generated/agents"),
+            instruction=instruction,
+        )
         artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
         explicit_runtime_parameters = self._extract_runtime_parameters_from_instruction(instruction)
         schedule_policy = self._extract_schedule_policy_from_instruction(instruction)
@@ -1142,7 +1195,10 @@ class AgentStudioService:
         text = str(message or "")
         if not text.strip():
             return None
-        participants = self.store.list_json("generated/agents")
+        participants = self._canonicalize_task_participant_catalog(
+            self.store.list_json("generated/agents"),
+            instruction=instruction,
+        )
         candidates: list[tuple[int, dict[str, Any]]] = []
         lowered = text.casefold()
         for participant in participants:

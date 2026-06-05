@@ -1,0 +1,67 @@
+defaults:
+  provider: ollama
+  model: qwen3.5:2b
+  route:
+    provider: ollama
+    model: qwen3.5:2b
+    options:
+      temperature: 0
+
+brains:
+  ai_core:
+    default:
+      provider: ollama
+      model: qwen3.5:2b
+      options:
+        temperature: 0
+    tasks:
+      workflow_planning:
+        provider: ollama
+        model: qwen3.5:2b
+        options:
+          temperature: 0
+      final_synthesis:
+        provider: ollama
+        model: qwen3.5:4b-q4_k_m
+        options:
+          temperature: 0
+
+  auxiliary_brain:
+    default:
+      provider: ollama
+      model: qwen3.5:2b
+      options:
+        temperature: 0
+
+  repair_brain:
+    default:
+      provider: ollama
+      model: qwen3.5:4b-q4_k_m
+      options:
+        temperature: 0
+    complexities:
+      high:
+        provider: openai
+        model: gpt-5.5-thinking
+        options:
+          temperature: 0
+
+  verification_brain:
+    default:
+      provider: ollama
+      model: qwen3.5:2b
+      options:
+        temperature: 0
+    complexities:
+      critical:
+        provider: openai
+        model: gpt-5.5-thinking
+        options:
+          temperature: 0
+
+  memory_brain:
+    default:
+      provider: ollama
+      model: qwen3.5:2b
+      options:
+        temperature: 0

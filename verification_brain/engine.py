@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from verification_brain.contracts import VerificationExpectation, VerificationResult
+from ai_core.model_orchestration import LiteLLMBrainClient
 
 
 class RuntimeVerificationBrain:
@@ -12,6 +13,9 @@ class RuntimeVerificationBrain:
     The first phase only includes generic checks that do not require domain
     knowledge and therefore can safely run in every workflow.
     """
+
+    def __init__(self) -> None:
+        self.llm = LiteLLMBrainClient()
 
     def verify(self, *, output: Any, expectation: VerificationExpectation | dict[str, Any] | None = None) -> VerificationResult:
         exp = expectation if isinstance(expectation, VerificationExpectation) else VerificationExpectation(
