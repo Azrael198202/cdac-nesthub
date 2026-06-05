@@ -202,6 +202,10 @@ class AgentStudioRequest(BaseModel):
     session_id: str | None = None
 
 
+class TaskInstructionUpdateRequest(BaseModel):
+    instruction: str
+    uploaded_artifacts: list[dict[str, Any]] | None = None
+
 
 
 class KnowledgeQueryRequest(BaseModel):
@@ -881,6 +885,26 @@ async def agent_studio_delete_task(task_name: str):
         return JSONResponse(payload, status_code=200 if payload.get("ok") else 404)
     except Exception as exc:
         _write_api_error_log(area="agent_studio_delete_task", exc=exc, context={"task_name": task_name})
+        return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
+
+
+@app.post("/api/agent-studio/tasks/{task_name}/rebuild")
+async def agent_studio_rebuild_task(task_name: str):
+    try:
+        payload = studio_service.rebuild_task_graph(task_name)
+        return JSONResponse(payload, status_code=200 if payload.get("ok") else 404)
+    except Exception as exc:
+        _write_api_error_log(area="agent_studio_rebuild_task", exc=exc, context={"task_name": task_name})
+        return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
+
+
+@app.put("/api/agent-studio/tasks/{task_name}/instruction")
+async def agent_studio_update_task_instruction(task_name: str, req: TaskInstructionUpdateRequest):
+    try:
+        payload = studio_service.update_task_graph_instruction(task_name, req.instruction, uploaded_artifacts=req.uploaded_artifacts)
+        return JSONResponse(payload, status_code=200 if payload.get("ok") else 404)
+    except Exception as exc:
+        _write_api_error_log(area="agent_studio_update_task_instruction", exc=exc, context={"task_name": task_name})
         return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
 
 

@@ -6,6 +6,7 @@ from typing import Any
 import copy
 import json
 import re
+import hashlib
 
 from auxiliary_brain.delegation import AgentDelegationRuntime
 from auxiliary_brain.runtime import new_id
@@ -889,6 +890,123 @@ class AgentStudioService:
             hydrated.append(item)
         return hydrated
 
+    def _safe_task_asset_name(self, task_name: str) -> str:
+        value = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(task_name or "").strip()).strip("._")
+        return value or "task"
+
+    def _instruction_fingerprint(self, instruction: str) -> str:
+        return hashlib.sha256(str(instruction or "").encode("utf-8")).hexdigest()
+
+    def _next_task_revision_metadata(self, task_name: str, instruction: str) -> dict[str, Any]:
+        """Create a generic lifecycle identity for a task graph revision.
+
+        A task is a durable composition snapshot.  Each create/edit operation
+        must mint its own graph/plan revision so execution never depends on a
+        mutable natural-language note whose graph was produced by an earlier
+        version.  This is runtime lifecycle metadata only; it does not inspect
+        any business words, agents, or capabilities.
+        """
+        existing = self.store.read_json(f"generated/tasks/{task_name}.json")
+        previous_revision = existing.get("active_revision_id") or existing.get("revision_id") if isinstance(existing, dict) else None
+        previous_task_revision = existing.get("task_revision") if isinstance(existing, dict) else None
+        try:
+            next_revision = int(previous_task_revision or 0) + 1
+        except Exception:
+            next_revision = 1
+        revision_id = new_id("task_revision")
+        graph_revision_id = new_id("graph_revision")
+        plan_revision_id = new_id("plan_revision")
+        now = self._now()
+        return {
+            "task_revision": next_revision,
+            "graph_revision": next_revision,
+            "plan_revision": next_revision,
+            "revision_id": revision_id,
+            "active_revision_id": revision_id,
+            "graph_revision_id": graph_revision_id,
+            "plan_revision_id": plan_revision_id,
+            "previous_revision_id": previous_revision,
+            "source_instruction_fingerprint": self._instruction_fingerprint(instruction),
+            "revision_created_at": now,
+            "updated_at": now,
+            "lifecycle": {
+                "state": "active",
+                "asset_model": "task_owns_independent_graph_and_plan_revision",
+                "task_revision": next_revision,
+                "graph_revision": next_revision,
+                "plan_revision": next_revision,
+                "active_revision_id": revision_id,
+                "previous_revision_id": previous_revision,
+            },
+        }
+
+    def _write_task_revision_asset(self, payload: dict[str, Any]) -> None:
+        task_name = str(payload.get("task_name") or payload.get("graph_id") or "task").strip() or "task"
+        revision_id = str(payload.get("active_revision_id") or payload.get("revision_id") or new_id("task_revision"))
+        safe_name = self._safe_task_asset_name(task_name)
+        try:
+            self.store.write_json(f"generated/task_revisions/{safe_name}/{revision_id}.json", copy.deepcopy(payload))
+        except Exception:
+            return
+
+    def _task_instruction_changed(self, task_graph: dict[str, Any]) -> bool:
+        if not isinstance(task_graph, dict):
+            return False
+        instruction = str(task_graph.get("instruction") or "")
+        if not instruction.strip():
+            return False
+        expected = str(task_graph.get("source_instruction_fingerprint") or "").strip()
+        if not expected:
+            return False
+        return expected != self._instruction_fingerprint(instruction)
+
+    def _rebuild_task_graph_from_current_instruction(self, task_graph: dict[str, Any]) -> dict[str, Any]:
+        """Rebuild a task's own graph/plan when its source instruction changed.
+
+        This is a generic invalidation hook.  It lets an edited task definition
+        produce a fresh graph/plan revision while preserving agent and
+        capability definitions.  Run history remains in generated/results.
+        """
+        if not isinstance(task_graph, dict):
+            return task_graph
+        task_name = str(task_graph.get("task_name") or task_graph.get("graph_id") or "").strip()
+        instruction = str(task_graph.get("instruction") or "")
+        if not task_name or not instruction.strip():
+            return task_graph
+        uploaded_artifacts = task_graph.get("uploaded_artifacts") if isinstance(task_graph.get("uploaded_artifacts"), list) else None
+        rebuilt = self.create_task_graph(instruction, task_name, uploaded_artifacts=uploaded_artifacts)
+        if rebuilt.get("status") != "completed":
+            return task_graph
+        latest = self.store.read_json(f"generated/tasks/{task_name}.json")
+        return latest or task_graph
+
+    def rebuild_task_graph(self, task_name: str) -> dict[str, Any]:
+        resolved = self._resolve_task_name(task_name) or str(task_name or "").strip()
+        if not resolved:
+            return {"ok": False, "status": "failed", "error": {"code": "missing_task_name", "message": "A task name is required."}}
+        current = self.store.read_json(f"generated/tasks/{resolved}.json")
+        if not current:
+            return {"ok": False, "status": "not_found", "task_name": resolved}
+        instruction = str(current.get("instruction") or "")
+        if not instruction.strip():
+            return {"ok": False, "status": "failed", "task_name": resolved, "error": {"code": "missing_instruction", "message": "The task has no source instruction to rebuild."}}
+        rebuilt = self.create_task_graph(instruction, resolved, uploaded_artifacts=current.get("uploaded_artifacts") if isinstance(current.get("uploaded_artifacts"), list) else None)
+        return {"ok": rebuilt.get("status") == "completed", "status": rebuilt.get("status"), "task_name": resolved, "rebuild": rebuilt}
+
+    def update_task_graph_instruction(self, task_name: str, instruction: str, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        """Edit a task by creating a new active graph/plan revision."""
+        resolved = self._resolve_task_name(task_name) or str(task_name or "").strip()
+        if not resolved:
+            return {"ok": False, "status": "failed", "error": {"code": "missing_task_name", "message": "A task name is required."}}
+        if not str(instruction or "").strip():
+            return {"ok": False, "status": "failed", "task_name": resolved, "error": {"code": "missing_instruction", "message": "A task instruction is required."}}
+        current = self.store.read_json(f"generated/tasks/{resolved}.json")
+        if not current:
+            return {"ok": False, "status": "not_found", "task_name": resolved}
+        artifacts = uploaded_artifacts if uploaded_artifacts is not None else current.get("uploaded_artifacts") if isinstance(current.get("uploaded_artifacts"), list) else None
+        rebuilt = self.create_task_graph(str(instruction), resolved, uploaded_artifacts=artifacts)
+        return {"ok": rebuilt.get("status") == "completed", "status": rebuilt.get("status"), "task_name": resolved, "revision": rebuilt}
+
     def create_task_graph(self, instruction: str, name: str | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         graph_id = new_id("graph")
         task_name = name or graph_id
@@ -971,6 +1089,8 @@ class AgentStudioService:
             },
             "final_synthesis_owner": "ai_core",
         }
+        payload.update(self._next_task_revision_metadata(task_name, instruction))
+        self._write_task_revision_asset(payload)
         path = self.store.write_json(f"generated/tasks/{task_name}.json", payload)
         if isinstance(schedule_policy, dict) and schedule_policy.get("enabled"):
             self._emit_schedule_observation(
@@ -1229,6 +1349,8 @@ class AgentStudioService:
                 "status": "not_found",
                 "task_name": task_name,
             }
+        if self._task_instruction_changed(task_graph):
+            task_graph = self._rebuild_task_graph_from_current_instruction(task_graph)
         provided_inputs = provided_inputs or {}
         payload_only_ids = self._execution_payload_only_ids(task_graph, provided_inputs)
         payload_only_execution = bool(payload_only_ids)

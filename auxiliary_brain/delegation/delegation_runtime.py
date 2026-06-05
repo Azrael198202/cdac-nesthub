@@ -1724,6 +1724,7 @@ class AgentDelegationRuntime:
         participant: dict[str, Any],
         completed_results: list[Any],
         dependency_plan: dict[str, Any],
+        task_graph: dict[str, Any] | None = None,
     ) -> None:
         """Resolve task dataflow placeholders in participant runtime values.
 
@@ -1738,7 +1739,7 @@ class AgentDelegationRuntime:
         values = dict(participant.get("runtime_parameters") or {}) if isinstance(participant.get("runtime_parameters"), dict) else {}
         contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}
         params = contract.get("parameters") if isinstance(contract.get("parameters"), list) else []
-        refs = self._task_variable_reference_map(completed_results=completed_results, dependency_plan=dependency_plan, participant=participant)
+        refs = self._task_variable_reference_map(completed_results=completed_results, dependency_plan=dependency_plan, participant=participant, task_graph=task_graph)
         if not refs:
             return
         changed = False
@@ -1758,7 +1759,7 @@ class AgentDelegationRuntime:
             participant["runtime_parameters"] = values
             self.parameter_contract_service.apply_values(participant, values)
 
-    def _task_variable_reference_map(self, *, completed_results: list[Any], dependency_plan: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
+    def _task_variable_reference_map(self, *, completed_results: list[Any], dependency_plan: dict[str, Any], participant: dict[str, Any], task_graph: dict[str, Any] | None = None) -> dict[str, Any]:
         deps = set(self._participant_dependency_ids(participant, dependency_plan))
         ref_map: dict[str, Any] = {}
         included_index = 0
@@ -1796,6 +1797,11 @@ class AgentDelegationRuntime:
             ]
             if included_index != absolute_index:
                 aliases.extend([f"input{included_index}", f"input_{included_index}", f"input {included_index}"])
+            aliases.extend(self._task_step_aliases_for_result(
+                result_pid=result_pid,
+                result_name=result_name,
+                task_graph=task_graph,
+            ))
             if result_pid:
                 aliases.append(result_pid)
             if result_name:
@@ -1807,6 +1813,49 @@ class AgentDelegationRuntime:
                     for field_name, field_value in structured.items():
                         ref_map[self._normalize_task_variable_key(f"{alias}.{field_name}")] = field_value
         return ref_map
+
+    def _task_step_aliases_for_result(self, *, result_pid: str, result_name: str, task_graph: dict[str, Any] | None) -> list[str]:
+        """Return stable workflow-step aliases for a completed result.
+
+        Runtime placeholders may refer to the user's declared step number, not
+        to the compact execution order after controller steps are skipped.  This
+        method maps a result back to the durable task graph's structural step
+        identifiers, for example ``step_3`` and ``Step 3``, without relying on
+        any domain-specific agent or capability names.
+        """
+        if not isinstance(task_graph, dict):
+            return []
+        aliases: list[str] = []
+        tasks = task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []
+        result_keys = {str(result_pid or "").strip(), str(result_name or "").strip()}
+        result_keys = {x for x in result_keys if x}
+        for ordinal, task in enumerate(tasks, start=1):
+            if not isinstance(task, dict):
+                continue
+            task_keys = {
+                str(task.get("participant_id") or "").strip(),
+                str(task.get("participant_display_name") or "").strip(),
+                str(task.get("name") or "").strip(),
+                str(task.get("agent_name") or "").strip(),
+            }
+            task_keys = {x for x in task_keys if x}
+            if result_keys and not (result_keys & task_keys):
+                continue
+            aliases.extend([
+                f"step{ordinal}", f"step_{ordinal}", f"step {ordinal}",
+                f"stage{ordinal}", f"stage_{ordinal}", f"stage {ordinal}",
+            ])
+            source_step_id = str(task.get("source_step_id") or "").strip()
+            if source_step_id:
+                aliases.append(source_step_id)
+                m = re.search(r"(\d+)", source_step_id)
+                if m:
+                    n = m.group(1)
+                    aliases.extend([f"step{n}", f"step_{n}", f"step {n}", f"stage{n}", f"stage_{n}", f"stage {n}"])
+            task_id = str(task.get("task_id") or "").strip()
+            if task_id:
+                aliases.append(task_id)
+        return aliases
 
     def _resolve_task_variable_templates(self, value: Any, refs: dict[str, Any]) -> Any:
         if isinstance(value, dict):
@@ -2053,10 +2102,14 @@ class AgentDelegationRuntime:
         if not tool_id:
             return None
         self._ensure_task_runtime_parameters_for_participant(participant=participant, task_name=task_name)
+        task_graph_for_templates = self.store.read_json(f"generated/tasks/{task_name}.json") if task_name else None
+        if not isinstance(task_graph_for_templates, dict):
+            task_graph_for_templates = None
         self._resolve_task_variable_placeholders_for_participant(
             participant=participant,
             completed_results=completed_results or [],
             dependency_plan=dependency_plan or {},
+            task_graph=task_graph_for_templates,
         )
         self._ensure_participant_structural_context(participant=participant, task_name=task_name)
         values = participant.get("runtime_parameters") if isinstance(participant.get("runtime_parameters"), dict) else {}
