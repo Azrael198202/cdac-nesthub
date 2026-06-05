@@ -111,6 +111,12 @@ class AgentStudioService:
                 "context_trace": {"short_answer_cache": True, "llm_used": False, "planning_used": False},
             }
 
+        # Requests that need the generic ai_core conversation/capability-acquisition
+        # pipeline must not be intercepted by direct participant invocation.
+        # This keeps durable Agent execution separate from runtime capability
+        # acquisition / external evidence / repair-style flows.
+        core_pipeline_requested = self.natural_conversation.needs_core_conversation_pipeline(message)
+
         # If the message is exactly a known task name, treat it as an execution
         # request. This keeps the UI natural: users can type `taskC` after
         # creating it, without falling into ordinary chat or re-planning.
@@ -124,7 +130,7 @@ class AgentStudioService:
         # against durable participant names, then creates a task-run wrapper so
         # the existing missing-parameter form, approval, resume, and registered
         # tool bridge are reused unchanged.
-        if routed.action == "chat":
+        if routed.action == "chat" and not core_pipeline_requested:
             direct_agent_response = await self._maybe_execute_direct_participant_invocation(
                 message,
                 provided_inputs=provided_inputs,
@@ -152,7 +158,6 @@ class AgentStudioService:
         # Give the generic ai_core conversation pipeline priority so it can
         # perform input_parsing -> intent_recognition -> workflow_planning ->
         # web_retrieval -> result_verification -> final_synthesis.
-        core_pipeline_requested = self.natural_conversation.needs_core_conversation_pipeline(message)
         if routed.action == "feedback_adaptation" and core_pipeline_requested:
             return await self.natural_conversation.reply(message, latest_task=self._latest_task_name(), session_id=session_id)
 
@@ -1065,7 +1070,7 @@ class AgentStudioService:
         task_name = name or graph_id
         participants = self._canonicalize_task_participant_catalog(
             self.store.list_json("generated/agents"),
-            instruction=instruction,
+            instruction=message,
         )
         artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
         explicit_runtime_parameters = self._extract_runtime_parameters_from_instruction(instruction)
@@ -1200,7 +1205,7 @@ class AgentStudioService:
             return None
         participants = self._canonicalize_task_participant_catalog(
             self.store.list_json("generated/agents"),
-            instruction=instruction,
+            instruction=message,
         )
         candidates: list[tuple[int, dict[str, Any]]] = []
         lowered = text.casefold()
