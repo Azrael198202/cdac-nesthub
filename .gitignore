@@ -803,3 +803,5 @@ tools/__pycache__/verify_phase21_repair_routing.cpython-313.pyc
 tools/__pycache__/verify_repair_source_material_chain.cpython-313.pyc
 ai_core/runtime/scheduler/__pycache__/__init__.cpython-311.pyc
 ai_core/runtime/scheduler/__pycache__/scheduled_task_runner.cpython-311.pyc
+ai_core/runtime/scheduler/__pycache__/__init__.cpython-313.pyc
+ai_core/runtime/scheduler/__pycache__/scheduled_task_runner.cpython-313.pyc
