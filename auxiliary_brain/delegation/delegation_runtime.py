@@ -885,7 +885,8 @@ class AgentDelegationRuntime:
         task_name = str(task_graph.get("task_name") or run_payload.get("task_name") or "task")
         task_instruction = str(task_graph.get("instruction") or "")
         community_id = str(task_graph.get("community_id") or run_payload.get("community_id") or "default")
-        selected = self._select_participants(task_graph, participants)
+        selected = self._fresh_task_participants(self._select_participants(task_graph, participants))
+        selected = self._hydrate_runtime_bindings_for_task(task_graph, selected)
         pending = run_payload.get("pending_action") if isinstance(run_payload.get("pending_action"), dict) else {}
         if str(pending.get("kind") or "") == "agent_parameter_collection":
             selected = self._fresh_task_participants(selected)
@@ -1021,6 +1022,29 @@ class AgentDelegationRuntime:
                 completed_results=agent_results,
                 dependency_plan=dependency_plan,
             )
+            capability_result = await self._try_execute_generated_capability(
+                participant=participant,
+                completed_results=agent_results,
+                dependency_plan=dependency_plan,
+                task_name=task_name,
+            )
+            if capability_result is not None:
+                payload = self._sanitize_result_payload(capability_result.__dict__)
+                existing_results.append(payload)
+                agent_results.append(capability_result)
+                self._record_progress(run_payload, f"participant_{index + 1}_complete", f"Participant finished: {participant_name}", "completed" if capability_result.status == "completed" else capability_result.status)
+                if capability_result.status in {"requires_key", "requires_input", "paused"}:
+                    run_payload.update({
+                        "status": capability_result.status,
+                        "current_stage": "waiting_for_required_input",
+                        "pending_action": capability_result.pending_action,
+                        "missing_inputs": capability_result.missing_inputs or [],
+                    })
+                    run_payload["agent_results"] = existing_results
+                    self._record_progress(run_payload, "waiting_input", "Waiting for required input", "waiting")
+                    self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+                    return run_payload
+                continue
             material_result = self._try_execute_file_material_generation(
                 participant=participant,
                 completed_results=agent_results,
@@ -1159,7 +1183,7 @@ class AgentDelegationRuntime:
         return str(participant.get("participant_id") or participant.get("id") or participant.get("name") or "").strip()
 
     def _participant_name(self, participant: dict[str, Any]) -> str:
-        return str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant.get("participant_id") or participant.get("id") or "participant").strip()
+        return str(participant.get("display_name") or participant.get("participant_display_name") or participant.get("agent_name") or participant.get("name") or participant.get("participant_id") or participant.get("id") or "participant").strip()
 
     def _participant_objective(self, participant: dict[str, Any]) -> str:
         return str(participant.get("execution_objective") or participant.get("instruction") or participant.get("description") or "").strip()
@@ -1428,6 +1452,8 @@ class AgentDelegationRuntime:
                     continue
                 if not self._is_blocking_agent_parameter_field(participant, field):
                     continue
+                if self._runtime_field_already_bound(participant, field):
+                    continue
                 if self._can_defer_field_to_dependency_output(participant, field, dependency_plan or {}):
                     continue
                 field_name = str(field.get("name") or field.get("field") or field.get("key") or "").strip()
@@ -1437,6 +1463,39 @@ class AgentDelegationRuntime:
                 seen.add(key)
                 fields.append(field)
         return fields
+
+    def _runtime_field_already_bound(self, participant: dict[str, Any], field: dict[str, Any]) -> bool:
+        """Return True when a missing field is already satisfied in run state.
+
+        This is a generic guard against stale parameter_contract.missing_information.
+        It checks the current participant runtime_parameters using the same
+        participant-id/name scoped alias rules used by task creation and resume.
+        """
+        if not isinstance(field, dict):
+            return False
+        name = str(field.get("parameter_name") or field.get("name") or field.get("field") or field.get("key") or "").strip()
+        if "." in name:
+            name = name.rsplit(".", 1)[-1]
+        if not name:
+            return False
+        values = participant.get("runtime_parameters") if isinstance(participant.get("runtime_parameters"), dict) else {}
+        if not isinstance(values, dict):
+            return False
+        pid = self._participant_identity(participant)
+        pname = self._participant_name(participant)
+        safe = re.sub(r"[^A-Za-z0-9_]+", "_", pname).strip("_")
+        aliases = [name]
+        for prefix in (pid, pname, safe):
+            if prefix:
+                aliases.extend([f"{prefix}.{name}", f"{prefix}_{name}"])
+        lowered = {str(k).casefold(): k for k in values.keys()}
+        for alias in aliases:
+            if alias in values and values[alias] not in (None, "", [], {}):
+                return True
+            matched = lowered.get(str(alias).casefold())
+            if matched is not None and values.get(matched) not in (None, "", [], {}):
+                return True
+        return False
 
     def _capability_required_fields(self, participant: dict[str, Any]) -> list[dict[str, Any]]:
         """Build missing input fields from runtime capability metadata.
@@ -1891,21 +1950,40 @@ class AgentDelegationRuntime:
         input_data = bridge_result.get("input_data") if isinstance(bridge_result.get("input_data"), dict) else {}
         missing = bridge_result.get("missing") if isinstance(bridge_result.get("missing"), list) else []
         if missing:
-            return AgentExecutionResult(
-                participant_id=self._participant_identity(participant),
-                participant_name=self._participant_name(participant),
-                core_run_id=new_id("registered_tool_missing_input"),
-                status="requires_input",
-                final_answer="",
-                workflow_results={"status": "requires_input", "capability_type": "runtime_registered_tool", "tool_id": tool_id},
-                pending_action={
-                    "kind": "agent_parameter_collection",
-                    "message": "Runtime input is required before execution can continue.",
-                    "request": {"input_mode": "multi_value_list", "fields": self.parameter_contract_service.to_missing_input_fields(participant)},
-                },
-                missing_inputs=self.parameter_contract_service.to_missing_input_fields(participant),
-                origin="auxiliary_brain",
-            )
+            raw_fields = self.registered_tool_parameter_bridge.input_fields_from_schema(participant=participant)
+            missing_set = {str(x).casefold() for x in missing}
+            fields = []
+            for field in raw_fields:
+                pname = str(field.get("parameter_name") or field.get("name") or field.get("field") or "").rsplit(".", 1)[-1]
+                if pname.casefold() in missing_set and not self._runtime_field_already_bound(participant, field):
+                    fields.append(field)
+            if not fields:
+                # Values were present but a stale contract still reported missing.
+                # Rebuild once from the now-normalized participant state before
+                # pausing the run.
+                bridge_result = self.registered_tool_parameter_bridge.build_invocation(participant=participant, provided_values=participant.get("runtime_parameters") or {})
+                input_data = bridge_result.get("input_data") if isinstance(bridge_result.get("input_data"), dict) else {}
+                missing = bridge_result.get("missing") if isinstance(bridge_result.get("missing"), list) else []
+                if not missing:
+                    pass
+                else:
+                    fields = [f for f in raw_fields if str(f.get("parameter_name") or "").casefold() in {str(x).casefold() for x in missing}]
+            if fields:
+                return AgentExecutionResult(
+                    participant_id=self._participant_identity(participant),
+                    participant_name=self._participant_name(participant),
+                    core_run_id=new_id("registered_tool_missing_input"),
+                    status="requires_input",
+                    final_answer="",
+                    workflow_results={"status": "requires_input", "capability_type": "runtime_registered_tool", "tool_id": tool_id},
+                    pending_action={
+                        "kind": "agent_parameter_collection",
+                        "message": "Runtime input is required before execution can continue.",
+                        "request": {"input_mode": "multi_value_list", "fields": fields},
+                    },
+                    missing_inputs=fields,
+                    origin="auxiliary_brain",
+                )
         execution_policy = profile.get("execution_policy") if isinstance(profile.get("execution_policy"), dict) else {}
         approval_policy = execution_policy.get("approval_policy") if isinstance(execution_policy.get("approval_policy"), dict) else {}
         approval_confirmed = bool(values.get("approval_confirmed") or values.get("confirm") or values.get("confirmed"))

@@ -284,7 +284,7 @@ class RegisteredToolParameterBridge:
         return str(participant.get("participant_id") or participant.get("id") or "").strip()
 
     def _participant_name(self, participant: dict[str, Any]) -> str:
-        return str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or self._participant_id(participant) or "participant").strip()
+        return str(participant.get("display_name") or participant.get("participant_display_name") or participant.get("agent_name") or participant.get("name") or self._participant_id(participant) or "participant").strip()
 
     def _safe_key(self, value: Any) -> str:
         return re.sub(r"[^A-Za-z0-9_]+", "_", str(value or "").strip()).strip("_")

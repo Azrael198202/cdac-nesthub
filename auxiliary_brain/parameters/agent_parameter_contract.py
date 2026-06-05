@@ -355,7 +355,10 @@ class AgentParameterContractService:
         for param in parameters:
             if not isinstance(param, dict) or not param.get("required", True):
                 continue
-            values = self._normalize_list(param.get("values") or participant.get("runtime_parameters", {}).get(param.get("name")))
+            name = str(param.get("name") or param.get("field") or param.get("key") or "").strip()
+            values = self._normalize_list(param.get("values"))
+            if not values and name:
+                values = self._normalize_list(self._lookup_runtime_parameter(participant, name))
             if values:
                 continue
             missing.append(param)
@@ -376,6 +379,7 @@ class AgentParameterContractService:
                 continue
             participant_names = [
                 str(participant.get("display_name") or ""),
+                str(participant.get("participant_display_name") or ""),
                 str(participant.get("agent_name") or ""),
                 str(participant.get("name") or ""),
             ]
@@ -427,6 +431,43 @@ class AgentParameterContractService:
                 "execution_required": bool(param.get("execution_required", False)),
             })
         return fields
+
+    def _lookup_runtime_parameter(self, participant: dict[str, Any], name: str) -> Any:
+        """Find a task-run value for a parameter using generic scoped aliases.
+
+        Task graph values can be stored as plain parameter names, participant-id
+        scoped names, display-name scoped names, or safe display-name scoped
+        names.  Missing-input checks must use the same alias model as value
+        application, otherwise a value already written in the task can still
+        trigger a UI prompt.
+        """
+        if not name:
+            return None
+        values = participant.get("runtime_parameters") if isinstance(participant.get("runtime_parameters"), dict) else {}
+        if not isinstance(values, dict):
+            return None
+        pid = str(participant.get("participant_id") or participant.get("id") or "").strip()
+        participant_names = [
+            str(participant.get("display_name") or ""),
+            str(participant.get("participant_display_name") or ""),
+            str(participant.get("agent_name") or ""),
+            str(participant.get("name") or ""),
+        ]
+        safe_names = [self._safe_name(x) for x in participant_names if str(x).strip()]
+        aliases = [name]
+        if pid:
+            aliases.extend([f"{pid}.{name}", f"{pid}_{name}"])
+        for prefix in participant_names + safe_names:
+            if prefix:
+                aliases.extend([f"{prefix}.{name}", f"{prefix}_{name}"])
+        lowered = {str(k).casefold(): k for k in values.keys()}
+        for alias in aliases:
+            if alias in values and values[alias] not in (None, "", [], {}):
+                return values[alias]
+            matched = lowered.get(str(alias).casefold())
+            if matched is not None and values.get(matched) not in (None, "", [], {}):
+                return values[matched]
+        return None
 
     def _load_config(self) -> dict[str, Any]:
         if self.config_path.exists():
