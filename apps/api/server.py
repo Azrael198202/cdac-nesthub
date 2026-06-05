@@ -423,6 +423,24 @@ def _graph_runtime_schedule_payload(snapshot: dict[str, Any], graph_id: str | No
     }
 
 
+def _graph_runtime_verification_payload(snapshot: dict[str, Any], graph_id: str | None) -> dict[str, Any]:
+    reports = [item for item in snapshot.get("failure_reports", []) if isinstance(item, dict)] if isinstance(snapshot, dict) else []
+    if graph_id:
+        matched = [
+            item for item in reports
+            if str(item.get("graph_id") or "") == str(graph_id)
+            or str(item.get("task_name") or "") == str(graph_id)
+        ]
+    else:
+        matched = reports
+    selected = matched[-1] if matched else None
+    return {
+        "has_failure": bool(selected),
+        "latest_report": selected or {},
+        "reports": matched[-20:],
+    }
+
+
 @app.get("/api/graph-runtime/state")
 async def graph_runtime_state(graph_id: str | None = None):
     try:
@@ -440,12 +458,14 @@ async def graph_runtime_state(graph_id: str | None = None):
                 "summary": {"node_count": 0, "edge_count": 0, "completed_count": 0, "running_count": 0, "failed_count": 0, "skipped_count": 0, "reused_count": 0, "repair_count": 0},
                 "repair_plan": [],
                 "available_graphs": [],
+                "verification": {"has_failure": False, "latest_report": {}, "reports": []},
                 "source": "agent_studio_snapshot",
             })
         visual_state = graph_visual_builder.from_snapshot(snapshot, graph_id=graph_id)
         payload = graph_visual_builder.to_dict(visual_state)
         payload["source"] = "agent_studio_snapshot"
         payload["schedule_control"] = _graph_runtime_schedule_payload(snapshot, payload.get("graph_id") or graph_id)
+        payload["verification"] = _graph_runtime_verification_payload(snapshot, payload.get("graph_id") or graph_id)
         payload["available_graphs"] = [
             {
                 "graph_id": str(item.get("graph_id") or item.get("task_name") or item.get("id") or "runtime_graph"),
@@ -468,6 +488,7 @@ async def graph_runtime_state(graph_id: str | None = None):
                 "events": [{"event": "graph_state_load_failed", "error": str(exc)}],
                 "summary": {"node_count": 0, "edge_count": 0, "completed_count": 0, "running_count": 0, "failed_count": 1},
                 "repair_plan": [{"action": "check_runtime_snapshot", "error": str(exc)}],
+                "verification": {"has_failure": True, "latest_report": {"failure_class": "graph_state_load_failed", "suggested_owner": "observability"}, "reports": []},
                 "source": "agent_studio_snapshot",
             },
             status_code=200,
@@ -488,6 +509,20 @@ async def graph_runtime_resume_schedule(task_name: str):
 async def graph_runtime_schedule_history(task_name: str, limit: int = 80):
     return JSONResponse({"ok": True, "task_name": task_name, "history": studio_service.task_execution_history(task_name, limit=limit)})
 
+
+
+@app.get("/api/verification/failure-reports")
+async def verification_failure_reports(limit: int = 80):
+    return JSONResponse({"ok": True, "reports": studio_service.verification_foundation.list_reports(limit=limit)})
+
+
+@app.get("/api/verification/failure-reports/{report_id}")
+async def verification_failure_report(report_id: str):
+    reports = studio_service.verification_foundation.list_reports(limit=500)
+    for item in reports:
+        if str(item.get("report_id") or "") == report_id:
+            return JSONResponse({"ok": True, "report": item})
+    return JSONResponse({"ok": False, "status": "not_found", "report_id": report_id}, status_code=404)
 
 
 

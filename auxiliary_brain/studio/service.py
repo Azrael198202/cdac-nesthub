@@ -29,6 +29,7 @@ from ai_core.execution.parameter_resolution import ParameterResolutionPipeline, 
 from auxiliary_brain.studio.instruction_workflow_planner import InstructionWorkflowPlanner
 from auxiliary_brain.studio.runtime_semantic_planner import RuntimeSemanticPlanner
 from ai_core.runtime.capability.registered_tool_agent_binder import RegisteredToolAgentBinder
+from verification_brain import RuntimeVerificationFoundation
 
 
 class AgentStudioService:
@@ -54,6 +55,7 @@ class AgentStudioService:
         self.runtime_semantic_planner = RuntimeSemanticPlanner()
         self.registered_tool_service = RuntimeRegisteredToolService()
         self.registered_tool_agent_binder = RegisteredToolAgentBinder()
+        self.verification_foundation = RuntimeVerificationFoundation()
         self.direct_capability_dispatcher = CapabilityDispatcher(handlers={
             "image_generation": self._handle_direct_image_generation,
             "video_generation": self._handle_direct_video_generation,
@@ -779,6 +781,7 @@ class AgentStudioService:
             "runtime_tool_runs": runtime_tool_runs,
             "runtime_execution_traces": runtime_execution_traces,
             "deliveries": self.store.list_json("deliveries"),
+            "failure_reports": self.verification_foundation.list_reports(limit=80),
             "traces": agent_traces + conversation_runs + runtime_execution_traces,
         }
 
@@ -1389,6 +1392,92 @@ class AgentStudioService:
         return candidates[-1]
 
 
+    def _attach_verification_report(
+        self,
+        *,
+        task_graph: dict[str, Any],
+        participants: list[dict[str, Any]],
+        run_payload: dict[str, Any],
+        response: dict[str, Any] | None = None,
+        stage: str = "post_execution",
+    ) -> dict[str, Any] | None:
+        """Run v19 verification/evidence foundation and persist report if needed.
+
+        This method is deliberately side-effect limited: it writes a failure
+        report and attaches it to the run payload/response. It does not apply a
+        patch, change the task graph, or retry execution.
+        """
+        try:
+            report = self.verification_foundation.inspect_run(
+                task_graph=task_graph,
+                participants=participants,
+                run_payload=run_payload,
+                stage=stage,
+            )
+        except Exception as exc:
+            report = None
+            try:
+                path = Path("runtime") / "traces" / "verification" / "verification_events.jsonl"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({
+                        "created_at": self._now(),
+                        "event": "verification_foundation_failed",
+                        "error_type": exc.__class__.__name__,
+                        "error": str(exc),
+                        "task_name": run_payload.get("task_name") if isinstance(run_payload, dict) else "",
+                        "run_id": run_payload.get("run_id") if isinstance(run_payload, dict) else "",
+                    }, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+        if report is None:
+            return None
+        report_dict = report.to_dict()
+        self_check = run_payload.get("self_check") if isinstance(run_payload.get("self_check"), dict) else {}
+        self_check = dict(self_check)
+        self_check["verification_status"] = "failure_detected"
+        self_check["failure_report_id"] = report.report_id
+        self_check["failure_class"] = report.failure_class
+        self_check["suggested_owner"] = report.suggested_owner
+        self_check["suggested_location"] = report.suggested_location
+        repair_items = self_check.get("repair_plan") if isinstance(self_check.get("repair_plan"), list) else []
+        repair_items = list(repair_items)
+        repair_items.append({
+            "source": "verification_brain",
+            "failure_report_id": report.report_id,
+            "failure_class": report.failure_class,
+            "suggested_owner": report.suggested_owner,
+            "suggested_location": report.suggested_location,
+            "evidence_path": report.evidence_path,
+            "repair_plan": report.repair_plan,
+        })
+        self_check["repair_plan"] = repair_items
+        run_payload["self_check"] = self_check
+        run_payload["verification_report"] = report_dict
+        run_id = str(run_payload.get("run_id") or "").strip()
+        if run_id:
+            try:
+                self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+            except Exception:
+                pass
+        if response is not None:
+            response["verification"] = {
+                "status": "failure_detected",
+                "failure_report_id": report.report_id,
+                "failure_class": report.failure_class,
+                "suggested_owner": report.suggested_owner,
+                "suggested_location": report.suggested_location,
+                "evidence_path": report.evidence_path,
+            }
+            response.setdefault("repair_plan", []).append({
+                "source": "verification_brain",
+                "failure_class": report.failure_class,
+                "suggested_owner": report.suggested_owner,
+                "suggested_location": report.suggested_location,
+            })
+        return report_dict
+
+
     async def execute_task(self, task_name: str | None, provided_inputs: dict[str, Any] | None = None, instruction: str | None = None) -> dict[str, Any]:
         if not task_name:
             return {
@@ -1489,6 +1578,7 @@ class AgentStudioService:
                 "message": self._paused_message(response["missing_inputs"], pending_action),
             }
             response["message"] = self._paused_message(response["missing_inputs"], pending_action)
+        self._attach_verification_report(task_graph=task_graph, participants=participants, run_payload=result, response=response, stage="execute_task")
         return response
 
     async def resume_run(self, run_id: str, provided_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1597,6 +1687,7 @@ class AgentStudioService:
                 "message": self._paused_message(response["missing_inputs"], pending_action),
             }
             response["message"] = self._paused_message(response["missing_inputs"], pending_action)
+        self._attach_verification_report(task_graph=task_graph, participants=participants, run_payload=result, response=response, stage="resume_task")
         return response
 
     def _execution_payload_only_ids(self, task_graph: dict[str, Any], provided_inputs: dict[str, Any] | None) -> list[str]:

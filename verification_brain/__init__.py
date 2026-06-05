@@ -6,3 +6,7 @@ __all__ = [
     "VerificationResult",
     "RuntimeVerificationBrain",
 ]
+
+from verification_brain.foundation import RuntimeFailureReport, RuntimeVerificationFoundation
+
+__all__.extend(["RuntimeFailureReport", "RuntimeVerificationFoundation"])

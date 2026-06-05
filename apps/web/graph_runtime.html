@@ -39,6 +39,7 @@
       <div class="stats" id="stats"></div>
       <section class="panel"><h2>Schedule Control</h2><div id="schedulePanel" class="scroll"></div></section>
       <section class="panel"><h2>Runtime Events</h2><div id="events" class="scroll"></div></section>
+      <section class="panel"><h2>Verification</h2><div id="verification" class="scroll"></div></section>
       <section class="panel"><h2>Repair Plan</h2><div id="repair" class="scroll"></div></section>
     </aside>
   </main>
@@ -54,7 +55,7 @@ async function loadState(manual=false){
     if(!res.ok){throw new Error('HTTP '+res.status);}
     const data=await res.json(); latest=data; render(data);
   }catch(e){
-    latest={ok:false,status:'idle',graph_id:selectedGraph||'runtime_graph',nodes:[],edges:[],lanes:[],events:[{event:'graph_fetch_failed',error:String(e)}],summary:{node_count:0,edge_count:0,completed_count:0,running_count:0,failed_count:0},repair_plan:[],available_graphs:[]};
+    latest={ok:false,status:'idle',graph_id:selectedGraph||'runtime_graph',nodes:[],edges:[],lanes:[],events:[{event:'graph_fetch_failed',error:String(e)}],summary:{node_count:0,edge_count:0,completed_count:0,running_count:0,failed_count:0},repair_plan:[],available_graphs:[],verification:{has_failure:false,latest_report:{},reports:[]}};
     render(latest);
   }
   if(manual && !auto){ schedule(); }
@@ -73,7 +74,7 @@ function renderGraphSelector(graphs,current){
 function schedule(){if(timer)clearTimeout(timer); if(auto)timer=setTimeout(()=>loadState(),1800);}
 function render(data){
   document.getElementById('subtitle').textContent=`${data.graph_id||'runtime_graph'} / ${data.status||'pending'}`;
-  renderGraphSelector(data.available_graphs||[], data.graph_id||""); renderStats(data.summary||{}); renderDag(data); renderSchedule(data.schedule_control||{}); renderEvents(data.events||[]); renderRepair(data.repair_plan||[]); schedule();
+  renderGraphSelector(data.available_graphs||[], data.graph_id||""); renderStats(data.summary||{}); renderDag(data); renderSchedule(data.schedule_control||{}); renderEvents(data.events||[]); renderVerification(data.verification||{}); renderRepair(data.repair_plan||[]); schedule();
 }
 function renderStats(s){
   const items=[['Nodes',s.node_count||0],['Edges',s.edge_count||0],['Done',s.completed_count||0],['Running',s.running_count||0],['Failed',s.failed_count||0],['Repair',s.repair_count||0]];
@@ -123,6 +124,14 @@ function renderSchedule(control){
     '<div class="small">Task: '+esc(control.task_name)+'<br>Status: '+esc(control.state)+' / enabled='+esc(control.enabled)+'<br>Mode: '+esc(control.mode)+' / interval='+esc(control.interval_seconds||'')+'s<br>Last: '+esc(control.last_run_at||'')+'<br>Next: '+esc(control.next_run_at||'')+'</div>'+logs;
 }
 function renderEvents(events){document.getElementById('events').innerHTML=events.length?events.slice().reverse().map(e=>`<div class="event">${esc(JSON.stringify(e,null,2))}</div>`).join(''):'<div class="empty">No runtime events yet.</div>';}
+function renderVerification(v){
+  const el=document.getElementById('verification'); if(!el)return;
+  if(!v || !v.has_failure){el.innerHTML='<div class="empty">No verification failure detected.</div>'; return;}
+  const r=v.latest_report||{};
+  const summary='<div class="repairItem"><b>Failure detected</b><br>Class: '+esc(r.failure_class||'unknown')+'<br>Owner: '+esc(r.suggested_owner||'')+'<br>Location: '+esc((r.suggested_location||[]).join(' / '))+'<br>Evidence: '+esc(r.evidence_path||'')+'</div>';
+  const checks=(r.failed_checks||[]).map(c=>'<div class="logItem">'+esc(JSON.stringify(c,null,2))+'</div>').join('');
+  el.innerHTML=summary+(checks||'<div class="empty">No failed check details.</div>');
+}
 function renderRepair(items){document.getElementById('repair').innerHTML=items.length?items.map(e=>`<div class="repairItem">${esc(JSON.stringify(e,null,2))}</div>`).join(''):'<div class="empty">No repair plan.</div>';}
 window.addEventListener('resize',()=>latest&&drawEdges(latest.edges||[]));
 loadState();
