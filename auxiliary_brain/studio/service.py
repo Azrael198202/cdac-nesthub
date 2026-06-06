@@ -30,6 +30,7 @@ from auxiliary_brain.studio.instruction_workflow_planner import InstructionWorkf
 from auxiliary_brain.studio.runtime_semantic_planner import RuntimeSemanticPlanner
 from ai_core.runtime.capability.registered_tool_agent_binder import RegisteredToolAgentBinder
 from verification_brain import RuntimeVerificationFoundation
+from presentation_brain import FailureMessageRenderer
 
 
 class AgentStudioService:
@@ -56,6 +57,7 @@ class AgentStudioService:
         self.registered_tool_service = RuntimeRegisteredToolService()
         self.registered_tool_agent_binder = RegisteredToolAgentBinder()
         self.verification_foundation = RuntimeVerificationFoundation()
+        self.failure_message_renderer = FailureMessageRenderer()
         self.direct_capability_dispatcher = CapabilityDispatcher(handlers={
             "image_generation": self._handle_direct_image_generation,
             "video_generation": self._handle_direct_video_generation,
@@ -1112,6 +1114,47 @@ class AgentStudioService:
             if controller_ids:
                 schedule_policy = dict(schedule_policy)
                 schedule_policy["controller_participant_ids"] = controller_ids
+
+        static_validation = self._validate_task_graph_static(
+            instruction=instruction,
+            participants=participants,
+            selected_participants=workflow_plan.selected_participants,
+            generated_participants=workflow_plan.generated_participants,
+            tasks=workflow_tasks,
+        )
+        if not static_validation.get("passed"):
+            failure_payload = {
+                "graph_id": graph_id,
+                "task_name": task_name,
+                "community_id": self.community_id,
+                "instruction": instruction,
+                "origin": "auxiliary_brain",
+                "status": "static_validation_failed",
+                "created_at": self._now(),
+                "execution_policy": "blocked_before_task_graph_persistence",
+                "selected_participant_ids": selected_ids,
+                "uploaded_artifacts": artifact_refs,
+                "runtime_parameters": explicit_runtime_parameters,
+                "schedule_policy": schedule_policy,
+                "tasks": workflow_tasks,
+                "static_validation": static_validation,
+                "instruction_coverage": workflow_plan.coverage,
+            }
+            failure_report = self._build_static_validation_failure_report(failure_payload)
+            self._write_static_validation_failure_report(failure_payload, report=failure_report)
+            self._update_community()
+            return {
+                "action": "create_task_graph",
+                "origin": "auxiliary_brain",
+                "status": "failed",
+                "failure_class": "task_graph_static_validation_failed",
+                "graph_id": graph_id,
+                "task_name": task_name,
+                "message": (failure_report.get("payload") or {}).get("user_message", {}).get("summary") or "Task graph creation failed.",
+                "user_message": (failure_report.get("payload") or {}).get("user_message"),
+                "failure_report": failure_report,
+                "static_validation": static_validation,
+            }
         # Task graphs do not own durable parameter values.  Parameter schemas live
         # on participants, while uploaded artifact parameters are discovered from
         # the selected artifact during execution_preparation.  Keeping a blank
@@ -1173,6 +1216,227 @@ class AgentStudioService:
             "path": str(path),
             "uploaded_artifacts": artifact_refs,
         }
+
+
+    def _validate_task_graph_static(
+        self,
+        *,
+        instruction: str,
+        participants: list[dict[str, Any]] | None,
+        selected_participants: list[dict[str, Any]] | None,
+        generated_participants: list[dict[str, Any]] | None,
+        tasks: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        """Validate graph structure before persisting a task graph.
+
+        The validator is intentionally generic.  It checks structural facts that
+        are knowable at task creation time: declared participant references must
+        resolve to durable participants, and explicit step-template references
+        must target declared steps.  It does not know domains or capability
+        business semantics.
+        """
+        text = str(instruction or "")
+        participants = participants if isinstance(participants, list) else []
+        selected_participants = selected_participants if isinstance(selected_participants, list) else []
+        generated_participants = generated_participants if isinstance(generated_participants, list) else []
+        tasks = tasks if isinstance(tasks, list) else []
+        issues: list[dict[str, Any]] = []
+
+        known_names = self._static_participant_name_index(participants)
+        selected_names = self._static_participant_name_index(selected_participants)
+        declared_refs = self._extract_declared_participant_references(text)
+        for ref in declared_refs:
+            ref_name = str(ref.get("name") or "").strip()
+            norm = self._static_normalize_name(ref_name)
+            if not norm:
+                continue
+            if norm not in known_names:
+                suggestions = self._static_suggest_participants(norm, known_names)
+                issues.append({
+                    "level": "create_task_graph",
+                    "check": "declared_participant_reference_resolves",
+                    "passed": False,
+                    "failure_class": "agent_reference_not_found" if not suggestions else "agent_reference_ambiguous",
+                    "message": "A declared participant reference did not resolve to an existing durable participant.",
+                    "reference": ref_name,
+                    "line": ref.get("line"),
+                    "suggestions": suggestions,
+                    "suggested_location": ["auxiliary_brain.studio.task_graph_static_validation", "agent_reference_resolution"],
+                })
+
+        for generated in generated_participants:
+            if not isinstance(generated, dict):
+                continue
+            if not self._is_task_local_generated_participant(generated):
+                continue
+            source = "\n".join(str(generated.get(k) or "") for k in ("display_name", "agent_name", "name", "definition_instruction", "instruction", "execution_objective", "source_instruction_fragment"))
+            generated_refs = self._extract_declared_participant_references(source)
+            for ref in generated_refs:
+                ref_name = str(ref.get("name") or "").strip()
+                norm = self._static_normalize_name(ref_name)
+                if norm and norm not in known_names and norm not in selected_names:
+                    issues.append({
+                        "level": "create_task_graph",
+                        "check": "generated_step_must_not_mask_unresolved_participant_reference",
+                        "passed": False,
+                        "failure_class": "agent_reference_not_found",
+                        "message": "A generated local step appears to be an unresolved participant reference. Task graph creation is blocked to avoid creating a false agent node.",
+                        "reference": ref_name,
+                        "generated_participant_id": generated.get("participant_id"),
+                        "suggestions": self._static_suggest_participants(norm, known_names),
+                        "suggested_location": ["auxiliary_brain.studio.instruction_workflow_planner", "participant_catalog_resolution"],
+                    })
+
+        declared_steps = self._extract_declared_step_ids(text)
+        task_step_aliases = {str(t.get("source_step_id") or "").strip().casefold() for t in tasks if isinstance(t, dict) and str(t.get("source_step_id") or "").strip()}
+        for template in self._extract_template_references(text):
+            root = str(template.get("root") or "").strip()
+            if not root:
+                continue
+            root_norm = root.casefold()
+            step_match = re.fullmatch(r"step\s*_?\s*(\d+)", root_norm, flags=re.I)
+            if step_match:
+                canonical = f"step{step_match.group(1)}".casefold()
+                if canonical not in declared_steps and root_norm not in task_step_aliases:
+                    issues.append({
+                        "level": "create_task_graph",
+                        "check": "template_step_reference_exists",
+                        "passed": False,
+                        "failure_class": "template_reference_not_found",
+                        "message": "A template reference points to a step that is not declared in this task instruction.",
+                        "reference": template.get("raw"),
+                        "root": root,
+                        "declared_steps": sorted(declared_steps),
+                        "suggested_location": ["verification_brain.template_verification", "task_graph_static_validation"],
+                    })
+
+        return {
+            "passed": not issues,
+            "stage": "create_task_graph",
+            "checks": [
+                {"name": "declared_participant_references", "passed": not any(i.get("check") in {"declared_participant_reference_resolves", "generated_step_must_not_mask_unresolved_participant_reference"} for i in issues)},
+                {"name": "template_step_references", "passed": not any(i.get("check") == "template_step_reference_exists" for i in issues)},
+            ],
+            "issues": issues,
+        }
+
+    def _extract_declared_participant_references(self, text: str) -> list[dict[str, Any]]:
+        refs: list[dict[str, Any]] = []
+        for line_no, line in enumerate(str(text or "").splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            match = re.search(r"(?i)\b(?:call|use|run|execute|invoke)\s+(?P<name>[^\n\r.:;]+?\bagent\b)", stripped)
+            if not match:
+                continue
+            name = re.sub(r"(?i)^\s*(?:the|a|an)\s+", "", str(match.group("name") or "")).strip()
+            if name:
+                refs.append({"name": name, "line": line_no, "source": stripped})
+        return refs
+
+    def _extract_declared_step_ids(self, text: str) -> set[str]:
+        ids: set[str] = set()
+        for match in re.finditer(r"(?im)^\s*step\s*(\d+)\s*[:.)-]?", str(text or "")):
+            ids.add(f"step{match.group(1)}".casefold())
+        return ids
+
+    def _extract_template_references(self, text: str) -> list[dict[str, Any]]:
+        refs: list[dict[str, Any]] = []
+        for match in re.finditer(r"\{\{\s*([^{}]+?)\s*\}\}", str(text or "")):
+            expr = str(match.group(1) or "").strip()
+            root = re.split(r"[.\[\s]", expr, maxsplit=1)[0].strip()
+            refs.append({"raw": match.group(0), "expression": expr, "root": root})
+        return refs
+
+    def _static_participant_name_index(self, participants: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        index: dict[str, dict[str, Any]] = {}
+        for participant in participants or []:
+            if not isinstance(participant, dict):
+                continue
+            values = [
+                participant.get("display_name"),
+                participant.get("agent_name"),
+                participant.get("name"),
+                participant.get("role_name"),
+                participant.get("participant_id"),
+                participant.get("id"),
+            ]
+            for value in values:
+                norm = self._static_normalize_name(value)
+                if norm and norm not in index:
+                    index[norm] = participant
+        return index
+
+    def _static_normalize_name(self, value: Any) -> str:
+        raw = str(value or "").strip()
+        raw = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", raw)
+        text = raw.casefold()
+        text = re.sub(r"[^a-z0-9]+", " ", text)
+        return " ".join(text.split())
+
+    def _static_suggest_participants(self, normalized_ref: str, known_names: dict[str, dict[str, Any]]) -> list[str]:
+        structural_terms = {"agent", "participant", "runtime"}
+        ref_tokens = {t for t in str(normalized_ref or "").split() if t not in structural_terms}
+        scored: list[tuple[int, str]] = []
+        for norm, participant in known_names.items():
+            tokens = {t for t in norm.split() if t not in structural_terms}
+            if not tokens:
+                continue
+            score = len(ref_tokens & tokens)
+            if score:
+                name = str(participant.get("display_name") or participant.get("agent_name") or participant.get("name") or participant.get("participant_id") or "").strip()
+                if name:
+                    scored.append((score, name))
+        scored.sort(key=lambda item: (-item[0], item[1].casefold()))
+        out: list[str] = []
+        for _, name in scored:
+            if name not in out:
+                out.append(name)
+            if len(out) >= 5:
+                break
+        return out
+
+    def _build_static_validation_failure_report(self, payload: dict[str, Any]) -> dict[str, Any]:
+        graph_id = self._safe_filename(payload.get("graph_id") or payload.get("task_name") or "static_validation")
+        report = {
+            "report_id": f"failure_{graph_id}",
+            "status": "failure_detected",
+            "failure_class": "task_graph_static_validation_failed",
+            "stage": "create_task_graph",
+            "task_name": payload.get("task_name"),
+            "graph_id": payload.get("graph_id"),
+            "failed_checks": (payload.get("static_validation") or {}).get("issues") if isinstance(payload.get("static_validation"), dict) else [],
+            "suggested_owner": "auxiliary_brain",
+            "suggested_location": ["auxiliary_brain.studio.create_task_graph", "task_graph_static_validation"],
+            "created_at": self._now(),
+            "payload": payload,
+        }
+        try:
+            user_message = self.failure_message_renderer.render(report, allow_llm=True).to_dict()
+        except Exception as exc:
+            user_message = {
+                "title": "Task graph creation failed",
+                "summary": "The task could not be converted into a safe executable graph.",
+                "reasons": [str(exc)[:300]],
+                "suggestions": ["Inspect the static validation report."],
+                "source": "presentation_brain.fallback",
+            }
+        report["payload"] = dict(report.get("payload") or {})
+        report["payload"]["user_message"] = user_message
+        return report
+
+    def _write_static_validation_failure_report(self, payload: dict[str, Any], *, report: dict[str, Any] | None = None) -> None:
+        try:
+            root = Path("runtime/generated/failure_reports")
+            root.mkdir(parents=True, exist_ok=True)
+            report = report if isinstance(report, dict) else self._build_static_validation_failure_report(payload)
+            (root / f"{report['report_id']}.json").write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        except Exception:
+            return
+
+    def _safe_filename(self, value: Any) -> str:
+        text = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(value or "")).strip("_")
+        return text[:120] or "unknown"
 
     async def _maybe_execute_direct_participant_invocation(
         self,

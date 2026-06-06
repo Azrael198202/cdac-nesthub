@@ -4,9 +4,7 @@ from typing import Any
 
 from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import PROJECT_ROOT
-from ai_core.presentation.result_presenter import ResultPresenter
-from ai_core.presentation.result_material_builder import ResultMaterialBuilder
-from ai_core.presentation.final_answer_synthesizer import FinalAnswerSynthesizer
+from presentation_brain import PresentationBrain, PresentationRequest
 from ai_core.validation.schema_validator import SchemaValidator
 from ai_core.knowledge.knowledge_service import KnowledgeService
 
@@ -32,9 +30,7 @@ class OutputExecutor:
     def __init__(self) -> None:
         self.loader = ConfigLoader()
         self.validator = SchemaValidator()
-        self.presenter = ResultPresenter()
-        self.material_builder = ResultMaterialBuilder()
-        self.final_synthesizer = FinalAnswerSynthesizer()
+        self.presentation_brain = PresentationBrain()
         self.knowledge = KnowledgeService()
 
     async def execute(self, workflow_node, node_config, state, capability_result):
@@ -121,17 +117,20 @@ class OutputExecutor:
             provenance = tool_result.get("provenance") if isinstance(tool_result.get("provenance"), dict) else step.get("provenance")
             if isinstance(provenance, dict):
                 provenance_records.append(provenance)
-            result_materials.append(self.material_builder.from_execution_step(step).to_dict())
+            result_materials.append(self.presentation_brain.material_from_execution_step(step))
 
         trust_summary = self._trust_summary(provenance_records, tool_results)
-        synthesized = await self.final_synthesizer.synthesize(
+        presentation = await self.presentation_brain.synthesize(PresentationRequest(
             run_id=str(state.get("run_id") or state.get("id") or ""),
             node_id=str(node_config.get("node_id", "output")),
+            original_input=str(state.get("input") or ""),
             state=state,
             materials=result_materials,
             trust_summary=trust_summary,
-        )
-        final_answer = synthesized.get("answer") or self._answer_material_from_execution_steps(execution_steps) or "Workflow finished, but no user-facing answer was produced."
+            output_policy=((state.get("runtime") or {}).get("output_policy") or {}) if isinstance(state.get("runtime"), dict) else {},
+        ))
+        synthesized = presentation.to_dict()
+        final_answer = synthesized.get("final_answer") or self._answer_material_from_execution_steps(execution_steps) or "Workflow finished, but no user-facing answer was produced."
         if not self._is_public_answer_text(final_answer):
             fallback_answer = self._answer_material_from_execution_steps(execution_steps)
             final_answer = fallback_answer if fallback_answer else "Workflow finished, but no verified user-facing answer was produced."

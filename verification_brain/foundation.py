@@ -9,6 +9,7 @@ from typing import Any
 from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_TRACES
 from evidence_engine import EvidenceRequest, RuntimeEvidenceCollector
 from repair_brain import RepairRequest, RuntimeRepairBrain
+from presentation_brain import FailureMessageRenderer
 from verification_brain import RuntimeVerificationBrain, VerificationExpectation
 
 
@@ -55,6 +56,7 @@ class RuntimeVerificationFoundation:
         self.verifier = RuntimeVerificationBrain()
         self.evidence = RuntimeEvidenceCollector()
         self.repair = RuntimeRepairBrain()
+        self.failure_renderer = FailureMessageRenderer()
         self.report_root = RUNTIME_GENERATED / "failure_reports"
         self.report_root.mkdir(parents=True, exist_ok=True)
         self.confirmation_root = RUNTIME_GENERATED / "side_effect_confirmations"
@@ -149,6 +151,7 @@ class RuntimeVerificationFoundation:
             suggested_location=suggested_location,
             payload={"runtime_status": status, "stage": stage},
         )
+        self._attach_user_message(report)
         self.write_report(report)
         return report
 
@@ -291,8 +294,24 @@ class RuntimeVerificationFoundation:
             suggested_location=["side-effect verifier", "capability implementation", "external operation adapter"],
             payload={"confirmation": record},
         )
+        self._attach_user_message(report)
         self.write_report(report)
         return report
+
+    def _attach_user_message(self, report: RuntimeFailureReport) -> None:
+        try:
+            rendered = self.failure_renderer.render(report.to_dict(), allow_llm=True)
+            report.payload = dict(report.payload or {})
+            report.payload["user_message"] = rendered.to_dict()
+        except Exception as exc:
+            report.payload = dict(report.payload or {})
+            report.payload["user_message"] = {
+                "title": "Runtime problem detected",
+                "summary": "The runtime detected a failure, but the user-facing explanation renderer was unavailable.",
+                "reasons": [str(exc)[:300]],
+                "suggestions": ["Inspect the failure report and evidence package."],
+                "source": "presentation_brain.fallback",
+            }
 
     def write_report(self, report: RuntimeFailureReport) -> Path:
         path = self.report_root / f"{report.report_id}.json"

@@ -77,3 +77,22 @@ brains:
       model: qwen3.5:2b
       options:
         temperature: 0
+
+  presentation_brain:
+    default:
+      provider: ollama
+      model: qwen3.5:2b
+      options:
+        temperature: 0
+    tasks:
+      failure_explanation:
+        provider: ollama
+        model: qwen3.5:4b-q4_k_m
+        options:
+          temperature: 0
+        complexities:
+          high:
+            provider: openai
+            model: gpt-5.5-thinking
+            options:
+              temperature: 0
