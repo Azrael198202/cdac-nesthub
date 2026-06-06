@@ -23,6 +23,14 @@
       <div class="row"><button class="btn ok" onclick="saveModelSettings()">Save model settings</button><button class="btn" onclick="loadModelSettings()">Refresh model settings</button></div>
       <div id="modelSettingsHint" class="settingsHint">Loading model orchestration settings...</div>
     </div></section>
+    <section class="panel" style="min-height:150px"><h2>Presentation profile <span class="small">User / Advanced / Developer / Diagnostic</span></h2><div class="scroll" id="presentationSettings">
+      <div class="modelGrid">
+        <div class="field"><label>Default view mode</label><select id="settingsPresentationProfile" class="select"><option value="user">User</option><option value="advanced">Advanced</option><option value="developer">Developer</option><option value="diagnostic">Diagnostic</option></select></div>
+      </div>
+      <div class="settingsHint">Controls how failure messages and runtime details are displayed in Runtime Agent Studio.</div>
+      <div class="row"><button class="btn ok" onclick="savePresentationSettings()">Save presentation profile</button><button class="btn" onclick="loadPresentationSettings()">Refresh presentation profile</button></div>
+      <div id="presentationSettingsHint" class="settingsHint">Loading presentation profile...</div>
+    </div></section>
     <section class="panel"><h2>Tool settings <span id="selectedToolTitle" class="small"></span></h2><div class="scroll" id="detail"><div class="muted">Select a registered tool.</div></div></section>
   </div>
 </div>
@@ -60,8 +68,11 @@ document.getElementById('detail').innerHTML=html;document.getElementById('approv
 async function saveApprovalPolicy(){const mode=document.getElementById('approvalMode').value;await api('/api/runtime/settings/tool-approval',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:selectedToolId,profile_id:'default',mode})});showToast('Approval policy saved');await loadSettings();}
 function typedValue(el,spec){const type=String((spec&&spec.type)||'string');if(type==='boolean')return !!el.checked;if(type==='integer'){const v=el.value;return v===''?v:parseInt(v,10);}if(type==='number'){const v=el.value;return v===''?v:Number(v);}if(type==='array'||type==='object'){try{return JSON.parse(el.value|| (type==='array'?'[]':'{}'));}catch(e){return el.value;}}return el.value;}
 async function saveProfile(){const t=(state.tools||[]).find(x=>x.tool_id===selectedToolId);if(!t)return;const connProps=props(t.connection_schema);const secProps=props(t.secret_schema);const config={};const secrets={};Object.keys(connProps).forEach(k=>{const el=document.getElementById('conn_'+k);if(el)config[k]=typedValue(el,connProps[k]);});Object.keys(secProps).forEach(k=>{const el=document.getElementById('secret_'+k);if(el&&el.value)secrets[k]=el.value;});await api('/api/agent-studio/runtime-tool-profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:selectedToolId,profile_id:'default',config,secrets})});showToast('Profile saved');await loadSettings();}
+function loadPresentationSettings(){const value=localStorage.getItem('agentStudio.presentationProfile')||'advanced';const el=document.getElementById('settingsPresentationProfile');if(el)el.value=value;const hint=document.getElementById('presentationSettingsHint');if(hint)hint.textContent='Current presentation profile: '+value;}
+function savePresentationSettings(){const el=document.getElementById('settingsPresentationProfile');const value=(el&&el.value)||'advanced';localStorage.setItem('agentStudio.presentationProfile', value);const hint=document.getElementById('presentationSettingsHint');if(hint)hint.textContent='Current presentation profile: '+value;showToast('Presentation profile saved');}
 loadSettings().catch(e=>{document.getElementById('toolList').innerHTML='<div class="muted">'+escapeHtml(e.message)+'</div>';});
 loadModelSettings();
+loadPresentationSettings();
 </script>
 </body>
 </html>

@@ -13,7 +13,7 @@
     main{display:grid;grid-template-columns:minmax(0,26fr) minmax(0,44fr) minmax(0,30fr);gap:10px;height:calc(100vh - 74px);padding:10px 10px 10px 292px;overflow:hidden;min-width:0;transition:grid-template-columns .18s ease,padding-left .18s ease}body.sessionCollapsed main{padding-left:72px}main.rightCollapsed{grid-template-columns:minmax(0,30fr) minmax(0,70fr) 44px}.panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);min-height:0;min-width:0;display:flex;flex-direction:column;overflow:hidden}.panel.collapsed .scroll{display:none}.panel.collapsed h2{writing-mode:vertical-rl;transform:rotate(180deg);align-items:center;height:100%;justify-content:flex-start;gap:8px;padding:12px 8px}.panel.collapsed h2 .small{display:none}.panel h2{font-size:14px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}.scroll{padding:12px;overflow:auto;min-height:0;flex:1}.item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}.pill{display:inline-block;margin:3px 4px 0 0;padding:3px 7px;border-radius:999px;background:#0f766e;color:#ccfbf1;font-size:12px}.path{color:#93c5fd;font-size:12px;word-break:break-all}.console{border-top:1px solid var(--line);padding:10px 12px;background:#0b1220;flex:0 0 auto;max-height:330px;overflow:auto}.consoleActions{position:sticky;bottom:0;background:#0b1220;padding-top:8px;padding-bottom:2px;margin-top:8px;z-index:2}.studioSettingsSummary{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:8px}.settingsChip{border:1px solid var(--line);border-radius:999px;padding:5px 9px;background:#0b1220;color:#bfdbfe;font-size:12px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hiddenModelControls{display:none!important}.input{width:100%;height:72px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px;resize:none}.row{display:flex;gap:8px;margin-top:10px}.message{white-space:pre-wrap;line-height:1.55}.answerText{display:flex;flex-direction:column;gap:6px;line-height:1.5}.imageThumbLink{display:inline-block;max-width:260px;margin:6px 0}.answerVideoPreview,.answerGifPreview{display:block;max-width:280px;max-height:180px;border-radius:12px;border:1px solid #334155;margin:8px 0;background:#020617;}
 .answerGifPreview{object-fit:cover;}
 .answerImageThumb{display:block;max-width:260px;max-height:180px;object-fit:cover;border-radius:12px;border:1px solid var(--line);box-shadow:0 8px 24px rgba(0,0,0,.28)}.answerImageThumb:hover{border-color:#38bdf8}.answerBlock{border-left:3px solid #38bdf8;padding-left:10px;margin:6px 0}.answerLine{display:block}.internalNote{color:#93c5fd;font-size:12px}.hiddenRaw{display:none}.detailsBox{margin-top:8px}.detailsBox summary{cursor:pointer;color:#bfdbfe;font-weight:700}.pre.compact{max-height:120px;font-size:12px}.user{border-color:#0ea5e9}.error{border-color:#f59e0b}.final{border-color:#22c55e}.pre{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;background:#020617;border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;max-height:220px;max-width:100%}.small{font-size:12px;color:#bfdbfe}.sectionTitle{color:#bfdbfe;font-weight:700;margin:12px 0 8px}.empty{color:#94a3b8;font-size:13px}.cardHeader{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.copyBtn{border:1px solid var(--line);border-radius:8px;background:#0b1220;color:#bfdbfe;padding:4px 8px;cursor:pointer;font-size:12px}.copyBtn:hover{border-color:#38bdf8;color:#e0f2fe}.toast{position:fixed;right:20px;bottom:20px;background:#064e3b;border:1px solid #22c55e;color:#dcfce7;padding:10px 14px;border-radius:10px;z-index:50}.progressLine{display:flex;align-items:center;gap:8px;margin:6px 0;color:#bfdbfe}.progressDot{width:8px;height:8px;border-radius:999px;background:#38bdf8;animation:pulse 1.2s ease-in-out infinite}.progressDot.done{background:#22c55e;animation:none}.progressDot.wait{background:#f59e0b;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.15)}}
-.execDashboard{border-bottom:1px solid var(--line);background:#0b1220;padding:12px;display:flex;flex-direction:column;gap:10px}.execDashboard.idle{padding:10px 12px}.execIdleTitle{font-weight:800;color:#e0f2fe}.execIdleMeta{font-size:12px;color:#94a3b8;margin-top:3px}.execTop{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.execTitle{font-weight:800;color:#e0f2fe}.execMeta{font-size:12px;color:#93c5fd;margin-top:3px}.execPercent{font-size:24px;font-weight:900;color:#7dd3fc;line-height:1}.progressBar{height:8px;background:#020617;border:1px solid #1e293b;border-radius:999px;overflow:hidden}.progressFill{height:100%;width:0%;background:linear-gradient(90deg,#0ea5e9,#8b5cf6);transition:width .25s ease}.stageGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.stageChip{border:1px solid #1e293b;border-radius:9px;padding:7px 8px;background:#020617;color:#94a3b8;min-width:0}.stageChip b{display:block;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.stageChip span{font-size:10px}.stageChip.completed{border-color:#166534;color:#bbf7d0}.stageChip.running{border-color:#38bdf8;color:#e0f2fe;box-shadow:0 0 0 1px rgba(56,189,248,.15) inset}.stageChip.failed{border-color:#f59e0b;color:#fde68a}.stageChip.pending{border-color:#334155;color:#94a3b8}.rightTabs{display:flex;gap:6px;padding:8px 10px;border-bottom:1px solid var(--line);background:#0b1220}.tabBtn{border:1px solid var(--line);background:#020617;color:#bfdbfe;border-radius:999px;padding:6px 10px;cursor:pointer;font-weight:700}.tabBtn.active{background:#075985;border-color:#38bdf8;color:white}.tabPane{display:none}.tabPane.active{display:block}.modelModeSelect{min-width:105px;max-width:130px}.compactModelSelect{min-width:220px;max-width:300px}
+.execDashboard{border-bottom:1px solid var(--line);background:#0b1220;padding:12px;display:flex;flex-direction:column;gap:10px}.execDashboard.idle{padding:10px 12px}.execIdleTitle{font-weight:800;color:#e0f2fe}.execIdleMeta{font-size:12px;color:#94a3b8;margin-top:3px}.execTop{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.execTitle{font-weight:800;color:#e0f2fe}.execMeta{font-size:12px;color:#93c5fd;margin-top:3px}.execPercent{font-size:24px;font-weight:900;color:#7dd3fc;line-height:1}.progressBar{height:8px;background:#020617;border:1px solid #1e293b;border-radius:999px;overflow:hidden}.progressFill{height:100%;width:0%;background:linear-gradient(90deg,#0ea5e9,#8b5cf6);transition:width .25s ease}.stageGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.stageChip{border:1px solid #1e293b;border-radius:9px;padding:7px 8px;background:#020617;color:#94a3b8;min-width:0}.stageChip b{display:block;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.stageChip span{font-size:10px}.stageChip.completed{border-color:#166534;color:#bbf7d0}.stageChip.running{border-color:#38bdf8;color:#e0f2fe;box-shadow:0 0 0 1px rgba(56,189,248,.15) inset}.stageChip.failed{border-color:#f59e0b;color:#fde68a}.stageChip.pending{border-color:#334155;color:#94a3b8}.rightTabs{display:flex;gap:6px;padding:8px 10px;border-bottom:1px solid var(--line);background:#0b1220}.tabBtn{border:1px solid var(--line);background:#020617;color:#bfdbfe;border-radius:999px;padding:6px 10px;cursor:pointer;font-weight:700}.tabBtn.active{background:#075985;border-color:#38bdf8;color:white}.tabPane{display:none}.tabPane.active{display:block}.tabPane.execDashboard{border-bottom:0;border-radius:12px;margin:0 0 12px 0}.tabPane.execDashboard.idle{background:#0b1220;border:1px solid var(--line)}.modelModeSelect{min-width:105px;max-width:130px}.compactModelSelect{min-width:220px;max-width:300px}.executionHistory{display:flex;flex-direction:column;gap:8px;margin-top:10px}.executionHistoryCard{border:1px solid var(--line);border-radius:10px;background:#020617;padding:9px}.executionHistoryTitle{display:flex;justify-content:space-between;gap:8px;font-weight:800;color:#e0f2fe}.executionHistoryMeta{font-size:11px;color:#93c5fd;margin-top:3px}.miniStageRow{display:flex;flex-wrap:wrap;gap:4px;margin-top:7px}.miniStage{border:1px solid #1e293b;border-radius:999px;padding:2px 6px;font-size:10px;color:#94a3b8}.miniStage.completed{border-color:#166534;color:#bbf7d0}.miniStage.running{border-color:#38bdf8;color:#e0f2fe}.miniStage.failed{border-color:#f59e0b;color:#fde68a}.miniStage.pending{border-color:#334155;color:#94a3b8}
 
     .commandGrid{display:grid;grid-template-columns:1fr;gap:10px;margin-top:12px}.commandCategory{border:1px solid var(--line);border-radius:12px;background:#0b1220;padding:10px}.commandCategory h4{margin:0 0 8px;color:#bfdbfe}.commandItem{border-top:1px solid #1e293b;padding:8px 0}.commandItem:first-of-type{border-top:0}.commandTitle{display:flex;gap:8px;align-items:center;justify-content:space-between;font-weight:700}.commandPatterns{font-size:12px;color:#cbd5e1;margin-top:4px}.commandDesc{font-size:12px;color:#93c5fd;margin-top:4px}.disabledCommand{opacity:.55}
     .modalBackdrop{position:fixed;inset:0;background:rgba(2,6,23,.72);display:none;align-items:center;justify-content:center;z-index:80}.modalBackdrop.show{display:flex}.modal{width:min(720px,92vw);max-height:86vh;overflow:auto;background:#111827;border:1px solid var(--line);border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.45);padding:18px}.modal h3{margin:0 0 6px;font-size:18px}.fieldLabel{display:block;margin:14px 0 6px;font-weight:700;color:#bfdbfe}.fieldHint{font-size:12px;color:#cbd5e1;white-space:pre-wrap}.booleanField{display:flex;align-items:center;gap:10px;margin:10px 0;padding:10px;border:1px solid var(--line);border-radius:10px;background:#020617}.booleanField input{width:18px;height:18px}.booleanField span{font-weight:700;color:#e0f2fe}.fieldInput{width:100%;min-height:40px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px}.fieldInput.area{min-height:110px;font-family:ui-monospace,Consolas,monospace}.modalActions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}.badge{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 8px;color:#bae6fd;font-size:12px}.modelBar{justify-self:end;display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px;max-width:100%;min-width:0;overflow:visible}.modelGroup{display:flex;align-items:center;gap:5px;background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:6px 8px;white-space:nowrap}.modelGroup label{font-size:12px;color:#bfdbfe}.modelSelect{background:#020617;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px;max-width:260px;min-width:180px}.radioGroup{display:flex;gap:8px;align-items:center}.radioGroup label{font-size:12px;color:#e0f2fe;white-space:nowrap}.modelHint{width:100%;text-align:right;font-size:11px;color:#93c5fd;line-height:1.2;white-space:normal;overflow:visible;text-overflow:clip}.uploadBox{border:1px dashed #38bdf8;border-radius:12px;padding:10px;margin-bottom:10px;background:#0b1220}.artifactList{margin-top:8px}.artifactItem{display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--line);border-radius:10px;padding:7px 8px;margin-top:6px;background:#111827}.artifactMeta{min-width:0}.artifactName{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.artifactPath{font-size:11px;color:#93c5fd;word-break:break-all}.checkLabel{display:flex;align-items:center;gap:6px;font-size:12px;color:#e0f2fe}.fileInput{width:100%;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:8px}
@@ -42,9 +42,9 @@
 </header>
 <aside id="sessionSidebar" class="sessionSidebar"><div class="sessionHeader"><div class="sessionBrand">Runtime Agent Studio</div><div class="sessionActions"><button class="copyBtn sessionToggleBtn" title="Collapse sidebar" onclick="toggleSessionSidebar()">☰</button><button class="copyBtn" title="Refresh sessions" onclick="refreshSessions()">↻</button></div></div><div class="sessionToolbar"><button class="btn primary" onclick="createNewSession()">+ New Session</button></div><div id="sessionBoundaryWarning"></div><div id="sessionList" class="sessionList"><div class="empty">Loading...</div></div><div class="sessionFooter"><a class="btn primary" href="/graph-runtime" target="_blank" rel="noopener">Graph Runtime</a><a class="btn" href="/runtime-console" target="_blank" rel="noopener">Runtime Console</a><a class="btn" href="/settings" target="_blank" rel="noopener">Settings</a></div></aside>
 <main id="studioMain">
-  <section class="panel"><h2>Interactive Console <span id="profileCount" class="small"></span></h2><div id="executionDashboard" class="execDashboard"></div><div class="scroll" id="messages"></div><div class="console"><div class="uploadBox"><div class="cardHeader"><b>Uploaded artifacts</b><button class="copyBtn" onclick="refreshArtifacts()">Refresh</button></div><input id="artifactUploadInput" class="fileInput" type="file" multiple onchange="uploadArtifacts()" /><div class="small">Files selected here can be bound to create-agent messages and used as external methods during execution.</div><div id="artifactList" class="artifactList"><div class="empty">No uploaded artifact.</div></div></div><textarea id="input" class="input" placeholder="Enter a message, request, or runtime instruction."></textarea><div class="row consoleActions"><button id="sendBtn" class="btn primary" onclick="sendMessage()">Send</button><button class="btn" onclick="quickExecute()">Execute Named Task</button></div></div></section>
+  <section class="panel"><h2>Interactive Console <span id="profileCount" class="small"></span></h2><div class="scroll" id="messages"></div><div class="console"><div class="uploadBox"><div class="cardHeader"><b>Uploaded artifacts</b><button class="copyBtn" onclick="refreshArtifacts()">Refresh</button></div><input id="artifactUploadInput" class="fileInput" type="file" multiple onchange="uploadArtifacts()" /><div class="small">Files selected here can be bound to create-agent messages and used as external methods during execution.</div><div id="artifactList" class="artifactList"><div class="empty">No uploaded artifact.</div></div></div><textarea id="input" class="input" placeholder="Enter a message, request, or runtime instruction."></textarea><div class="row consoleActions"><button id="sendBtn" class="btn primary" onclick="sendMessage()">Send</button><button class="btn" onclick="quickExecute()">Execute Named Task</button></div></div></section>
   <section class="panel"><h2>Generated Participants <span id="participantCount" class="small"></span></h2><div class="scroll" id="participants"></div></section>
-  <section class="panel" id="tracePanel"><h2><span>Runtime Center <span id="graphCount" class="small"></span></span><button id="traceToggleBtn" class="copyBtn" onclick="toggleTracePanel()">&gt;&gt;</button></h2><div class="rightTabs"><button class="tabBtn active" data-tab="workflow" onclick="selectRightTab('workflow')">Workflow</button><button class="tabBtn" data-tab="results" onclick="selectRightTab('results')">Results</button><button class="tabBtn" data-tab="traces" onclick="selectRightTab('traces')">Traces</button></div><div class="scroll" id="rightPane"><div id="workflowPane" class="tabPane active"></div><div id="resultsPane" class="tabPane"></div><div id="tracesPane" class="tabPane"></div></div></section>
+  <section class="panel" id="tracePanel"><h2><span>Runtime Center <span id="graphCount" class="small"></span></span><button id="traceToggleBtn" class="copyBtn" onclick="toggleTracePanel()">&gt;&gt;</button></h2><div class="rightTabs"><button class="tabBtn active" data-tab="workflow" onclick="selectRightTab('workflow')">Workflow</button><button class="tabBtn" data-tab="progress" onclick="selectRightTab('progress')">Progress</button><button class="tabBtn" data-tab="results" onclick="selectRightTab('results')">Results</button><button class="tabBtn" data-tab="traces" onclick="selectRightTab('traces')">Traces</button></div><div class="scroll" id="rightPane"><div id="workflowPane" class="tabPane active"></div><div id="progressPane" class="tabPane"></div><div id="resultsPane" class="tabPane"></div><div id="tracesPane" class="tabPane"></div></div></section>
 </main>
 
 <div id="runtimeSchemaModal" class="modalBackdrop"><div class="modal"><h3 id="runtimeSchemaTitle">Runtime setup</h3><div class="small" id="runtimeSchemaSummary"></div><div id="runtimeSchemaFields"></div><div class="modalActions"><button class="btn" onclick="closeRuntimeSchemaModal()">Cancel</button><button class="btn primary" onclick="submitRuntimeSchemaModal()">Submit</button></div></div></div>
@@ -108,6 +108,53 @@ function addMessage(text, cls='item', options={}) {
   else { el.innerHTML=`<div class="message">${escapeHtml(text)}</div>`; }
   messages.appendChild(el);
   messages.scrollTop=messages.scrollHeight;
+}
+function stageStatusForRecord(record, key){
+  if(!record || !record.stages) return 'pending';
+  return normalizeStageStatus(record.stages[key] || 'pending');
+}
+function executionRecordCard(record){
+  const stages=[['input_parsing','Input'],['intent_recognition','Intent'],['requirement_completion','Requirements'],['context_awareness','Context'],['workflow_planning','Planning'],['pre_execution_validation','Pre-check'],['execution','Execution'],['verification_brain','Verification'],['repair_brain','Repair'],['presentation_brain','Presentation']];
+  const stageHtml=stages.map(([key,label])=>`<span class="miniStage ${stageStatusForRecord(record,key)}">${escapeHtml(label)}</span>`).join('');
+  const status=record.status||'running';
+  const pct=Math.max(0,Math.min(100,Math.round(record.pct||0)));
+  const model=record.modelText||'model decision pending';
+  const title=record.label||record.instruction||'Runtime execution';
+  return `<div class="executionHistoryCard"><div class="executionHistoryTitle"><span>${escapeHtml(title)}</span><span>${pct}% · ${escapeHtml(status)}</span></div><div class="executionHistoryMeta">${escapeHtml(model)}${record.started_at?' · '+new Date(record.started_at).toLocaleTimeString():''}</div><div class="miniStageRow">${stageHtml}</div></div>`;
+}
+function renderExecutionHistoryInto(container, includeCurrent=true){
+  if(!container) return;
+  const records=[];
+  if(includeCurrent && currentExecutionRecord) records.push(currentExecutionRecord);
+  records.push(...executionHistory.slice().reverse());
+  if(!records.length){ container.insertAdjacentHTML('beforeend','<div class="empty">No execution history yet.</div>'); return; }
+  container.insertAdjacentHTML('beforeend','<div class="executionHistory">'+records.map(executionRecordCard).join('')+'</div>');
+}
+function startExecutionRecord(instruction){
+  const mode=document.getElementById('modelModeSelect')?.value || '';
+  const selected=document.getElementById('initialModelSelect')?.value || '';
+  currentExecutionRecord={id:'local_'+(++executionSequence)+'_'+Date.now(),instruction:String(instruction||'').slice(0,120),label:'Receiving instruction',status:'running',pct:3,modelText:[mode,selected].filter(Boolean).join(' / '),started_at:Date.now(),stages:{}};
+  currentExecutionRecord.stages.input_parsing='running';
+}
+function updateExecutionRecord(stageKey,label,pct,status='running'){
+  if(!currentExecutionRecord) return;
+  const stages=['input_parsing','intent_recognition','requirement_completion','context_awareness','workflow_planning','pre_execution_validation','execution','verification_brain','repair_brain','presentation_brain'];
+  const idx=stages.indexOf(stageKey);
+  stages.forEach((k,i)=>{ if(i<idx && currentExecutionRecord.stages[k]!=='failed') currentExecutionRecord.stages[k]='completed'; });
+  if(stageKey) currentExecutionRecord.stages[stageKey]=status;
+  if(label) currentExecutionRecord.label=label;
+  if(typeof pct==='number') currentExecutionRecord.pct=pct;
+  currentExecutionRecord.updated_at=Date.now();
+}
+function finishExecutionRecord(status='completed', label='Completed'){
+  if(!currentExecutionRecord) return;
+  currentExecutionRecord.status=status;
+  currentExecutionRecord.label=label;
+  currentExecutionRecord.pct=status==='failed'?Math.max(currentExecutionRecord.pct||0,70):100;
+  Object.keys(currentExecutionRecord.stages||{}).forEach(k=>{ if(currentExecutionRecord.stages[k]==='running') currentExecutionRecord.stages[k]=status==='failed'?'failed':'completed'; });
+  executionHistory.push(currentExecutionRecord);
+  if(executionHistory.length>20) executionHistory=executionHistory.slice(-20);
+  currentExecutionRecord=null;
 }
 function addFinalAnswer(text, cls='item final'){
   const feedback='<div class="feedbackBar"><span class="small">Evaluate:</span><button class="copyBtn" onclick="sendConversationFeedback(\'good\')">Good</button><button class="copyBtn" onclick="sendConversationFeedback(\'bad\')">Bad</button><input id="feedbackNote" class="feedbackNote" placeholder="optional note" /></div>';
@@ -495,10 +542,9 @@ async function sendMessage(){
   if(!text)return;
   lastSubmittedInstruction=text;
   lastPendingInstruction=text;
-  const canStart = await ensureSelectedModelCredential();
-  if(!canStart){ return; }
   input.value='';
   addMessage(text,'item user');
+  startExecutionRecord(text);
   const btn=document.getElementById('sendBtn');
   btn.disabled=true;
   btn.textContent='Thinking...';
@@ -515,6 +561,12 @@ async function sendMessage(){
   ];
   let hintIndex=0;
   try{
+    const canStart = await ensureSelectedModelCredential();
+    if(!canStart){
+      finishExecutionRecord('waiting_input','Waiting for model configuration');
+      setStudioStatus('waiting input', false);
+      return;
+    }
     setLocalExecutionStage('input_parsing','Receiving instruction',8);
     addProgressMessage(hints[hintIndex++]);
     const localStages=[['intent_recognition','Routing command',18],['workflow_planning','Planning runtime work',35],['pre_execution_validation','Checking readiness',48],['execution','Executing runtime work',68],['verification_brain','Verifying result',82],['presentation_brain','Preparing response',92]];
@@ -528,11 +580,14 @@ async function sendMessage(){
     const data=await res.json();
     consumeSelectedArtifactsAfterRequest();
     renderStudioResponse(data, text);
+    finishExecutionRecord((data&&data.status==='failed')?'failed':'completed', (data&&data.status==='failed')?'Failed':'Completed');
+    await refreshSessions();
     const pendingItems = collectMissingInputs(data);
     if(pendingItems.length){ lastMissingInputs=pendingItems; lastPendingRunId=data.run_id||''; lastPendingInstruction=text; addMissingInputs(pendingItems, text, lastPendingRunId); }
     // Final answers are rendered by renderStudioResponse; do not duplicate or show raw runtime JSON here.
     await refreshState();
   }catch(e){
+    finishExecutionRecord('failed','Error');
     addMessage('Error: '+e,'item error');
   } finally{
     if(pollTimer) clearInterval(pollTimer);
@@ -1090,7 +1145,11 @@ function renderCommandHelp(commands){
 }
 
 async function ensureSelectedModelCredential(){
-  await saveModelSelection();
+  try{
+    await saveModelSelection();
+  }catch(e){
+    addMessage('Model settings could not be saved before this request. Continuing with the last active runtime model policy. Details: '+escapeHtml(e && e.message ? e.message : e), 'item error');
+  }
   const data=modelSelectionState;
   if(!data || !data.secret_prompt_required){ return true; }
   const key=data.required_secret;
@@ -1164,16 +1223,17 @@ function makeLocalExecutionState(stageKey, label, pct){
 }
 function setLocalExecutionStage(stageKey, label, pct){
   localExecutionState=makeLocalExecutionState(stageKey,label,pct);
+  updateExecutionRecord(stageKey,label,pct,'running');
   renderLocalExecutionDashboard();
 }
 function renderLocalExecutionDashboard(){
-  const box=document.getElementById('executionDashboard');
+  const box=document.getElementById('progressPane');
   if(!box || !localExecutionState){ return; }
   const stages=[['input_parsing','Input'],['intent_recognition','Intent'],['requirement_completion','Requirements'],['context_awareness','Context'],['workflow_planning','Planning'],['pre_execution_validation','Pre-check'],['execution','Execution'],['verification_brain','Verification'],['repair_brain','Repair'],['presentation_brain','Presentation']];
   const order=stages.map(x=>x[0]);
   const idx=Math.max(0,order.indexOf(localExecutionState.stage));
   const stageHtml=stages.map(([key,label],i)=>{
-    const status=i<idx?'completed':(i===idx?'running':'pending');
+    const status=currentExecutionRecord?stageStatusForRecord(currentExecutionRecord,key):(i<idx?'completed':(i===idx?'running':'pending'));
     return `<div class="stageChip ${status}"><b>${escapeHtml(label)}</b><span>${escapeHtml(status)}</span></div>`;
   }).join('');
   const pct=Math.max(0,Math.min(100,Math.round(localExecutionState.pct||0)));
@@ -1184,7 +1244,7 @@ function renderLocalExecutionDashboard(){
   box.innerHTML=`<div class="execTop"><div><div class="execTitle">${escapeHtml(localExecutionState.label||'Executing')}</div><div class="execMeta">Live request · ${escapeHtml(modelText)}</div></div><div class="execPercent">${pct}%</div></div><div class="progressBar"><div class="progressFill" style="width:${pct}%"></div></div><div class="stageGrid">${stageHtml}</div>`;
 }
 function renderExecutionDashboard(data){
-  const box=document.getElementById('executionDashboard');
+  const box=document.getElementById('progressPane');
   if(!box) return;
   const conversationRuns=data.conversation_runs||[];
   const taskRuns=data.task_runs||[];
@@ -1234,10 +1294,12 @@ function appendSection(parent,title,empty,items,renderer){
 }
 function renderRightPanes(data){
   const workflow=document.getElementById('workflowPane');
+  const progressPane=document.getElementById('progressPane');
   const resultsPane=document.getElementById('resultsPane');
   const tracesPane=document.getElementById('tracesPane');
-  if(!workflow || !resultsPane || !tracesPane){ return; }
-  workflow.innerHTML=''; resultsPane.innerHTML=''; tracesPane.innerHTML='';
+  if(!workflow || !progressPane || !resultsPane || !tracesPane){ return; }
+  workflow.innerHTML=''; progressPane.innerHTML=''; resultsPane.innerHTML=''; tracesPane.innerHTML='';
+  progressPane.classList.add('execDashboard');
   const graphs=data.task_graphs||[]; const runs=data.task_runs||[]; const conversationRuns=data.conversation_runs||[]; const runtimeToolRuns=data.runtime_tool_runs||[]; const deliveries=data.deliveries||[]; const traces=data.traces||[]; const runtimeTools=data.runtime_tools||[];
   const latestRun = conversationRuns.length ? conversationRuns[0] : (runs.length ? runs[0] : null);
   appendSection(workflow,'Execution Flow','No execution flow yet.', latestRun?[latestRun]:(graphs.length?[graphs[0]]:[]), latestRun?conversationFlowCard:taskGraphFlowCard);
@@ -1249,6 +1311,9 @@ function renderRightPanes(data){
   appendSection(resultsPane,'Runtime Registry','No registered runtime tool.', runtimeTools, runtimeToolCard);
   appendSection(tracesPane,'Conversation Workflow Runs','No conversation workflow run.', conversationRuns, conversationRunCard);
   appendSection(tracesPane,'Runtime Traces','No trace.', traces, t=>compactJsonCard(t.trace_id||'trace', t));
+  renderExecutionDashboard(data);
+  progressPane.insertAdjacentHTML('beforeend','<div class="sectionTitle">Execution history</div>');
+  renderExecutionHistoryInto(progressPane, true);
   selectRightTab(activeRightTab);
 }
 
@@ -1256,7 +1321,6 @@ async function refreshState(){ try{ const res=await fetch('/api/agent-studio/sta
 function renderState(data){
   const ps=data.participants||[]; document.getElementById('participantCount').textContent=ps.length; const pbox=document.getElementById('participants'); pbox.innerHTML=''; if(!ps.length)pbox.innerHTML='<div class="empty">No participant.</div>'; ps.forEach(p=>{ const el=document.createElement('div'); el.className='item'; const pid=p.participant_id||p.id||''; el.innerHTML=`<div class="cardHeader"><b>${escapeHtml(p.name||pid)}</b><span class="pill">${escapeHtml(p.status||'created')}</span></div><div class="small">${escapeHtml(pid||'')}</div><span class="pill">delegate_to_ai_core</span><div class="path">${escapeHtml(p._path||'')}</div>`; const del=document.createElement('button'); del.className='btn danger'; del.style.marginTop='8px'; del.textContent='Delete agent'; del.onclick=()=>deleteStudioItem('agent', pid); el.appendChild(del); pbox.appendChild(el); });
   document.getElementById('graphCount').textContent=(data.task_graphs||[]).length + (data.conversation_runs||[]).length;
-  renderExecutionDashboard(data);
   renderRightPanes(data);
 }
 
