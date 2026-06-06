@@ -1,9 +1,0 @@
-{
-  "run_id": "graph_b094723d3576",
-  "node_id": "semantic_task_graph_planning",
-  "provider": "stage_adapter_or_default_ollama_qwen3_5_2b",
-  "provider_type": "universal_model",
-  "model": "qwen3.5:2b",
-  "elapsed_seconds": 90.26,
-  "error": "Model request timed out. provider=stage_adapter_or_default_ollama_qwen3_5_2b, model=qwen3.5:2b, timeout_seconds=90.0. Use a smaller/faster local model for early JSON stages, increase the whole-run budget, or enable an external fallback provider."
-}
