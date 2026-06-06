@@ -30,7 +30,7 @@ from auxiliary_brain.studio.instruction_workflow_planner import InstructionWorkf
 from auxiliary_brain.studio.runtime_semantic_planner import RuntimeSemanticPlanner
 from ai_core.runtime.capability.registered_tool_agent_binder import RegisteredToolAgentBinder
 from verification_brain import RuntimeVerificationFoundation
-from presentation_brain import FailureMessageRenderer
+from presentation_brain import FailureMessageRenderer, PresentationProfileRegistry
 
 
 class AgentStudioService:
@@ -65,7 +65,7 @@ class AgentStudioService:
         self.store.ensure_workspace()
         self.community_id = self._ensure_community()
 
-    async def handle_message(self, message: str, provided_inputs: dict[str, Any] | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None, session_id: str | None = None) -> dict[str, Any]:
+    async def handle_message(self, message: str, provided_inputs: dict[str, Any] | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None, session_id: str | None = None, presentation_profile: str | None = None) -> dict[str, Any]:
         direct = self._direct_ephemeral_answer(message)
         if direct is not None:
             self.execution_reuse_store.save_short_answer(query=message, answer=direct, source="ephemeral_direct")
@@ -85,7 +85,7 @@ class AgentStudioService:
         if routed.action == "create_participant":
             return await self.create_participant(message, routed.name, uploaded_artifacts=uploaded_artifacts)
         if routed.action == "create_task":
-            return self.create_task_graph(message, routed.name, uploaded_artifacts=uploaded_artifacts)
+            return self.create_task_graph(message, routed.name, uploaded_artifacts=uploaded_artifacts, presentation_profile=presentation_profile)
 
         # Direct output-modality requests must be isolated from ordinary chat and
         # from text-model preflight.  If a provider is missing, the user should
@@ -1067,7 +1067,7 @@ class AgentStudioService:
         method = str(execution_policy.get("execution_method") or participant.get("execution_policy") or "").strip().casefold()
         return "|".join([name, cap_type, tool_id, method])
 
-    def create_task_graph(self, instruction: str, name: str | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def create_task_graph(self, instruction: str, name: str | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None, presentation_profile: str | None = None) -> dict[str, Any]:
         graph_id = new_id("graph")
         task_name = name or graph_id
         participants = self._canonicalize_task_participant_catalog(
@@ -1139,8 +1139,9 @@ class AgentStudioService:
                 "tasks": workflow_tasks,
                 "static_validation": static_validation,
                 "instruction_coverage": workflow_plan.coverage,
+                "presentation_profile": PresentationProfileRegistry.normalize(presentation_profile),
             }
-            failure_report = self._build_static_validation_failure_report(failure_payload)
+            failure_report = self._build_static_validation_failure_report(failure_payload, presentation_profile=presentation_profile)
             self._write_static_validation_failure_report(failure_payload, report=failure_report)
             self._update_community()
             user_message = (failure_report.get("payload") or {}).get("user_message")
@@ -1405,7 +1406,7 @@ class AgentStudioService:
                 break
         return out
 
-    def _build_static_validation_failure_report(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _build_static_validation_failure_report(self, payload: dict[str, Any], *, presentation_profile: str | None = None) -> dict[str, Any]:
         graph_id = self._safe_filename(payload.get("graph_id") or payload.get("task_name") or "static_validation")
         report = {
             "report_id": f"failure_{graph_id}",
@@ -1421,7 +1422,7 @@ class AgentStudioService:
             "payload": payload,
         }
         try:
-            user_message = self.failure_message_renderer.render(report, allow_llm=True).to_dict()
+            user_message = self.failure_message_renderer.render(report, allow_llm=True, profile=presentation_profile or payload.get("presentation_profile")).to_dict()
         except Exception as exc:
             user_message = {
                 "title": "Task graph creation failed",
@@ -1466,10 +1467,17 @@ class AgentStudioService:
         if location:
             lines.append("")
             lines.append("Where to check:")
-            for item in location[:4]:
+            for item in location[:8]:
                 text = str(item or "").strip()
                 if text:
                     lines.append(f"- {text}")
+        technical = user_message.get("technical") if isinstance(user_message.get("technical"), dict) else {}
+        if technical:
+            lines.append("")
+            lines.append("Technical details:")
+            for key, value in list(technical.items())[:10]:
+                if value not in (None, "", [], {}):
+                    lines.append(f"- {key}: {value}")
         return "\n".join(lines).strip() or "Task graph creation failed."
 
     def _write_static_validation_failure_report(self, payload: dict[str, Any], *, report: dict[str, Any] | None = None) -> None:

@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ai_core.model_orchestration import LiteLLMBrainClient
+from presentation_brain.profile_registry import PresentationProfileRegistry
 
 
 @dataclass
@@ -171,17 +172,36 @@ class FailureMessageRenderer:
     def __init__(self, *, llm_client: LiteLLMBrainClient | None = None) -> None:
         self.llm = llm_client or LiteLLMBrainClient()
 
-    def render(self, report: dict[str, Any], *, allow_llm: bool = True) -> FailureUserMessage:
+    def render(self, report: dict[str, Any], *, allow_llm: bool = True, profile: str | None = None) -> FailureUserMessage:
         report = report if isinstance(report, dict) else {}
         failed_checks = report.get("failed_checks") if isinstance(report.get("failed_checks"), list) else []
         failed_checks = self._dedupe_checks(failed_checks)
         failure_class = str(report.get("failure_class") or self._infer_primary_failure_class(failed_checks) or "unknown_problem")
+        profile_obj = PresentationProfileRegistry.get(profile)
         message = self._render_deterministic(report=report, failure_class=failure_class, failed_checks=failed_checks)
-        if allow_llm and self._should_upgrade_to_llm(report=report, failed_checks=failed_checks, failure_class=failure_class):
+        effective_allow_llm = bool(allow_llm and profile_obj.llm_allowed)
+        if effective_allow_llm and self._should_upgrade_to_llm(report=report, failed_checks=failed_checks, failure_class=failure_class):
             upgraded = self._render_with_llm(report=report, base_message=message)
             if upgraded is not None:
-                return upgraded
-        return message
+                message = upgraded
+        return self._apply_profile(message, profile_obj.name)
+
+
+    def _apply_profile(self, message: FailureUserMessage, profile: str | None) -> FailureUserMessage:
+        profile_obj = PresentationProfileRegistry.get(profile)
+        technical = dict(message.technical or {}) if profile_obj.include_technical else {}
+        technical["presentation_profile"] = profile_obj.name
+        return FailureUserMessage(
+            title=message.title,
+            summary=message.summary,
+            reasons=message.reasons[: profile_obj.max_reasons] if profile_obj.include_reasons else [],
+            suggestions=message.suggestions[: profile_obj.max_suggestions] if profile_obj.include_suggestions else [],
+            location=message.location[: profile_obj.max_location] if profile_obj.include_location else [],
+            severity=message.severity,
+            source=message.source,
+            llm_used=message.llm_used,
+            technical=technical,
+        )
 
     def _render_deterministic(self, *, report: dict[str, Any], failure_class: str, failed_checks: list[dict[str, Any]]) -> FailureUserMessage:
         template = self.TEMPLATE_LIBRARY.get(failure_class) or self.TEMPLATE_LIBRARY["unknown_problem"]

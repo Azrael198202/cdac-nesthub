@@ -200,6 +200,7 @@ class AgentStudioRequest(BaseModel):
     provided_inputs: dict[str, Any] | None = None
     uploaded_artifacts: list[dict[str, Any]] | None = None
     session_id: str | None = None
+    presentation_profile: str | None = None
 
 
 class TaskInstructionUpdateRequest(BaseModel):
@@ -986,7 +987,7 @@ async def agent_studio_state():
 async def agent_studio_message(req: AgentStudioRequest):
     try:
         active_session_id = session_store.start_or_get_session(req.session_id, metadata={"surface": "agent_studio"})
-        payload = await studio_service.handle_message(req.message, provided_inputs=req.provided_inputs, uploaded_artifacts=req.uploaded_artifacts, session_id=active_session_id)
+        payload = await studio_service.handle_message(req.message, provided_inputs=req.provided_inputs, uploaded_artifacts=req.uploaded_artifacts, session_id=active_session_id, presentation_profile=req.presentation_profile)
         if isinstance(payload, dict):
             payload.setdefault("session_id", active_session_id)
             final_answer = str(payload.get("final_answer") or payload.get("message") or payload.get("status") or "")
