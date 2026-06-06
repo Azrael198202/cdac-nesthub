@@ -1,0 +1,142 @@
+{
+  "report_id": "failure_delegation_run_49873fc59c0e",
+  "status": "failure_detected",
+  "task_name": "SendCurrentTimeMail",
+  "run_id": "delegation_run_49873fc59c0e",
+  "graph_id": "graph_b094723d3576",
+  "failure_class": "template_resolution_problem",
+  "failed_checks": [
+    {
+      "level": 1,
+      "level_name": "template_verification",
+      "name": "template_must_be_resolved",
+      "passed": false,
+      "unresolved_templates": [
+        "{{Step1.final_answer}}"
+      ],
+      "suggested_location": [
+        "template resolution",
+        "dependency mapping",
+        "parameter hydration"
+      ]
+    }
+  ],
+  "evidence_path": "/Users/home/workspace/cdac-nesthub/runtime/generated/failure_reports/evidence_delegation_run_49873fc59c0e.json",
+  "evidence_summary": {
+    "item_count": 3,
+    "matched_item_count": 3,
+    "tokens": [
+      "delegation_run_49873fc59c0e",
+      "SendCurrentTimeMail",
+      "template_resolution_problem"
+    ]
+  },
+  "repair_plan": {
+    "status": "repair_plan_created",
+    "category": "tool_implementation_problem",
+    "owner": "auxiliary_brain",
+    "steps": [
+      "collect_evidence",
+      "classify_failure",
+      "propose_repair",
+      "generate_patch_outside_ai_core",
+      "run_sandbox_validation",
+      "run_execution_verification"
+    ],
+    "requires_approval": true,
+    "evidence_summary": {
+      "item_count": 3,
+      "matched_item_count": 3,
+      "tokens": [
+        "delegation_run_49873fc59c0e",
+        "SendCurrentTimeMail",
+        "template_resolution_problem"
+      ]
+    },
+    "payload": {
+      "diagnosis": {
+        "category": "tool_implementation_problem",
+        "user_title": "Runtime tool implementation needs repair",
+        "user_message": "The tool code, output contract, or runtime implementation may be incorrect. The auxiliary layer should read the trace, generate a patch, and revalidate it.",
+        "repairable": true,
+        "requires_user_confirmation": true,
+        "suggested_action": "Create a tool repair request. The auxiliary layer will generate a patch, run sandbox validation, and register a new version only after verification passes.",
+        "technical_reason": "",
+        "confidence": 0.77,
+        "evidence": {
+          "error_code": "completed",
+          "message": "",
+          "status": "completed"
+        }
+      },
+      "request": {
+        "run_id": "delegation_run_49873fc59c0e",
+        "component": "graph_b094723d3576",
+        "failure": {
+          "status": "completed",
+          "failure_class": "template_resolution_problem",
+          "failed_checks": [
+            {
+              "level": 1,
+              "level_name": "template_verification",
+              "name": "template_must_be_resolved",
+              "passed": false,
+              "unresolved_templates": [
+                "{{Step1.final_answer}}"
+              ],
+              "suggested_location": [
+                "template resolution",
+                "dependency mapping",
+                "parameter hydration"
+              ]
+            }
+          ]
+        },
+        "context": {
+          "task_name": "SendCurrentTimeMail",
+          "participant_id": "",
+          "graph_id": "graph_b094723d3576",
+          "event_name": "template_resolution_problem"
+        },
+        "expected_contract": {
+          "generic_runtime_checks": true
+        },
+        "created_at": "2026-06-06T13:14:05.949377+00:00"
+      }
+    }
+  },
+  "suggested_owner": "ai_core",
+  "suggested_location": [
+    "template resolution",
+    "dependency mapping",
+    "final_synthesis"
+  ],
+  "created_at": "2026-06-06T13:14:05.963369+00:00",
+  "payload": {
+    "runtime_status": "completed",
+    "stage": "execute_task",
+    "user_message": {
+      "title": "Template value was not resolved",
+      "summary": "A placeholder remained unresolved when the runtime tried to produce or deliver the result.",
+      "reasons": [
+        "template_must_be_resolved"
+      ],
+      "suggestions": [
+        "Check the referenced step, participant, or output field.",
+        "Make sure the upstream result exists before it is used downstream."
+      ],
+      "location": [
+        "template resolution",
+        "dependency mapping",
+        "final_synthesis",
+        "verification level 1"
+      ],
+      "severity": "error",
+      "source": "presentation_brain.deterministic_renderer",
+      "llm_used": false,
+      "technical": {
+        "presentation_profile": "advanced"
+      }
+    }
+  }
+}

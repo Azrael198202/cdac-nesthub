@@ -1,0 +1,115 @@
+{
+  "trace_id": "registered_tool_run_906f01f4ba4f_agent_studio_registered_tool_gmail_smtp_mail_sender_gmail_smtp_mail_sender_20260606131358576544",
+  "run_id": "registered_tool_run_906f01f4ba4f",
+  "node_id": "agent_studio_registered_tool",
+  "step_id": "gmail_smtp_mail_sender",
+  "component_type": "runtime_tool",
+  "component_id": "gmail_smtp_mail_sender",
+  "capability": "gmail_smtp_mail_sender",
+  "status": "success",
+  "started_at": "2026-06-06T13:13:58.577058+00:00",
+  "finished_at": "2026-06-06T13:14:01.636315+00:00",
+  "duration_ms": 3057.28,
+  "input": {
+    "input": {
+      "to": [
+        "soarwiththewind6@gmail.com"
+      ],
+      "subject": "Current Time",
+      "body": "The current time is 22:13."
+    },
+    "connection": {
+      "smtp_host": "smtp.gmail.com",
+      "smtp_port": 465,
+      "use_tls": true,
+      "starttls": false,
+      "timeout_seconds": 60.0,
+      "default_from_email": "ying.hahn@gmail.com"
+    },
+    "secrets": {
+      "username": "***",
+      "password": "***"
+    },
+    "_runtime": {
+      "profile_id": "default",
+      "connection": {
+        "smtp_host": "smtp.gmail.com",
+        "smtp_port": 465,
+        "use_tls": true,
+        "starttls": false,
+        "timeout_seconds": 60.0,
+        "default_from_email": "ying.hahn@gmail.com"
+      },
+      "secrets": {
+        "username": "***",
+        "password": "***"
+      },
+      "secret_refs": {
+        "username": "RUNTIME_SECRET__GMAIL_SMTP_MAIL_SENDER__DEFAULT__USERNAME",
+        "password": "RUNTIME_SECRET__GMAIL_SMTP_MAIL_SENDER__DEFAULT__PASSWORD"
+      },
+      "approval_confirmed": false
+    }
+  },
+  "output": {
+    "status": "success",
+    "tool_id": "gmail_smtp_mail_sender",
+    "data": {
+      "dry_run": false,
+      "host": "smtp.gmail.com",
+      "port": 465,
+      "recipient_count": 1,
+      "subject": "Current Time",
+      "refused_recipients": {},
+      "sent": true
+    },
+    "message": "Message flow completed.",
+    "provenance": {
+      "source": "runtime_generated_tool",
+      "side_effects": true
+    },
+    "source": "gmail_smtp_mail_sender",
+    "requires_human_confirmation": false
+  },
+  "error": null,
+  "artifact": {
+    "id": "gmail_smtp_mail_sender",
+    "name": "gmail_smtp_mail_sender",
+    "version": null,
+    "status": "enabled",
+    "source": null,
+    "runtime_generated": null,
+    "spec_path": "/Users/home/workspace/cdac-nesthub/runtime/generated/tools/gmail_smtp_mail_sender/manifest.json",
+    "module_path": "/Users/home/workspace/cdac-nesthub/runtime/generated/tools/gmail_smtp_mail_sender/tool.py",
+    "callable": "run",
+    "input_schema_present": true,
+    "output_schema_present": true,
+    "api_discovery_present": false,
+    "verification_present": true
+  },
+  "execution_claims": {
+    "uses_network": null,
+    "network_declared": false,
+    "can_write_external_data": null,
+    "can_perform_irreversible_action": null,
+    "requires_human_confirmation": null,
+    "no_mock_data_declared": null,
+    "real_execution_declared": null,
+    "live_verification_required": null,
+    "live_verification_passed": null,
+    "api_discovery_trace_id": null,
+    "official_sources_count": null
+  },
+  "events": [
+    {
+      "type": "execution_started",
+      "time": "2026-06-06T13:13:58.577058+00:00"
+    },
+    {
+      "type": "execution_finished",
+      "time": "2026-06-06T13:14:01.636315+00:00",
+      "status": "success"
+    }
+  ],
+  "trace_path": "/Users/home/workspace/cdac-nesthub/runtime/traces/executions/registered_tool_run_906f01f4ba4f_agent_studio_registered_tool_gmail_smtp_mail_sender_gmail_smtp_mail_sender_20260606131358576544.json"
+}

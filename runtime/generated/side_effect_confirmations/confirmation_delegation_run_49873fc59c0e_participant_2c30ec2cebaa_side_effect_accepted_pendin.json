@@ -1,0 +1,34 @@
+{
+  "confirmation_id": "confirmation_delegation_run_49873fc59c0e_participant_2c30ec2cebaa_side_effect_accepted_pendin",
+  "status": "pending_user_feedback_default_success",
+  "default_assumption": "success_until_user_reports_failure",
+  "task_name": "SendCurrentTimeMail",
+  "run_id": "delegation_run_49873fc59c0e",
+  "graph_id": "graph_b094723d3576",
+  "participant_id": "participant_2c30ec2cebaa",
+  "participant_name": "SendGmail Agent",
+  "tool_id": "gmail_smtp_mail_sender",
+  "side_effect_status": "accepted_pending_user_confirmation",
+  "verification_mode": "accepted_only",
+  "stage": "execute_task",
+  "created_at": "2026-06-06T13:14:05.918169+00:00",
+  "prompt_to_user": "Please confirm whether the external side effect actually worked. If it did not, report this confirmation_id so repair can start.",
+  "source_check": {
+    "level": 6,
+    "level_name": "side_effect_verification",
+    "name": "side_effect_accepted_pending_user_confirmation",
+    "participant_id": "participant_2c30ec2cebaa",
+    "participant_name": "SendGmail Agent",
+    "tool_id": "gmail_smtp_mail_sender",
+    "verification_mode": "accepted_only",
+    "passed": null,
+    "side_effect_status": "accepted_pending_user_confirmation",
+    "requires_user_confirmation": true,
+    "default_assumption": "success_until_user_reports_failure",
+    "suggested_location": [
+      "capability side-effect declaration",
+      "optional read-back verifier",
+      "user confirmation channel"
+    ]
+  }
+}

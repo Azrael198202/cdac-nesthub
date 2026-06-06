@@ -1,0 +1,12 @@
+{
+  "mode": "local_only",
+  "initial_model_id": "qwen3.5:2b",
+  "initial_provider": "ollama",
+  "selected_local_model_id": "qwen3.5:2b",
+  "selected_api_model_id": "gpt-4o-mini",
+  "selected_provider": "auto",
+  "custom_endpoint": "",
+  "allow_escalation": true,
+  "ask_for_missing_keys_at_start": true,
+  "source": "agent_studio_ui"
+}

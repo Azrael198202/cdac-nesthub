@@ -1,0 +1,20 @@
+{
+  "tool_id": "gmail_smtp_mail_sender",
+  "profile_id": "default",
+  "config": {
+    "smtp_host": "smtp.gmail.com",
+    "smtp_port": 465,
+    "use_tls": true,
+    "starttls": false,
+    "timeout_seconds": 60.0,
+    "default_from_email": "ying.hahn@gmail.com"
+  },
+  "secret_refs": {
+    "username": "RUNTIME_SECRET__GMAIL_SMTP_MAIL_SENDER__DEFAULT__USERNAME",
+    "password": "RUNTIME_SECRET__GMAIL_SMTP_MAIL_SENDER__DEFAULT__PASSWORD"
+  },
+  "metadata": {
+    "source": "agent_studio_runtime_profile"
+  },
+  "updated_at": "2026-06-06T13:13:35.349626+00:00"
+}

@@ -1,0 +1,11 @@
+{
+  "trace_id": "trace_5e4b0f03a197",
+  "origin": "auxiliary_brain",
+  "community_id": "community_79f7c8bd68b4",
+  "updated_at": "2026-06-06T13:13:34.897885+00:00",
+  "paths": {
+    "participants": "runtime/generated/agents",
+    "tasks": "runtime/generated/tasks",
+    "communities": "runtime/generated/communities"
+  }
+}

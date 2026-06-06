@@ -1,0 +1,391 @@
+{
+  "participant_id": "participant_2c30ec2cebaa",
+  "name": "SendGmail Agent",
+  "agent_name": "SendGmail Agent",
+  "display_name": "SendGmail Agent",
+  "role_name": "SendGmail Agent",
+  "instruction": "can Gmail smtp mail",
+  "execution_objective": "can Gmail smtp mail",
+  "definition_instruction": "Create an agent named \"SendGmail Agent\" that can Gmail smtp mail.",
+  "parameter_contract": {
+    "contract_type": "registered_tool_parameter_contract",
+    "source": "registered_tool_input_schema",
+    "tool_id": "gmail_smtp_mail_sender",
+    "parameters": [
+      {
+        "name": "to",
+        "label": "to",
+        "description": "Provide to.",
+        "required": true,
+        "type": "list",
+        "values": [],
+        "collection_mode": "repeat_until_done",
+        "runtime_required": true,
+        "blocking": true,
+        "execution_required": true,
+        "source_schema_type": "array"
+      },
+      {
+        "name": "cc",
+        "label": "cc",
+        "description": "Provide cc.",
+        "required": false,
+        "type": "list",
+        "values": [],
+        "collection_mode": "repeat_until_done",
+        "runtime_required": false,
+        "blocking": false,
+        "execution_required": false,
+        "source_schema_type": "array"
+      },
+      {
+        "name": "bcc",
+        "label": "bcc",
+        "description": "Provide bcc.",
+        "required": false,
+        "type": "list",
+        "values": [],
+        "collection_mode": "repeat_until_done",
+        "runtime_required": false,
+        "blocking": false,
+        "execution_required": false,
+        "source_schema_type": "array"
+      },
+      {
+        "name": "subject",
+        "label": "subject",
+        "description": "Provide subject.",
+        "required": true,
+        "type": "string",
+        "values": [],
+        "collection_mode": "single_value",
+        "runtime_required": true,
+        "blocking": true,
+        "execution_required": true,
+        "source_schema_type": "string"
+      },
+      {
+        "name": "body",
+        "label": "body",
+        "description": "Provide body.",
+        "required": true,
+        "type": "string",
+        "values": [],
+        "collection_mode": "single_value",
+        "runtime_required": true,
+        "blocking": true,
+        "execution_required": true,
+        "source_schema_type": "string"
+      },
+      {
+        "name": "body_subtype",
+        "label": "body_subtype",
+        "description": "Provide body_subtype.",
+        "required": false,
+        "type": "string",
+        "values": [],
+        "collection_mode": "single_value",
+        "runtime_required": false,
+        "blocking": false,
+        "execution_required": false,
+        "source_schema_type": "string"
+      },
+      {
+        "name": "from_email",
+        "label": "from_email",
+        "description": "Provide from_email.",
+        "required": false,
+        "type": "string",
+        "values": [],
+        "collection_mode": "single_value",
+        "runtime_required": false,
+        "blocking": false,
+        "execution_required": false,
+        "source_schema_type": "string"
+      },
+      {
+        "name": "reply_to",
+        "label": "reply_to",
+        "description": "Provide reply_to.",
+        "required": false,
+        "type": "string",
+        "values": [],
+        "collection_mode": "single_value",
+        "runtime_required": false,
+        "blocking": false,
+        "execution_required": false,
+        "source_schema_type": "string"
+      },
+      {
+        "name": "dry_run",
+        "label": "dry_run",
+        "description": "Provide dry_run.",
+        "required": false,
+        "type": "boolean",
+        "values": [],
+        "collection_mode": "single_value",
+        "runtime_required": false,
+        "blocking": false,
+        "execution_required": false,
+        "source_schema_type": "boolean"
+      },
+      {
+        "name": "profile_id",
+        "label": "Runtime profile",
+        "description": "Optional runtime connection profile id. Defaults to default.",
+        "required": false,
+        "type": "string",
+        "values": [],
+        "collection_mode": "single_value",
+        "runtime_required": false,
+        "blocking": false,
+        "execution_required": false,
+        "source_schema_type": "string"
+      }
+    ],
+    "missing_information": [
+      {
+        "name": "to",
+        "label": "to",
+        "description": "Provide to.",
+        "required": true,
+        "type": "list",
+        "values": [],
+        "collection_mode": "repeat_until_done",
+        "runtime_required": true,
+        "blocking": true,
+        "execution_required": true,
+        "source_schema_type": "array"
+      },
+      {
+        "name": "subject",
+        "label": "subject",
+        "description": "Provide subject.",
+        "required": true,
+        "type": "string",
+        "values": [],
+        "collection_mode": "single_value",
+        "runtime_required": true,
+        "blocking": true,
+        "execution_required": true,
+        "source_schema_type": "string"
+      },
+      {
+        "name": "body",
+        "label": "body",
+        "description": "Provide body.",
+        "required": true,
+        "type": "string",
+        "values": [],
+        "collection_mode": "single_value",
+        "runtime_required": true,
+        "blocking": true,
+        "execution_required": true,
+        "source_schema_type": "string"
+      }
+    ],
+    "runtime_scope": "task_run"
+  },
+  "runtime_parameters": {},
+  "missing_information": [
+    {
+      "name": "to",
+      "label": "to",
+      "description": "Provide to.",
+      "required": true,
+      "type": "list",
+      "values": [],
+      "collection_mode": "repeat_until_done",
+      "runtime_required": true,
+      "blocking": true,
+      "execution_required": true,
+      "source_schema_type": "array"
+    },
+    {
+      "name": "subject",
+      "label": "subject",
+      "description": "Provide subject.",
+      "required": true,
+      "type": "string",
+      "values": [],
+      "collection_mode": "single_value",
+      "runtime_required": true,
+      "blocking": true,
+      "execution_required": true,
+      "source_schema_type": "string"
+    },
+    {
+      "name": "body",
+      "label": "body",
+      "description": "Provide body.",
+      "required": true,
+      "type": "string",
+      "values": [],
+      "collection_mode": "single_value",
+      "runtime_required": true,
+      "blocking": true,
+      "execution_required": true,
+      "source_schema_type": "string"
+    }
+  ],
+  "origin": "auxiliary_brain",
+  "status": "created",
+  "created_at": "2026-06-06T13:10:52.713449+00:00",
+  "execution_policy": "runtime_registered_tool",
+  "capability_profile": {
+    "capability_type": "runtime_registered_tool",
+    "tool_id": "gmail_smtp_mail_sender",
+    "capability": "gmail_smtp_mail_sender",
+    "capabilities": [
+      "gmail_smtp_mail_sender"
+    ],
+    "binding_status": "bound_to_registered_runtime_tool",
+    "match_score": 4,
+    "tool_summary": {
+      "tool_id": "gmail_smtp_mail_sender",
+      "name": "gmail_smtp_mail_sender",
+      "capability": "gmail_smtp_mail_sender",
+      "capabilities": [
+        "gmail_smtp_mail_sender"
+      ],
+      "status": "enabled",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "to",
+          "subject",
+          "body"
+        ],
+        "properties": {
+          "to": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "email",
+              "minLength": 3
+            },
+            "minItems": 1
+          },
+          "cc": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "email"
+            },
+            "default": []
+          },
+          "bcc": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "email"
+            },
+            "default": []
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1
+          },
+          "body_subtype": {
+            "type": "string",
+            "enum": [
+              "plain",
+              "html"
+            ],
+            "default": "plain"
+          },
+          "from_email": {
+            "type": "string",
+            "format": "email",
+            "minLength": 3
+          },
+          "reply_to": {
+            "type": "string",
+            "format": "email"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "connection_schema": {
+        "type": "object",
+        "required": [
+          "smtp_host",
+          "smtp_port"
+        ],
+        "properties": {
+          "smtp_host": {
+            "type": "string",
+            "minLength": 1
+          },
+          "smtp_port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "use_tls": {
+            "type": "boolean",
+            "default": true
+          },
+          "starttls": {
+            "type": "boolean",
+            "default": false
+          },
+          "timeout_seconds": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 120,
+            "default": 20
+          },
+          "default_from_email": {
+            "type": "string",
+            "format": "email"
+          }
+        },
+        "additionalProperties": false
+      },
+      "secret_schema": {
+        "type": "object",
+        "required": [],
+        "properties": {
+          "username": {
+            "type": "string",
+            "format": "email"
+          },
+          "password": {
+            "type": "string",
+            "format": "password"
+          }
+        },
+        "additionalProperties": false
+      },
+      "approval_policy": {
+        "mode": "required_for_side_effects",
+        "preview_required": true
+      }
+    },
+    "execution_policy": {
+      "execution_method": "runtime_registered_tool",
+      "requires_approval": false,
+      "approval_policy": {
+        "mode": "required_for_side_effects",
+        "preview_required": true
+      },
+      "connection_required": true,
+      "secret_required": false
+    }
+  },
+  "uploaded_artifacts": [],
+  "artifact_policy": {
+    "bind_uploaded_artifacts_to_agent": false,
+    "allowed_action": "",
+    "parameter_collection_owner": "agent_runtime"
+  }
+}

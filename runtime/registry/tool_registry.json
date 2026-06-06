@@ -1,0 +1,545 @@
+{
+  "gmail_smtp_mail_sender": {
+    "tool_id": "gmail_smtp_mail_sender",
+    "name": "gmail_smtp_mail_sender",
+    "capability": "gmail_smtp_mail_sender",
+    "capabilities": [
+      "gmail_smtp_mail_sender"
+    ],
+    "status": "enabled",
+    "spec_path": "/Users/home/workspace/cdac-nesthub/runtime/generated/tools/gmail_smtp_mail_sender/manifest.json",
+    "implementation": {
+      "type": "python_module",
+      "module_path": "/Users/home/workspace/cdac-nesthub/runtime/generated/tools/gmail_smtp_mail_sender/tool.py",
+      "function": "run"
+    },
+    "dependencies": [],
+    "dependency_resolution": {
+      "passed": true,
+      "status": "not_required",
+      "checks": []
+    },
+    "input_schema": {
+      "type": "object",
+      "required": [
+        "to",
+        "subject",
+        "body"
+      ],
+      "properties": {
+        "to": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "email",
+            "minLength": 3
+          },
+          "minItems": 1
+        },
+        "cc": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "email"
+          },
+          "default": []
+        },
+        "bcc": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "email"
+          },
+          "default": []
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1
+        },
+        "body_subtype": {
+          "type": "string",
+          "enum": [
+            "plain",
+            "html"
+          ],
+          "default": "plain"
+        },
+        "from_email": {
+          "type": "string",
+          "format": "email",
+          "minLength": 3
+        },
+        "reply_to": {
+          "type": "string",
+          "format": "email"
+        },
+        "dry_run": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "required": [
+        "status",
+        "data"
+      ],
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        },
+        "message": {
+          "type": "string"
+        },
+        "provenance": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "connection_schema": {
+      "type": "object",
+      "required": [
+        "smtp_host",
+        "smtp_port"
+      ],
+      "properties": {
+        "smtp_host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "smtp_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "use_tls": {
+          "type": "boolean",
+          "default": true
+        },
+        "starttls": {
+          "type": "boolean",
+          "default": false
+        },
+        "timeout_seconds": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 120,
+          "default": 20
+        },
+        "default_from_email": {
+          "type": "string",
+          "format": "email"
+        }
+      },
+      "additionalProperties": false
+    },
+    "secret_schema": {
+      "type": "object",
+      "required": [],
+      "properties": {
+        "username": {
+          "type": "string",
+          "format": "email"
+        },
+        "password": {
+          "type": "string",
+          "format": "password"
+        }
+      },
+      "additionalProperties": false
+    },
+    "approval_policy": {
+      "mode": "required_for_side_effects",
+      "preview_required": true
+    },
+    "runtime_interface": {
+      "input_mode": "json",
+      "output_mode": "json"
+    },
+    "runtime_execution_policy": {
+      "side_effects": "runtime_declared"
+    },
+    "verification": {
+      "sandbox_verification": true,
+      "execution_verification": true,
+      "registration_gate": {
+        "status": "registration_gate_passed",
+        "safe_to_register": true,
+        "passed": true,
+        "stage": "registration_gate",
+        "checks": [
+          {
+            "name": "pre_validation_gate",
+            "passed": true,
+            "result": {
+              "status": "pre_validation_passed",
+              "safe_to_register": false,
+              "passed": true,
+              "stage": "pre_validation",
+              "checks": [
+                {
+                  "name": "dependency_resolution",
+                  "passed": true,
+                  "result": {
+                    "passed": true,
+                    "status": "not_required",
+                    "checks": []
+                  }
+                },
+                {
+                  "name": "capability_match_contract",
+                  "passed": true,
+                  "result": {
+                    "passed": true,
+                    "status": "completed",
+                    "checks": [
+                      {
+                        "name": "required_markers",
+                        "passed": true,
+                        "missing": []
+                      },
+                      {
+                        "name": "forbidden_markers",
+                        "passed": true,
+                        "present": []
+                      },
+                      {
+                        "name": "expected_tool_id",
+                        "passed": true,
+                        "expected": "gmail_smtp_mail_sender",
+                        "actual": "gmail_smtp_mail_sender"
+                      },
+                      {
+                        "name": "expected_template_id",
+                        "passed": true,
+                        "expected": "gmail_smtp_mail_sender",
+                        "actual": "gmail_smtp_mail_sender"
+                      },
+                      {
+                        "name": "required_artifact_dir_name",
+                        "passed": true,
+                        "expected": "gmail_smtp_mail_sender",
+                        "actual": "gmail_smtp_mail_sender"
+                      }
+                    ],
+                    "created_at": "2026-06-06T13:03:01.870779+00:00"
+                  }
+                }
+              ],
+              "reason": "Dependency and capability match checks passed; sandbox validation is still required.",
+              "created_at": "2026-06-06T13:03:01.872176+00:00"
+            }
+          },
+          {
+            "name": "sandbox_validation",
+            "passed": true,
+            "result": {
+              "passed": true,
+              "status": "completed",
+              "checks": [
+                {
+                  "name": "python_compile",
+                  "returncode": 0,
+                  "stdout": "",
+                  "stderr": "0.01s - Debugger warning: It seems that frozen modules are being used, which may\n0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n0.00s - to python to disable frozen modules.\n0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n",
+                  "attempts": [
+                    {
+                      "executable": "/Users/home/.pyenv/versions/3.11.9/bin/python3.11",
+                      "returncode": 0,
+                      "stdout": "",
+                      "stderr": "0.01s - Debugger warning: It seems that frozen modules are being used, which may\n0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n0.00s - to python to disable frozen modules.\n0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"
+                    }
+                  ]
+                },
+                {
+                  "name": "unit_test",
+                  "test_file": "/Users/home/workspace/cdac-nesthub/runtime/generated/tests/gmail_smtp_mail_sender/test_gmail_smtp_mail_sender.py",
+                  "returncode": 0,
+                  "stdout": "",
+                  "stderr": "0.00s - Debugger warning: It seems that frozen modules are being used, which may\n0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n0.00s - to python to disable frozen modules.\n0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n",
+                  "attempts": [
+                    {
+                      "executable": "/Users/home/.pyenv/versions/3.11.9/bin/python3.11",
+                      "returncode": 0,
+                      "stdout": "",
+                      "stderr": "0.00s - Debugger warning: It seems that frozen modules are being used, which may\n0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n0.00s - to python to disable frozen modules.\n0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"
+                    }
+                  ]
+                },
+                {
+                  "name": "registration_quality_gate",
+                  "passed": true,
+                  "result": {
+                    "passed": true,
+                    "status": "registerable",
+                    "checks": [
+                      {
+                        "name": "artifact_kind",
+                        "passed": true,
+                        "actual": "real_runtime_implementation"
+                      },
+                      {
+                        "name": "input_schema",
+                        "passed": true,
+                        "property_count": 9,
+                        "required": [
+                          "to",
+                          "subject",
+                          "body"
+                        ]
+                      },
+                      {
+                        "name": "connection_schema",
+                        "passed": true,
+                        "property_count": 6,
+                        "required": [
+                          "smtp_host",
+                          "smtp_port"
+                        ]
+                      },
+                      {
+                        "name": "secret_schema",
+                        "passed": true,
+                        "property_count": 2,
+                        "required": []
+                      },
+                      {
+                        "name": "no_stub_markers",
+                        "passed": true,
+                        "present": []
+                      },
+                      {
+                        "name": "smtp_real_implementation_markers",
+                        "passed": true,
+                        "missing": [],
+                        "has_smtp_client": true,
+                        "has_dry_run_path": true
+                      }
+                    ]
+                  }
+                }
+              ],
+              "isolation_level": "clean_subprocess"
+            }
+          },
+          {
+            "name": "isolation_level",
+            "passed": true,
+            "isolation_level": "clean_subprocess"
+          },
+          {
+            "name": "verification_run",
+            "passed": true,
+            "result": {
+              "passed": true,
+              "status": "completed",
+              "input": {
+                "dry_run": true,
+                "input": {
+                  "to": [
+                    "recipient@example.invalid"
+                  ],
+                  "subject": "Capability verification",
+                  "body": "Dry-run verification message.",
+                  "from_email": "sender@example.invalid",
+                  "dry_run": true
+                },
+                "connection": {
+                  "smtp_host": "mock.smtp.invalid",
+                  "smtp_port": 587,
+                  "use_tls": false,
+                  "starttls": true,
+                  "timeout_seconds": 5
+                },
+                "secrets": {
+                  "username": "dry-run-user",
+                  "password": "dry-run-password"
+                },
+                "_runtime": {
+                  "dry_run": true
+                }
+              },
+              "output": {
+                "status": "completed",
+                "tool_id": "gmail_smtp_mail_sender",
+                "data": {
+                  "dry_run": true,
+                  "host": "mock.smtp.invalid",
+                  "port": 587,
+                  "recipient_count": 1,
+                  "subject": "Capability verification",
+                  "refused_recipients": {},
+                  "sent": false
+                },
+                "message": "Message flow completed.",
+                "provenance": {
+                  "source": "runtime_generated_tool",
+                  "side_effects": false
+                }
+              },
+              "expectations": {
+                "status": "completed"
+              },
+              "created_at": "2026-06-06T13:03:05.081208+00:00"
+            }
+          }
+        ],
+        "reason": "Capability artifact passed all registration gate checks.",
+        "created_at": "2026-06-06T13:03:05.087068+00:00"
+      },
+      "checks": [
+        {
+          "name": "python_compile",
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "0.01s - Debugger warning: It seems that frozen modules are being used, which may\n0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n0.00s - to python to disable frozen modules.\n0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n",
+          "attempts": [
+            {
+              "executable": "/Users/home/.pyenv/versions/3.11.9/bin/python3.11",
+              "returncode": 0,
+              "stdout": "",
+              "stderr": "0.01s - Debugger warning: It seems that frozen modules are being used, which may\n0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n0.00s - to python to disable frozen modules.\n0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"
+            }
+          ]
+        },
+        {
+          "name": "unit_test",
+          "test_file": "/Users/home/workspace/cdac-nesthub/runtime/generated/tests/gmail_smtp_mail_sender/test_gmail_smtp_mail_sender.py",
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "0.00s - Debugger warning: It seems that frozen modules are being used, which may\n0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n0.00s - to python to disable frozen modules.\n0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n",
+          "attempts": [
+            {
+              "executable": "/Users/home/.pyenv/versions/3.11.9/bin/python3.11",
+              "returncode": 0,
+              "stdout": "",
+              "stderr": "0.00s - Debugger warning: It seems that frozen modules are being used, which may\n0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n0.00s - to python to disable frozen modules.\n0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"
+            }
+          ]
+        },
+        {
+          "name": "registration_quality_gate",
+          "passed": true,
+          "result": {
+            "passed": true,
+            "status": "registerable",
+            "checks": [
+              {
+                "name": "artifact_kind",
+                "passed": true,
+                "actual": "real_runtime_implementation"
+              },
+              {
+                "name": "input_schema",
+                "passed": true,
+                "property_count": 9,
+                "required": [
+                  "to",
+                  "subject",
+                  "body"
+                ]
+              },
+              {
+                "name": "connection_schema",
+                "passed": true,
+                "property_count": 6,
+                "required": [
+                  "smtp_host",
+                  "smtp_port"
+                ]
+              },
+              {
+                "name": "secret_schema",
+                "passed": true,
+                "property_count": 2,
+                "required": []
+              },
+              {
+                "name": "no_stub_markers",
+                "passed": true,
+                "present": []
+              },
+              {
+                "name": "smtp_real_implementation_markers",
+                "passed": true,
+                "missing": [],
+                "has_smtp_client": true,
+                "has_dry_run_path": true
+              }
+            ]
+          }
+        }
+      ],
+      "verification_run": {
+        "passed": true,
+        "status": "completed",
+        "input": {
+          "dry_run": true,
+          "input": {
+            "to": [
+              "recipient@example.invalid"
+            ],
+            "subject": "Capability verification",
+            "body": "Dry-run verification message.",
+            "from_email": "sender@example.invalid",
+            "dry_run": true
+          },
+          "connection": {
+            "smtp_host": "mock.smtp.invalid",
+            "smtp_port": 587,
+            "use_tls": false,
+            "starttls": true,
+            "timeout_seconds": 5
+          },
+          "secrets": {
+            "username": "dry-run-user",
+            "password": "dry-run-password"
+          },
+          "_runtime": {
+            "dry_run": true
+          }
+        },
+        "output": {
+          "status": "completed",
+          "tool_id": "gmail_smtp_mail_sender",
+          "data": {
+            "dry_run": true,
+            "host": "mock.smtp.invalid",
+            "port": 587,
+            "recipient_count": 1,
+            "subject": "Capability verification",
+            "refused_recipients": {},
+            "sent": false
+          },
+          "message": "Message flow completed.",
+          "provenance": {
+            "source": "runtime_generated_tool",
+            "side_effects": false
+          }
+        },
+        "expectations": {
+          "status": "completed"
+        },
+        "created_at": "2026-06-06T13:03:05.081208+00:00"
+      },
+      "test_dir": "/Users/home/workspace/cdac-nesthub/runtime/generated/tests/gmail_smtp_mail_sender",
+      "test_files": [
+        "/Users/home/workspace/cdac-nesthub/runtime/generated/tests/gmail_smtp_mail_sender/test_gmail_smtp_mail_sender.py"
+      ]
+    },
+    "source_urls": [
+      "runtime-policy://basic-runtime-capability-contract"
+    ],
+    "registered_at": "2026-06-06T13:03:05.109180+00:00"
+  }
+}

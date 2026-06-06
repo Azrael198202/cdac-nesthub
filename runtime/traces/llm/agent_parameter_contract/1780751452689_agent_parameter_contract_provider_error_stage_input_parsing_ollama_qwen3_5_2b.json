@@ -1,0 +1,9 @@
+{
+  "run_id": "agent_parameter_contract",
+  "node_id": "agent_parameter_contract",
+  "provider": "stage_input_parsing_ollama_qwen3_5_2b",
+  "provider_type": "universal_model",
+  "model": "qwen3.5:2b",
+  "elapsed_seconds": 5.21,
+  "error": "Model request timed out. provider=stage_input_parsing_ollama_qwen3_5_2b, model=qwen3.5:2b, timeout_seconds=5.0. Use a smaller/faster local model for early JSON stages, increase the whole-run budget, or enable an external fallback provider."
+}

@@ -1,0 +1,87 @@
+{
+  "run_id": "graph_b094723d3576",
+  "node_id": "semantic_task_graph_planning",
+  "provider": "stage_adapter_or_default_ollama_qwen3_5_2b",
+  "provider_type": "universal_model",
+  "model": "qwen3.5:2b",
+  "timeout_seconds": 90.0,
+  "options": {
+    "temperature": 0
+  },
+  "think": null,
+  "prompt": {
+    "system": "Return only JSON. Decompose the user instruction into the work graph that should run after the task exists. Represent every requested executable action, modifier, post-process, and dependency as a step. Do not create executable steps for the command wrapper that only names, registers, or initializes the task itself. If a parsed fragment is only task-management metadata, include it only when needed with executable=false. Use a participant route only when the step should be executed by one of the declared participants. For any executable step not owned by a declared participant, set route.requires_generated_step=true. Do not omit independent parallel steps or dependent follow-up steps.",
+    "user": "{'instruction': 'Create a task named SendCurrentTimeMail.\\n\\nStep 1:\\n\\nCall Time Agent.\\n\\nStep 2:\\n\\nCall SendGMail Agent.\\n\\nParameters:\\n\\n- to:  soarwiththewind6@gmail.com\\n- subject: Current Time\\n- body: {{Step1.final_answer}}\\n\\nExecute the task.', 'declared_participants': [{'participant_id': 'participant_2c30ec2cebaa', 'display_name': 'SendGmail Agent'}, {'participant_id': 'participant_ee061542bee5', 'display_name': 'Time Agent'}], 'output_contract': {'type': 'object', 'additionalProperties': False, 'properties': {'steps': {'type': 'array', 'items': {'type': 'object', 'additionalProperties': True, 'properties': {'id': {'type': 'string'}, 'label': {'type': 'string'}, 'objective': {'type': 'string'}, 'instruction_fragment': {'type': 'string'}, 'executable': {'type': 'boolean'}, 'depends_on': {'type': 'array', 'items': {'type': 'string'}}, 'route': {'type': 'object', 'additionalProperties': True, 'properties': {'participant_id': {'type': 'string'}, 'participant_name': {'type': 'string'}, 'requires_generated_step': {'type': 'boolean'}}}}, 'required': ['id', 'objective', 'depends_on', 'route']}}, 'coverage_notes': {'type': 'array', 'items': {'type': 'string'}}}, 'required': ['steps']}}"
+  },
+  "schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "objective": {
+              "type": "string"
+            },
+            "instruction_fragment": {
+              "type": "string"
+            },
+            "executable": {
+              "type": "boolean"
+            },
+            "depends_on": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "route": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "participant_id": {
+                  "type": "string"
+                },
+                "participant_name": {
+                  "type": "string"
+                },
+                "requires_generated_step": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "required": [
+            "id",
+            "objective",
+            "depends_on",
+            "route"
+          ]
+        }
+      },
+      "coverage_notes": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "required": [
+      "steps"
+    ]
+  },
+  "budget": {
+    "budget_tokens": 1500,
+    "estimated_tokens": 303,
+    "truncated": false
+  }
+}
