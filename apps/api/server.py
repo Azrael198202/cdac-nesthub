@@ -516,6 +516,29 @@ async def verification_failure_reports(limit: int = 80):
     return JSONResponse({"ok": True, "reports": studio_service.verification_foundation.list_reports(limit=limit)})
 
 
+
+
+@app.get("/api/verification/side-effect-confirmations")
+async def verification_side_effect_confirmations(limit: int = 100, status: str | None = None):
+    return JSONResponse({
+        "ok": True,
+        "confirmations": studio_service.verification_foundation.list_side_effect_confirmations(limit=limit, status=status),
+    })
+
+
+@app.post("/api/verification/side-effect-confirmations/{confirmation_id}/feedback")
+async def verification_side_effect_confirmation_feedback(confirmation_id: str, payload: dict):
+    outcome = str((payload or {}).get("outcome") or "")
+    note = str((payload or {}).get("note") or "")
+    result = studio_service.verification_foundation.record_user_side_effect_feedback(
+        confirmation_id=confirmation_id,
+        outcome=outcome,
+        note=note,
+    )
+    status_code = 200 if result.get("ok") else 404
+    return JSONResponse(result, status_code=status_code)
+
+
 @app.get("/api/verification/failure-reports/{report_id}")
 async def verification_failure_report(report_id: str):
     reports = studio_service.verification_foundation.list_reports(limit=500)

@@ -1436,6 +1436,17 @@ class AgentStudioService:
             except Exception:
                 pass
         if report is None:
+            confirmations = run_payload.get("side_effect_confirmations") if isinstance(run_payload, dict) else None
+            if response is not None and isinstance(confirmations, list) and confirmations:
+                response["side_effect_confirmation"] = {
+                    "status": "pending_user_feedback_default_success",
+                    "default_assumption": "success_until_user_reports_failure",
+                    "confirmations": confirmations,
+                }
+                response.setdefault("verification", {})
+                if isinstance(response.get("verification"), dict):
+                    response["verification"].setdefault("status", "passed_with_pending_side_effect_confirmation")
+                    response["verification"]["side_effect_confirmation_count"] = len(confirmations)
             return None
         report_dict = report.to_dict()
         self_check = run_payload.get("self_check") if isinstance(run_payload.get("self_check"), dict) else {}

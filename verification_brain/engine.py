@@ -405,30 +405,141 @@ class RuntimeVerificationBrain:
         checks: list[dict[str, Any]] = []
         for item in self._agent_results(context):
             workflow_results = item.get("workflow_results") if isinstance(item.get("workflow_results"), dict) else {}
-            text = self._stringify({"item": item, "workflow_results": workflow_results}).casefold()
-            is_side_effect = bool(workflow_results.get("side_effect")) or bool(workflow_results.get("tool_id")) or "runtime_registered_tool" in text or "registered_tool" in text
+            evidence_text = self._stringify({"item": item, "workflow_results": workflow_results}).casefold()
+            is_side_effect = (
+                bool(workflow_results.get("side_effect"))
+                or bool(workflow_results.get("tool_id"))
+                or bool(workflow_results.get("delivery"))
+                or bool(workflow_results.get("artifact_path"))
+                or "runtime_registered_tool" in evidence_text
+                or "registered_tool" in evidence_text
+            )
             if not is_side_effect:
                 continue
             status = self._status_of(workflow_results) or self._status_of(item)
+            success_reported = status in self.SUCCESS_STATUSES
             checks.append({
                 "level": 6,
                 "level_name": self.LEVELS[6],
-                "name": "side_effect_capability_reports_success",
+                "name": "side_effect_capability_reports_terminal_status",
                 "participant_id": item.get("participant_id"),
+                "participant_name": item.get("participant_name"),
                 "status": status,
-                "passed": status in self.SUCCESS_STATUSES,
+                "passed": success_reported,
+                "side_effect_status": "accepted" if success_reported else "failed",
                 "suggested_location": ["side-effect tool result", "capability return schema", "external operation verification"],
             })
-            if _TEMPLATE_RE.search(text):
+            if _TEMPLATE_RE.search(evidence_text):
                 checks.append({
                     "level": 6,
                     "level_name": self.LEVELS[6],
                     "name": "side_effect_input_output_must_not_contain_unresolved_template",
                     "participant_id": item.get("participant_id"),
                     "passed": False,
+                    "side_effect_status": "failed",
                     "suggested_location": ["side-effect preflight guard", "template resolution"],
                 })
+                continue
+            if not success_reported:
+                continue
+            checks.append(self._side_effect_verification_status(item=item, workflow_results=workflow_results))
         return checks
+
+    def _side_effect_verification_status(self, *, item: dict[str, Any], workflow_results: dict[str, Any]) -> dict[str, Any]:
+        verification = workflow_results.get("side_effect_verification") if isinstance(workflow_results.get("side_effect_verification"), dict) else {}
+        mode = str(verification.get("mode") or workflow_results.get("side_effect_verification_mode") or "").strip().lower()
+        status = str(verification.get("status") or verification.get("result_status") or "").strip().lower()
+        artifact_refs = self._artifact_refs(workflow_results)
+        if artifact_refs:
+            missing = [ref for ref in artifact_refs if not self._local_ref_exists(ref)]
+            return {
+                "level": 6,
+                "level_name": self.LEVELS[6],
+                "name": "side_effect_local_artifact_must_exist",
+                "participant_id": item.get("participant_id"),
+                "participant_name": item.get("participant_name"),
+                "verification_mode": "local_artifact",
+                "passed": not missing,
+                "side_effect_status": "verified" if not missing else "failed",
+                "artifact_refs": artifact_refs[:20],
+                "missing_artifact_refs": missing[:20],
+                "suggested_location": ["artifact writer", "delivery recorder", "capability result schema"],
+            }
+        if mode in {"read_back", "callback", "status_check"}:
+            verified = status in self.SUCCESS_STATUSES or bool(verification.get("verified"))
+            return {
+                "level": 6,
+                "level_name": self.LEVELS[6],
+                "name": "side_effect_read_back_verification",
+                "participant_id": item.get("participant_id"),
+                "participant_name": item.get("participant_name"),
+                "verification_mode": mode,
+                "passed": verified,
+                "side_effect_status": "verified" if verified else "failed",
+                "verification": verification,
+                "suggested_location": ["read-back verifier", "capability verification adapter", "external state check"],
+            }
+        if mode in {"none", "not_verifiable"}:
+            return {
+                "level": 6,
+                "level_name": self.LEVELS[6],
+                "name": "side_effect_declared_not_verifiable",
+                "participant_id": item.get("participant_id"),
+                "participant_name": item.get("participant_name"),
+                "verification_mode": mode,
+                "passed": None,
+                "side_effect_status": "not_verifiable",
+                "requires_user_confirmation": True,
+                "suggested_location": ["capability side-effect declaration", "user confirmation channel"],
+            }
+        return {
+            "level": 6,
+            "level_name": self.LEVELS[6],
+            "name": "side_effect_accepted_pending_user_confirmation",
+            "participant_id": item.get("participant_id"),
+            "participant_name": item.get("participant_name"),
+            "tool_id": workflow_results.get("tool_id"),
+            "verification_mode": mode or "accepted_only",
+            "passed": None,
+            "side_effect_status": "accepted_pending_user_confirmation",
+            "requires_user_confirmation": True,
+            "default_assumption": "success_until_user_reports_failure",
+            "suggested_location": ["capability side-effect declaration", "optional read-back verifier", "user confirmation channel"],
+        }
+
+    def _artifact_refs(self, workflow_results: dict[str, Any]) -> list[str]:
+        refs: list[str] = []
+        for key in ("artifact_path", "file_path", "output_path", "delivery_path", "path"):
+            value = workflow_results.get(key)
+            if isinstance(value, str) and value.strip():
+                refs.append(value.strip())
+        raw = workflow_results.get("artifacts")
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, str) and item.strip():
+                    refs.append(item.strip())
+                elif isinstance(item, dict):
+                    for key in ("path", "file_path", "artifact_path"):
+                        value = item.get(key)
+                        if isinstance(value, str) and value.strip():
+                            refs.append(value.strip())
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for ref in refs:
+            if ref not in seen:
+                seen.add(ref)
+                deduped.append(ref)
+        return deduped
+
+    def _local_ref_exists(self, ref: str) -> bool:
+        from pathlib import Path
+        path = Path(ref)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        try:
+            return path.exists() and (path.is_file() or path.is_dir())
+        except Exception:
+            return False
 
     def _participants(self, context: dict[str, Any]) -> list[dict[str, Any]]:
         direct = context.get("participants")

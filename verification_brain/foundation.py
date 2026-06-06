@@ -57,6 +57,8 @@ class RuntimeVerificationFoundation:
         self.repair = RuntimeRepairBrain()
         self.report_root = RUNTIME_GENERATED / "failure_reports"
         self.report_root.mkdir(parents=True, exist_ok=True)
+        self.confirmation_root = RUNTIME_GENERATED / "side_effect_confirmations"
+        self.confirmation_root.mkdir(parents=True, exist_ok=True)
 
     def inspect_run(
         self,
@@ -92,6 +94,14 @@ class RuntimeVerificationFoundation:
         )
         checks.extend(verify_result.checks)
         failed_checks = [check for check in checks if check.get("passed") is False]
+        pending_confirmations = self._record_side_effect_confirmations(
+            task_name=task_name,
+            run_id=run_id,
+            graph_id=graph_id,
+            checks=checks,
+            run_payload=run_payload,
+            stage=stage,
+        )
         if status not in self.FAILURE_STATUSES and not failed_checks:
             self._append_verification_event({
                 "event": "verification_passed",
@@ -100,6 +110,7 @@ class RuntimeVerificationFoundation:
                 "graph_id": graph_id,
                 "status": status,
                 "stage": stage,
+                "side_effect_confirmations": [item.get("confirmation_id") for item in pending_confirmations],
             })
             return None
 
@@ -137,6 +148,148 @@ class RuntimeVerificationFoundation:
             suggested_owner=suggested_owner,
             suggested_location=suggested_location,
             payload={"runtime_status": status, "stage": stage},
+        )
+        self.write_report(report)
+        return report
+
+
+    def list_side_effect_confirmations(self, *, limit: int = 100, status: str | None = None) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for path in sorted(self.confirmation_root.glob("confirmation_*.json"), key=lambda p: p.stat().st_mtime):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    continue
+                data.setdefault("path", str(path))
+                if status and str(data.get("status") or "") != status:
+                    continue
+                records.append(data)
+            except Exception:
+                continue
+        return records[-max(1, int(limit)):]
+
+    def record_user_side_effect_feedback(self, *, confirmation_id: str, outcome: str, note: str = "") -> dict[str, Any]:
+        confirmation_id = str(confirmation_id or "").strip()
+        outcome_norm = str(outcome or "").strip().lower()
+        if outcome_norm in {"ok", "success", "succeeded", "works", "confirmed"}:
+            outcome_norm = "confirmed_success"
+        elif outcome_norm in {"fail", "failed", "failure", "not_working", "not_received", "unavailable", "ng"}:
+            outcome_norm = "confirmed_failure"
+        path = self.confirmation_root / f"{confirmation_id}.json"
+        if not path.exists():
+            return {"ok": False, "status": "not_found", "confirmation_id": confirmation_id}
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(record, dict):
+                record = {}
+        except Exception:
+            record = {}
+        record["status"] = outcome_norm or "user_feedback_recorded"
+        record["user_feedback"] = {"outcome": outcome_norm, "note": note, "received_at": datetime.now(timezone.utc).isoformat()}
+        path.write_text(json.dumps(record, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        self._append_verification_event({"event": "side_effect_user_feedback_recorded", **record})
+        if outcome_norm == "confirmed_failure":
+            report = self._create_user_confirmed_side_effect_failure(record)
+            return {"ok": True, "status": outcome_norm, "confirmation": record, "failure_report": report.to_dict()}
+        return {"ok": True, "status": outcome_norm, "confirmation": record}
+
+    def _record_side_effect_confirmations(
+        self,
+        *,
+        task_name: str,
+        run_id: str,
+        graph_id: str,
+        checks: list[dict[str, Any]],
+        run_payload: dict[str, Any],
+        stage: str,
+    ) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for check in checks:
+            if int(check.get("level") or 0) != 6:
+                continue
+            if not check.get("requires_user_confirmation"):
+                continue
+            if str(check.get("side_effect_status") or "") not in {"accepted_pending_user_confirmation", "not_verifiable"}:
+                continue
+            participant_id = str(check.get("participant_id") or "").strip()
+            confirmation_id = self._safe_id("|".join([run_id, participant_id, check.get("name") or "side_effect"]))
+            confirmation_id = f"confirmation_{confirmation_id}"
+            record = {
+                "confirmation_id": confirmation_id,
+                "status": "pending_user_feedback_default_success",
+                "default_assumption": "success_until_user_reports_failure",
+                "task_name": task_name,
+                "run_id": run_id,
+                "graph_id": graph_id,
+                "participant_id": participant_id,
+                "participant_name": check.get("participant_name"),
+                "tool_id": check.get("tool_id"),
+                "side_effect_status": check.get("side_effect_status"),
+                "verification_mode": check.get("verification_mode"),
+                "stage": stage,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "prompt_to_user": "Please confirm whether the external side effect actually worked. If it did not, report this confirmation_id so repair can start.",
+                "source_check": check,
+            }
+            path = self.confirmation_root / f"{confirmation_id}.json"
+            if path.exists():
+                try:
+                    existing = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(existing, dict):
+                        records.append(existing)
+                        continue
+                except Exception:
+                    pass
+            path.write_text(json.dumps(record, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+            self._append_verification_event({"event": "side_effect_confirmation_requested", **record})
+            records.append(record)
+        run_payload["side_effect_confirmations"] = records
+        return records
+
+    def _create_user_confirmed_side_effect_failure(self, record: dict[str, Any]) -> RuntimeFailureReport:
+        task_name = str(record.get("task_name") or "")
+        run_id = str(record.get("run_id") or "")
+        graph_id = str(record.get("graph_id") or "")
+        participant_id = str(record.get("participant_id") or "")
+        failure_class = "user_confirmed_side_effect_failure"
+        evidence_package = self.evidence.collect(EvidenceRequest(
+            run_id=run_id,
+            task_name=task_name,
+            participant_id=participant_id,
+            event_name=failure_class,
+            max_lines_per_file=280,
+        ))
+        evidence_path = self.report_root / f"evidence_{run_id or self._safe_id(task_name) or 'unknown'}_user_feedback.json"
+        self.evidence.write_package(evidence_package, output_path=evidence_path)
+        repair_plan = self.repair.analyze(RepairRequest(
+            run_id=run_id,
+            component=participant_id or graph_id,
+            failure={"status": "confirmed_failure", "failure_class": failure_class, "confirmation": record},
+            context={"task_name": task_name, "participant_id": participant_id, "graph_id": graph_id, "event_name": failure_class},
+            expected_contract={"side_effect_must_be_confirmable": True},
+        ))
+        report = RuntimeFailureReport(
+            report_id=f"failure_{run_id or self._safe_id(task_name) or datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_user_confirmed_side_effect",
+            status="failure_detected",
+            task_name=task_name,
+            run_id=run_id,
+            graph_id=graph_id,
+            failure_class=failure_class,
+            failed_checks=[{
+                "level": 6,
+                "level_name": "side_effect_verification",
+                "name": "user_confirmed_side_effect_failure",
+                "passed": False,
+                "participant_id": participant_id,
+                "confirmation_id": record.get("confirmation_id"),
+                "suggested_location": ["side-effect verifier", "capability implementation", "external operation adapter"],
+            }],
+            evidence_path=str(evidence_path),
+            evidence_summary=evidence_package.summary,
+            repair_plan=repair_plan.to_dict(),
+            suggested_owner="repair_brain",
+            suggested_location=["side-effect verifier", "capability implementation", "external operation adapter"],
+            payload={"confirmation": record},
         )
         self.write_report(report)
         return report
