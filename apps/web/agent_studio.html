@@ -536,6 +536,34 @@ async function uploadArtifacts(){
   finally{ if(input) input.value=''; setStudioStatus('ready', false); }
 }
 
+
+async function postStudioMessage(payload){
+  const controller = new AbortController();
+  const timeout = setTimeout(()=>controller.abort(), 120000);
+  try{
+    const res = await fetch('/api/agent-studio/message',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload),
+      signal:controller.signal
+    });
+    const raw = await res.text();
+    let data = null;
+    try{ data = raw ? JSON.parse(raw) : {}; }catch(parseError){
+      data = {ok:false, status:'failed', final_answer: raw || ('HTTP '+res.status), error: 'non_json_response'};
+    }
+    if(!res.ok){
+      data = data || {};
+      data.status = data.status || 'failed';
+      data.final_answer = data.final_answer || data.message || ('HTTP '+res.status);
+      data.http_status = res.status;
+    }
+    return data || {};
+  }finally{
+    clearTimeout(timeout);
+  }
+}
+
 async function sendMessage(){
   const input=document.getElementById('input');
   const text=input.value.trim();
@@ -561,12 +589,8 @@ async function sendMessage(){
   ];
   let hintIndex=0;
   try{
-    const canStart = await ensureSelectedModelCredential();
-    if(!canStart){
-      finishExecutionRecord('waiting_input','Waiting for model configuration');
-      setStudioStatus('waiting input', false);
-      return;
-    }
+    // Do not block message submission on UI-side model configuration checks.
+    // The backend runtime owns model policy validation and missing credential handling.
     setLocalExecutionStage('input_parsing','Receiving instruction',8);
     addProgressMessage(hints[hintIndex++]);
     const localStages=[['intent_recognition','Routing command',18],['workflow_planning','Planning runtime work',35],['pre_execution_validation','Checking readiness',48],['execution','Executing runtime work',68],['verification_brain','Verifying result',82],['presentation_brain','Preparing response',92]];
@@ -576,8 +600,8 @@ async function sendMessage(){
       if(hintIndex<hints.length){ addProgressMessage(hints[hintIndex++]); }
       if(localStageIndex<localStages.length){ const st=localStages[localStageIndex++]; setLocalExecutionStage(st[0],st[1],st[2]); }
     }, 1800);
-    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, session_id:activeSessionId, uploaded_artifacts:selectedArtifactsForRequest(text), presentation_profile:getPresentationProfile()})});
-    const data=await res.json();
+    addProgressMessage('submitting request to runtime');
+    const data=await postStudioMessage({message:text, session_id:activeSessionId, uploaded_artifacts:selectedArtifactsForRequest(text), presentation_profile:getPresentationProfile()});
     consumeSelectedArtifactsAfterRequest();
     renderStudioResponse(data, text);
     finishExecutionRecord((data&&data.status==='failed')?'failed':'completed', (data&&data.status==='failed')?'Failed':'Completed');
@@ -588,7 +612,9 @@ async function sendMessage(){
     await refreshState();
   }catch(e){
     finishExecutionRecord('failed','Error');
-    addMessage('Error: '+e,'item error');
+    const msg = (e && e.name === 'AbortError') ? 'Runtime request timed out before a response was received.' : String(e && e.message ? e.message : e);
+    addMessage('Error: '+msg,'item error');
+    try{ await refreshSessions(); await refreshState(); }catch(refreshError){}
   } finally{
     if(pollTimer) clearInterval(pollTimer);
     if(hintTimer) clearInterval(hintTimer);
@@ -1145,16 +1171,20 @@ function renderCommandHelp(commands){
 }
 
 async function ensureSelectedModelCredential(){
-  try{
-    await saveModelSelection();
-  }catch(e){
-    addMessage('Model settings could not be saved before this request. Continuing with the last active runtime model policy. Details: '+escapeHtml(e && e.message ? e.message : e), 'item error');
-  }
-  const data=modelSelectionState;
-  if(!data || !data.secret_prompt_required){ return true; }
+  // Send must never be silently blocked by model-setting persistence.
+  // Runtime execution uses the last saved model policy; settings are saved explicitly
+  // from the Settings panel. This guard only blocks when an API credential is
+  // explicitly required for the currently selected policy.
+  const data=modelSelectionState || {};
+  const selection=data.selection || {};
+  const mode=String(selection.mode || data.mode || '').toLowerCase();
+  const provider=String(selection.initial_provider || data.initial_provider || selection.selected_provider || data.selected_provider || '').toLowerCase();
+  const apiLike = mode.includes('api') || provider.includes('openai') || provider.includes('anthropic') || provider.includes('azure') || provider.includes('google') || provider.includes('deepseek');
+  if(!apiLike){ return true; }
+  if(!data.secret_prompt_required){ return true; }
   const key=data.required_secret;
   if(!key){ return true; }
-  openMissingInputModal([{kind:'secret_input', field:key, input_type:'password', message:'The selected initial API model requires a credential. Enter the key to continue, or cancel to stop this run.', provider:(data.selection&&data.selection.initial_provider)||'api provider'}], 'model_selection');
+  openMissingInputModal([{kind:'secret_input', field:key, input_type:'password', message:'The selected API model requires a credential. Enter the key to continue, or change the model mode in Settings.', provider:(selection.initial_provider)||'api provider'}], 'model_selection');
   return false;
 }
 
