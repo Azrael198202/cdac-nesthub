@@ -174,6 +174,7 @@ class FailureMessageRenderer:
     def render(self, report: dict[str, Any], *, allow_llm: bool = True) -> FailureUserMessage:
         report = report if isinstance(report, dict) else {}
         failed_checks = report.get("failed_checks") if isinstance(report.get("failed_checks"), list) else []
+        failed_checks = self._dedupe_checks(failed_checks)
         failure_class = str(report.get("failure_class") or self._infer_primary_failure_class(failed_checks) or "unknown_problem")
         message = self._render_deterministic(report=report, failure_class=failure_class, failed_checks=failed_checks)
         if allow_llm and self._should_upgrade_to_llm(report=report, failed_checks=failed_checks, failure_class=failure_class):
@@ -326,6 +327,27 @@ class FailureMessageRenderer:
             if isinstance(check, dict):
                 compact.append({k: v for k, v in check.items() if k in allowed})
         return compact
+
+    def _dedupe_checks(self, checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Collapse repeated structural validation issues before rendering."""
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for check in checks:
+            if not isinstance(check, dict):
+                continue
+            key_parts = [
+                str(check.get("failure_class") or ""),
+                str(check.get("check") or ""),
+                str(check.get("reference") or ""),
+                str(check.get("root") or ""),
+                str(check.get("line") or ""),
+            ]
+            key = "|".join(key_parts).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(check)
+        return out
 
     def _dedupe(self, values: list[str]) -> list[str]:
         out: list[str] = []

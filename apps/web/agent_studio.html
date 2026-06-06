@@ -152,7 +152,28 @@ function renderStudioResponse(data, originalText){
   }
   const status = data && data.status ? String(data.status) : 'received';
   const action = data && data.action ? String(data.action) : 'runtime response';
+  if(data && data.user_message){
+    const um=data.user_message||{};
+    const parts=[];
+    if(um.title){ parts.push(String(um.title)); }
+    if(um.summary){ parts.push('', String(um.summary)); }
+    if(Array.isArray(um.reasons) && um.reasons.length){
+      parts.push('', 'Reasons:');
+      um.reasons.slice(0,8).forEach(x=>parts.push('- '+String(x)));
+    }
+    if(Array.isArray(um.suggestions) && um.suggestions.length){
+      parts.push('', 'Suggested fixes:');
+      um.suggestions.slice(0,8).forEach(x=>parts.push('- '+String(x)));
+    }
+    if(Array.isArray(um.location) && um.location.length){
+      parts.push('', 'Where to check:');
+      um.location.slice(0,5).forEach(x=>parts.push('- '+String(x)));
+    }
+    addMessage(parts.join('\n') || `${action}: ${status}`, data.status==='completed' ? 'item' : 'item error');
+    return;
+  }
   let detail = '';
+  if(data && data.message){ detail = String(data.message); }
   if(data && data.error){
     if(typeof data.error === 'string'){ detail = data.error; }
     else { detail = data.error.message || data.error.type || JSON.stringify(data.error); }

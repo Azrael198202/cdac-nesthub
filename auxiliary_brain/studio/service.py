@@ -1092,11 +1092,11 @@ class AgentStudioService:
         explicit_runtime_parameters.update(
             self._extract_step_scoped_runtime_parameters_from_tasks(workflow_plan.tasks)
         )
-        for generated_participant in workflow_plan.generated_participants:
-            generated_participant.setdefault("created_at", self._now())
-            pid = str(generated_participant.get("participant_id") or "").strip()
-            if pid:
-                self.store.write_json(f"generated/agents/{pid}.json", generated_participant)
+        # Do not persist planner-generated local participants before static
+        # validation. If validation fails, persisting them pollutes the durable
+        # agent catalog and the UI starts showing false agents such as
+        # "Call X Agent. Parameters...". Generated participants are only
+        # runtime graph assets after the task graph is accepted.
         selected_ids = [p.get("participant_id") for p in workflow_plan.selected_participants]
         workflow_tasks = self._hydrate_task_step_bindings_from_participants(
             workflow_plan.tasks,
@@ -1143,6 +1143,8 @@ class AgentStudioService:
             failure_report = self._build_static_validation_failure_report(failure_payload)
             self._write_static_validation_failure_report(failure_payload, report=failure_report)
             self._update_community()
+            user_message = (failure_report.get("payload") or {}).get("user_message")
+            final_answer = self._format_failure_user_message(user_message) if isinstance(user_message, dict) else "Task graph creation failed."
             return {
                 "action": "create_task_graph",
                 "origin": "auxiliary_brain",
@@ -1150,8 +1152,9 @@ class AgentStudioService:
                 "failure_class": "task_graph_static_validation_failed",
                 "graph_id": graph_id,
                 "task_name": task_name,
-                "message": (failure_report.get("payload") or {}).get("user_message", {}).get("summary") or "Task graph creation failed.",
-                "user_message": (failure_report.get("payload") or {}).get("user_message"),
+                "message": final_answer,
+                "final_answer": final_answer,
+                "user_message": user_message,
                 "failure_report": failure_report,
                 "static_validation": static_validation,
             }
@@ -1161,6 +1164,12 @@ class AgentStudioService:
         # task-level contract here prevents stale values from leaking into
         # unrelated future runs and avoids referencing an undefined
         # participant-only parameter_contract.
+        for generated_participant in workflow_plan.generated_participants:
+            generated_participant.setdefault("created_at", self._now())
+            pid = str(generated_participant.get("participant_id") or "").strip()
+            if pid:
+                self.store.write_json(f"generated/agents/{pid}.json", generated_participant)
+
         schema_contract = {
             "contract_type": "task_runtime_parameter_contract",
             "parameters": [],
@@ -1424,6 +1433,44 @@ class AgentStudioService:
         report["payload"] = dict(report.get("payload") or {})
         report["payload"]["user_message"] = user_message
         return report
+
+    def _format_failure_user_message(self, user_message: dict[str, Any] | None) -> str:
+        """Format Presentation Brain failure message for simple UI surfaces."""
+        if not isinstance(user_message, dict):
+            return "Task graph creation failed."
+        lines: list[str] = []
+        title = str(user_message.get("title") or "Task graph creation failed.").strip()
+        summary = str(user_message.get("summary") or "").strip()
+        if title:
+            lines.append(title)
+        if summary:
+            lines.append("")
+            lines.append(summary)
+        reasons = user_message.get("reasons") if isinstance(user_message.get("reasons"), list) else []
+        if reasons:
+            lines.append("")
+            lines.append("Reasons:")
+            for item in reasons[:6]:
+                text = str(item or "").strip()
+                if text:
+                    lines.append(f"- {text}")
+        suggestions = user_message.get("suggestions") if isinstance(user_message.get("suggestions"), list) else []
+        if suggestions:
+            lines.append("")
+            lines.append("Suggested fixes:")
+            for item in suggestions[:6]:
+                text = str(item or "").strip()
+                if text:
+                    lines.append(f"- {text}")
+        location = user_message.get("location") if isinstance(user_message.get("location"), list) else []
+        if location:
+            lines.append("")
+            lines.append("Where to check:")
+            for item in location[:4]:
+                text = str(item or "").strip()
+                if text:
+                    lines.append(f"- {text}")
+        return "\n".join(lines).strip() or "Task graph creation failed."
 
     def _write_static_validation_failure_report(self, payload: dict[str, Any], *, report: dict[str, Any] | None = None) -> None:
         try:
