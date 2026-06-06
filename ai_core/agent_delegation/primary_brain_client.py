@@ -126,16 +126,152 @@ class PrimaryBrainDelegationClient:
 
 
     def _try_self_contained_runtime_observation(self, request: AgentExecutionRequest) -> AgentExecutionResult | None:
-        """No fixed runtime-observation shortcut is performed in ai_core.
+        """Answer self-contained runtime-state participant requests without LLM.
 
-        Runtime values must be supplied by a registered/generated capability, a
-        delegated participant, or the configured model/tool route.  Keeping this
-        hook disabled avoids embedding domain-specific behavior in the universal
-        runtime brain and ensures create-agent / execute-agent requests go
-        through the normal planning and evidence path.
+        The participant profile may be created as a small generated program or as
+        a direct runtime observation. In both cases, when no external artifact is
+        bound and the objective asks for the current runtime temporal value, no
+        user-supplied parameters are required and no planner LLM is needed.
         """
-        return None
+        context = request.shared_context if isinstance(request.shared_context, dict) else {}
+        artifact_binding = context.get("artifact_binding") if isinstance(context.get("artifact_binding"), dict) else {}
+        if artifact_binding.get("available"):
+            return None
+        text = " ".join([request.participant_name or "", request.participant_instruction or "", request.task_instruction or ""]).casefold()
+        current_markers = ("current", "now", "present", "現在", "今", "当前", "现在")
+        temporal_markers = ("time", "datetime", "timestamp", "時刻", "時間", "日時", "时间")
+        if not (any(m in text for m in current_markers) and any(m in text for m in temporal_markers)):
+            return None
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).astimezone()
+        answer = f"The current time is {now.strftime('%H:%M')}."
+        run_id = uuid.uuid4().hex[:12]
+        return AgentExecutionResult(
+            participant_id=request.participant_id,
+            participant_name=request.participant_name,
+            core_run_id=run_id,
+            status="completed",
+            final_answer=answer,
+            workflow_results={
+                "runtime_native_observation": {
+                    "status": "completed",
+                    "final_answer": answer,
+                    "execution_mode": "self_contained_runtime_observation",
+                    "observed_at": now.isoformat(timespec="seconds"),
+                }
+            },
+        )
 
+
+    async def execute_intermediate_step(self, request: AgentExecutionRequest, progress_callback: Callable[[dict[str, Any]], Any] | None = None) -> AgentExecutionResult:
+        """Execute a generated dataflow step with the smallest safe prompt.
+
+        The step is generic: it receives an objective plus declared upstream
+        results and returns only the user-facing step output. It avoids sending
+        full task graphs or coordination metadata to the model. A pure final
+        projection step with one upstream result is completed deterministically
+        without using an LLM.
+        """
+        core_run_id = uuid.uuid4().hex[:12]
+        if progress_callback:
+            progress_callback({"type": "NODE_STARTED", "run_id": core_run_id, "node_id": "dataflow_step"})
+            progress_callback({"type": "NODE_EXECUTING", "run_id": core_run_id, "node_id": "dataflow_step"})
+
+        declared_dependencies = []
+        if isinstance(request.shared_context, dict):
+            raw_deps = request.shared_context.get("depends_on") or []
+            declared_dependencies = raw_deps if isinstance(raw_deps, list) else [raw_deps]
+        upstream = self._compact_declared_inputs((request.shared_context or {}).get("available_peer_results") or [])
+        if declared_dependencies and not upstream:
+            final_answer = "The generated step did not receive required upstream result material."
+            if progress_callback:
+                progress_callback({"type": "NODE_RESULT", "run_id": core_run_id, "node_id": "dataflow_step"})
+                progress_callback({"type": "RUN_COMPLETED", "run_id": core_run_id})
+            return AgentExecutionResult(
+                participant_id=request.participant_id,
+                participant_name=request.participant_name,
+                core_run_id=core_run_id,
+                status="failed",
+                final_answer=final_answer,
+                workflow_results={"dataflow_step": {"status": "failed", "final_answer": final_answer, "execution_mode": "missing_upstream_guard"}},
+            )
+        projection = self._project_single_upstream_result_if_possible(request.participant_instruction, upstream)
+        if projection is not None:
+            status = "completed" if self._answer_has_result_material(projection) else "failed"
+            if progress_callback:
+                progress_callback({"type": "NODE_RESULT", "run_id": core_run_id, "node_id": "dataflow_step"})
+                progress_callback({"type": "RUN_COMPLETED", "run_id": core_run_id})
+            return AgentExecutionResult(
+                participant_id=request.participant_id,
+                participant_name=request.participant_name,
+                core_run_id=core_run_id,
+                status=status,
+                final_answer=projection,
+                workflow_results={"dataflow_step": {"status": status, "final_answer": projection, "execution_mode": "deterministic_projection"}},
+            )
+
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"final_answer": {"type": "string"}},
+            "required": ["final_answer"],
+        }
+        user_prompt = self._build_lean_step_prompt(request.participant_instruction, upstream)
+        execution_mode = "lean_llm"
+        try:
+            result = await self.router.generate_json(
+                run_id=core_run_id,
+                node_id="dataflow_step",
+                adapter={
+                    "adapter_id": "delegated_dataflow_step_lean",
+                    "runtime_role": "intermediate_dataflow_step",
+                    "route_name": "stable_synthesis",
+                    "model_route_name": "stable_synthesis",
+                    "provider_timeout_seconds": 180,
+                    "max_provider_attempts": 1,
+                    "json_repair_retry": False,
+                    "accept_raw_text_as_final_answer": True,
+                    "provider_options": {"temperature": 0, "num_predict": 320, "num_ctx": 1536, "think": False},
+                    "prompt_policy": {"max_context_tokens": 720},
+                    "max_prompt_chars": 1400,
+                },
+                prompt={"id": "delegated_dataflow_step_lean", "system": "Output only the requested result text. No JSON. No explanation."},
+                rendered_user_prompt=user_prompt,
+                schema=schema,
+            )
+            answer = result.get("final_answer") if isinstance(result, dict) else ""
+            answer = self._normalize_public_step_answer(answer) if isinstance(answer, str) else ""
+            status = "completed" if isinstance(answer, str) and self._answer_has_result_material(answer) else "failed"
+            final_answer = answer.strip() if isinstance(answer, str) and answer.strip() else "Generated workflow step did not produce verified result material."
+        except LLMJSONParseError as exc:
+            recovered = self._recover_public_answer_from_invalid_json(exc)
+            if recovered:
+                status = "completed"
+                final_answer = recovered
+                execution_mode = "lean_llm_raw_text_fallback"
+            else:
+                status = "failed"
+                final_answer = "Generated workflow step returned non-public or invalid material."
+        except Exception as exc:
+            recovered = self._recover_public_answer_from_provider_error(exc)
+            if recovered:
+                status = "completed"
+                final_answer = recovered
+                execution_mode = "lean_llm_error_text_fallback"
+            else:
+                status = "failed"
+                final_answer = str(exc)
+        if progress_callback:
+            progress_callback({"type": "NODE_RESULT", "run_id": core_run_id, "node_id": "dataflow_step"})
+            progress_callback({"type": "RUN_COMPLETED", "run_id": core_run_id})
+        return AgentExecutionResult(
+            participant_id=request.participant_id,
+            participant_name=request.participant_name,
+            core_run_id=core_run_id,
+            status=status,
+            final_answer=final_answer,
+            workflow_results={"dataflow_step": {"status": status, "final_answer": final_answer, "execution_mode": execution_mode}},
+        )
 
 
     def _recover_public_answer_from_invalid_json(self, exc: LLMJSONParseError) -> str:

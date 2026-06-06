@@ -135,16 +135,18 @@ class AgentParameterContractService:
 
 
     def _looks_like_self_contained_runtime_observation(self, text: str) -> bool:
-        """Return whether an agent profile can skip runtime parameter analysis.
+        """Detect requests that can be answered from runtime state alone.
 
-        V22.3 intentionally disables fixed source-level shortcuts here.  Agent
-        creation must be based on the generic parameter-analysis path or on an
-        explicitly registered runtime capability, not on a source-code phrase
-        list.  This prevents create-agent requests that ask to produce scripts,
-        files, or other deliverables from being persisted immediately as if they
-        were already solved runtime observations.
+        This is a generic temporal/runtime-state guard. It prevents the UI from
+        asking for unrelated reminder/message parameters when the agent profile
+        itself already asks for the current runtime value.
         """
-        return False
+        normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if not normalized:
+            return False
+        current_markers = ("current", "now", "present", "現在", "今", "当前", "现在")
+        temporal_markers = ("time", "datetime", "timestamp", "時刻", "時間", "日時", "时间")
+        return any(marker in normalized for marker in current_markers) and any(marker in normalized for marker in temporal_markers)
 
 
     def _looks_like_open_capability(self, text: str) -> bool:
