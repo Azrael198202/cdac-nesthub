@@ -78,6 +78,39 @@ brains:
       options:
         temperature: 0
 
+  perception_brain:
+    default:
+      provider: ollama
+      model: qwen3.5:2b
+      options:
+        temperature: 0
+    tasks:
+      document_summarization:
+        provider: ollama
+        model: qwen3.5:2b
+        options:
+          temperature: 0
+      image_summarization:
+        provider: ollama
+        model: qwen3.5:4b-q4_k_m
+        options:
+          temperature: 0
+      audio_summarization:
+        provider: ollama
+        model: qwen3.5:4b-q4_k_m
+        options:
+          temperature: 0
+      video_summarization:
+        provider: ollama
+        model: qwen3.5:4b-q4_k_m
+        options:
+          temperature: 0
+      artifact_summarization:
+        provider: ollama
+        model: qwen3.5:2b
+        options:
+          temperature: 0
+
   presentation_brain:
     default:
       provider: ollama

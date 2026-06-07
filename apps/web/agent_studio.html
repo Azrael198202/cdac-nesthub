@@ -195,45 +195,19 @@ function renderStudioResponse(data, originalText){
 }
 function escapeHtml(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
-function normalizePresentationProfile(value){
-  const v=String(value||'').trim().toLowerCase();
-  return ['user','advanced','developer','diagnostic'].includes(v) ? v : 'advanced';
-}
 function getPresentationProfile(){
   const el=document.getElementById('presentationProfileSelect');
-  if(el && el.value){ return normalizePresentationProfile(el.value); }
-  const serverProfile = modelSelectionState && modelSelectionState.selection ? modelSelectionState.selection.presentation_profile : '';
-  return normalizePresentationProfile(serverProfile || localStorage.getItem('agentStudio.presentationProfile') || 'advanced');
+  return (el && el.value) ? el.value : (localStorage.getItem('agentStudio.presentationProfile') || 'advanced');
 }
-async function savePresentationProfile(){
+function savePresentationProfile(){
   const value=getPresentationProfile();
   localStorage.setItem('agentStudio.presentationProfile', value);
   const viewHint=document.getElementById('presentationProfileHint');
   if(viewHint){ viewHint.textContent='View: '+value; }
-  try{
-    if(modelSelectionState && modelSelectionState.selection){
-      const s=modelSelectionState.selection;
-      const payload={
-        mode:s.mode||currentModelMode(),
-        selected_local_model_id:s.selected_local_model_id,
-        selected_api_model_id:s.selected_api_model_id,
-        initial_model_id:s.initial_model_id,
-        allow_escalation:s.allow_escalation!==false,
-        ask_for_missing_keys_at_start:s.ask_for_missing_keys_at_start!==false,
-        presentation_profile:value
-      };
-      const res=await fetch('/api/agent-studio/model-selection',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-      if(res.ok){ modelSelectionState=await res.json(); }
-    }
-  }catch(e){ console.warn('presentation profile save skipped', e); }
 }
 function initPresentationProfile(){
   const el=document.getElementById('presentationProfileSelect');
-  const serverProfile = modelSelectionState && modelSelectionState.selection ? modelSelectionState.selection.presentation_profile : '';
-  const value=normalizePresentationProfile(serverProfile || localStorage.getItem('agentStudio.presentationProfile') || 'advanced');
-  if(el){ el.value=value; }
-  const viewHint=document.getElementById('presentationProfileHint');
-  if(viewHint){ viewHint.textContent='View: '+value; }
+  if(el){ el.value=localStorage.getItem('agentStudio.presentationProfile') || 'advanced'; }
 }
 
 function setStudioStatus(text, running=false){ const el=document.getElementById('status'); el.textContent=text; el.classList.toggle('running', !!running); }
@@ -250,7 +224,6 @@ let artifactEditState = {artifactId:"", proposalId:""};
 let activeSessionId = localStorage.getItem("agentStudio.activeSessionId") || "";
 let lastCompletedRunId = "";
 let localExecutionState = null;
-let localExecutionHistory = [];
 let localExecutionTimer = null;
 
 
@@ -522,59 +495,51 @@ async function sendMessage(){
   if(!text)return;
   lastSubmittedInstruction=text;
   lastPendingInstruction=text;
+  const canStart = await ensureSelectedModelCredential();
+  if(!canStart){ return; }
   input.value='';
   addMessage(text,'item user');
   const btn=document.getElementById('sendBtn');
   btn.disabled=true;
   btn.textContent='Thinking...';
-  setStudioStatus('submitting request to runtime', true);
+  setStudioStatus('running', true);
   let pollTimer=null;
   let hintTimer=null;
-  const requestId='local_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,7);
+  const hints=[
+    'receiving instruction',
+    'routing command',
+    'selecting response path',
+    'calling selected runtime',
+    'waiting for result',
+    'refreshing state'
+  ];
+  let hintIndex=0;
   try{
-    const canStart = await ensureSelectedModelCredential();
-    if(!canStart){
-      setStudioStatus('waiting for required setup', false);
-      return;
-    }
-    const localEntry=startLocalExecutionHistory(requestId, text);
-    setLocalExecutionStage('input_parsing','Receiving instruction',8, requestId);
-    const hints=[
-      'receiving instruction',
-      'routing command',
-      'selecting response path',
-      'calling selected runtime',
-      'waiting for result',
-      'refreshing state'
-    ];
-    let hintIndex=0;
+    setLocalExecutionStage('input_parsing','Receiving instruction',8);
     addProgressMessage(hints[hintIndex++]);
     const localStages=[['intent_recognition','Routing command',18],['workflow_planning','Planning runtime work',35],['pre_execution_validation','Checking readiness',48],['execution','Executing runtime work',68],['verification_brain','Verifying result',82],['presentation_brain','Preparing response',92]];
     let localStageIndex=0;
     pollTimer=setInterval(()=>refreshState(), 1200);
     hintTimer=setInterval(()=>{
       if(hintIndex<hints.length){ addProgressMessage(hints[hintIndex++]); }
-      if(localStageIndex<localStages.length){ const st=localStages[localStageIndex++]; setLocalExecutionStage(st[0],st[1],st[2], requestId); }
+      if(localStageIndex<localStages.length){ const st=localStages[localStageIndex++]; setLocalExecutionStage(st[0],st[1],st[2]); }
     }, 1800);
     const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, session_id:activeSessionId, uploaded_artifacts:selectedArtifactsForRequest(text), presentation_profile:getPresentationProfile()})});
     const data=await res.json();
     consumeSelectedArtifactsAfterRequest();
-    completeLocalExecutionHistory(requestId, data && data.ok===false ? 'failed' : 'completed', data);
     renderStudioResponse(data, text);
     const pendingItems = collectMissingInputs(data);
     if(pendingItems.length){ lastMissingInputs=pendingItems; lastPendingRunId=data.run_id||''; lastPendingInstruction=text; addMissingInputs(pendingItems, text, lastPendingRunId); }
+    // Final answers are rendered by renderStudioResponse; do not duplicate or show raw runtime JSON here.
     await refreshState();
-    await refreshSessions();
   }catch(e){
-    completeLocalExecutionHistory(requestId, 'failed', {error:String(e&&e.message?e.message:e)});
-    addMessage('Error: '+(e&&e.message?e.message:e),'item error');
+    addMessage('Error: '+e,'item error');
   } finally{
     if(pollTimer) clearInterval(pollTimer);
     if(hintTimer) clearInterval(hintTimer);
     btn.disabled=false;
     btn.textContent='Send';
     if(localExecutionState){ localExecutionState.active=false; }
-    renderExecutionDashboard(window.lastStudioState || {});
     setStudioStatus('ready', false);
   }
 }
@@ -1025,12 +990,8 @@ function renderModelSelection(data){
   const hint=document.getElementById('modelPolicyHint');
   const selected=selectedOptionMeta();
   if(hint){ hint.textContent = `Model: ${mode} · ${selected.model_id || selection.initial_model_id || ''} · ${selected.provider || selection.initial_provider || ''}`; }
-  const profileValue=normalizePresentationProfile(selection.presentation_profile || localStorage.getItem('agentStudio.presentationProfile') || 'advanced');
-  const profileSelect=document.getElementById('presentationProfileSelect');
-  if(profileSelect){ profileSelect.value=profileValue; }
-  localStorage.setItem('agentStudio.presentationProfile', profileValue);
   const viewHint=document.getElementById('presentationProfileHint');
-  if(viewHint){ viewHint.textContent='View: '+profileValue; }
+  if(viewHint){ viewHint.textContent='View: '+((document.getElementById('presentationProfileSelect')||{}).value || 'advanced'); }
   suppressModelSave=false;
 }
 function currentModelMode(){
@@ -1064,8 +1025,7 @@ async function saveModelSelection(){
     selected_api_model_id: selectedApi,
     initial_model_id: meta.model_id || '',
     allow_escalation: true,
-    ask_for_missing_keys_at_start: true,
-    presentation_profile: getPresentationProfile()
+    ask_for_missing_keys_at_start: true
   };
   if(mode==='local_only'){ payload.selected_local_model_id=payload.initial_model_id || selectedLocal; }
   if(mode==='api_only'){ payload.selected_api_model_id=payload.initial_model_id || selectedApi; }
@@ -1130,11 +1090,7 @@ function renderCommandHelp(commands){
 }
 
 async function ensureSelectedModelCredential(){
-  try{
-    await saveModelSelection();
-  }catch(e){
-    addMessage('Model settings could not be saved before execution. The request will continue with the current runtime model policy.\n'+(e&&e.message?e.message:String(e)), 'item error');
-  }
+  await saveModelSelection();
   const data=modelSelectionState;
   if(!data || !data.secret_prompt_required){ return true; }
   const key=data.required_secret;
@@ -1203,213 +1159,107 @@ function latestModelDecision(data){
   return candidates.length ? candidates[candidates.length-1] : null;
 }
 
-function makeLocalExecutionState(stageKey, label, pct, requestId){
-  return {active:true, request_id:requestId||'', stage:stageKey||'input_parsing', label:label||'Starting request', pct:Math.max(3,Math.min(95,pct||5)), started_at:Date.now(), status:'running'};
+function makeLocalExecutionState(stageKey, label, pct){
+  return {active:true, stage:stageKey||'input_parsing', label:label||'Starting request', pct:Math.max(3,Math.min(95,pct||5)), started_at:Date.now()};
 }
-function startLocalExecutionHistory(requestId, instruction){
-  const entry={request_id:requestId, instruction:String(instruction||'').slice(0,240), started_at:new Date().toISOString(), status:'running', stage:'input_parsing', label:'Receiving instruction', pct:5, events:[]};
-  localExecutionHistory.unshift(entry);
-  localExecutionHistory=localExecutionHistory.slice(0,20);
-  return entry;
-}
-function updateLocalExecutionHistory(requestId, patch){
-  if(!requestId){ return; }
-  const entry=localExecutionHistory.find(x=>x.request_id===requestId);
-  if(!entry){ return; }
-  Object.assign(entry, patch||{});
-  entry.updated_at=new Date().toISOString();
-  if(patch && patch.stage){
-    entry.events=Array.isArray(entry.events)?entry.events:[];
-    entry.events.push({stage:patch.stage, label:patch.label||patch.stage, status:patch.status||'running', pct:patch.pct, at:entry.updated_at});
-    entry.events=entry.events.slice(-16);
-  }
-}
-function completeLocalExecutionHistory(requestId, status, payload){
-  updateLocalExecutionHistory(requestId, {status:status||'completed', pct:status==='failed'?100:100, label:status==='failed'?'Request failed':'Request completed', payload:payload||{}});
-}
-function setLocalExecutionStage(stageKey, label, pct, requestId){
-  localExecutionState=makeLocalExecutionState(stageKey,label,pct, requestId || (localExecutionState&&localExecutionState.request_id));
-  updateLocalExecutionHistory(localExecutionState.request_id, {stage:localExecutionState.stage, label:localExecutionState.label, pct:localExecutionState.pct, status:'running'});
+function setLocalExecutionStage(stageKey, label, pct){
+  localExecutionState=makeLocalExecutionState(stageKey,label,pct);
   renderLocalExecutionDashboard();
 }
-function stageGridHtml(stageKey, results, events){
+function renderLocalExecutionDashboard(){
+  const box=document.getElementById('progressPane');
+  if(!box || !localExecutionState){ return; }
   const stages=[['input_parsing','Input'],['intent_recognition','Intent'],['requirement_completion','Requirements'],['context_awareness','Context'],['workflow_planning','Planning'],['pre_execution_validation','Pre-check'],['execution','Execution'],['verification_brain','Verification'],['repair_brain','Repair'],['presentation_brain','Presentation']];
   const order=stages.map(x=>x[0]);
-  const activeIndex=Math.max(0, order.indexOf(stageKey||'input_parsing'));
-  return stages.map(([key,label],i)=>{
-    let status='pending';
-    const ev=Array.isArray(events)?events.filter(x=>x.stage===key || x.brain===key).slice(-1)[0]:null;
-    if(ev) status=normalizeStageStatus(ev.status||'running');
-    else if(results && results[key]) status=normalizeStageStatus((results[key]&&results[key].status)||'completed');
-    else if(results && key==='verification_brain' && (results.result_verification||results.verification)) status='completed';
-    else if(results && key==='presentation_brain' && (results.final_synthesis||results.presentation)) status='completed';
-    else if(i<activeIndex) status='completed';
-    else if(i===activeIndex && stageKey) status='running';
+  const idx=Math.max(0,order.indexOf(localExecutionState.stage));
+  const stageHtml=stages.map(([key,label],i)=>{
+    const status=i<idx?'completed':(i===idx?'running':'pending');
     return `<div class="stageChip ${status}"><b>${escapeHtml(label)}</b><span>${escapeHtml(status)}</span></div>`;
   }).join('');
-}
-function progressCardHtml(opts){
-  opts=opts||{};
-  const pct=Math.max(0,Math.min(100,Math.round(opts.pct||0)));
-  const status=opts.status||'running';
-  const modelText=opts.modelText||'Model decision will appear during execution';
-  const title=opts.title||'Execution progress';
-  const subtitle=opts.subtitle||'';
-  return `<div class="item"><div class="execTop"><div><div class="execTitle">${escapeHtml(title)}</div><div class="execMeta">${escapeHtml(subtitle)}${subtitle?' · ':''}${escapeHtml(modelText)}</div></div><div class="execPercent">${pct}%</div></div><div class="progressBar"><div class="progressFill" style="width:${pct}%"></div></div><div class="stageGrid">${opts.stageHtml||''}</div><div class="small" style="margin-top:8px">status: ${escapeHtml(status)}</div></div>`;
-}
-function renderLocalExecutionDashboard(){
-  renderExecutionDashboard(window.lastStudioState || {});
-}
-function runProgressSummary(run){
-  const results=(run&&run.results)||{};
-  const events=Array.isArray(run&&run.progress_events)?run.progress_events:[];
-  const stages=['input_parsing','intent_recognition','requirement_completion','context_awareness','workflow_planning','pre_execution_validation','execution','verification_brain','repair_brain','presentation_brain'];
-  let completed=0, runningStage='';
-  stages.forEach(key=>{
-    const ev=events.filter(x=>x.stage===key || x.brain===key).slice(-1)[0];
-    let status='';
-    if(ev) status=normalizeStageStatus(ev.status||'running');
-    else if(results[key]) status='completed';
-    else if(key==='verification_brain' && (results.result_verification||results.verification)) status='completed';
-    else if(key==='presentation_brain' && (results.final_synthesis||results.presentation)) status='completed';
-    if(status==='completed') completed+=1;
-    if(status==='running' && !runningStage) runningStage=key;
-  });
-  const status=normalizeStageStatus(run.status || ((results.result_verification&&results.result_verification.status)||'completed'));
-  const pct=status==='completed'?100:Math.round((completed/stages.length)*100);
-  return {pct,status,runningStage,stageHtml:stageGridHtml(runningStage, results, events)};
+  const pct=Math.max(0,Math.min(100,Math.round(localExecutionState.pct||0)));
+  const mode=document.getElementById('modelModeSelect')?.value || '';
+  const selected=document.getElementById('initialModelSelect')?.value || '';
+  const modelText=[mode,selected].filter(Boolean).join(' / ') || 'model decision pending';
+  box.classList.remove('idle');
+  box.innerHTML=`<div class="execTop"><div><div class="execTitle">${escapeHtml(localExecutionState.label||'Executing')}</div><div class="execMeta">Live request · ${escapeHtml(modelText)}</div></div><div class="execPercent">${pct}%</div></div><div class="progressBar"><div class="progressFill" style="width:${pct}%"></div></div><div class="stageGrid">${stageHtml}</div>`;
 }
 function renderExecutionDashboard(data){
-  window.lastStudioState=data||{};
   const box=document.getElementById('progressPane');
   if(!box) return;
-  const conversationRuns=Array.isArray(data.conversation_runs)?data.conversation_runs:[];
-  const taskRuns=Array.isArray(data.task_runs)?data.task_runs:[];
-  const model=latestModelDecision(data)||{};
-  const modelText=[model.brain||model.stage||'', model.selected_model||model.model||model.model_id||'', model.provider||''].filter(Boolean).join(' / ') || 'Model decision will appear during execution';
-  let html='';
-  if(localExecutionHistory.length){
-    html += '<div class="sectionTitle">Local request history</div>';
-    localExecutionHistory.slice(0,8).forEach(entry=>{
-      html += progressCardHtml({
-        title: entry.label || 'Local request',
-        subtitle: (entry.instruction||'').slice(0,120),
-        pct: entry.pct || (entry.status==='completed'?100:0),
-        status: entry.status || 'running',
-        modelText,
-        stageHtml: stageGridHtml(entry.stage, null, entry.events||[])
-      });
-    });
-  }
-  const runs=[...conversationRuns.map(r=>({...r,_kind:'conversation'})), ...taskRuns.map(r=>({...r,_kind:'task'}))];
-  if(runs.length){
-    html += '<div class="sectionTitle">Runtime execution history</div>';
-    runs.slice(0,12).forEach(run=>{
-      const sum=runProgressSummary(run);
-      html += progressCardHtml({
-        title: run.task_name || run.run_id || 'runtime execution',
-        subtitle: (run._kind||'runtime') + (run.created_at ? ' · '+run.created_at : ''),
-        pct: sum.pct,
-        status: sum.status,
-        modelText,
-        stageHtml: sum.stageHtml
-      });
-    });
-  }
-  if(!html){
+  const conversationRuns=data.conversation_runs||[];
+  const taskRuns=data.task_runs||[];
+  const graphs=data.task_graphs||[];
+  const latestRun = conversationRuns.length ? conversationRuns[0] : (taskRuns.length ? taskRuns[0] : null);
+  const results=(latestRun&&latestRun.results)||{};
+  const events=Array.isArray(latestRun&&latestRun.progress_events)?latestRun.progress_events:[];
+  if(localExecutionState && localExecutionState.active && !latestRun && !graphs.length && !events.length){ renderLocalExecutionDashboard(); return; }
+  if(!latestRun && !graphs.length && !events.length){
     box.classList.add('idle');
-    box.innerHTML=`<div class="execIdleTitle">No execution history</div><div class="execIdleMeta">Each user request will create an individual progress record here.</div>`;
+    const model=latestModelDecision(data)||{};
+    const modelText=[model.brain||model.stage||'', model.selected_model||model.model||model.model_id||'', model.provider||''].filter(Boolean).join(' / ');
+    box.innerHTML=`<div class="execIdleTitle">No active execution</div><div class="execIdleMeta">Start a request to see live progress, current stage, selected brain, and model decisions.${modelText ? ' Latest model decision: '+escapeHtml(modelText) : ''}</div>`;
     return;
   }
   box.classList.remove('idle');
-  box.innerHTML=html;
+  const stages=[
+    ['input_parsing','Input'],['intent_recognition','Intent'],['requirement_completion','Requirements'],['context_awareness','Context'],
+    ['workflow_planning','Planning'],['pre_execution_validation','Pre-check'],['execution','Execution'],['verification_brain','Verification'],
+    ['repair_brain','Repair'],['presentation_brain','Presentation']
+  ];
+  let completed=0, runningIndex=-1, failed=false;
+  const stageHtml=stages.map(([key,label],idx)=>{
+    let status='pending';
+    const ev=events.filter(x=>x.stage===key || x.brain===key).slice(-1)[0];
+    if(ev) status=ev.status||'running';
+    else if(results[key]) status=(results[key].status||'completed');
+    else if(key==='verification_brain' && (results.result_verification||results.verification)) status='completed';
+    else if(key==='presentation_brain' && (results.final_synthesis||results.presentation)) status='completed';
+    status=normalizeStageStatus(status);
+    if(status==='completed') completed+=1;
+    if(status==='running' && runningIndex<0) runningIndex=idx;
+    if(status==='failed') failed=true;
+    return `<div class="stageChip ${status}"><b>${escapeHtml(label)}</b><span>${escapeHtml(status)}</span></div>`;
+  }).join('');
+  const pct=Math.max(0, Math.min(100, Math.round((completed/stages.length)*100)));
+  const current = failed ? 'Failure analysis required' : (runningIndex>=0 ? stages[runningIndex][1] : (completed ? 'Latest execution state' : 'Execution state'));
+  const model=latestModelDecision(data)||{};
+  const modelText=[model.brain||model.stage||'', model.selected_model||model.model||model.model_id||'', model.provider||''].filter(Boolean).join(' / ') || 'Model decision will appear during execution';
+  const graphText=graphs.length ? `${graphs.length} graph${graphs.length>1?'s':''}` : 'No graph yet';
+  box.innerHTML=`<div class="execTop"><div><div class="execTitle">${escapeHtml(current)}</div><div class="execMeta">${escapeHtml(graphText)} · ${escapeHtml(modelText)}</div></div><div class="execPercent">${pct}%</div></div><div class="progressBar"><div class="progressFill" style="width:${pct}%"></div></div><div class="stageGrid">${stageHtml}</div>`;
 }
-
-
-async function refreshState(){
-  try{
-    const res=await fetch('/api/agent-studio/state');
-    const data=await res.json();
-    renderState(data);
-  }catch(e){
-    console.error(e);
-    addMessage('State refresh failed: '+(e&&e.message?e.message:e),'item error');
-  }
-}
-function renderState(data){
-  window.lastStudioState=data||{};
-  const ps=Array.isArray(data&&data.participants)?data.participants:[];
-  const count=document.getElementById('participantCount');
-  if(count){ count.textContent=ps.length; }
-  const pbox=document.getElementById('participants');
-  if(pbox){
-    pbox.innerHTML='';
-    if(!ps.length){ pbox.innerHTML='<div class="empty">No participant.</div>'; }
-    ps.forEach(p=>{
-      const el=document.createElement('div');
-      el.className='item';
-      const pid=p.participant_id||p.id||'';
-      el.innerHTML=`<div class="cardHeader"><b>${escapeHtml(p.name||pid)}</b><span class="pill">${escapeHtml(p.status||'created')}</span></div><div class="small">${escapeHtml(pid||'')}</div><span class="pill">delegate_to_ai_core</span><div class="path">${escapeHtml(p._path||'')}</div>`;
-      const del=document.createElement('button');
-      del.className='btn danger';
-      del.style.marginTop='8px';
-      del.textContent='Delete agent';
-      del.onclick=()=>deleteStudioItem('agent', pid);
-      el.appendChild(del);
-      pbox.appendChild(el);
-    });
-  }
-  const graphCount=document.getElementById('graphCount');
-  if(graphCount){ graphCount.textContent=(Array.isArray(data.task_graphs)?data.task_graphs.length:0) + (Array.isArray(data.conversation_runs)?data.conversation_runs.length:0); }
-  renderRightPanes(data||{});
+function appendSection(parent,title,empty,items,renderer){
+  parent.insertAdjacentHTML('beforeend','<div class="sectionTitle">'+escapeHtml(title)+'</div>');
+  if(!items || !items.length){ parent.insertAdjacentHTML('beforeend','<div class="empty">'+escapeHtml(empty)+'</div>'); return; }
+  items.forEach(x=>parent.appendChild(renderer(x)));
 }
 function renderRightPanes(data){
-  data=data||{};
   const workflow=document.getElementById('workflowPane');
-  const results=document.getElementById('resultsPane');
-  const traces=document.getElementById('tracesPane');
-  if(workflow){
-    workflow.innerHTML='';
-    const conv=Array.isArray(data.conversation_runs)?data.conversation_runs:[];
-    const taskRuns=Array.isArray(data.task_runs)?data.task_runs:[];
-    const graphs=Array.isArray(data.task_graphs)?data.task_graphs:[];
-    const section=document.createElement('div');
-    section.className='sectionTitle';
-    section.textContent='Execution Flow';
-    workflow.appendChild(section);
-    if(conv.length || taskRuns.length){
-      [...conv.slice(0,6), ...taskRuns.slice(0,6)].forEach(r=>workflow.appendChild(r.task_name?executionFlowCard(r):conversationFlowCard(r)));
-    }else{
-      const empty=document.createElement('div'); empty.className='empty'; empty.textContent='No execution flow yet.'; workflow.appendChild(empty);
-    }
-    const gtitle=document.createElement('div');
-    gtitle.className='sectionTitle';
-    gtitle.textContent='Task Graphs';
-    workflow.appendChild(gtitle);
-    if(graphs.length){ graphs.slice(0,8).forEach(g=>workflow.appendChild(taskGraphCard(g))); }
-    else { const empty=document.createElement('div'); empty.className='empty'; empty.textContent='No task graph.'; workflow.appendChild(empty); }
-  }
+  const progressPane=document.getElementById('progressPane');
+  const resultsPane=document.getElementById('resultsPane');
+  const tracesPane=document.getElementById('tracesPane');
+  if(!workflow || !progressPane || !resultsPane || !tracesPane){ return; }
+  workflow.innerHTML=''; progressPane.innerHTML=''; resultsPane.innerHTML=''; tracesPane.innerHTML='';
+  progressPane.classList.add('execDashboard');
+  const graphs=data.task_graphs||[]; const runs=data.task_runs||[]; const conversationRuns=data.conversation_runs||[]; const runtimeToolRuns=data.runtime_tool_runs||[]; const deliveries=data.deliveries||[]; const traces=data.traces||[]; const runtimeTools=data.runtime_tools||[];
+  const latestRun = conversationRuns.length ? conversationRuns[0] : (runs.length ? runs[0] : null);
+  appendSection(workflow,'Execution Flow','No execution flow yet.', latestRun?[latestRun]:(graphs.length?[graphs[0]]:[]), latestRun?conversationFlowCard:taskGraphFlowCard);
+  appendSection(workflow,'Task Graphs','No task graph.', graphs, taskGraphCard);
+  appendSection(workflow,'Delegation Runs','No run.', runs, runCard);
+  appendSection(resultsPane,'Latest Results','No runtime result yet.', latestRun?[latestRun]:[], resultSummaryCard);
+  appendSection(resultsPane,'Runtime Tool Runs','No runtime tool run.', runtimeToolRuns, runtimeToolRunCard);
+  appendSection(resultsPane,'Deliveries','No delivery.', deliveries, deliveryCard);
+  appendSection(resultsPane,'Runtime Registry','No registered runtime tool.', runtimeTools, runtimeToolCard);
+  appendSection(tracesPane,'Conversation Workflow Runs','No conversation workflow run.', conversationRuns, conversationRunCard);
+  appendSection(tracesPane,'Runtime Traces','No trace.', traces, t=>compactJsonCard(t.trace_id||'trace', t));
   renderExecutionDashboard(data);
-  if(results){
-    results.innerHTML='';
-    const deliveries=Array.isArray(data.deliveries)?data.deliveries:[];
-    const conv=Array.isArray(data.conversation_runs)?data.conversation_runs:[];
-    const registry=Array.isArray(data.runtime_registry)?data.runtime_registry:(Array.isArray(data.tools)?data.tools:[]);
-    const dtitle=document.createElement('div'); dtitle.className='sectionTitle'; dtitle.textContent='Deliveries'; results.appendChild(dtitle);
-    if(deliveries.length){ deliveries.slice(0,8).forEach(d=>results.appendChild(deliveryCard(d))); }
-    else { const empty=document.createElement('div'); empty.className='empty'; empty.textContent='No delivery.'; results.appendChild(empty); }
-    const rtitle=document.createElement('div'); rtitle.className='sectionTitle'; rtitle.textContent='Workflow Results'; results.appendChild(rtitle);
-    if(conv.length){ conv.slice(0,6).forEach(r=>results.appendChild(resultSummaryCard(r))); }
-    else { const empty=document.createElement('div'); empty.className='empty'; empty.textContent='No workflow result.'; results.appendChild(empty); }
-    const regtitle=document.createElement('div'); regtitle.className='sectionTitle'; regtitle.textContent='Runtime Registry'; results.appendChild(regtitle);
-    if(registry.length){ registry.slice(0,8).forEach(t=>results.appendChild(runtimeToolCard(t))); }
-    else { const empty=document.createElement('div'); empty.className='empty'; empty.textContent='No runtime registry entry.'; results.appendChild(empty); }
-  }
-  if(traces){
-    traces.innerHTML='';
-    traces.appendChild(compactJsonCard('Latest Studio State', data));
-  }
   selectRightTab(activeRightTab);
+}
+
+async function refreshState(){ try{ const res=await fetch('/api/agent-studio/state'); const data=await res.json(); renderState(data); }catch(e){ console.error(e); }}
+function renderState(data){
+  const ps=data.participants||[]; document.getElementById('participantCount').textContent=ps.length; const pbox=document.getElementById('participants'); pbox.innerHTML=''; if(!ps.length)pbox.innerHTML='<div class="empty">No participant.</div>'; ps.forEach(p=>{ const el=document.createElement('div'); el.className='item'; const pid=p.participant_id||p.id||''; el.innerHTML=`<div class="cardHeader"><b>${escapeHtml(p.name||pid)}</b><span class="pill">${escapeHtml(p.status||'created')}</span></div><div class="small">${escapeHtml(pid||'')}</div><span class="pill">delegate_to_ai_core</span><div class="path">${escapeHtml(p._path||'')}</div>`; const del=document.createElement('button'); del.className='btn danger'; del.style.marginTop='8px'; del.textContent='Delete agent'; del.onclick=()=>deleteStudioItem('agent', pid); el.appendChild(del); pbox.appendChild(el); });
+  document.getElementById('graphCount').textContent=(data.task_graphs||[]).length + (data.conversation_runs||[]).length;
+  renderRightPanes(data);
 }
 
 function conversationFlowCard(r){

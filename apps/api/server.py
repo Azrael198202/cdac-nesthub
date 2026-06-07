@@ -17,6 +17,7 @@ from ai_core.evolution.approval_learning import ApprovalLearningService
 from ai_core.orchestration.workflow_runtime import WorkflowRuntime
 from ai_core.events.event_bus import event_bus
 from auxiliary_brain.studio import AgentStudioService
+from perception_brain import PerceptionBrainService
 from ai_core.runtime.bootstrap import RuntimeBootstrapService
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 from ai_core.context.session_memory_store import SessionMemoryStore
@@ -34,6 +35,7 @@ approval_learning = ApprovalLearningService()
 app = FastAPI()
 runtime = WorkflowRuntime()
 studio_service = AgentStudioService()
+perception_brain_service = PerceptionBrainService()
 bootstrap_service = RuntimeBootstrapService()
 model_selection_store = UserModelSelectionStore()
 session_store = SessionMemoryStore()
@@ -264,7 +266,6 @@ class AgentStudioModelSelectionRequest(BaseModel):
     custom_endpoint: str | None = None
     allow_escalation: bool = True
     ask_for_missing_keys_at_start: bool = True
-    presentation_profile: str | None = None
 
 
 
@@ -984,13 +985,49 @@ async def agent_studio_state():
     return JSONResponse(studio_service.snapshot())
 
 
+
+
+@app.post("/api/perception/normalize")
+async def perception_normalize(req: AgentStudioRequest):
+    try:
+        payload = perception_brain_service.normalize(
+            text=req.message,
+            uploaded_artifacts=req.uploaded_artifacts,
+            context={"surface": "api_perception_normalize", "session_id": req.session_id},
+        )
+        return JSONResponse({"ok": True, "status": "completed", "perception": payload})
+    except Exception as exc:
+        _write_api_error_log(area="perception_normalize", exc=exc, context={"session_id": req.session_id})
+        return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
+
+
 @app.post("/api/agent-studio/message")
 async def agent_studio_message(req: AgentStudioRequest):
     try:
         active_session_id = session_store.start_or_get_session(req.session_id, metadata={"surface": "agent_studio"})
-        payload = await studio_service.handle_message(req.message, provided_inputs=req.provided_inputs, uploaded_artifacts=req.uploaded_artifacts, session_id=active_session_id, presentation_profile=req.presentation_profile)
+        perception_package = perception_brain_service.normalize(
+            text=req.message,
+            uploaded_artifacts=req.uploaded_artifacts,
+            context={"surface": "agent_studio", "session_id": active_session_id},
+        )
+        normalized_message = str(perception_package.get("normalized_text") or req.message or "")
+        provided_inputs = dict(req.provided_inputs or {})
+        provided_inputs.setdefault("_perception_package", perception_package)
+        payload = await studio_service.handle_message(
+            normalized_message,
+            provided_inputs=provided_inputs,
+            uploaded_artifacts=req.uploaded_artifacts,
+            session_id=active_session_id,
+            presentation_profile=req.presentation_profile,
+        )
         if isinstance(payload, dict):
             payload.setdefault("session_id", active_session_id)
+            payload.setdefault("perception", {
+                "status": "completed",
+                "artifact_count": len(perception_package.get("artifacts") or []),
+                "confidence": perception_package.get("confidence"),
+                "warnings": perception_package.get("warnings") or [],
+            })
             final_answer = str(payload.get("final_answer") or payload.get("message") or payload.get("status") or "")
             if final_answer.strip():
                 session_store.append_turn(
@@ -998,8 +1035,8 @@ async def agent_studio_message(req: AgentStudioRequest):
                     run_id=str(payload.get("run_id") or payload.get("resumed_from_run_id") or payload.get("task_name") or "studio_run"),
                     user_input=req.message,
                     final_answer=final_answer,
-                    stage_results={"agent_studio_payload": payload},
-                    metadata={"action": str(payload.get("action") or "")},
+                    stage_results={"agent_studio_payload": payload, "perception_package": perception_package},
+                    metadata={"action": str(payload.get("action") or ""), "perception_enabled": True},
                 )
                 payload["session_boundary"] = session_store.boundary_status(active_session_id)
         return JSONResponse(payload)

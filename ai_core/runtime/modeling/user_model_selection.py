@@ -27,7 +27,6 @@ class UserModelSelectionSnapshot:
     custom_endpoint: str = ""
     allow_escalation: bool = True
     ask_for_missing_keys_at_start: bool = True
-    presentation_profile: str = "advanced"
     updated_at: str = ""
     source: str = "default"
 
@@ -90,7 +89,6 @@ class UserModelSelectionStore:
             custom_endpoint=str(data.get("custom_endpoint") or ""),
             allow_escalation=bool(data.get("allow_escalation", True)),
             ask_for_missing_keys_at_start=bool(data.get("ask_for_missing_keys_at_start", True)),
-            presentation_profile=self._normalize_presentation_profile(data.get("presentation_profile") or data.get("view_mode") or "advanced"),
             updated_at=str(data.get("updated_at") or ""),
             source=str(data.get("source") or "runtime_config"),
         )
@@ -117,7 +115,6 @@ class UserModelSelectionStore:
             "custom_endpoint": str(payload.get("custom_endpoint") or current.custom_endpoint or ""),
             "allow_escalation": bool(payload.get("allow_escalation", current.allow_escalation)),
             "ask_for_missing_keys_at_start": bool(payload.get("ask_for_missing_keys_at_start", current.ask_for_missing_keys_at_start)),
-            "presentation_profile": self._normalize_presentation_profile(payload.get("presentation_profile") or current.presentation_profile),
             "source": "agent_studio_ui",
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -304,10 +301,6 @@ class UserModelSelectionStore:
             if preferred in ids:
                 return preferred
         return ids[0] if ids else "gpt-4o-mini"
-
-    def _normalize_presentation_profile(self, value: Any) -> str:
-        text = str(value or "").strip().lower().replace("-", "_")
-        return text if text in {"user", "advanced", "developer", "diagnostic"} else "advanced"
 
     def _normalize_mode(self, mode: Any) -> str:
         text = str(mode or "").strip().lower().replace("-", "_")

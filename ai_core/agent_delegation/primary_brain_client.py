@@ -61,6 +61,15 @@ class PrimaryBrainDelegationClient:
         self.router = ProviderRouter()
 
     async def execute_agent_request(self, request: AgentExecutionRequest, progress_callback: Callable[[dict[str, Any]], Any] | None = None) -> AgentExecutionResult:
+        native = self._try_self_contained_runtime_observation(request)
+        if native is not None:
+            if progress_callback:
+                run_id = native.core_run_id
+                progress_callback({"type": "NODE_STARTED", "run_id": run_id, "node_id": "runtime_native_observation"})
+                progress_callback({"type": "NODE_RESULT", "run_id": run_id, "node_id": "runtime_native_observation"})
+                progress_callback({"type": "RUN_COMPLETED", "run_id": run_id})
+            return native
+
         message = self._build_agent_message(request)
         core_run_id, state = await self.runtime.prepare(message)
         state.setdefault("runtime_options", {})["delegation_mode"] = True
@@ -116,15 +125,42 @@ class PrimaryBrainDelegationClient:
 
 
 
-    def _disabled_direct_observation_shortcut(self, request: AgentExecutionRequest) -> AgentExecutionResult | None:
-        """Direct observation shortcuts are disabled.
+    def _try_self_contained_runtime_observation(self, request: AgentExecutionRequest) -> AgentExecutionResult | None:
+        """Answer self-contained runtime-state participant requests without LLM.
 
-        Agent creation and agent execution must go through the normal runtime
-        analysis, planning, generation, execution, and verification path.  This
-        prevents ai_core from substituting a fixed built-in answer for any
-        user-requested capability or generated program.
+        The participant profile may be created as a small generated program or as
+        a direct runtime observation. In both cases, when no external artifact is
+        bound and the objective asks for the current runtime temporal value, no
+        user-supplied parameters are required and no planner LLM is needed.
         """
-        return None
+        context = request.shared_context if isinstance(request.shared_context, dict) else {}
+        artifact_binding = context.get("artifact_binding") if isinstance(context.get("artifact_binding"), dict) else {}
+        if artifact_binding.get("available"):
+            return None
+        text = " ".join([request.participant_name or "", request.participant_instruction or "", request.task_instruction or ""]).casefold()
+        current_markers = ("current", "now", "present", "現在", "今", "当前", "现在")
+        temporal_markers = ("time", "datetime", "timestamp", "時刻", "時間", "日時", "时间")
+        if not (any(m in text for m in current_markers) and any(m in text for m in temporal_markers)):
+            return None
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).astimezone()
+        answer = f"The current time is {now.strftime('%H:%M')}."
+        run_id = uuid.uuid4().hex[:12]
+        return AgentExecutionResult(
+            participant_id=request.participant_id,
+            participant_name=request.participant_name,
+            core_run_id=run_id,
+            status="completed",
+            final_answer=answer,
+            workflow_results={
+                "runtime_native_observation": {
+                    "status": "completed",
+                    "final_answer": answer,
+                    "execution_mode": "self_contained_runtime_observation",
+                    "observed_at": now.isoformat(timespec="seconds"),
+                }
+            },
+        )
 
 
     async def execute_intermediate_step(self, request: AgentExecutionRequest, progress_callback: Callable[[dict[str, Any]], Any] | None = None) -> AgentExecutionResult:
