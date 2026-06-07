@@ -251,7 +251,8 @@ class RuntimeBlueprintArtifactGenerator:
             "The Python code must be real executable implementation code, not a placeholder, not blueprint-only, and not a stub. "
             "The test file must be a plain Python script that uses only standard-library imports and assert statements; "
             "do not import pytest or any external test runner. "
-            "The test file must run locally without external network calls and assert the declared verification behavior. "
+            "The test file must run locally without external network calls, assert the declared verification behavior, "
+            "and verify that json.dumps(run(payload)) succeeds. "
             "Return only a JSON object; no markdown, no prose."
         )
         user = "Generate the runtime artifact from this contract:\n" + json.dumps(contract, ensure_ascii=False, indent=2, default=str)
@@ -480,7 +481,10 @@ class RuntimeBlueprintArtifactGenerator:
             schema.setdefault("type", "object")
             schema.setdefault("properties", {})
             schema.setdefault("required", [])
-            schema.setdefault("additionalProperties", name != "output")
+            if schema.get("properties"):
+                schema["additionalProperties"] = False
+            else:
+                schema.setdefault("additionalProperties", name != "output")
             return schema
         if name == "output":
             return {

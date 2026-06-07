@@ -599,7 +599,7 @@ class RuntimeCapabilityGapImplementer:
                     props[name]["default"] = default_match.group(1)
         if "dry_run" not in props and "dry_run" in lowered:
             props["dry_run"] = {"type": "boolean", "default": False}
-        return {"type": "object", "required": required, "properties": props, "additionalProperties": True}
+        return {"type": "object", "required": required, "properties": props, "additionalProperties": False}
 
     def _extract_declared_field_names(self, text: str, *, header_patterns: list[str]) -> list[str]:
         lines = str(text or "").splitlines()
@@ -1348,6 +1348,10 @@ class RuntimeCapabilityGapImplementer:
             self._write_test_report(artifact, check)
             if proc.get("returncode") != 0:
                 return {"passed": False, "status": "sandbox_failed", "checks": checks}
+        smoke = self._artifact_entrypoint_smoke_test(artifact)
+        checks.append({"name": "entrypoint_json_smoke_test", **smoke})
+        if not smoke.get("passed"):
+            return {"passed": False, "status": "sandbox_failed", "reason": str(smoke.get("reason") or "entrypoint_smoke_test_failed"), "checks": checks}
         quality = self._artifact_registration_quality_gate(artifact)
         checks.append({"name": "registration_quality_gate", "passed": bool(quality.get("passed")), "result": quality})
         if not quality.get("passed"):
@@ -1401,6 +1405,41 @@ class RuntimeCapabilityGapImplementer:
             return set()
         dependencies = manifest.get("dependencies") if isinstance(manifest, dict) else []
         return self._dependency_import_names(self._normalized_dependencies(dependencies))
+
+    def _artifact_entrypoint_smoke_test(self, artifact: dict[str, Any]) -> dict[str, Any]:
+        tool_dir = Path(str(artifact.get("tool_dir") or ""))
+        manifest_path = Path(str(artifact.get("manifest_path") or tool_dir / "manifest.json"))
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {"passed": False, "status": "failed", "reason": "manifest_unreadable", "error": str(exc)[:500]}
+        entrypoint = manifest.get("entrypoint") if isinstance(manifest.get("entrypoint"), dict) else {}
+        module_path = tool_dir / str(entrypoint.get("module") or "tool.py")
+        function_name = str(entrypoint.get("function") or "run")
+        verification_input = manifest.get("verification_input") if isinstance(manifest.get("verification_input"), dict) else {}
+        if not module_path.exists():
+            return {"passed": False, "status": "failed", "reason": "implementation_module_missing", "module_path": str(module_path)}
+        runner = (
+            "import importlib.util, json; "
+            f"module_path = {json.dumps(str(module_path))}; "
+            f"function_name = {json.dumps(function_name)}; "
+            f"payload = json.loads({json.dumps(json.dumps(verification_input, ensure_ascii=False))}); "
+            "spec = importlib.util.spec_from_file_location('runtime_generated_smoke_tool', module_path); "
+            "module = importlib.util.module_from_spec(spec); "
+            "spec.loader.exec_module(module); "
+            "output = getattr(module, function_name)(payload); "
+            "json.dumps(output, ensure_ascii=False)"
+        )
+        proc = self._run_isolated_python(["-c", runner], cwd=tool_dir, timeout=30)
+        return {
+            "passed": proc.get("returncode") == 0,
+            "status": "completed" if proc.get("returncode") == 0 else "failed",
+            "reason": "" if proc.get("returncode") == 0 else "entrypoint_output_not_json_serializable_or_execution_failed",
+            "returncode": proc.get("returncode"),
+            "stdout": str(proc.get("stdout") or "")[-2000:],
+            "stderr": str(proc.get("stderr") or "")[-2000:],
+            "attempts": proc.get("attempts", []),
+        }
 
     def _artifact_registration_quality_gate(self, artifact: dict[str, Any]) -> dict[str, Any]:
         """Reject blueprint/stub artifacts before registration.

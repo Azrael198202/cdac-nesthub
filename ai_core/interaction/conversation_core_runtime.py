@@ -668,8 +668,8 @@ class ConversationCoreRuntime:
                 evidence=evidence,
                 material="",
                 run_id=run_id,
+                runtime_implementation=runtime_impl,
             )
-            implementation["runtime_implementation"] = runtime_impl
             material = self._capability_gap_answer_material(
                 user_input=text,
                 evidence=evidence,
@@ -756,8 +756,8 @@ class ConversationCoreRuntime:
                     evidence=evidence,
                     material=material,
                     run_id=run_id,
+                    runtime_implementation=runtime_impl,
                 )
-                implementation["runtime_implementation"] = runtime_impl
                 material = self._capability_gap_answer_material(
                     user_input=text,
                     evidence=evidence,
@@ -872,6 +872,7 @@ class ConversationCoreRuntime:
         evidence: dict[str, Any],
         material: str,
         run_id: str,
+        runtime_implementation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create a generic, non-executing capability implementation record.
 
@@ -882,13 +883,21 @@ class ConversationCoreRuntime:
         blocked and no implementation is claimed.
         """
         urls = evidence.get("urls") if isinstance(evidence.get("urls"), list) else []
+        runtime_impl = runtime_implementation if isinstance(runtime_implementation, dict) else {}
+        runtime_status = str(runtime_impl.get("status") or "").strip()
+        if runtime_status:
+            artifact_status = runtime_status
+        elif urls:
+            artifact_status = "implementation_candidate_created"
+        else:
+            artifact_status = "blocked_without_verified_evidence"
         base = {
             "run_id": run_id,
-            "status": "implementation_candidate_created" if urls else "blocked_without_verified_evidence",
+            "status": artifact_status,
             "user_input": str(user_input or ""),
             "resolution_query": query,
             "source_urls": urls,
-            "evidence_required": True,
+            "evidence_required": bool(not runtime_status and not urls),
             "safe_execution_policy": "do_not_execute_external_code_without_validation",
             "lifecycle": [
                 "resolve_capability_gap",
@@ -900,6 +909,8 @@ class ConversationCoreRuntime:
             ],
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
+        if runtime_impl:
+            base["runtime_implementation"] = runtime_impl
         out_dir = RUNTIME_GENERATED / "capability_gap_resolutions"
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -1035,7 +1046,17 @@ class ConversationCoreRuntime:
         if isinstance(capability_impl, dict):
             runtime_impl = capability_impl.get("runtime_implementation") if isinstance(capability_impl.get("runtime_implementation"), dict) else None
         passed = bool(execution.get("answer_material")) and (not expects_web or bool(urls))
-        if runtime_impl and runtime_impl.get("status") in {"generated_but_validation_failed", "generated_but_verification_failed", "dependency_resolution_failed"}:
+        if runtime_impl and runtime_impl.get("status") in {
+            "sandbox_failed",
+            "not_registered",
+            "generated_but_validation_failed",
+            "generated_but_verification_failed",
+            "dependency_resolution_failed",
+            "code_generation_failed",
+            "planner_failed",
+            "planner_low_confidence",
+            "evidence_missing",
+        }:
             passed = False
         return {
             "status": "completed" if passed else "failed",
