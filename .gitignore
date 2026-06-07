@@ -709,3 +709,4 @@ runtime_assets/seeds/capability_planners/__pycache__/default_capability_planner.
 ai_core/runtime/observability/__pycache__/runtime_console.cpython-313.pyc
 ai_core/runtime/external_runtimes/__pycache__/__init__.cpython-313.pyc
 ai_core/runtime/external_runtimes/__pycache__/gguf_model_resolver.cpython-313.pyc
+runtime/external_runtimes/comfyui
