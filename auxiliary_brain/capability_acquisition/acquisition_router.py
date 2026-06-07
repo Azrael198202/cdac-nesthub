@@ -458,6 +458,7 @@ class RuntimeCapabilityGapImplementer:
             confidence = float(payload.get("confidence_score") or payload.get("confidence") or 0)
             if not isinstance(raw_blueprint, dict):
                 return {"status": "planner_failed", "reason": "planner_returned_no_blueprint", "confidence_score": confidence, "needs_external_evidence": True, "raw": payload}
+            raw_blueprint = self._augment_blueprint_from_user_request(raw_blueprint, user_input=user_input)
             template = self.blueprint_artifact_generator.materialize(raw_blueprint, identity_contract=identity_contract)
             validation = self._validate_runtime_template_shape(template)
             if not validation.get("passed"):
@@ -482,6 +483,98 @@ class RuntimeCapabilityGapImplementer:
                 "needs_external_evidence": True,
             }
 
+
+
+    def _augment_blueprint_from_user_request(self, blueprint: dict[str, Any], *, user_input: str) -> dict[str, Any]:
+        """Add explicitly declared user contract details to planner output.
+
+        This is not domain logic.  It only preserves explicit schema/contract text
+        that the user already declared, preventing a weak planner from replacing
+        the requested interface with the generic operation/name management schema.
+        """
+        merged = dict(blueprint or {})
+        text = str(user_input or "")
+        existing_description = str(merged.get("description") or "")
+        merged["description"] = (existing_description + "\n" + text[:4000]).strip()
+        declared_input = self._extract_declared_schema_section(text, header_patterns=[r"Input\s+parameters?"])
+        if declared_input and not self._schema_has_specific_properties(merged.get("input_schema")):
+            merged["input_schema"] = declared_input
+        declared_output_fields = self._extract_declared_field_names(text, header_patterns=[r"Output\s+fields?"])
+        if declared_output_fields and not self._schema_has_specific_properties(merged.get("output_schema")):
+            merged["output_schema"] = {
+                "type": "object",
+                "required": ["status", "data"],
+                "properties": {
+                    "status": {"type": "string"},
+                    "data": {"type": "object", "properties": {name: {"type": "string"} for name in declared_output_fields}, "additionalProperties": True},
+                    "message": {"type": "string"},
+                    "provenance": {"type": "object"},
+                },
+                "additionalProperties": False,
+            }
+        return merged
+
+    def _schema_has_specific_properties(self, value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        props = value.get("properties") if isinstance(value.get("properties"), dict) else {}
+        generic = {"operation", "name", "definition", "patch", "enabled", "dry_run"}
+        return bool(set(props) - generic)
+
+    def _extract_declared_schema_section(self, text: str, *, header_patterns: list[str]) -> dict[str, Any]:
+        names = self._extract_declared_field_names(text, header_patterns=header_patterns)
+        if not names:
+            return {}
+        props: dict[str, Any] = {}
+        required: list[str] = []
+        lowered = text.casefold()
+        for name in names:
+            props[name] = {"type": "string"}
+            pattern = re.compile(rf"{re.escape(name)}\s*[:：-]?\s*([^\n]*)", flags=re.IGNORECASE)
+            match = pattern.search(text)
+            detail = (match.group(1) if match else "").casefold()
+            if "optional" not in detail and "default" not in detail:
+                required.append(name)
+            if "boolean" in detail or "true" in detail or "false" in detail:
+                props[name]["type"] = "boolean"
+            elif "integer" in detail or "number" in detail:
+                props[name]["type"] = "number"
+            if "default" in detail:
+                default_match = re.search(r"default\s+([a-zA-Z0-9_:/+.-]+)", detail)
+                if default_match:
+                    props[name]["default"] = default_match.group(1)
+        if "dry_run" not in props and "dry_run" in lowered:
+            props["dry_run"] = {"type": "boolean", "default": False}
+        return {"type": "object", "required": required, "properties": props, "additionalProperties": True}
+
+    def _extract_declared_field_names(self, text: str, *, header_patterns: list[str]) -> list[str]:
+        lines = str(text or "").splitlines()
+        names: list[str] = []
+        active = False
+        for raw in lines:
+            line = raw.strip()
+            if any(re.search(pattern, line, flags=re.IGNORECASE) for pattern in header_patterns):
+                active = True
+                continue
+            if active and re.match(r"^[A-Z][A-Za-z ]+requirements?\s*[:：]?$", line):
+                break
+            if active and re.match(r"^(Input\s+parameters?|Output\s+fields?|Capability\s+behavior\s+requirements?)\s*[:：]?$", line, flags=re.IGNORECASE):
+                break
+            if active and re.match(r"^The\s+capability\s+acquisition\s+is\s+complete", line, flags=re.IGNORECASE):
+                break
+            if not active:
+                continue
+            match = re.match(r"^[-*]\s*([a-zA-Z_][a-zA-Z0-9_]*)\b", line)
+            if match:
+                value = self._safe_name(match.group(1))
+                if value and value not in names:
+                    names.append(value)
+            elif line and not line.startswith(("-", "*")) and ":" in line:
+                head = line.split(":", 1)[0].strip()
+                value = self._safe_name(head)
+                if value and value not in names:
+                    names.append(value)
+        return names
 
     def _allow_template_fallback(self) -> bool:
         return str(os.environ.get("AI_CORE_ALLOW_TEMPLATE_FALLBACK", "")).strip().casefold() in {"1", "true", "yes", "on"}

@@ -266,6 +266,7 @@ class AgentStudioModelSelectionRequest(BaseModel):
     custom_endpoint: str | None = None
     allow_escalation: bool = True
     ask_for_missing_keys_at_start: bool = True
+    presentation_profile: str | None = None
 
 
 

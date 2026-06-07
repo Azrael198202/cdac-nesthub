@@ -32,6 +32,18 @@ brains:
       model: qwen3.5:2b
       options:
         temperature: 0
+    tasks:
+      runtime_tool_code_generation:
+        provider: ollama
+        model: qwen3.5:4b-q4_k_m
+        options:
+          temperature: 0
+        complexities:
+          high:
+            provider: openai
+            model: gpt-5.5-thinking
+            options:
+              temperature: 0
 
   repair_brain:
     default:

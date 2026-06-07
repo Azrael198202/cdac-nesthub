@@ -27,6 +27,7 @@ class UserModelSelectionSnapshot:
     custom_endpoint: str = ""
     allow_escalation: bool = True
     ask_for_missing_keys_at_start: bool = True
+    presentation_profile: str = "advanced"
     updated_at: str = ""
     source: str = "default"
 
@@ -89,6 +90,7 @@ class UserModelSelectionStore:
             custom_endpoint=str(data.get("custom_endpoint") or ""),
             allow_escalation=bool(data.get("allow_escalation", True)),
             ask_for_missing_keys_at_start=bool(data.get("ask_for_missing_keys_at_start", True)),
+            presentation_profile=self._normalize_presentation_profile(data.get("presentation_profile") or os.getenv("AI_CORE_PRESENTATION_PROFILE") or "advanced"),
             updated_at=str(data.get("updated_at") or ""),
             source=str(data.get("source") or "runtime_config"),
         )
@@ -115,6 +117,7 @@ class UserModelSelectionStore:
             "custom_endpoint": str(payload.get("custom_endpoint") or current.custom_endpoint or ""),
             "allow_escalation": bool(payload.get("allow_escalation", current.allow_escalation)),
             "ask_for_missing_keys_at_start": bool(payload.get("ask_for_missing_keys_at_start", current.ask_for_missing_keys_at_start)),
+            "presentation_profile": self._normalize_presentation_profile(payload.get("presentation_profile") or current.presentation_profile),
             "source": "agent_studio_ui",
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -307,3 +310,7 @@ class UserModelSelectionStore:
         aliases = {"local": "local_only", "api": "api_only", "mixed": "hybrid", "mix": "hybrid"}
         text = aliases.get(text, text)
         return text if text in self.VALID_MODES else "api_only"
+
+    def _normalize_presentation_profile(self, value: Any) -> str:
+        normalized = str(value or "advanced").strip().casefold().replace("-", "_")
+        return normalized if normalized in {"user", "advanced", "developer", "diagnostic"} else "advanced"
