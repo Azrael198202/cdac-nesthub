@@ -68,7 +68,36 @@ def test_codegen_source_has_no_capability_specific_keyword_branches() -> None:
     assert not found, found
 
 
+def test_codegen_complexity_tiers_are_policy_driven() -> None:
+    generator = RuntimeBlueprintArtifactGenerator(llm_client=FakeBrainClient())
+    basic = generator._generation_complexity(
+        blueprint={
+            "description": "Complexity level basic. Use Python standard library only. Do not call external network APIs. Do not return a hardcoded runtime value.",
+            "dependencies": [],
+        },
+        identity_contract={},
+    )
+    medium = generator._generation_complexity(
+        blueprint={
+            "description": "Use official documentation and similar example program material to generate an implementation guide. No external package is declared.",
+            "dependencies": [],
+        },
+        identity_contract={},
+    )
+    high = generator._generation_complexity(
+        blueprint={
+            "description": "Requires OAuth and third-party SDK integration.",
+            "dependencies": [{"package": "example-sdk", "import_name": "example_sdk"}],
+        },
+        identity_contract={},
+    )
+    assert basic == "basic"
+    assert medium == "medium"
+    assert high == "high"
+
+
 if __name__ == "__main__":
     test_codegen_uses_litellm_path_and_not_builtin_templates()
     test_codegen_source_has_no_capability_specific_keyword_branches()
+    test_codegen_complexity_tiers_are_policy_driven()
     print("verify_v22_4_llm_based_code_generator: ok")

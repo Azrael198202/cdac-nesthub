@@ -39,11 +39,38 @@ brains:
         options:
           temperature: 0
         complexities:
+          basic:
+            provider: ollama
+            model: qwen3.5:4b-q4_k_m
+            options:
+              temperature: 0
+          medium:
+            provider: ollama
+            model: qwen3.5:4b-q4_k_m
+            options:
+              temperature: 0
           high:
             provider: openai
             model: gpt-5.5-thinking
             options:
               temperature: 0
+            fallback:
+              - provider: ollama
+                model: qwen3.5:4b-q4_k_m
+                options:
+                  temperature: 0
+                reason: local_code_generation_fallback
+          critical:
+            provider: openai
+            model: gpt-5.5-thinking
+            options:
+              temperature: 0
+            fallback:
+              - provider: ollama
+                model: qwen3.5:4b-q4_k_m
+                options:
+                  temperature: 0
+                reason: local_code_generation_fallback
 
   repair_brain:
     default:
@@ -52,11 +79,38 @@ brains:
       options:
         temperature: 0
     complexities:
+      basic:
+        provider: ollama
+        model: qwen3.5:2b
+        options:
+          temperature: 0
+      medium:
+        provider: ollama
+        model: qwen3.5:4b-q4_k_m
+        options:
+          temperature: 0
       high:
         provider: openai
         model: gpt-5.5-thinking
         options:
           temperature: 0
+        fallback:
+          - provider: ollama
+            model: qwen3.5:4b-q4_k_m
+            options:
+              temperature: 0
+            reason: local_repair_fallback
+      critical:
+        provider: openai
+        model: gpt-5.5-thinking
+        options:
+          temperature: 0
+        fallback:
+          - provider: ollama
+            model: qwen3.5:4b-q4_k_m
+            options:
+              temperature: 0
+            reason: local_repair_fallback
 
   verification_brain:
     default:
@@ -71,17 +125,49 @@ brains:
         options:
           temperature: 0
         complexities:
+          basic:
+            provider: ollama
+            model: qwen3.5:2b
+            options:
+              temperature: 0
+          medium:
+            provider: ollama
+            model: qwen3.5:4b-q4_k_m
+            options:
+              temperature: 0
           critical:
             provider: openai
             model: gpt-5.5-thinking
             options:
               temperature: 0
+            fallback:
+              - provider: ollama
+                model: qwen3.5:4b-q4_k_m
+                options:
+                  temperature: 0
+                reason: local_verification_fallback
     complexities:
+      basic:
+        provider: ollama
+        model: qwen3.5:2b
+        options:
+          temperature: 0
+      medium:
+        provider: ollama
+        model: qwen3.5:4b-q4_k_m
+        options:
+          temperature: 0
       critical:
         provider: openai
         model: gpt-5.5-thinking
         options:
           temperature: 0
+        fallback:
+          - provider: ollama
+            model: qwen3.5:4b-q4_k_m
+            options:
+              temperature: 0
+            reason: local_verification_fallback
 
   memory_brain:
     default:
@@ -89,6 +175,17 @@ brains:
       model: qwen3.5:2b
       options:
         temperature: 0
+    complexities:
+      basic:
+        provider: ollama
+        model: qwen3.5:2b
+        options:
+          temperature: 0
+      medium:
+        provider: ollama
+        model: qwen3.5:4b-q4_k_m
+        options:
+          temperature: 0
 
   perception_brain:
     default:
@@ -136,8 +233,24 @@ brains:
         options:
           temperature: 0
         complexities:
+          basic:
+            provider: ollama
+            model: qwen3.5:2b
+            options:
+              temperature: 0
+          medium:
+            provider: ollama
+            model: qwen3.5:4b-q4_k_m
+            options:
+              temperature: 0
           high:
             provider: openai
             model: gpt-5.5-thinking
             options:
               temperature: 0
+            fallback:
+              - provider: ollama
+                model: qwen3.5:4b-q4_k_m
+                options:
+                  temperature: 0
+                reason: local_presentation_fallback

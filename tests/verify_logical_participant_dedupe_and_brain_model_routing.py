@@ -1,3 +1,10 @@
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from auxiliary_brain.studio.instruction_workflow_planner import InstructionWorkflowPlanner
 from ai_core.model_orchestration import BrainModelRouter, LiteLLMBrainClient
 
@@ -23,8 +30,13 @@ def test_brain_model_router_selects_policy_without_hardcoded_callsite_model():
     assert route.brain == "repair_brain"
     assert route.model
     assert route.provider
+    assert route.fallback
     client = LiteLLMBrainClient()
     assert client._litellm_model(route)
+    attempts = client._route_attempts(route)
+    assert len(attempts) >= 2
+    assert attempts[0].provider == route.provider
+    assert attempts[1].provider
 
 
 if __name__ == "__main__":

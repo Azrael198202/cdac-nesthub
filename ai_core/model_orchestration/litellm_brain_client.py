@@ -71,13 +71,19 @@ class LiteLLMBrainClient:
         except Exception as exc:  # pragma: no cover - environment dependent
             return LiteLLMBrainResult(status="litellm_unavailable", route=route.to_dict(), error=str(exc))
 
-        model = self._litellm_model(route)
-        options = self._merge_options(route=route, response_format=response_format, kwargs=kwargs)
-        try:
-            raw = await acompletion(model=model, messages=messages, **options)
-            return LiteLLMBrainResult(status="completed", content=self._extract_content(raw), route=route.to_dict(), raw=raw)
-        except Exception as exc:
-            return LiteLLMBrainResult(status="failed", route=route.to_dict(), error=str(exc))
+        errors: list[dict[str, Any]] = []
+        for attempt_route in self._route_attempts(route):
+            model = self._litellm_model(attempt_route)
+            options = self._merge_options(route=attempt_route, response_format=response_format, kwargs=kwargs)
+            try:
+                raw = await acompletion(model=model, messages=messages, **options)
+                route_payload = attempt_route.to_dict()
+                if errors:
+                    route_payload["previous_attempts"] = errors
+                return LiteLLMBrainResult(status="completed", content=self._extract_content(raw), route=route_payload, raw=raw)
+            except Exception as exc:
+                errors.append({"provider": attempt_route.provider, "model": attempt_route.model, "error": str(exc)[:1000]})
+        return LiteLLMBrainResult(status="failed", route=route.to_dict(), error=json_dumps_compact(errors))
 
     def complete_with_route_sync(
         self,
@@ -92,13 +98,19 @@ class LiteLLMBrainClient:
         except Exception as exc:  # pragma: no cover - environment dependent
             return LiteLLMBrainResult(status="litellm_unavailable", route=route.to_dict(), error=str(exc))
 
-        model = self._litellm_model(route)
-        options = self._merge_options(route=route, response_format=response_format, kwargs=kwargs)
-        try:
-            raw = completion(model=model, messages=messages, **options)
-            return LiteLLMBrainResult(status="completed", content=self._extract_content(raw), route=route.to_dict(), raw=raw)
-        except Exception as exc:
-            return LiteLLMBrainResult(status="failed", route=route.to_dict(), error=str(exc))
+        errors: list[dict[str, Any]] = []
+        for attempt_route in self._route_attempts(route):
+            model = self._litellm_model(attempt_route)
+            options = self._merge_options(route=attempt_route, response_format=response_format, kwargs=kwargs)
+            try:
+                raw = completion(model=model, messages=messages, **options)
+                route_payload = attempt_route.to_dict()
+                if errors:
+                    route_payload["previous_attempts"] = errors
+                return LiteLLMBrainResult(status="completed", content=self._extract_content(raw), route=route_payload, raw=raw)
+            except Exception as exc:
+                errors.append({"provider": attempt_route.provider, "model": attempt_route.model, "error": str(exc)[:1000]})
+        return LiteLLMBrainResult(status="failed", route=route.to_dict(), error=json_dumps_compact(errors))
 
     def _merge_options(self, *, route: BrainModelRoute, response_format: dict[str, Any] | None, kwargs: dict[str, Any]) -> dict[str, Any]:
         options = dict(route.options or {})
@@ -130,3 +142,33 @@ class LiteLLMBrainClient:
         if model.startswith(provider + "/"):
             return model
         return f"{provider}/{model}" if model else provider
+
+    def _route_attempts(self, route: BrainModelRoute) -> list[BrainModelRoute]:
+        attempts = [route]
+        for item in route.fallback or []:
+            if isinstance(item, dict):
+                attempts.append(self._fallback_route(base=route, item=item))
+        return attempts
+
+    def _fallback_route(self, *, base: BrainModelRoute, item: dict[str, Any]) -> BrainModelRoute:
+        return BrainModelRoute(
+            brain=base.brain,
+            task_type=base.task_type,
+            complexity=base.complexity,
+            provider=str(item.get("provider") or base.provider),
+            model=str(item.get("model") or base.model),
+            model_alias=str(item.get("model_alias") or item.get("alias") or base.model_alias),
+            source=f"{base.source}:fallback",
+            options=item.get("options") if isinstance(item.get("options"), dict) else dict(base.options or {}),
+            fallback=[],
+            decision_reason=str(item.get("reason") or "fallback_route"),
+        )
+
+
+def json_dumps_compact(value: Any) -> str:
+    try:
+        import json
+
+        return json.dumps(value, ensure_ascii=False, default=str)[:2000]
+    except Exception:
+        return str(value)[:2000]

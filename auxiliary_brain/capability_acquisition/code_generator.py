@@ -265,18 +265,26 @@ class RuntimeBlueprintArtifactGenerator:
             "complexity level basic",
             "standard library",
             "standard-library",
-            "no external package",
-            "do not require external package",
             "no external network",
             "do not call external network",
             "no network",
             "offline",
         ]
+        external_reference_markers = [
+            "official documentation",
+            "reference documentation",
+            "implementation guide",
+            "api documentation",
+            "similar example",
+            "example program",
+            "external evidence",
+            "web evidence",
+            "source material",
+        ]
         complex_markers = [
             "oauth",
             "browser automation",
             "third-party sdk",
-            "external api",
             "pip install",
             "requires external package",
         ]
@@ -286,6 +294,8 @@ class RuntimeBlueprintArtifactGenerator:
             return "high"
         if any(marker in text for marker in local_basic_markers):
             return "basic"
+        if any(marker in text for marker in external_reference_markers):
+            return "medium"
         return "default"
 
     def _capability_contract(self, *, tool_id: str, blueprint: dict[str, Any]) -> dict[str, Any]:
