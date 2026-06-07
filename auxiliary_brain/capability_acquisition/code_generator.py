@@ -286,10 +286,59 @@ class RuntimeBlueprintArtifactGenerator:
         files = artifact.get("files")
         if not self._valid_files(files) or self._files_look_like_stub(files):
             return False
+        if not self._generated_tests_have_defined_names(files):
+            return False
         text = "\n".join(str(item.get("content") or "") for item in files if isinstance(item, dict))
         if "def " not in text or "return" not in text:
             return False
         return True
+
+    def _generated_tests_have_defined_names(self, files: list[dict[str, Any]]) -> bool:
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            if not self._is_test_path(str(item.get("path") or "")):
+                continue
+            try:
+                tree = ast.parse(str(item.get("content") or ""))
+            except SyntaxError:
+                return False
+            if self._undefined_loaded_names(tree):
+                return False
+        return True
+
+    def _undefined_loaded_names(self, tree: ast.AST) -> list[str]:
+        defined: set[str] = {"__name__", "True", "False", "None"}
+        try:
+            import builtins
+            defined.update(name for name in dir(builtins) if isinstance(name, str))
+        except Exception:
+            pass
+        loaded: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    defined.add(str(alias.asname or alias.name).split(".", 1)[0])
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    defined.add(str(alias.asname or alias.name))
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                defined.add(str(node.name))
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]:
+                        defined.add(str(arg.arg))
+                    if node.args.vararg:
+                        defined.add(str(node.args.vararg.arg))
+                    if node.args.kwarg:
+                        defined.add(str(node.args.kwarg.arg))
+            elif isinstance(node, ast.Name):
+                if isinstance(node.ctx, ast.Store):
+                    defined.add(str(node.id))
+                elif isinstance(node.ctx, ast.Load):
+                    loaded.add(str(node.id))
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                defined.add(str(node.name))
+        return sorted(name for name in loaded if name not in defined and not name.startswith("__"))
 
     def _generated_tests_use_allowed_imports(self, files: list[dict[str, Any]], dependencies: list[dict[str, Any]]) -> bool:
         local_modules = {

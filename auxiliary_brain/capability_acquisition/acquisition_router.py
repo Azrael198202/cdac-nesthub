@@ -294,6 +294,25 @@ class RuntimeCapabilityGapImplementer:
 
         validation = self._validate_artifact(artifact)
         mark("SandboxValidator", "completed" if validation.get("passed") else "sandbox_failed", result=validation)
+        if not validation.get("passed"):
+            retry = self._retry_artifact_after_validation_failure(
+                template=template,
+                planner_record=planner_record or {},
+                identity_contract=identity_contract,
+                validation=validation,
+                run_id=run_id,
+                evidence=evidence,
+                dependency_resolution=dependency_resolution,
+                user_input=user_input,
+            )
+            mark("SandboxRepairGenerator", str(retry.get("status") or "not_attempted"), result=retry)
+            if retry.get("status") == "validation_passed":
+                template = retry["template"]
+                artifact = retry["artifact"]
+                dependency_resolution = retry["dependency_resolution"]
+                pre_gate = retry["pre_gate"]
+                capability_match = retry["capability_match"]
+                validation = retry["validation"]
         verification_run: dict[str, Any] | None = None
         if validation.get("passed"):
             verification_run = self._execute_verification_run(template=template, artifact=artifact)
@@ -1218,6 +1237,133 @@ class RuntimeCapabilityGapImplementer:
         manifest_path = tool_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"tool_id": safe_id, "tool_dir": str(tool_dir), "test_dir": str(tests_dir), "manifest_path": str(manifest_path), "written_files": written, "test_files": test_files}
+
+    def _retry_artifact_after_validation_failure(
+        self,
+        *,
+        template: dict[str, Any],
+        planner_record: dict[str, Any],
+        identity_contract: dict[str, Any],
+        validation: dict[str, Any],
+        run_id: str,
+        evidence: dict[str, Any],
+        dependency_resolution: dict[str, Any],
+        user_input: str,
+    ) -> dict[str, Any]:
+        if not self._validation_failure_is_regenerable(validation):
+            return {"status": "not_attempted", "reason": "validation_failure_not_regenerable"}
+        source_blueprint = planner_record.get("blueprint") if isinstance(planner_record.get("blueprint"), dict) else template
+        repair_blueprint = dict(source_blueprint)
+        for key in [
+            "template_id",
+            "capabilities",
+            "entrypoint",
+            "input_schema",
+            "output_schema",
+            "connection_schema",
+            "secret_schema",
+            "approval_policy",
+            "runtime_interface",
+            "runtime_execution_policy",
+            "verification_input",
+            "verification_expectations",
+            "capability_match_contract",
+            "acquisition_policy",
+            "dependencies",
+        ]:
+            if key in template:
+                repair_blueprint[key] = template[key]
+        repair_blueprint["files"] = []
+        repair_blueprint["previous_validation_failure"] = self._compact_validation_failure(validation)
+        repair_blueprint["description"] = (
+            str(repair_blueprint.get("description") or "")
+            + "\n\nPrevious generated artifact failed sandbox validation. "
+            "Regenerate the runtime files so tests are self-contained, all names are imported or defined, "
+            "the entrypoint output is JSON-serializable, and the verification behavior is asserted by execution."
+        ).strip()
+        repaired_template = self.blueprint_artifact_generator.materialize(repair_blueprint, identity_contract=identity_contract)
+        if repaired_template.get("artifact_kind") != "real_runtime_implementation":
+            return {
+                "status": "code_generation_failed",
+                "reason": "repair_generation_did_not_produce_runtime_implementation",
+                "code_generation": repaired_template.get("code_generation") if isinstance(repaired_template.get("code_generation"), dict) else {},
+            }
+        shape = self._validate_runtime_template_shape(repaired_template)
+        if not shape.get("passed"):
+            return {"status": "planner_failed", "reason": "repair_template_contract_failed", "validation": shape}
+        repaired_artifact = self._write_artifact(template=repaired_template, run_id=run_id, evidence=evidence, dependency_resolution=dependency_resolution)
+        repaired_dependency_resolution = self._resolve_artifact_dependencies(
+            template=repaired_template,
+            artifact=repaired_artifact,
+            previous=dependency_resolution,
+        )
+        if not repaired_dependency_resolution.get("passed"):
+            return {
+                "status": "dependency_resolution_failed",
+                "dependency_resolution": repaired_dependency_resolution,
+                "artifact": repaired_artifact,
+            }
+        repaired_pre_gate = self.acquisition_gate.evaluate_before_validation(
+            requested_capability=str(repaired_template.get("template_id") or ""),
+            user_input=user_input,
+            template=repaired_template,
+            artifact=repaired_artifact,
+            dependency_resolution=repaired_dependency_resolution,
+        )
+        self.acquisition_gate.write_report(artifact_dir=repaired_artifact.get("tool_dir"), report={"pre_validation": repaired_pre_gate})
+        repaired_match = self._verify_capability_match(template=repaired_template, artifact=repaired_artifact, user_input=user_input)
+        if not repaired_pre_gate.get("passed") or not repaired_match.get("passed"):
+            return {
+                "status": "generated_but_capability_mismatch",
+                "pre_gate": repaired_pre_gate,
+                "capability_match": repaired_match,
+                "artifact": repaired_artifact,
+            }
+        repaired_validation = self._validate_artifact(repaired_artifact)
+        return {
+            "status": "validation_passed" if repaired_validation.get("passed") else "validation_failed",
+            "template": repaired_template,
+            "artifact": repaired_artifact,
+            "dependency_resolution": repaired_dependency_resolution,
+            "pre_gate": repaired_pre_gate,
+            "capability_match": repaired_match,
+            "validation": repaired_validation,
+        }
+
+    def _validation_failure_is_regenerable(self, validation: dict[str, Any]) -> bool:
+        reason = str(validation.get("reason") or "").strip()
+        if reason in {
+            "generated_test_undefined_names",
+            "undeclared_external_test_dependencies",
+            "entrypoint_output_not_json_serializable_or_execution_failed",
+            "entrypoint_smoke_test_failed",
+            "artifact_quality_gate_failed",
+        }:
+            return True
+        checks = validation.get("checks") if isinstance(validation.get("checks"), list) else []
+        text = json.dumps(checks, ensure_ascii=False, default=str).casefold()
+        return any(marker in text for marker in ["nameerror", "typeerror", "not json serializable", "undefined_names", "unit_test"])
+
+    def _compact_validation_failure(self, validation: dict[str, Any]) -> dict[str, Any]:
+        checks = validation.get("checks") if isinstance(validation.get("checks"), list) else []
+        compact_checks: list[dict[str, Any]] = []
+        for check in checks[-5:]:
+            if not isinstance(check, dict):
+                continue
+            compact_checks.append({
+                "name": check.get("name"),
+                "passed": check.get("passed"),
+                "status": check.get("status"),
+                "reason": check.get("reason"),
+                "unknown_imports": check.get("unknown_imports"),
+                "undefined_names": check.get("undefined_names"),
+                "stderr": str(check.get("stderr") or "")[-1000:],
+            })
+        return {
+            "status": validation.get("status"),
+            "reason": validation.get("reason"),
+            "checks": compact_checks,
+        }
 
 
     def _verify_capability_match(self, *, template: dict[str, Any], artifact: dict[str, Any], user_input: str) -> dict[str, Any]:
