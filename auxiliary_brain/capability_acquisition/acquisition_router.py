@@ -1319,20 +1319,20 @@ class RuntimeCapabilityGapImplementer:
         legacy_test_file = tool_dir / "test_tool.py"
         if legacy_test_file.exists() and legacy_test_file not in test_candidates:
             test_candidates.append(legacy_test_file)
-        import_gate = self._test_import_quality_gate(tool_dir=tool_dir, test_candidates=test_candidates)
-        checks.append({"name": "test_import_quality_gate", **import_gate})
-        if not import_gate.get("passed"):
+        test_quality = self._test_static_quality_gate(tool_dir=tool_dir, test_candidates=test_candidates)
+        checks.append({"name": "test_static_quality_gate", **test_quality})
+        if not test_quality.get("passed"):
             return {
                 "passed": False,
                 "status": "sandbox_failed",
-                "reason": "undeclared_external_test_dependencies",
+                "reason": str(test_quality.get("status") or "generated_test_static_quality_failed"),
                 "checks": checks,
             }
         for test_file in test_candidates:
             runner = (
                 "import runpy, sys; "
                 f"sys.path.insert(0, {json.dumps(str(tool_dir))}); "
-                f"ns = runpy.run_path({json.dumps(str(test_file))}, run_name='__main__'); "
+                f"ns = runpy.run_path({json.dumps(str(test_file))}, run_name='__runtime_test__'); "
                 "[fn() for name, fn in sorted(ns.items()) if name.startswith('test_') and callable(fn)]"
             )
             proc = self._run_isolated_python(["-c", runner], cwd=tool_dir, timeout=30)
@@ -1358,10 +1358,11 @@ class RuntimeCapabilityGapImplementer:
             return {"passed": False, "status": "sandbox_failed", "reason": str(quality.get("reason") or "artifact_quality_gate_failed"), "checks": checks}
         return {"passed": True, "status": "completed", "checks": checks, "isolation_level": "clean_subprocess"}
 
-    def _test_import_quality_gate(self, *, tool_dir: Path, test_candidates: list[Path]) -> dict[str, Any]:
+    def _test_static_quality_gate(self, *, tool_dir: Path, test_candidates: list[Path]) -> dict[str, Any]:
         local_modules = {path.stem for path in tool_dir.rglob("*.py")}
         declared_imports = self._manifest_dependency_imports(tool_dir)
         unknown: list[dict[str, str]] = []
+        undefined: list[dict[str, str]] = []
         for test_file in test_candidates:
             try:
                 tree = ast.parse(test_file.read_text(encoding="utf-8"))
@@ -1376,11 +1377,52 @@ class RuntimeCapabilityGapImplementer:
                 if module in local_modules or module in declared_imports or module in getattr(sys, "stdlib_module_names", set()):
                     continue
                 unknown.append({"test_file": str(test_file), "module": module})
+            for name in self._undefined_loaded_names(tree):
+                undefined.append({"test_file": str(test_file), "name": name})
+        status = "completed"
+        if unknown:
+            status = "undeclared_external_test_dependencies"
+        elif undefined:
+            status = "generated_test_undefined_names"
         return {
-            "passed": not unknown,
-            "status": "completed" if not unknown else "undeclared_external_test_dependencies",
+            "passed": not unknown and not undefined,
+            "status": status,
             "unknown_imports": unknown,
+            "undefined_names": undefined,
         }
+
+    def _undefined_loaded_names(self, tree: ast.AST) -> list[str]:
+        defined: set[str] = {"__name__", "True", "False", "None"}
+        try:
+            import builtins
+            defined.update(name for name in dir(builtins) if isinstance(name, str))
+        except Exception:
+            pass
+        loaded: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    defined.add(str(alias.asname or alias.name).split(".", 1)[0])
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    defined.add(str(alias.asname or alias.name))
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                defined.add(str(node.name))
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]:
+                        defined.add(str(arg.arg))
+                    if node.args.vararg:
+                        defined.add(str(node.args.vararg.arg))
+                    if node.args.kwarg:
+                        defined.add(str(node.args.kwarg.arg))
+            elif isinstance(node, ast.Name):
+                if isinstance(node.ctx, ast.Store):
+                    defined.add(str(node.id))
+                elif isinstance(node.ctx, ast.Load):
+                    loaded.add(str(node.id))
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                defined.add(str(node.name))
+        return sorted(name for name in loaded if name not in defined and not name.startswith("__"))
 
     def _top_level_imports(self, tree: ast.AST) -> list[str]:
         modules: list[str] = []
