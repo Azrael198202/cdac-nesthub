@@ -54,6 +54,8 @@ class PrimaryBrainDelegationClient:
     INTERNAL_OUTPUT_MARKERS = (
         "Use upstream input", "Return JSON", "Return valid JSON",
         "prompt_contract", "agent_action_prompt_contract", "planner_llm",
+        "Agent actions and substeps planned", "locked fixed execution options",
+        "workflow is blocked", "blocked step details",
     )
 
     def __init__(self, runtime: WorkflowRuntime | None = None) -> None:
@@ -689,14 +691,23 @@ class PrimaryBrainDelegationClient:
         core_run_id = uuid.uuid4().hex[:12]
         usable_results = self._usable_agent_results(agent_results)
         failed_results = [r for r in agent_results if str(r.status or "").lower() != "completed"]
-        synthesis_input = usable_results if usable_results else agent_results
-        final_answer = await self._compose_or_escalate_delegated_final_answer(
-            core_run_id=core_run_id,
-            task_name=task_name,
-            task_instruction=task_instruction,
-            agent_results=synthesis_input,
-            shared_context=shared_context or {},
-        )
+        if usable_results:
+            final_answer = await self._compose_or_escalate_delegated_final_answer(
+                core_run_id=core_run_id,
+                task_name=task_name,
+                task_instruction=task_instruction,
+                agent_results=usable_results,
+                shared_context=shared_context or {},
+            )
+        else:
+            # No participant produced verified user-facing material. Do not feed
+            # planner/status text back into an LLM for synthesis, because that can
+            # turn internal planning messages into fake final answers.
+            final_answer = self._compose_delegated_final_answer(
+                task_name=task_name,
+                task_instruction=task_instruction,
+                agent_results=agent_results,
+            )
         return {
             "origin": "ai_core",
             "core_run_id": core_run_id,
@@ -1142,7 +1153,7 @@ class PrimaryBrainDelegationClient:
         marker = "\n\nTrust: unverified generated result."
         if marker in text:
             text = text.split(marker, 1)[0].strip()
-        if any(m in text for m in self.INTERNAL_OUTPUT_MARKERS):
+        if any(str(m).casefold() in text.casefold() for m in self.INTERNAL_OUTPUT_MARKERS):
             return ""
         return text
 
@@ -1196,7 +1207,7 @@ class PrimaryBrainDelegationClient:
                 return ""
             if "intermediate node data was intentionally not exposed" in lowered:
                 return ""
-            if any(marker in text for marker in self.INTERNAL_OUTPUT_MARKERS):
+            if any(str(marker).casefold() in text.casefold() for marker in self.INTERNAL_OUTPUT_MARKERS):
                 return ""
             return text
 
@@ -1213,7 +1224,7 @@ class PrimaryBrainDelegationClient:
                     return text
 
         for node_id, node in results.items():
-            if str(node_id) in {"input_parsing", "intent_recognition", "requirement_completion", "context_awareness", "workflow_planning", "execution_preparation", "pre_execution_validation", "result_verification", "feedback_repair"}:
+            if str(node_id) in {"input_parsing", "intent_recognition", "requirement_completion", "context_awareness", "workflow_planning", "agent_action_planning", "execution_preparation", "pre_execution_validation", "result_verification", "feedback_repair", "final_synthesis"}:
                 continue
             if isinstance(node, dict):
                 status = str(node.get("status") or node.get("execution_status") or "").lower()
@@ -1278,7 +1289,7 @@ class PrimaryBrainDelegationClient:
             clean = str(text or "").strip()
             if not clean or not self._answer_has_result_material(clean):
                 return ""
-            if any(marker in clean for marker in self.INTERNAL_OUTPUT_MARKERS):
+            if any(str(marker).casefold() in clean.casefold() for marker in self.INTERNAL_OUTPUT_MARKERS):
                 return ""
             return clean
 
