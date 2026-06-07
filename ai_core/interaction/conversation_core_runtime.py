@@ -1180,6 +1180,38 @@ class ConversationCoreRuntime:
                 terms.append(term)
         return terms[:20]
 
+
+    def _generic_capability_terms(self, text: str) -> list[str]:
+        """Extract neutral implementation terms from a request.
+
+        This helper is intentionally generic: it removes common orchestration
+        words and keeps compact technical nouns/phrases that can be used for
+        evidence retrieval. It must not encode any concrete capability domain.
+        """
+        raw = str(text or "")
+        tokens = re.findall(r"[A-Za-z][A-Za-z0-9_+.#/-]{1,}|[\u3040-\u30ff\u3400-\u9fff]{2,}", raw)
+        stop = {
+            "runtime", "capability", "acquire", "create", "generate", "register",
+            "implementation", "constraints", "schema", "secret", "connection",
+            "approval", "policy", "sandbox", "validation", "verify", "verified",
+            "complete", "only", "after", "prefer", "language", "complexity",
+            "store", "values", "through", "local", "system", "using", "with",
+            "without", "should", "must", "required", "please", "user", "mode",
+        }
+        terms: list[str] = []
+        for token in tokens:
+            clean = token.strip(" .,:;()[]{}<>\"'`")
+            if not clean:
+                continue
+            low = clean.casefold()
+            if low in stop or len(clean) < 2:
+                continue
+            if clean not in terms:
+                terms.append(clean)
+            if len(terms) >= 20:
+                break
+        return terms
+
     def _generic_external_signal(self, text: str) -> bool:
         return bool(self._external_information_signals(text) or self._generic_capability_gap_signal(text))
 

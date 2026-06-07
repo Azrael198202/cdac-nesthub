@@ -885,3 +885,14 @@ tools/__pycache__/verify_v22_3_runtime_execution_center_ui.cpython-313.pyc
 tools/__pycache__/verify_v22_3_runtime_execution_center_ui.cpython-313.pyc
 tools/__pycache__/verify_v22_3_runtime_execution_center_ui_settings_fix.cpython-313.pyc
 tools/__pycache__/verify_v22_3_ui_profile_history.cpython-313.pyc
+perception_brain/__pycache__/__init__.cpython-313.pyc
+perception_brain/__pycache__/contracts.cpython-313.pyc
+perception_brain/__pycache__/modality_router.cpython-313.pyc
+perception_brain/__pycache__/service.cpython-313.pyc
+perception_brain/processors/__pycache__/__init__.cpython-313.pyc
+perception_brain/processors/__pycache__/audio_video.cpython-313.pyc
+perception_brain/processors/__pycache__/base.cpython-313.pyc
+perception_brain/processors/__pycache__/image.cpython-313.pyc
+perception_brain/processors/__pycache__/text_document.cpython-313.pyc
+tools/__pycache__/verify_v22_4_no_shortcut_and_capability_terms.cpython-313.pyc
+tools/__pycache__/verify_v22_4_perception_brain.cpython-313.pyc
