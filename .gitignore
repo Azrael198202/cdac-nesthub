@@ -898,3 +898,15 @@ tools/__pycache__/verify_v22_4_no_shortcut_and_capability_terms.cpython-313.pyc
 tools/__pycache__/verify_v22_4_perception_brain.cpython-313.pyc
 tools/__pycache__/verify_v22_4_no_fake_time_and_planner_answer.cpython-313.pyc
 tools/__pycache__/verify_v22_4_runtime_moment_and_profile_settings.cpython-313.pyc
+perception_brain/__pycache__/__init__.cpython-311.pyc
+perception_brain/__pycache__/contracts.cpython-311.pyc
+perception_brain/__pycache__/modality_router.cpython-311.pyc
+perception_brain/__pycache__/service.cpython-311.pyc
+perception_brain/processors/__pycache__/__init__.cpython-311.pyc
+perception_brain/processors/__pycache__/audio_video.cpython-311.pyc
+perception_brain/processors/__pycache__/base.cpython-311.pyc
+perception_brain/processors/__pycache__/image.cpython-311.pyc
+perception_brain/processors/__pycache__/text_document.cpython-311.pyc
+runtime_assets/seeds/capability_planners/__pycache__/default_capability_planner.cpython-311.pyc
+tools/__pycache__/verify_v22_4_llm_based_code_generator.cpython-311.pyc
+tools/__pycache__/verify_v22_5_policy_backed_local_codegen_registration.cpython-311.pyc

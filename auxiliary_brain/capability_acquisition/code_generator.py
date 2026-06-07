@@ -142,8 +142,13 @@ class RuntimeBlueprintArtifactGenerator:
         result = self.llm_client.complete_sync(
             brain="auxiliary_brain",
             task_type="runtime_tool_code_generation",
-            complexity="high",
+            complexity=self._generation_complexity(blueprint=blueprint, identity_contract=identity_contract),
             messages=messages,
+            context={
+                "tool_id": tool_id,
+                "acquisition_policy": blueprint.get("acquisition_policy") if isinstance(blueprint.get("acquisition_policy"), dict) else {},
+                "dependencies": blueprint.get("dependencies") if isinstance(blueprint.get("dependencies"), list) else [],
+            },
             response_format={"type": "json_object"},
         )
         route = result.route if isinstance(result.route, dict) else {}
@@ -241,6 +246,47 @@ class RuntimeBlueprintArtifactGenerator:
         if policy.get("code_generation") == "disabled":
             return False
         return True
+
+    def _generation_complexity(self, *, blueprint: dict[str, Any], identity_contract: dict[str, Any]) -> str:
+        """Choose a policy route without embedding capability-specific logic."""
+        text = json.dumps({
+            "blueprint": {
+                "description": blueprint.get("description"),
+                "acquisition_policy": blueprint.get("acquisition_policy"),
+                "runtime_execution_policy": blueprint.get("runtime_execution_policy"),
+                "dependencies": blueprint.get("dependencies"),
+            },
+            "identity_contract": identity_contract,
+        }, ensure_ascii=False, default=str).casefold()
+        dependencies = blueprint.get("dependencies") if isinstance(blueprint.get("dependencies"), list) else []
+        has_declared_dependency = any(isinstance(item, dict) and str(item.get("package") or item.get("name") or item.get("module") or "").strip() for item in dependencies)
+        local_basic_markers = [
+            "complexity level: basic",
+            "complexity level basic",
+            "standard library",
+            "standard-library",
+            "no external package",
+            "do not require external package",
+            "no external network",
+            "do not call external network",
+            "no network",
+            "offline",
+        ]
+        complex_markers = [
+            "oauth",
+            "browser automation",
+            "third-party sdk",
+            "external api",
+            "pip install",
+            "requires external package",
+        ]
+        if has_declared_dependency:
+            return "high"
+        if any(marker in text for marker in complex_markers):
+            return "high"
+        if any(marker in text for marker in local_basic_markers):
+            return "basic"
+        return "default"
 
     def _capability_contract(self, *, tool_id: str, blueprint: dict[str, Any]) -> dict[str, Any]:
         declared = blueprint.get("capability_match_contract") if isinstance(blueprint.get("capability_match_contract"), dict) else {}

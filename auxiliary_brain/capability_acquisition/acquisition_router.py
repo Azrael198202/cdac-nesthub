@@ -464,9 +464,25 @@ class RuntimeCapabilityGapImplementer:
             if not validation.get("passed"):
                 return {"status": "planner_failed", "reason": "planner_blueprint_contract_failed", "confidence_score": confidence, "needs_external_evidence": True, "validation": validation}
             min_confidence = float(os.environ.get("AI_CORE_CAPABILITY_PLANNER_MIN_CONFIDENCE", "0.70") or 0.70)
-            if confidence < min_confidence:
+            policy_backed_basic = self._request_declares_policy_backed_basic(user_input=user_input, template=template, evidence=evidence)
+            if policy_backed_basic:
+                policy = template.get("acquisition_policy") if isinstance(template.get("acquisition_policy"), dict) else {}
+                policy = dict(policy)
+                policy["allow_policy_backed_basic_acquisition_without_external_evidence"] = True
+                policy["planner_confidence_policy_override"] = confidence < min_confidence
+                template["acquisition_policy"] = policy
+            if confidence < min_confidence and not policy_backed_basic:
                 return {"status": "planner_low_confidence", "reason": "planner_confidence_below_threshold", "confidence_score": confidence, "needs_external_evidence": True, "template": template, "validation": validation}
-            return {"status": "planned", "confidence_score": confidence, "needs_external_evidence": bool(payload.get("needs_external_evidence")), "template": template, "blueprint": raw_blueprint, "validation": validation, "planner_origin": planner_origin}
+            return {
+                "status": "planned",
+                "confidence_score": confidence,
+                "needs_external_evidence": False if policy_backed_basic else bool(payload.get("needs_external_evidence")),
+                "template": template,
+                "blueprint": raw_blueprint,
+                "validation": validation,
+                "planner_origin": planner_origin,
+                "policy_backed_basic": policy_backed_basic,
+            }
         except ValueError:
             return {
                 "status": "planner_failed",
@@ -671,11 +687,23 @@ class RuntimeCapabilityGapImplementer:
             "planner": {"needs_external_evidence": planner_record.get("needs_external_evidence")},
         }, ensure_ascii=False).casefold()
         has_external_evidence = bool(isinstance(evidence, dict) and evidence.get("urls"))
+        policy_backed_basic = self._request_declares_policy_backed_basic(user_input=user_input, template=template, evidence=evidence)
         positive_markers = [
             "standard library",
             "standard-library",
             "no external package",
             "do not require external",
+            "without external package",
+            "no package installation",
+            "do not require package installation",
+            "do not call external network",
+            "no external network",
+            "no network api",
+            "no network apis",
+            "offline",
+            "deterministic local",
+            "do not return a hardcoded",
+            "not hardcoded",
             "local runtime",
             "local storage",
             "runtime storage",
@@ -693,7 +721,7 @@ class RuntimeCapabilityGapImplementer:
         declares_external_dependency = any(isinstance(item, dict) and str(item.get("package") or item.get("name") or "").strip() for item in dependencies)
         positive = [item for item in positive_markers if item in text]
         negative = [item for item in external_markers if item in text]
-        runtime_native = bool(positive) and not negative and not declares_external_dependency
+        runtime_native = (bool(positive) or policy_backed_basic) and not negative and not declares_external_dependency
         return {
             "runtime_native": runtime_native,
             "class": "runtime_native" if runtime_native else "evidence_or_dependency_backed",
@@ -701,8 +729,63 @@ class RuntimeCapabilityGapImplementer:
             "negative_markers": negative,
             "declares_external_dependency": declares_external_dependency,
             "has_external_evidence": has_external_evidence,
+            "policy_backed_basic": policy_backed_basic,
             "policy": "policy_backed_without_external_evidence" if runtime_native and not has_external_evidence else "normal",
         }
+
+    def _request_declares_policy_backed_basic(self, *, user_input: str, template: dict[str, Any], evidence: dict[str, Any]) -> bool:
+        """Detect explicit local-only implementation constraints.
+
+        This is generic policy classification. It never checks concrete
+        capability names. The caller still must generate code, compile it, run
+        sandbox tests, execute verification input, and pass the registration
+        gate before anything is registered.
+        """
+        text = json.dumps({
+            "user_input": user_input,
+            "template": {
+                "description": template.get("description") if isinstance(template, dict) else "",
+                "acquisition_policy": template.get("acquisition_policy") if isinstance(template, dict) else {},
+                "runtime_execution_policy": template.get("runtime_execution_policy") if isinstance(template, dict) else {},
+                "dependencies": template.get("dependencies") if isinstance(template, dict) else [],
+            },
+        }, ensure_ascii=False, default=str).casefold()
+        dependencies = template.get("dependencies") if isinstance(template.get("dependencies"), list) else []
+        declares_external_dependency = any(isinstance(item, dict) and str(item.get("package") or item.get("name") or item.get("module") or "").strip() for item in dependencies)
+        if declares_external_dependency:
+            return False
+        required = [
+            ("standard library" in text or "standard-library" in text),
+            ("basic" in text or "low complexity" in text),
+        ]
+        local_safety = any(marker in text for marker in [
+            "no external package",
+            "do not require external package",
+            "without external package",
+            "no package installation",
+            "do not require package installation",
+            "do not call external network",
+            "no external network",
+            "no network api",
+            "no network apis",
+            "offline",
+        ])
+        dynamic_value_required = any(marker in text for marker in [
+            "do not return a hardcoded",
+            "not hardcoded",
+            "runtime value",
+            "derived at execution",
+            "execution time",
+        ])
+        external_runtime = any(marker in text for marker in [
+            "oauth",
+            "browser automation",
+            "third-party sdk",
+            "pip install",
+            "requires external package",
+            "external api",
+        ])
+        return all(required) and local_safety and dynamic_value_required and not external_runtime
 
     def _runtime_self_repair(
         self,
