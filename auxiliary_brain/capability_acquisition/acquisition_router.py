@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -223,6 +224,33 @@ class RuntimeCapabilityGapImplementer:
 
         artifact = self._write_artifact(template=template, run_id=run_id, evidence=evidence, dependency_resolution=dependency_resolution)
         mark("ArtifactGenerator", "completed", artifact=artifact)
+
+        dependency_resolution = self._resolve_artifact_dependencies(template=template, artifact=artifact, previous=dependency_resolution)
+        mark(
+            "ArtifactDependencyResolver",
+            "completed" if dependency_resolution.get("passed") else str(dependency_resolution.get("status") or "failed"),
+            result=dependency_resolution,
+        )
+        if not dependency_resolution.get("passed"):
+            repair = self._runtime_self_repair(
+                run_id=run_id,
+                stage="ArtifactDependencyResolver",
+                status=str(dependency_resolution.get("status") or "failed"),
+                reason="artifact_dependency_resolution_failed",
+                payload=dependency_resolution,
+                expected={"passed": True},
+            )
+            mark("RuntimeSelfRepairEngine", str(repair.get("status") or "repair_checked"), repair=repair)
+            return {
+                "status": "dependency_resolution_failed",
+                "template_id": template.get("template_id"),
+                "score": match.score if match else 0,
+                "dependency_resolution": dependency_resolution,
+                "artifact": artifact,
+                "pipeline": pipeline,
+                "self_repair": repair,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
 
         pre_gate = self.acquisition_gate.evaluate_before_validation(
             requested_capability=str(template.get("template_id") or ""),
@@ -889,6 +917,138 @@ class RuntimeCapabilityGapImplementer:
             checks.append(check)
         return {"passed": True, "status": "completed", "checks": checks}
 
+    def _resolve_artifact_dependencies(
+        self,
+        *,
+        template: dict[str, Any],
+        artifact: dict[str, Any],
+        previous: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve dependencies that are visible only after code generation."""
+        declared = self._normalized_dependencies(template.get("dependencies"))
+        discovered = self._discover_artifact_python_dependencies(artifact, declared)
+        merged = self._merge_dependencies(declared, discovered)
+        if not discovered:
+            self._update_artifact_dependency_manifest(artifact=artifact, dependencies=merged, dependency_resolution=previous)
+            return {
+                **previous,
+                "dependencies": merged,
+                "artifact_dependency_scan": {"status": "completed", "discovered": []},
+            }
+        resolution = self._resolve_dependencies({"dependencies": merged})
+        combined = {
+            "passed": bool(resolution.get("passed")),
+            "status": resolution.get("status"),
+            "checks": resolution.get("checks", []),
+            "pre_generation": previous,
+            "dependencies": merged,
+            "artifact_dependency_scan": {
+                "status": "completed",
+                "discovered": discovered,
+            },
+        }
+        template["dependencies"] = merged
+        self._update_artifact_dependency_manifest(artifact=artifact, dependencies=merged, dependency_resolution=combined)
+        return combined
+
+    def _discover_artifact_python_dependencies(self, artifact: dict[str, Any], declared: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        tool_dir = Path(str(artifact.get("tool_dir") or ""))
+        test_dir = Path(str(artifact.get("test_dir") or ""))
+        if not tool_dir.exists():
+            return []
+        local_modules = {path.stem for path in tool_dir.rglob("*.py")}
+        if test_dir.exists():
+            local_modules.update(path.stem for path in test_dir.rglob("*.py"))
+        declared_imports = self._dependency_import_names(declared)
+        discovered: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        python_files = list(tool_dir.rglob("*.py"))
+        if test_dir.exists():
+            python_files.extend(test_dir.rglob("*.py"))
+        for path in sorted({p.resolve() for p in python_files}):
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except SyntaxError:
+                continue
+            for module in self._top_level_imports(tree):
+                if not module:
+                    continue
+                if module in local_modules or module in declared_imports or module in getattr(sys, "stdlib_module_names", set()):
+                    continue
+                if module in seen:
+                    continue
+                seen.add(module)
+                discovered.append({
+                    "package": module,
+                    "import_name": module,
+                    "auto_install": True,
+                    "source": "artifact_import_scan",
+                })
+        return discovered
+
+    def _update_artifact_dependency_manifest(
+        self,
+        *,
+        artifact: dict[str, Any],
+        dependencies: list[dict[str, Any]],
+        dependency_resolution: dict[str, Any],
+    ) -> None:
+        manifest_path = Path(str(artifact.get("manifest_path") or ""))
+        if not manifest_path.exists():
+            return
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(manifest, dict):
+            return
+        manifest["dependencies"] = dependencies
+        manifest["dependency_resolution"] = dependency_resolution
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _normalized_dependencies(self, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        result: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            import_name = str(item.get("import_name") or item.get("module") or "").strip()
+            package = str(item.get("package") or item.get("name") or import_name).strip()
+            if not package and not import_name:
+                continue
+            result.append({
+                "package": package or import_name,
+                "import_name": import_name or package.replace("-", "_"),
+                "auto_install": bool(item.get("auto_install", True)),
+                **({"source": item.get("source")} if item.get("source") else {}),
+            })
+        return result
+
+    def _merge_dependencies(self, left: list[dict[str, Any]], right: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in [*left, *right]:
+            package = str(item.get("package") or item.get("name") or "").strip()
+            import_name = str(item.get("import_name") or item.get("module") or "").strip()
+            key = (package, import_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+        return merged
+
+    def _dependency_import_names(self, dependencies: list[dict[str, Any]]) -> set[str]:
+        imports: set[str] = set()
+        for item in dependencies:
+            import_name = str(item.get("import_name") or item.get("module") or "").strip()
+            package = str(item.get("package") or item.get("name") or "").strip()
+            if import_name:
+                imports.add(import_name.split(".", 1)[0])
+            elif package:
+                imports.add(package.replace("-", "_").split(".", 1)[0])
+        return imports
+
     def _module_available(self, name: str) -> bool:
         try:
             return importlib.util.find_spec(name) is not None
@@ -1159,11 +1319,21 @@ class RuntimeCapabilityGapImplementer:
         legacy_test_file = tool_dir / "test_tool.py"
         if legacy_test_file.exists() and legacy_test_file not in test_candidates:
             test_candidates.append(legacy_test_file)
+        import_gate = self._test_import_quality_gate(tool_dir=tool_dir, test_candidates=test_candidates)
+        checks.append({"name": "test_import_quality_gate", **import_gate})
+        if not import_gate.get("passed"):
+            return {
+                "passed": False,
+                "status": "sandbox_failed",
+                "reason": "undeclared_external_test_dependencies",
+                "checks": checks,
+            }
         for test_file in test_candidates:
             runner = (
                 "import runpy, sys; "
                 f"sys.path.insert(0, {json.dumps(str(tool_dir))}); "
-                f"runpy.run_path({json.dumps(str(test_file))}, run_name='__main__')"
+                f"ns = runpy.run_path({json.dumps(str(test_file))}, run_name='__main__'); "
+                "[fn() for name, fn in sorted(ns.items()) if name.startswith('test_') and callable(fn)]"
             )
             proc = self._run_isolated_python(["-c", runner], cwd=tool_dir, timeout=30)
             check = {
@@ -1183,6 +1353,54 @@ class RuntimeCapabilityGapImplementer:
         if not quality.get("passed"):
             return {"passed": False, "status": "sandbox_failed", "reason": str(quality.get("reason") or "artifact_quality_gate_failed"), "checks": checks}
         return {"passed": True, "status": "completed", "checks": checks, "isolation_level": "clean_subprocess"}
+
+    def _test_import_quality_gate(self, *, tool_dir: Path, test_candidates: list[Path]) -> dict[str, Any]:
+        local_modules = {path.stem for path in tool_dir.rglob("*.py")}
+        declared_imports = self._manifest_dependency_imports(tool_dir)
+        unknown: list[dict[str, str]] = []
+        for test_file in test_candidates:
+            try:
+                tree = ast.parse(test_file.read_text(encoding="utf-8"))
+            except SyntaxError as exc:
+                return {
+                    "passed": False,
+                    "status": "syntax_error",
+                    "test_file": str(test_file),
+                    "error": str(exc),
+                }
+            for module in self._top_level_imports(tree):
+                if module in local_modules or module in declared_imports or module in getattr(sys, "stdlib_module_names", set()):
+                    continue
+                unknown.append({"test_file": str(test_file), "module": module})
+        return {
+            "passed": not unknown,
+            "status": "completed" if not unknown else "undeclared_external_test_dependencies",
+            "unknown_imports": unknown,
+        }
+
+    def _top_level_imports(self, tree: ast.AST) -> list[str]:
+        modules: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules.extend(str(alias.name or "").split(".", 1)[0] for alias in node.names if alias.name)
+            elif isinstance(node, ast.ImportFrom):
+                if getattr(node, "level", 0):
+                    continue
+                module = str(node.module or "").split(".", 1)[0]
+                if module:
+                    modules.append(module)
+        return modules
+
+    def _manifest_dependency_imports(self, tool_dir: Path) -> set[str]:
+        manifest_path = tool_dir / "manifest.json"
+        if not manifest_path.exists():
+            return set()
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return set()
+        dependencies = manifest.get("dependencies") if isinstance(manifest, dict) else []
+        return self._dependency_import_names(self._normalized_dependencies(dependencies))
 
     def _artifact_registration_quality_gate(self, artifact: dict[str, Any]) -> dict[str, Any]:
         """Reject blueprint/stub artifacts before registration.
@@ -1270,6 +1488,19 @@ class RuntimeCapabilityGapImplementer:
         try:
             fn = self._load_function(module_path, function_name)
             output = fn(dict(verification_input))
+            try:
+                json.dumps(output, ensure_ascii=False)
+            except TypeError as exc:
+                report = {
+                    "passed": False,
+                    "status": "failed",
+                    "reason": "output_not_json_serializable",
+                    "error": str(exc)[:2000],
+                    "input": verification_input,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+                self._write_verification_report(artifact, report)
+                return report
             expectations = template.get("verification_expectations") if isinstance(template.get("verification_expectations"), dict) else {}
             passed = self._matches_expectations(output, expectations)
             report = {

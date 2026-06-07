@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
+import sys
 import time
 from typing import Any
 
@@ -51,6 +53,7 @@ class RuntimeBlueprintArtifactGenerator:
         generation_status = "not_attempted"
         generation_route: dict[str, Any] = {}
         generation_error = ""
+        dependencies = self._normalized_dependencies(blueprint.get("dependencies"))
 
         if self._valid_files(files) and not self._files_look_like_stub(files):
             artifact_kind = "real_runtime_implementation"
@@ -78,6 +81,7 @@ class RuntimeBlueprintArtifactGenerator:
                 secret_schema = self._closed_schema(llm_artifact.get("secret_schema"))
                 verification_input = llm_artifact.get("verification_input") if isinstance(llm_artifact.get("verification_input"), dict) else self._generic_verification_input(input_schema)
                 verification_expectations = llm_artifact.get("verification_expectations") if isinstance(llm_artifact.get("verification_expectations"), dict) else verification_expectations
+                dependencies = self._merge_dependencies(dependencies, self._normalized_dependencies(llm_artifact.get("dependencies")))
                 capability_contract = self._capability_contract(tool_id=tool_id, blueprint={**blueprint, **llm_artifact})
                 artifact_kind = "real_runtime_implementation"
             else:
@@ -93,6 +97,7 @@ class RuntimeBlueprintArtifactGenerator:
             "required_terms": blueprint.get("required_terms") if isinstance(blueprint.get("required_terms"), list) else [],
             "entrypoint": entrypoint,
             "files": files,
+            "dependencies": dependencies,
             "input_schema": input_schema,
             "output_schema": output_schema,
             "connection_schema": connection_schema,
@@ -215,11 +220,12 @@ class RuntimeBlueprintArtifactGenerator:
             "secret_schema": secret_schema,
             "verification_input": verification_input,
             "required_return_shape": {
-                "files": [{"path": "tool.py", "content": "Python source code"}, {"path": "test_tool.py", "content": "pytest source code"}],
+                "files": [{"path": "tool.py", "content": "Python source code"}, {"path": "test_tool.py", "content": "plain Python test source code"}],
                 "input_schema": "JSON schema object",
                 "output_schema": "JSON schema object",
                 "connection_schema": "JSON schema object",
                 "secret_schema": "JSON schema object",
+                "dependencies": [{"package": "pip package name", "import_name": "python import name", "auto_install": True}],
                 "verification_input": "JSON object used by sandbox validation",
                 "verification_expectations": "JSON object",
                 "capability_match_contract": "JSON object",
@@ -240,8 +246,11 @@ class RuntimeBlueprintArtifactGenerator:
             "Generate executable Python code that implements the supplied capability blueprint. "
             "Do not use hardcoded sample results. Do not add domain assumptions not present in the blueprint. "
             "Use only the Python standard library unless the blueprint explicitly permits dependencies. "
-            "The entrypoint function must accept one optional dict payload and return a JSON-serializable dict. "
+            "The entrypoint function must accept one optional dict payload and return a JSON-serializable dict; "
+            "all nested output values must be JSON-native values such as strings, numbers, booleans, lists, dicts, or null. "
             "The Python code must be real executable implementation code, not a placeholder, not blueprint-only, and not a stub. "
+            "The test file must be a plain Python script that uses only standard-library imports and assert statements; "
+            "do not import pytest or any external test runner. "
             "The test file must run locally without external network calls and assert the declared verification behavior. "
             "Return only a JSON object; no markdown, no prose."
         )
@@ -280,6 +289,98 @@ class RuntimeBlueprintArtifactGenerator:
         if "def " not in text or "return" not in text:
             return False
         return True
+
+    def _generated_tests_use_allowed_imports(self, files: list[dict[str, Any]], dependencies: list[dict[str, Any]]) -> bool:
+        local_modules = {
+            self._module_stem_from_path(str(item.get("path") or ""))
+            for item in files
+            if isinstance(item, dict) and str(item.get("path") or "").endswith(".py")
+        }
+        local_modules.discard("")
+        declared_imports = self._dependency_import_names(dependencies)
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "")
+            if not self._is_test_path(path):
+                continue
+            content = str(item.get("content") or "")
+            try:
+                tree = ast.parse(content)
+            except SyntaxError:
+                return False
+            for node in ast.walk(tree):
+                module = ""
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        module = str(alias.name or "").split(".", 1)[0]
+                        if module and not self._allowed_generated_test_import(module, local_modules, declared_imports):
+                            return False
+                elif isinstance(node, ast.ImportFrom):
+                    module = str(node.module or "").split(".", 1)[0]
+                    if module and not self._allowed_generated_test_import(module, local_modules, declared_imports):
+                        return False
+        return True
+
+    def _allowed_generated_test_import(self, module: str, local_modules: set[str], declared_imports: set[str]) -> bool:
+        if module in local_modules:
+            return True
+        if module in declared_imports:
+            return True
+        return module in getattr(sys, "stdlib_module_names", set())
+
+    def _is_test_path(self, path: str) -> bool:
+        name = path.replace("\\", "/").rsplit("/", 1)[-1]
+        return name.startswith("test_") and name.endswith(".py")
+
+    def _module_stem_from_path(self, path: str) -> str:
+        name = path.replace("\\", "/").rsplit("/", 1)[-1]
+        if not name.endswith(".py"):
+            return ""
+        return name[:-3]
+
+    def _normalized_dependencies(self, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        result: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            import_name = str(item.get("import_name") or item.get("module") or "").strip()
+            package = str(item.get("package") or item.get("name") or import_name).strip()
+            if not package and not import_name:
+                continue
+            result.append({
+                "package": package or import_name,
+                "import_name": import_name or package.replace("-", "_"),
+                "auto_install": bool(item.get("auto_install", True)),
+                **({"source": item.get("source")} if item.get("source") else {}),
+            })
+        return result
+
+    def _merge_dependencies(self, left: list[dict[str, Any]], right: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in [*left, *right]:
+            package = str(item.get("package") or item.get("name") or "").strip()
+            import_name = str(item.get("import_name") or item.get("module") or "").strip()
+            key = (package, import_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+        return merged
+
+    def _dependency_import_names(self, dependencies: list[dict[str, Any]]) -> set[str]:
+        imports: set[str] = set()
+        for item in dependencies:
+            import_name = str(item.get("import_name") or item.get("module") or "").strip()
+            package = str(item.get("package") or item.get("name") or "").strip()
+            if import_name:
+                imports.add(import_name.split(".", 1)[0])
+            elif package:
+                imports.add(package.replace("-", "_").split(".", 1)[0])
+        return imports
 
     def _should_request_llm_generation(self, blueprint: dict[str, Any], identity_contract: dict[str, Any]) -> bool:
         policy = blueprint.get("acquisition_policy") if isinstance(blueprint.get("acquisition_policy"), dict) else {}
