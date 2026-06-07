@@ -460,6 +460,16 @@ class RuntimeCapabilityGapImplementer:
                 return {"status": "planner_failed", "reason": "planner_returned_no_blueprint", "confidence_score": confidence, "needs_external_evidence": True, "raw": payload}
             raw_blueprint = self._augment_blueprint_from_user_request(raw_blueprint, user_input=user_input)
             template = self.blueprint_artifact_generator.materialize(raw_blueprint, identity_contract=identity_contract)
+            code_generation = template.get("code_generation") if isinstance(template.get("code_generation"), dict) else {}
+            if template.get("artifact_kind") != "real_runtime_implementation":
+                return {
+                    "status": "code_generation_failed",
+                    "reason": str(code_generation.get("error") or code_generation.get("status") or "runtime_artifact_not_registerable"),
+                    "confidence_score": confidence,
+                    "needs_external_evidence": False,
+                    "template": template,
+                    "code_generation": code_generation,
+                }
             validation = self._validate_runtime_template_shape(template)
             if not validation.get("passed"):
                 return {"status": "planner_failed", "reason": "planner_blueprint_contract_failed", "confidence_score": confidence, "needs_external_evidence": True, "validation": validation}
@@ -569,14 +579,15 @@ class RuntimeCapabilityGapImplementer:
         active = False
         for raw in lines:
             line = raw.strip()
+            section_line = re.sub(r"^[-*]\s*", "", line).strip()
             if any(re.search(pattern, line, flags=re.IGNORECASE) for pattern in header_patterns):
                 active = True
                 continue
-            if active and re.match(r"^[A-Z][A-Za-z ]+requirements?\s*[:：]?$", line):
+            if active and re.match(r"^[A-Z][A-Za-z ]+requirements?\s*[:：]?$", section_line):
                 break
-            if active and re.match(r"^(Input\s+parameters?|Output\s+fields?|Capability\s+behavior\s+requirements?)\s*[:：]?$", line, flags=re.IGNORECASE):
+            if active and re.match(r"^(Input\s+parameters?|Output\s+fields?|Capability\s+behavior\s+requirements?)\s*[:：]?$", section_line, flags=re.IGNORECASE):
                 break
-            if active and re.match(r"^The\s+capability\s+acquisition\s+is\s+complete", line, flags=re.IGNORECASE):
+            if active and re.match(r"^The\s+capability\s+acquisition\s+is\s+complete", section_line, flags=re.IGNORECASE):
                 break
             if not active:
                 continue

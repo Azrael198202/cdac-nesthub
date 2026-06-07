@@ -35,20 +35,38 @@ brains:
     tasks:
       runtime_tool_code_generation:
         provider: ollama
-        model: qwen3.5:4b-q4_k_m
+        model: qwen2.5-coder:7b
         options:
           temperature: 0
+        fallback:
+          - provider: ollama
+            model: qwen3.5:4b-q4_k_m
+            options:
+              temperature: 0
+            reason: local_general_model_fallback
         complexities:
           basic:
             provider: ollama
-            model: qwen3.5:4b-q4_k_m
+            model: qwen2.5-coder:7b
             options:
               temperature: 0
+            fallback:
+              - provider: ollama
+                model: qwen3.5:4b-q4_k_m
+                options:
+                  temperature: 0
+                reason: local_general_model_fallback
           medium:
             provider: ollama
-            model: qwen3.5:4b-q4_k_m
+            model: qwen2.5-coder:7b
             options:
               temperature: 0
+            fallback:
+              - provider: ollama
+                model: qwen3.5:4b-q4_k_m
+                options:
+                  temperature: 0
+                reason: local_general_model_fallback
           high:
             provider: openai
             model: gpt-5.5-thinking

@@ -921,15 +921,19 @@ class ConversationCoreRuntime:
         urls = evidence.get("urls") if isinstance(evidence.get("urls"), list) else []
         runtime_impl = implementation.get("runtime_implementation") if isinstance(implementation.get("runtime_implementation"), dict) else {}
         runtime_status = str(runtime_impl.get("status") or "not_requested")
-        if not urls and runtime_status not in {"registered", "registered_verified"}:
+        if not urls and runtime_status == "not_requested":
             return (
                 self._external_retrieval_failure_material(evidence)
                 + "\n\nCapability gap status: blocked_without_verified_evidence. No implementation was generated or registered."
             )
         if runtime_status in {"registered", "registered_verified"}:
             headline = "Capability gap resolution completed. Runtime capability was implemented, sandbox-tested, registered, and verified by execution."
+        elif runtime_status in {"code_generation_failed", "planner_failed", "planner_low_confidence"}:
+            headline = "Capability acquisition reached runtime code generation, but no registerable implementation artifact was produced."
         elif runtime_status in {"blocked", "generated_but_validation_failed"}:
             headline = "Capability gap resolution collected verified material, but implementation was not registered."
+        elif runtime_status in {"sandbox_failed", "not_registered", "generated_but_verification_failed"}:
+            headline = "Capability acquisition generated an artifact, but sandbox validation or registration gate blocked it."
         else:
             headline = "Capability gap resolution completed with verified external material; implementation was not requested or no matching runtime template was available."
         lines = [
@@ -962,6 +966,9 @@ class ConversationCoreRuntime:
                     lines.append("- secret_ui: Agent Studio Runtime Registry -> Configure profile -> Secret values")
                 if isinstance(tool_record.get("approval_policy"), dict) and tool_record.get("approval_policy", {}).get("required"):
                     lines.append("- approval_ui: Agent Studio Run registered tool -> confirmation preview")
+            reason = runtime_impl.get("reason") or runtime_impl.get("diagnosis")
+            if reason:
+                lines.append(f"- reason: {str(reason)[:1000]}")
             lines.append("")
         lines.append("Source URLs:")
         for url in urls:

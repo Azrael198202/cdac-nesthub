@@ -128,38 +128,67 @@ class RuntimeBlueprintArtifactGenerator:
         secret_schema: dict[str, Any],
         verification_input: dict[str, Any],
     ) -> dict[str, Any]:
-        messages = self._generation_messages(
-            tool_id=tool_id,
-            entrypoint=entrypoint,
-            blueprint=blueprint,
-            identity_contract=identity_contract,
-            input_schema=input_schema,
-            output_schema=output_schema,
-            connection_schema=connection_schema,
-            secret_schema=secret_schema,
-            verification_input=verification_input,
-        )
-        result = self.llm_client.complete_sync(
-            brain="auxiliary_brain",
-            task_type="runtime_tool_code_generation",
-            complexity=self._generation_complexity(blueprint=blueprint, identity_contract=identity_contract),
-            messages=messages,
-            context={
-                "tool_id": tool_id,
-                "acquisition_policy": blueprint.get("acquisition_policy") if isinstance(blueprint.get("acquisition_policy"), dict) else {},
-                "dependencies": blueprint.get("dependencies") if isinstance(blueprint.get("dependencies"), list) else [],
-            },
-            response_format={"type": "json_object"},
-        )
-        route = result.route if isinstance(result.route, dict) else {}
-        if result.status != "completed":
-            return {"generation_status": result.status, "generation_route": route, "generation_error": result.error or "llm_generation_failed"}
-        parsed = self._parse_json_object(result.content)
-        if not isinstance(parsed, dict):
-            return {"generation_status": "invalid_llm_json", "generation_route": route, "generation_error": "LLM did not return a JSON object."}
-        parsed["generation_status"] = "completed"
-        parsed["generation_route"] = route
-        return parsed
+        base_complexity = self._generation_complexity(blueprint=blueprint, identity_contract=identity_contract)
+        attempts: list[dict[str, Any]] = []
+        for attempt in self._generation_attempts(base_complexity):
+            messages = self._generation_messages(
+                tool_id=tool_id,
+                entrypoint=entrypoint,
+                blueprint=blueprint,
+                identity_contract=identity_contract,
+                input_schema=input_schema,
+                output_schema=output_schema,
+                connection_schema=connection_schema,
+                secret_schema=secret_schema,
+                verification_input=verification_input,
+                compact=bool(attempt.get("compact")),
+            )
+            result = self.llm_client.complete_sync(
+                brain="auxiliary_brain",
+                task_type="runtime_tool_code_generation",
+                complexity=str(attempt.get("complexity") or base_complexity),
+                messages=messages,
+                context={
+                    "tool_id": tool_id,
+                    "acquisition_policy": blueprint.get("acquisition_policy") if isinstance(blueprint.get("acquisition_policy"), dict) else {},
+                    "dependencies": blueprint.get("dependencies") if isinstance(blueprint.get("dependencies"), list) else [],
+                    "generation_attempt": attempt,
+                },
+                response_format={"type": "json_object"} if attempt.get("force_json") else None,
+            )
+            route = result.route if isinstance(result.route, dict) else {}
+            record = {
+                "status": result.status,
+                "route": route,
+                "attempt": attempt,
+                "error": result.error,
+                "content_excerpt": str(result.content or "")[:500],
+            }
+            if result.status != "completed":
+                attempts.append(record)
+                continue
+            parsed = self._parse_json_object(result.content)
+            if not isinstance(parsed, dict):
+                record["status"] = "invalid_llm_json"
+                record["error"] = "LLM did not return a JSON object."
+                attempts.append(record)
+                continue
+            if not self._valid_generated_artifact(parsed):
+                record["status"] = "invalid_generated_artifact"
+                record["error"] = "LLM JSON did not contain executable artifact files."
+                attempts.append(record)
+                continue
+            parsed["generation_status"] = "completed"
+            parsed["generation_route"] = route
+            parsed["generation_attempts"] = attempts + [record]
+            return parsed
+        last = attempts[-1] if attempts else {}
+        return {
+            "generation_status": str(last.get("status") or "llm_generation_failed"),
+            "generation_route": last.get("route") if isinstance(last.get("route"), dict) else {},
+            "generation_error": str(last.get("error") or "LLM did not produce a registerable runtime artifact."),
+            "generation_attempts": attempts,
+        }
 
     def _generation_messages(
         self,
@@ -173,6 +202,7 @@ class RuntimeBlueprintArtifactGenerator:
         connection_schema: dict[str, Any],
         secret_schema: dict[str, Any],
         verification_input: dict[str, Any],
+        compact: bool = False,
     ) -> list[dict[str, str]]:
         contract = {
             "tool_id": tool_id,
@@ -195,12 +225,24 @@ class RuntimeBlueprintArtifactGenerator:
                 "capability_match_contract": "JSON object",
             },
         }
+        if compact:
+            contract = {
+                "tool_id": tool_id,
+                "entrypoint": entrypoint,
+                "description": str(blueprint.get("description") or "")[:1800],
+                "input_schema": input_schema,
+                "output_schema": output_schema,
+                "verification_input": verification_input,
+                "required_return_shape": contract["required_return_shape"],
+            }
         system = (
             "You generate runtime capability artifacts as JSON only. "
             "Generate executable Python code that implements the supplied capability blueprint. "
             "Do not use hardcoded sample results. Do not add domain assumptions not present in the blueprint. "
             "Use only the Python standard library unless the blueprint explicitly permits dependencies. "
             "The entrypoint function must accept one optional dict payload and return a JSON-serializable dict. "
+            "The Python code must be real executable implementation code, not a placeholder, not blueprint-only, and not a stub. "
+            "The test file must run locally without external network calls and assert the declared verification behavior. "
             "Return only a JSON object; no markdown, no prose."
         )
         user = "Generate the runtime artifact from this contract:\n" + json.dumps(contract, ensure_ascii=False, indent=2, default=str)
@@ -297,6 +339,19 @@ class RuntimeBlueprintArtifactGenerator:
         if any(marker in text for marker in external_reference_markers):
             return "medium"
         return "default"
+
+    def _generation_attempts(self, base_complexity: str) -> list[dict[str, Any]]:
+        order = ["basic", "medium", "high", "critical"]
+        base = str(base_complexity or "default").strip().lower()
+        if base not in order:
+            base = "medium" if base == "default" else "high"
+        start = order.index(base)
+        complexities = order[start:]
+        attempts: list[dict[str, Any]] = []
+        for complexity in complexities:
+            attempts.append({"complexity": complexity, "force_json": True, "compact": False})
+            attempts.append({"complexity": complexity, "force_json": False, "compact": True})
+        return attempts
 
     def _capability_contract(self, *, tool_id: str, blueprint: dict[str, Any]) -> dict[str, Any]:
         declared = blueprint.get("capability_match_contract") if isinstance(blueprint.get("capability_match_contract"), dict) else {}
