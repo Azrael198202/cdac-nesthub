@@ -643,6 +643,9 @@ function openMissingInputModal(items, runId){
     input.dataset.aliases=JSON.stringify(it.aliases||[]);
     input.dataset.mergeTargets=JSON.stringify(it.merge_targets||[]);
     input.dataset.required=it.required===false ? 'false' : 'true';
+    input.dataset.scope=String(it.scope||'');
+    input.dataset.toolId=String(it.tool_id||'');
+    input.dataset.profileId=String(it.profile_id||'default');
     input.placeholder=inputType==='list' ? 'Enter values separated by comma/new line, or add one by one' : String(it.placeholder||field);
     if(isBoolean){
       const check=document.createElement('label');
@@ -811,12 +814,17 @@ async function skipCredentialAndContinue(){
 }
 async function submitMissingInputs(){
   const provided={};
+  const liveVerify={tool_id:'', profile_id:'default', connection:{}, secrets:{}, input_data:{}, approval_confirmed:true};
+  let hasLiveVerify=false;
   const inputs=document.querySelectorAll('[id^="missing_form_"]');
   const missingRequired=[];
   inputs.forEach(input=>{
     const field=(input.dataset.field||'').trim();
     const kind=(input.dataset.kind||'').trim();
     const inputType=(input.dataset.inputType||'').trim();
+    const scope=(input.dataset.scope||'').trim();
+    const toolId=(input.dataset.toolId||'').trim();
+    const profileId=(input.dataset.profileId||'default').trim() || 'default';
     const required=input.dataset.required!=='false';
     let value=input.value.trim();
     if(!field){ return; }
@@ -834,7 +842,19 @@ async function submitMissingInputs(){
       if(required){ missingRequired.push(field); }
       return;
     }
-    if(kind==='secret_input' || kind==='optional_credential_choice'){
+    if(kind==='runtime_tool_live_verification'){
+      hasLiveVerify=true;
+      if(toolId){ liveVerify.tool_id=toolId; }
+      liveVerify.profile_id=profileId;
+      const cleanField = field.replace(/^(connection|connections|secret|secrets|input|input_data)\./, '');
+      if(scope==='connection' || field.startsWith('connection.')){
+        liveVerify.connection[cleanField]=value;
+      } else if(scope==='secrets' || scope==='secret' || field.startsWith('secrets.') || field.startsWith('secret.')){
+        liveVerify.secrets[cleanField]=value;
+      } else {
+        liveVerify.input_data[cleanField]=value;
+      }
+    } else if(kind==='secret_input' || kind==='optional_credential_choice'){
       provided.secret_key=field;
       provided.value=Array.isArray(value) ? value.join(',') : value;
     } else {
@@ -852,6 +872,17 @@ async function submitMissingInputs(){
   if(missingRequired.length){ addMessage('Please enter required value(s): '+missingRequired.join(', '),'item error'); return; }
   closeMissingInputModal();
   try{
+    if(hasLiveVerify){
+      if(!liveVerify.tool_id){ throw new Error('Live verification request is missing tool_id.'); }
+      const data=await apiFetchRuntimeToolJson('/api/agent-studio/runtime-tools/live-verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(liveVerify)});
+      addMessage('Runtime live verification:\n'+renderJson(data), data.ok?'item final':'item error');
+      const execution=data && data.execution ? data.execution : {};
+      if(execution && execution.result){ addFinalAnswer(renderJson(execution.result), data.ok?'item final':'item error'); }
+      lastPendingRunId='';
+      lastMissingInputs=[];
+      await refreshState();
+      return;
+    }
     if(provided.secret_key && provided.value){
       await saveRuntimeSecret(provided.secret_key, provided.value);
     }

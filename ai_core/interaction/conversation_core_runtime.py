@@ -911,6 +911,8 @@ class ConversationCoreRuntime:
         }
         if runtime_impl:
             base["runtime_implementation"] = runtime_impl
+            if isinstance(runtime_impl.get("interaction_request"), dict):
+                base["interaction_request"] = runtime_impl["interaction_request"]
         out_dir = RUNTIME_GENERATED / "capability_gap_resolutions"
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -980,6 +982,12 @@ class ConversationCoreRuntime:
             reason = runtime_impl.get("reason") or runtime_impl.get("diagnosis")
             if reason:
                 lines.append(f"- reason: {str(reason)[:1000]}")
+            if isinstance(runtime_impl.get("interaction_request"), dict):
+                request = runtime_impl["interaction_request"]
+                fields = request.get("fields") if isinstance(request.get("fields"), list) else []
+                lines.append("- live_verification: waiting_for_user_runtime_values")
+                if fields:
+                    lines.append(f"- live_verification_fields: {len(fields)}")
             lines.append("")
         lines.append("Source URLs:")
         for url in urls:

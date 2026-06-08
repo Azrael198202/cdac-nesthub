@@ -193,6 +193,16 @@ class RuntimeToolProfileRequest(BaseModel):
     secrets: dict[str, Any] | None = None
 
 
+class RuntimeToolLiveVerifyRequest(BaseModel):
+    tool_id: str
+    profile_id: str | None = None
+    connection: dict[str, Any] | None = None
+    secrets: dict[str, Any] | None = None
+    input_data: dict[str, Any] | None = None
+    approval_confirmed: bool = True
+    remember_approval: bool = False
+
+
 class DeleteRuntimeCapabilityRequest(BaseModel):
     delete_artifacts: bool = False
     delete_profiles: bool = False
@@ -910,6 +920,45 @@ async def agent_studio_execute_runtime_tool(req: RegisteredToolExecuteRequest):
         return JSONResponse(payload, status_code=status)
     except Exception as exc:
         _write_api_error_log(area="agent_studio_execute_runtime_tool", exc=exc, context={"tool_id": req.tool_id})
+        return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
+
+
+@app.post("/api/agent-studio/runtime-tools/live-verify")
+async def agent_studio_live_verify_runtime_tool(req: RuntimeToolLiveVerifyRequest):
+    profile_id = req.profile_id or "default"
+    try:
+        configured = registered_tool_service.configure_tool_profile(
+            tool_id=req.tool_id,
+            profile_id=profile_id,
+            config=req.connection if req.connection is not None else {},
+            secrets=req.secrets if req.secrets is not None else {},
+        )
+        if configured.get("ok") is not True:
+            _write_api_failure_log(
+                area="agent_studio_live_verify_runtime_tool_configure",
+                payload=configured,
+                context={"tool_id": req.tool_id, "profile_id": profile_id},
+            )
+            return JSONResponse(configured, status_code=400)
+        executed = registered_tool_service.execute_tool(
+            tool_id=req.tool_id,
+            input_data=req.input_data if req.input_data is not None else {},
+            run_id="agent_studio_runtime_live_verify",
+            profile_id=profile_id,
+            approval_confirmed=bool(req.approval_confirmed),
+            remember_approval=bool(req.remember_approval),
+        )
+        payload = {"ok": bool(executed.get("ok")), "status": executed.get("status"), "configured": configured, "execution": executed}
+        status = _runtime_tool_execute_http_status(executed)
+        if status >= 400 or executed.get("ok") is not True:
+            _write_api_failure_log(
+                area="agent_studio_live_verify_runtime_tool_execute",
+                payload=payload,
+                context={"tool_id": req.tool_id, "profile_id": profile_id, "http_status": status},
+            )
+        return JSONResponse(payload, status_code=status)
+    except Exception as exc:
+        _write_api_error_log(area="agent_studio_live_verify_runtime_tool", exc=exc, context={"tool_id": req.tool_id, "profile_id": profile_id})
         return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
 
 

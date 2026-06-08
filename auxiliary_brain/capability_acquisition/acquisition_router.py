@@ -327,6 +327,7 @@ class RuntimeCapabilityGapImplementer:
         mark("RegistrationGate", "safe_to_register" if registration_gate.get("safe_to_register") else str(registration_gate.get("status") or "blocked"), result=registration_gate)
 
         registration: dict[str, Any] | None = None
+        interaction_request: dict[str, Any] | None = None
         if registration_gate.get("safe_to_register"):
             registration = self._register_artifact(
                 template=template,
@@ -339,6 +340,9 @@ class RuntimeCapabilityGapImplementer:
             )
             mark("RegistryWriter", "completed", registration=registration)
             status = str((registration or {}).get("status") or "registered")
+            interaction_request = self._build_live_verification_interaction_request(registration=registration or {})
+            if interaction_request:
+                mark("LiveVerificationInteraction", "requested", request=interaction_request)
             repair = None
         else:
             failure_status = "sandbox_failed" if not validation.get("passed") else "not_registered"
@@ -366,6 +370,7 @@ class RuntimeCapabilityGapImplementer:
             "validation": validation,
             "verification_run": verification_run,
             "registration": registration,
+            "interaction_request": interaction_request,
             "pipeline": pipeline,
             "self_repair": repair,
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1894,6 +1899,76 @@ class RuntimeCapabilityGapImplementer:
         self.registry_path.write_text(json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
         self.module_registry_path.write_text(json.dumps(module_registry, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"status": "registered", "registry_path": str(self.registry_path), "module_registry_path": str(self.module_registry_path), "tool_record": tool_record, "module_record": module_record}
+
+    def _build_live_verification_interaction_request(self, *, registration: dict[str, Any]) -> dict[str, Any] | None:
+        """Ask Agent Studio for real runtime values after sandbox registration.
+
+        This is intentionally schema-driven.  The acquisition layer does not know
+        the meaning of any capability field; it only exposes declared input,
+        connection, and secret schemas so the user can perform a live verification
+        run after the safe sandbox/mock checks have passed.
+        """
+        tool_record = registration.get("tool_record") if isinstance(registration.get("tool_record"), dict) else {}
+        tool_id = str(tool_record.get("tool_id") or "").strip()
+        if not tool_id:
+            return None
+        connection_schema = tool_record.get("connection_schema") if isinstance(tool_record.get("connection_schema"), dict) else {}
+        secret_schema = tool_record.get("secret_schema") if isinstance(tool_record.get("secret_schema"), dict) else {}
+        input_schema = tool_record.get("input_schema") if isinstance(tool_record.get("input_schema"), dict) else {}
+        side_effects = tool_record.get("runtime_execution_policy") if isinstance(tool_record.get("runtime_execution_policy"), dict) else {}
+        should_offer_live_verify = bool(connection_schema.get("properties") or secret_schema.get("properties"))
+        if not should_offer_live_verify and str(side_effects.get("side_effects") or "").strip().lower() not in {"yes", "true", "external", "side_effects", "runtime_declared"}:
+            return None
+
+        fields: list[dict[str, Any]] = []
+        fields.extend(self._interaction_fields_from_schema(schema=connection_schema, scope="connection", tool_id=tool_id))
+        fields.extend(self._interaction_fields_from_schema(schema=secret_schema, scope="secrets", tool_id=tool_id, force_password=True))
+        fields.extend(self._interaction_fields_from_schema(schema=input_schema, scope="input", tool_id=tool_id))
+        if not fields:
+            return None
+        return {
+            "type": "runtime_tool_live_verification",
+            "kind": "runtime_tool_live_verification",
+            "tool_id": tool_id,
+            "profile_id": "default",
+            "message": "Provide runtime connection, secret, and sample input values to run a live verification after sandbox registration.",
+            "fields": fields,
+            "approval_confirmed": True,
+        }
+
+    def _interaction_fields_from_schema(self, *, schema: dict[str, Any], scope: str, tool_id: str, force_password: bool = False) -> list[dict[str, Any]]:
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        required = {str(x) for x in schema.get("required", [])} if isinstance(schema.get("required"), list) else set()
+        fields: list[dict[str, Any]] = []
+        for name, spec in properties.items():
+            key = str(name or "").strip()
+            if not key:
+                continue
+            prop = spec if isinstance(spec, dict) else {}
+            json_type = str(prop.get("type") or "string").lower()
+            if force_password:
+                input_type = "password"
+            elif json_type == "array":
+                input_type = "list"
+            elif json_type == "boolean":
+                input_type = "boolean"
+            elif json_type in {"number", "integer"}:
+                input_type = "number"
+            else:
+                input_type = "textarea" if "body" in key.casefold() else "text"
+            fields.append({
+                "kind": "runtime_tool_live_verification",
+                "tool_id": tool_id,
+                "profile_id": "default",
+                "scope": scope,
+                "parameter_name": key,
+                "field": f"{scope}.{key}",
+                "label": str(prop.get("title") or key.replace("_", " ")),
+                "message": str(prop.get("description") or f"Provide {scope} value for {key}."),
+                "input_type": input_type,
+                "required": key in required,
+            })
+        return fields
 
     def _load_registry(self, path: Path) -> dict[str, Any]:
         if not path.exists():
