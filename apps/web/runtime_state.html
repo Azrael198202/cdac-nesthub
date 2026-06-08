@@ -93,15 +93,17 @@ function ioBlock(n){const detail={trace:n.trace,evidence:n.evidence,error:n.erro
 function actionHtml(e){return `<div class="action"><div class="line1"><span class="small">#${e.sequence}</span><span class="lvl ${e.level}">${e.level}</span>${statusIcon(e.status)}${statusHtml(e.status)}${progressText(e.progress||0)}<span class="kind">${e.kind}</span><span class="small">${shortTime(e.ts)}</span></div><div class="msg">${escapeHtml(e.title||'')} — ${escapeHtml(e.message||'')}</div><div class="small">step=${escapeHtml(e.step_id||'')} · method=${escapeHtml(e.method||'-')} · tool=${escapeHtml(e.tool||'-')}</div></div>`}
 function groupEventsByFlow(){const out={}; for(const e of eventCache){const fid=e.flow_id||guessFlow(e); (out[fid]||(out[fid]=[])).push(e)} return out}
 function displayEvents(){
-  const latestTerminal = new Map();
   const terminal = new Set(['completed','failed','skipped','cancelled','paused','interrupted']);
+  const latestTerminalByStep = new Map();
   for(const e of eventCache){
-    const key=[e.step_id||'', e.kind||'', e.title||''].join('::');
-    if(terminal.has(displayStatus(e.status))) latestTerminal.set(key, Number(e.sequence||0));
+    const stepKey=e.step_id||guessFlow(e)||'unknown';
+    if(terminal.has(displayStatus(e.status))){
+      latestTerminalByStep.set(stepKey, Math.max(latestTerminalByStep.get(stepKey)||0, Number(e.sequence||0)));
+    }
   }
   return eventCache.filter(e=>{
-    const key=[e.step_id||'', e.kind||'', e.title||''].join('::');
-    const later=latestTerminal.get(key)||0;
+    const stepKey=e.step_id||guessFlow(e)||'unknown';
+    const later=latestTerminalByStep.get(stepKey)||0;
     if(later && Number(e.sequence||0)<later && isActiveStatus(e.status)) return false;
     return true;
   });

@@ -1672,14 +1672,36 @@ def test_runtime_contract_smoke():
             "json.dumps(output, ensure_ascii=False)"
         )
         proc = self._run_isolated_python(["-c", runner], cwd=tool_dir, timeout=30)
+        output: Any = None
+        parse_error = ""
+        stdout = str(proc.get("stdout") or "")
+        if proc.get("returncode") == 0:
+            try:
+                output = json.loads(stdout)
+            except Exception as exc:
+                parse_error = f"output_json_parse_failed:{exc.__class__.__name__}"
+        manifest = {}
+        try:
+            manifest = json.loads((tool_dir / "manifest.json").read_text(encoding="utf-8"))
+        except Exception:
+            manifest = {}
+        expectations = manifest.get("verification_expectations") if isinstance(manifest.get("verification_expectations"), dict) else {}
+        contract = self._runtime_output_contract_checks(
+            verification_input=verification_input,
+            output=output,
+            expectations=expectations,
+            manifest=manifest if isinstance(manifest, dict) else {},
+        )
+        passed = proc.get("returncode") == 0 and not parse_error and bool(contract.get("passed"))
         return {
-            "passed": proc.get("returncode") == 0,
-            "status": "completed" if proc.get("returncode") == 0 else "failed",
-            "reason": "" if proc.get("returncode") == 0 else "entrypoint_output_not_json_serializable_or_execution_failed",
+            "passed": passed,
+            "status": "completed" if passed else "failed",
+            "reason": "" if passed else (parse_error or str(contract.get("reason") or "runtime_output_contract_failed") or "entrypoint_output_not_json_serializable_or_execution_failed"),
             "returncode": proc.get("returncode"),
-            "stdout": str(proc.get("stdout") or "")[-2000:],
+            "stdout": stdout[-2000:],
             "stderr": str(proc.get("stderr") or "")[-2000:],
             "attempts": proc.get("attempts", []),
+            "contract": contract,
         }
 
     def _artifact_registration_quality_gate(self, artifact: dict[str, Any]) -> dict[str, Any]:
@@ -1779,13 +1801,26 @@ def test_runtime_contract_smoke():
                 self._write_verification_report(artifact, report)
                 return report
             expectations = template.get("verification_expectations") if isinstance(template.get("verification_expectations"), dict) else {}
-            passed = self._matches_expectations(output, expectations)
+            manifest = dict(template)
+            manifest.setdefault("input_schema", template.get("input_schema") if isinstance(template.get("input_schema"), dict) else {})
+            manifest.setdefault("output_schema", template.get("output_schema") if isinstance(template.get("output_schema"), dict) else {})
+            expectation_passed = self._matches_expectations(output, expectations)
+            contract = self._runtime_output_contract_checks(
+                verification_input=verification_input,
+                output=output,
+                expectations=expectations,
+                manifest=manifest,
+            )
+            passed = bool(expectation_passed and contract.get("passed"))
             report = {
                 "passed": passed,
                 "status": "completed" if passed else "failed",
+                "reason": "" if passed else str(contract.get("reason") or "verification_contract_failed"),
                 "input": verification_input,
                 "output": output,
                 "expectations": expectations,
+                "expectation_passed": expectation_passed,
+                "contract": contract,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
             self._write_verification_report(artifact, report)
@@ -1806,6 +1841,183 @@ def test_runtime_contract_smoke():
         if not callable(fn):
             raise RuntimeError(f"Callable '{function_name}' not found in {path}")
         return fn
+
+    def _runtime_output_contract_checks(
+        self,
+        *,
+        verification_input: dict[str, Any],
+        output: Any,
+        expectations: dict[str, Any],
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Generic execution-quality checks for generated runtime tools.
+
+        Unit tests and smoke tests prove that code can run.  This guard checks
+        that the returned payload is not merely a copied prompt, format string,
+        or placeholder.  The rules are schema/contract driven and do not encode
+        a concrete business capability.
+        """
+        checks: list[dict[str, Any]] = []
+        if not isinstance(output, dict):
+            return {"passed": False, "reason": "output_is_not_object", "checks": checks}
+
+        output_schema = manifest.get("output_schema") if isinstance(manifest.get("output_schema"), dict) else {}
+        expected_fields = self._declared_output_fields(output_schema=output_schema, expectations=expectations)
+        flattened_output = self._flatten_object(output)
+        flattened_input = self._flatten_object(verification_input)
+
+        missing = [field for field in expected_fields if not self._has_nested_key(output, field)]
+        checks.append({"name": "declared_output_fields_present", "passed": not missing, "missing": missing, "fields": expected_fields})
+        if missing:
+            return {"passed": False, "reason": "declared_output_fields_missing", "checks": checks}
+
+        copied_dynamic_values: list[dict[str, str]] = []
+        input_format_values: list[tuple[str, str]] = []
+        for key, value in flattened_input.items():
+            if isinstance(value, str) and self._looks_like_format_or_template(value, key):
+                input_format_values.append((key, value))
+        for out_key, out_value in flattened_output.items():
+            if not isinstance(out_value, str):
+                continue
+            stripped_output = out_value.strip()
+            for in_key, in_value in input_format_values:
+                if stripped_output and stripped_output.casefold() == in_value.strip().casefold():
+                    copied_dynamic_values.append({"output_key": out_key, "input_key": in_key, "copied_value": stripped_output[:200]})
+        checks.append({"name": "dynamic_output_not_copied_from_format_or_template", "passed": not copied_dynamic_values, "copied": copied_dynamic_values})
+        if copied_dynamic_values:
+            return {"passed": False, "reason": "output_copied_format_or_template_instead_of_runtime_value", "checks": checks}
+
+        placeholder_values: list[dict[str, str]] = []
+        for out_key, out_value in flattened_output.items():
+            if isinstance(out_value, str) and self._looks_like_unresolved_placeholder(out_value):
+                placeholder_values.append({"output_key": out_key, "value": out_value[:200]})
+        checks.append({"name": "no_unresolved_placeholder_output", "passed": not placeholder_values, "placeholders": placeholder_values})
+        if placeholder_values:
+            return {"passed": False, "reason": "unresolved_placeholder_output", "checks": checks}
+
+        temporal_format_checks = self._temporal_format_contract_checks(verification_input=verification_input, flattened_output=flattened_output)
+        checks.append(temporal_format_checks)
+        if not temporal_format_checks.get("passed"):
+            return {"passed": False, "reason": str(temporal_format_checks.get("reason") or "temporal_format_contract_failed"), "checks": checks}
+
+        return {"passed": True, "checks": checks}
+
+    def _declared_output_fields(self, *, output_schema: dict[str, Any], expectations: dict[str, Any]) -> list[str]:
+        fields: list[str] = []
+        properties = output_schema.get("properties") if isinstance(output_schema.get("properties"), dict) else {}
+        required = output_schema.get("required") if isinstance(output_schema.get("required"), list) else []
+        for name in required:
+            if isinstance(name, str) and name not in fields:
+                fields.append(name)
+        for name in properties.keys():
+            if isinstance(name, str) and name not in fields:
+                fields.append(name)
+        for name in expectations.keys():
+            if isinstance(name, str) and name != "status" and name not in fields:
+                fields.append(name)
+        return fields
+
+    def _flatten_object(self, value: Any, prefix: str = "") -> dict[str, Any]:
+        flattened: dict[str, Any] = {}
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_key = f"{prefix}.{key}" if prefix else str(key)
+                flattened.update(self._flatten_object(child, child_key))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                child_key = f"{prefix}[{index}]" if prefix else f"[{index}]"
+                flattened.update(self._flatten_object(child, child_key))
+        else:
+            flattened[prefix] = value
+        return flattened
+
+    def _has_nested_key(self, output: dict[str, Any], key: str) -> bool:
+        if key in output:
+            return True
+        data = output.get("data") if isinstance(output.get("data"), dict) else {}
+        return key in data
+
+    def _looks_like_format_or_template(self, value: str, key: str = "") -> bool:
+        text = str(value or "").strip()
+        lowered_key = str(key or "").casefold()
+        if "format" in lowered_key or "template" in lowered_key:
+            return True
+        # Common date/time format tokens across user-facing and Python styles.
+        return bool(re.search(r"(%[YymdHMSzZ]|Y{2,4}|M{2}|D{2}|H{2}|h{2}|m{2}|s{2}|ISO-?8601)", text, flags=re.I))
+
+    def _looks_like_unresolved_placeholder(self, value: str) -> bool:
+        text = str(value or "").strip()
+        lowered = text.casefold()
+        if lowered in {"yyyy-mm-dd", "yyyy-mm-dd hh:mm", "yyyy-mm-dd hh mm", "iso8601", "current_time", "timestamp_iso"}:
+            return True
+        if re.fullmatch(r"[yYmMdDhHsS:/\-\s%]+", text) and re.search(r"[yY]{2,4}|%Y|%y", text):
+            return True
+        if re.search(r"\{\{[^{}]+\}\}|<[^<>]+>|\$\{[^{}]+\}", text):
+            return True
+        return False
+
+    def _temporal_format_contract_checks(self, *, verification_input: dict[str, Any], flattened_output: dict[str, Any]) -> dict[str, Any]:
+        format_value = None
+        for key, value in self._flatten_object(verification_input).items():
+            if isinstance(value, str) and "format" in str(key).casefold():
+                format_value = value
+                break
+        if not format_value:
+            return {"name": "temporal_format_contract", "passed": True, "reason": "no_declared_format_input"}
+        python_format = self._to_python_datetime_format(str(format_value))
+        if not python_format:
+            return {"name": "temporal_format_contract", "passed": True, "reason": "format_not_temporal_or_not_supported", "format": format_value}
+        candidates: list[dict[str, str]] = []
+        for key, value in flattened_output.items():
+            lowered_key = str(key).casefold()
+            if any(excluded in lowered_key for excluded in ["timezone", "time_zone", "utc_offset", "offset", "zone"]):
+                continue
+            if isinstance(value, str) and any(token in lowered_key for token in ["time", "date", "timestamp"]):
+                candidates.append({"key": str(key), "value": value})
+        if not candidates:
+            return {"name": "temporal_format_contract", "passed": True, "reason": "no_temporal_output_field_detected", "format": format_value}
+        failures: list[dict[str, str]] = []
+        for item in candidates:
+            raw = str(item["value"]).strip()
+            if self._looks_like_unresolved_placeholder(raw):
+                failures.append({"key": item["key"], "value": raw, "reason": "placeholder_or_format_string"})
+                continue
+            try:
+                datetime.strptime(raw, python_format)
+            except Exception as exc:
+                # ISO-8601 is also acceptable for timestamp-like outputs.
+                if "iso" in str(format_value).casefold():
+                    try:
+                        datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                        continue
+                    except Exception:
+                        pass
+                failures.append({"key": item["key"], "value": raw, "reason": f"parse_failed:{exc.__class__.__name__}"})
+        return {"name": "temporal_format_contract", "passed": not failures, "format": format_value, "python_format": python_format, "checked": candidates, "failures": failures, "reason": "temporal_output_does_not_match_declared_format" if failures else ""}
+
+    def _to_python_datetime_format(self, value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if text.casefold() in {"iso8601", "iso-8601", "iso_8601"}:
+            return ""
+        # Tokenize first so overlapping tokens such as MM/month and mm/minute
+        # cannot corrupt each other during replacement.
+        token_map = {
+            "YYYY": "%Y", "yyyy": "%Y", "YY": "%y", "yy": "%y",
+            "MM": "%m", "DD": "%d", "dd": "%d",
+            "HH": "%H", "hh": "%H", "mm": "%M",
+            "SS": "%S", "ss": "%S",
+        }
+        converted = re.sub(
+            r"YYYY|yyyy|YY|yy|MM|DD|dd|HH|hh|mm|SS|ss",
+            lambda match: token_map.get(match.group(0), match.group(0)),
+            text,
+        )
+        if "%" not in converted:
+            return ""
+        return converted
+
 
     def _matches_expectations(self, output: Any, expectations: dict[str, Any]) -> bool:
         success_statuses = {"completed", "success", "ok", "executed", "passed", ""}
