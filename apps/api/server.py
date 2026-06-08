@@ -1155,7 +1155,40 @@ async def conversation_feedback(req: ConversationFeedbackRequest):
             usage_scope="retrieval_context",
         )
         promoted = True
-    return JSONResponse({"ok": True, "feedback": record, "promoted_to_local_memory": promoted})
+    repair_candidate = None
+    if str(req.rating or "").strip().lower() in {"bad", "poor", "wrong", "incorrect", "not_useful", "failed", "荳榊･ｽ"}:
+        feedback_text = (req.note or "").strip() or "User marked the final answer as bad."
+        repair_candidate = _record_feedback_repair_candidate_for_run(
+            run_id=req.run_id,
+            feedback=feedback_text,
+        )
+    return JSONResponse({"ok": True, "feedback": record, "promoted_to_local_memory": promoted, "repair_candidate": repair_candidate})
+
+
+def _record_feedback_repair_candidate_for_run(*, run_id: str, feedback: str) -> dict[str, Any] | None:
+    run_id = str(run_id or "").strip()
+    if not run_id:
+        return None
+    try:
+        runs = studio_service.store.list_json("generated/results")
+        matched = None
+        for item in runs:
+            if str(item.get("run_id") or "").strip() == run_id:
+                matched = item
+                break
+        if matched is None:
+            return None
+        task_name = str(matched.get("task_name") or "").strip()
+        if not task_name:
+            return None
+        return studio_service.execution_reuse_store.record_repair_candidate(
+            task_name=task_name,
+            feedback=feedback,
+            run_payload=matched,
+        )
+    except Exception as exc:
+        _write_api_error_log(area="conversation_feedback_repair_candidate", exc=exc, context={"run_id": run_id})
+        return None
 
 
 @app.post("/api/resume")

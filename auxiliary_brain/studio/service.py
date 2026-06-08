@@ -279,6 +279,8 @@ class AgentStudioService:
         decision = self.execution_reuse_store.decide(task_name, runtime_parameters)
         if decision.reason == "no_reusable_asset":
             return None
+        if self._should_bypass_stale_reuse_asset(decision.asset, task_graph, participants, runtime_parameters):
+            return None
         if decision.reason == "missing_runtime_inputs":
             run_id = new_id("delegation_run")
             fields = decision.missing_inputs or []
@@ -374,6 +376,37 @@ class AgentStudioService:
                 "context_trace": reused.get("context_trace"),
             }
         return None
+
+    def _should_bypass_stale_reuse_asset(
+        self,
+        asset: dict[str, Any] | None,
+        task_graph: dict[str, Any],
+        participants: list[dict[str, Any]],
+        runtime_parameters: dict[str, Any],
+    ) -> bool:
+        if not isinstance(asset, dict):
+            return False
+        schema = asset.get("parameter_schema") if isinstance(asset.get("parameter_schema"), list) else []
+        required_fields = {str(item.get("field") or item.get("name") or "").strip() for item in schema if isinstance(item, dict) and item.get("required")}
+        if required_fields != {"payload"}:
+            return False
+        has_registered_tool = False
+        for participant in participants:
+            profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+            if str(profile.get("capability_type") or "") == "runtime_registered_tool":
+                has_registered_tool = True
+                break
+        if not has_registered_tool:
+            for step in task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []:
+                if not isinstance(step, dict):
+                    continue
+                profile = step.get("capability_profile") if isinstance(step.get("capability_profile"), dict) else {}
+                if str(profile.get("capability_type") or "") == "runtime_registered_tool":
+                    has_registered_tool = True
+                    break
+        if not has_registered_tool:
+            return False
+        return any(str(key).strip() and str(key).strip() != "payload" for key in runtime_parameters.keys())
 
     def _resolve_bare_task_name(self, message: str) -> str | None:
         text = str(message or "").strip().strip(" .,:;\"'")

@@ -2441,9 +2441,9 @@ class AgentDelegationRuntime:
             return "Runtime tool execution returned no structured result."
         tool_id = str(result.get("tool_id") or "runtime tool")
         if result.get("ok"):
-            # This means the runtime tool completed successfully. For external
-            # delivery tools it does not necessarily prove final inbox or third
-            # party delivery unless the tool reports such evidence explicitly.
+            material = self._registered_tool_success_material(result)
+            if material:
+                return material
             return f"Runtime capability executed successfully: {tool_id}."
         message = "Runtime capability execution failed."
         error = result.get("error") if isinstance(result.get("error"), dict) else {}
@@ -2462,6 +2462,31 @@ class AgentDelegationRuntime:
                 message = str(item)
                 break
         return f"Runtime capability execution failed: {tool_id}. {message}"
+
+    def _registered_tool_success_material(self, result: dict[str, Any]) -> str:
+        nested = result.get("result") if isinstance(result.get("result"), dict) else {}
+        data = nested.get("data") if isinstance(nested.get("data"), dict) else {}
+        if not data:
+            data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        candidates = [
+            nested.get("final_answer"),
+            nested.get("message"),
+            result.get("final_answer"),
+            result.get("message"),
+        ]
+        for item in candidates:
+            text = str(item or "").strip()
+            if text and not text.casefold().startswith("runtime capability executed successfully"):
+                return text
+        if not data:
+            return ""
+        lines = []
+        for key, value in data.items():
+            if value in (None, "", [], {}):
+                continue
+            label = str(key).replace("_", " ")
+            lines.append(f"{label}: {value}")
+        return "\n".join(lines)
 
 
 

@@ -306,7 +306,11 @@ async function sendConversationFeedback(rating){
   const res=await fetch('/api/conversation/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:activeSessionId,run_id:lastCompletedRunId||'agent_studio',rating,note})});
   const data=await res.json();
   if(!res.ok || data.ok===false){ addMessage('Feedback failed.','item error'); return; }
-  addMessage(data.promoted_to_local_memory ? 'Feedback saved and promoted to local memory.' : 'Feedback saved.','item final');
+  if(data.repair_candidate){
+    addMessage('Feedback saved as a self-repair candidate: '+escapeHtml(data.repair_candidate.repair_id||''),'item final');
+  }else{
+    addMessage(data.promoted_to_local_memory ? 'Feedback saved and promoted to local memory.' : 'Feedback saved.','item final');
+  }
 }
 async function initSessionWorkspace(){
   await refreshSessions();
