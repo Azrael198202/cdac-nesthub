@@ -57,6 +57,7 @@ class RuntimeBlueprintArtifactGenerator:
         dependencies = self._normalized_dependencies(blueprint.get("dependencies"))
 
         if self._valid_files(files) and not self._files_look_like_stub(files):
+            files = self._stabilize_standard_library_runtime_files(files, blueprint=blueprint)
             artifact_kind = "real_runtime_implementation"
             generation_status = "provided_blueprint_files_used"
         elif self._should_request_llm_generation(blueprint, identity_contract):
@@ -106,7 +107,7 @@ class RuntimeBlueprintArtifactGenerator:
             "output_schema": output_schema,
             "connection_schema": connection_schema,
             "secret_schema": secret_schema,
-            "approval_policy": blueprint.get("approval_policy") if isinstance(blueprint.get("approval_policy"), dict) else {"mode": "required_for_side_effects", "preview_required": True},
+            "approval_policy": self._approval_policy_or_default(blueprint.get("approval_policy")),
             "runtime_interface": blueprint.get("runtime_interface") if isinstance(blueprint.get("runtime_interface"), dict) else {"input_mode": "json", "output_mode": "json"},
             "runtime_execution_policy": blueprint.get("runtime_execution_policy") if isinstance(blueprint.get("runtime_execution_policy"), dict) else {"side_effects": "runtime_declared"},
             "verification_input": verification_input,
@@ -264,13 +265,10 @@ class RuntimeBlueprintArtifactGenerator:
             "do not import pytest or any external test runner. "
             "The test file must run locally without external network calls, assert the declared verification behavior, "
             "and verify that json.dumps(run(payload)) succeeds. "
-            "For side-effect integrations such as email, messaging, filesystem mutation, payment, HTTP, SMTP, or web APIs, sandbox verification must use dry-run behavior or standard-library mocks; it must not contact external services, require live credentials, or perform irreversible side effects. "
+            "For any integration that can affect external state, contact remote services, mutate local files, or require credentials, sandbox verification must use dry-run behavior or standard-library mocks; it must not contact external services, require live credentials, or perform irreversible side effects. "
             "If live end-to-end verification needs real user values, expose those values through input_schema, connection_schema, and secret_schema so the runtime interaction layer can ask the user after sandbox registration. "
-            "If generated code uses zoneinfo, UTC/GMT/Z must work without the optional tzdata package by using datetime.timezone.utc; "
-            "call zoneinfo.ZoneInfo only when an IANA timezone name is actually required by the supplied contract, "
-            "and handle unavailable timezone data with a structured error instead of crashing. "
             "When a standard-library feature needs a platform support package to satisfy the contract, declare the support package rather than the standard-library module itself. "
-            "Never declare standard-library modules such as datetime, json, pathlib, or zoneinfo as pip dependencies. "
+            "Never declare standard-library modules as pip dependencies. "
             "Return only a JSON object; no markdown, no prose."
         )
         user = "Generate the runtime artifact from this contract:\n" + json.dumps(contract, ensure_ascii=False, indent=2, default=str)
@@ -451,77 +449,38 @@ class RuntimeBlueprintArtifactGenerator:
         return kept
 
     def _stabilize_standard_library_runtime_files(self, files: list[dict[str, Any]], *, blueprint: dict[str, Any]) -> list[dict[str, Any]]:
-        """Apply generic stdlib-only runtime safety tweaks to generated files.
+        """Return generated files without capability-specific rewriting.
 
-        The common failure mode on Windows isolated Python is timezone database
-        absence: zoneinfo is stdlib, but IANA data may not be installed. UTC
-        verification must never depend on the optional tzdata package.
+        The generator must not infer, replace, or patch artifacts using
+        domain keywords. Runtime safety requirements are provided by the
+        blueprint, verification input, approval policy, and sandbox executor.
         """
-        text = json.dumps(blueprint, ensure_ascii=False, default=str).casefold()
-        if "timezone" not in text and "zoneinfo" not in text:
-            return files
         out: list[dict[str, Any]] = []
         for item in files:
-            if not isinstance(item, dict):
-                continue
-            cloned = dict(item)
-            path = str(cloned.get("path") or "")
-            content = str(cloned.get("content") or "")
-            if path.endswith(".py") and not path.rsplit("/", 1)[-1].startswith("test_"):
-                content = self._stabilize_zoneinfo_source(content)
-            cloned["content"] = content
-            out.append(cloned)
+            if isinstance(item, dict):
+                cloned = dict(item)
+                cloned["path"] = str(cloned.get("path") or "")
+                cloned["content"] = str(cloned.get("content") or "")
+                out.append(cloned)
         return out
 
-    def _stabilize_zoneinfo_source(self, source: str) -> str:
-        if "ZoneInfo(" not in source:
-            return source
-        text = source
-        text = re.sub(r"\b(?:[A-Za-z_]\w*\.)?ZoneInfo\(([^()]+)\)", r"_runtime_zoneinfo(\1)", text)
-        if "from datetime import timezone as _runtime_timezone_cls" not in text:
-            if "from datetime import" in text:
-                text = re.sub(
-                    r"from datetime import ([^\n]+)",
-                    lambda m: m.group(0) if "timezone" in m.group(1) else m.group(0) + "\nfrom datetime import timezone as _runtime_timezone_cls",
-                    text,
-                    count=1,
-                )
-            elif "import datetime" in text:
-                text = text.replace("import datetime", "import datetime\nfrom datetime import timezone as _runtime_timezone_cls", 1)
-            else:
-                text = "from datetime import timezone as _runtime_timezone_cls\n" + text
-        helper = '''
-
-def _runtime_zoneinfo(name):
-    value = str(name or "UTC").strip() or "UTC"
-    if value.upper() in {"UTC", "Z", "GMT"}:
-        return _runtime_timezone_cls.utc
-    try:
-        factory = ZoneInfo
-    except NameError:
-        try:
-            factory = zoneinfo.ZoneInfo
-        except Exception:
-            factory = None
-    if factory is None:
-        return None
-    try:
-        return factory(value)
-    except Exception:
-        return None
-'''
-        if "def _runtime_zoneinfo(" not in text:
-            lines = text.splitlines()
-            insert_at = 0
-            for idx, line in enumerate(lines):
-                stripped = line.strip()
-                if stripped.startswith(("import ", "from ")) or not stripped:
-                    insert_at = idx + 1
-                    continue
-                break
-            lines.insert(insert_at, helper.strip("\n"))
-            text = "\n".join(lines) + ("\n" if source.endswith("\n") else "")
-        return text
+    def _approval_policy_or_default(self, value: Any) -> dict[str, Any]:
+        if isinstance(value, dict) and value.get("supported_modes") and value.get("default_mode"):
+            policy = dict(value)
+        else:
+            policy = {
+                "required": True,
+                "supported_modes": ["always", "once", "never"],
+                "default_mode": "always",
+                "mode": "always",
+                "preview_required": True,
+            }
+        policy.setdefault("supported_modes", ["always", "once", "never"])
+        policy.setdefault("default_mode", "always")
+        policy.setdefault("mode", policy.get("default_mode", "always"))
+        policy.setdefault("required", True)
+        policy.setdefault("preview_required", True)
+        return policy
 
     def _dependency_import_names(self, dependencies: list[dict[str, Any]]) -> set[str]:
         imports: set[str] = set()
