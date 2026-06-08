@@ -59,6 +59,9 @@ class RuntimeBlueprintArtifactGenerator:
         generation_route: dict[str, Any] = {}
         generation_error = ""
         generation_interaction_request: dict[str, Any] = {}
+        generation_attempts: list[dict[str, Any]] = []
+        generation_preflight: dict[str, Any] = {}
+        generation_failed_artifact: dict[str, Any] = {}
         dependencies = self._normalized_dependencies(blueprint.get("dependencies"))
 
         if self._valid_files(files) and not self._files_look_like_stub(files):
@@ -81,6 +84,9 @@ class RuntimeBlueprintArtifactGenerator:
             generation_route = llm_artifact.get("generation_route") if isinstance(llm_artifact.get("generation_route"), dict) else {}
             generation_error = str(llm_artifact.get("generation_error") or "")
             generation_interaction_request = llm_artifact.get("generation_interaction_request") if isinstance(llm_artifact.get("generation_interaction_request"), dict) else {}
+            generation_attempts = llm_artifact.get("generation_attempts") if isinstance(llm_artifact.get("generation_attempts"), list) else []
+            generation_preflight = llm_artifact.get("generation_preflight") if isinstance(llm_artifact.get("generation_preflight"), dict) else {}
+            generation_failed_artifact = llm_artifact.get("generation_failed_artifact") if isinstance(llm_artifact.get("generation_failed_artifact"), dict) else {}
             if self._valid_generated_artifact(llm_artifact):
                 files = llm_artifact["files"]
                 input_schema = llm_artifact.get("input_schema") if isinstance(llm_artifact.get("input_schema"), dict) else input_schema
@@ -127,6 +133,9 @@ class RuntimeBlueprintArtifactGenerator:
                 "status": generation_status,
                 "route": generation_route,
                 "error": generation_error,
+                **({"attempts": generation_attempts} if generation_attempts else {}),
+                **({"preflight": generation_preflight} if generation_preflight else {}),
+                **({"failed_artifact": generation_failed_artifact} if generation_failed_artifact else {}),
                 **({"interaction_request": generation_interaction_request} if generation_interaction_request else {}),
             },
             "generated_at": self._now_iso(),
@@ -202,12 +211,14 @@ class RuntimeBlueprintArtifactGenerator:
                 record["status"] = "preflight_failed"
                 record["error"] = "Generated artifact did not pass local runtime preflight."
                 record["preflight"] = preflight
+                record["failed_artifact"] = self._artifact_failure_summary(parsed)
                 previous_failure = {
                     "status": "preflight_failed",
                     "reason": preflight.get("reason"),
                     "stderr": str(preflight.get("stderr") or "")[-2000:],
                     "stdout": str(preflight.get("stdout") or "")[-1000:],
                     "verification_input": verification_input,
+                    "artifact_summary": record.get("failed_artifact"),
                 }
                 attempts.append(record)
                 continue
@@ -221,10 +232,39 @@ class RuntimeBlueprintArtifactGenerator:
         return {
             "generation_status": "interaction_required" if interaction_request else str(last.get("status") or "llm_generation_failed"),
             "generation_route": last.get("route") if isinstance(last.get("route"), dict) else {},
-            "generation_error": str(last.get("error") or "LLM did not produce a registerable runtime artifact."),
+            "generation_error": self._generation_failure_message(last),
             "generation_attempts": attempts,
+            **({"generation_preflight": last.get("preflight")} if isinstance(last.get("preflight"), dict) else {}),
+            **({"generation_failed_artifact": last.get("failed_artifact")} if isinstance(last.get("failed_artifact"), dict) else {}),
             **({"generation_interaction_request": interaction_request} if interaction_request else {}),
         }
+
+    def _generation_failure_message(self, last_attempt: dict[str, Any]) -> str:
+        error = str(last_attempt.get("error") or "LLM did not produce a registerable runtime artifact.")
+        preflight = last_attempt.get("preflight") if isinstance(last_attempt.get("preflight"), dict) else {}
+        if preflight:
+            detail = {
+                "reason": preflight.get("reason"),
+                "returncode": preflight.get("returncode"),
+                "stderr": str(preflight.get("stderr") or preflight.get("error") or "")[-1200:],
+                "stdout": str(preflight.get("stdout") or "")[-600:],
+            }
+            return error + " | preflight=" + json.dumps(detail, ensure_ascii=False, default=str)
+        return error
+
+    def _artifact_failure_summary(self, artifact: dict[str, Any]) -> dict[str, Any]:
+        files = artifact.get("files") if isinstance(artifact.get("files"), list) else []
+        summarized: list[dict[str, str]] = []
+        for item in files[:8]:
+            if not isinstance(item, dict):
+                continue
+            content = str(item.get("content") or "")
+            summarized.append({
+                "path": str(item.get("path") or ""),
+                "content_excerpt": content[:4000],
+                "content_length": str(len(content)),
+            })
+        return {"files": summarized}
 
     def _interaction_request_from_generation_attempts(self, attempts: list[dict[str, Any]]) -> dict[str, Any]:
         fields: list[dict[str, Any]] = []
@@ -314,6 +354,7 @@ class RuntimeBlueprintArtifactGenerator:
             "Connection values declared in connection_schema must be read only from payload['connection']; secret values declared in secret_schema must be read only from payload['secrets']; do not duplicate connection or secret fields into input_schema or verification_input['input']. "
             "Do not store secrets in generated source code, generated manifests, tests, logs, or ordinary input fields; tests may use fake secret values only inside the secrets envelope or through mocks. "
             "all nested output values must be JSON-native values such as strings, numbers, booleans, lists, dicts, or null; never return runtime objects, class instances, file handles, exceptions, or other non-primitive runtime objects directly. "
+            "Do not assume schema defaults or sample inputs are already canonical for the libraries you use; normalize user strings when the standard library accepts a stricter canonical spelling, and return structured JSON errors instead of uncaught exceptions when validation fails. "
             "The Python code must be real executable implementation code, not a placeholder, not blueprint-only, and not a stub. "
             "The test file must be a plain Python script that uses only standard-library imports and assert statements; "
             "do not import pytest or any external test runner. "
@@ -700,17 +741,18 @@ class RuntimeBlueprintArtifactGenerator:
         if base == "default":
             sequence = ["medium"]
         elif base == "basic":
-            sequence = ["basic", "medium"]
+            sequence = ["basic"]
         elif base == "medium":
-            sequence = ["medium", "high"]
+            sequence = ["medium"]
         elif base == "high":
-            sequence = ["high", "critical"]
+            sequence = ["high"]
         else:
             sequence = [base if base in {"basic", "medium", "high", "critical"} else "medium"]
         attempts: list[dict[str, Any]] = []
         for complexity in sequence:
-            attempts.append({"complexity": complexity, "force_json": True, "compact": False})
-            attempts.append({"complexity": complexity, "force_json": False, "compact": True})
+            attempts.append({"complexity": complexity, "force_json": True, "compact": False, "phase": "initial"})
+            attempts.append({"complexity": complexity, "force_json": True, "compact": False, "phase": "repair_full"})
+            attempts.append({"complexity": complexity, "force_json": False, "compact": True, "phase": "repair_compact"})
         return attempts
 
     def _capability_contract(self, *, tool_id: str, blueprint: dict[str, Any]) -> dict[str, Any]:

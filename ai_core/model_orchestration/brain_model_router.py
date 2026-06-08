@@ -13,11 +13,18 @@ from ai_core.config.paths import CONFIGS_DIR, RUNTIME_GENERATED
 
 @dataclass
 class BrainModelRoute:
-    brain: str
-    task_type: str
-    complexity: str
-    provider: str
-    model: str
+    """Normalized model route used across all brain/model call sites.
+
+    Older and diagnostic paths may construct a route with only provider/model
+    for observability events.  Keep this object backward-compatible while the
+    router still records full brain/task/complexity decisions for real calls.
+    """
+
+    brain: str = "runtime_brain"
+    task_type: str = "default"
+    complexity: str = "default"
+    provider: str = ""
+    model: str = ""
     model_alias: str = ""
     source: str = "brain_model_policy"
     options: dict[str, Any] = field(default_factory=dict)
@@ -25,7 +32,13 @@ class BrainModelRoute:
     decision_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["brain"] = str(payload.get("brain") or "runtime_brain")
+        payload["task_type"] = str(payload.get("task_type") or "default")
+        payload["complexity"] = str(payload.get("complexity") or "default")
+        payload["provider"] = str(payload.get("provider") or "")
+        payload["model"] = str(payload.get("model") or "")
+        return payload
 
 
 class BrainModelRouter:

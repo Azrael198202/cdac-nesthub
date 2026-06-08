@@ -46,7 +46,7 @@ def test_basic_generation_does_not_escalate_to_critical():
     generator = RuntimeBlueprintArtifactGenerator(llm_client=ProbeClient([]))
     complexities = [item["complexity"] for item in generator._generation_attempts("basic")]
     assert "critical" not in complexities
-    assert complexities == ["basic", "basic", "medium", "medium"]
+    assert complexities == ["basic", "basic", "basic"]
 
 
 if __name__ == "__main__":
