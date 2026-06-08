@@ -81,7 +81,9 @@ class RuntimeBlueprintArtifactGenerator:
                 secret_schema = self._closed_schema(llm_artifact.get("secret_schema"))
                 verification_input = llm_artifact.get("verification_input") if isinstance(llm_artifact.get("verification_input"), dict) else self._generic_verification_input(input_schema)
                 verification_expectations = llm_artifact.get("verification_expectations") if isinstance(llm_artifact.get("verification_expectations"), dict) else verification_expectations
+                files = self._stabilize_standard_library_runtime_files(files, blueprint=blueprint)
                 dependencies = self._merge_dependencies(dependencies, self._normalized_dependencies(llm_artifact.get("dependencies")))
+                dependencies = self._drop_stdlib_dependencies(dependencies)
                 capability_contract = self._capability_contract(tool_id=tool_id, blueprint={**blueprint, **llm_artifact})
                 artifact_kind = "real_runtime_implementation"
             else:
@@ -245,7 +247,11 @@ class RuntimeBlueprintArtifactGenerator:
             "You generate runtime capability artifacts as JSON only. "
             "Generate executable Python code that implements the supplied capability blueprint. "
             "Do not use hardcoded sample results. Do not add domain assumptions not present in the blueprint. "
-            "Use only the Python standard library unless the blueprint explicitly permits dependencies. "
+            "Prefer the lowest sufficient implementation level first: standard-library and local deterministic code when it can satisfy the contract. "
+            "When the supplied contract, verification target, or previous failure evidence requires packages, declare the minimal required runtime dependencies in the dependencies array with accurate package and import names so the dependency-resolution layer can install and validate them. "
+            "Do not avoid dependencies by faking behavior, and do not add dependencies that are not needed for the verified objective. "
+            "If external documentation, web evidence, or a stronger model is needed, rely only on evidence and routing supplied by the acquisition/repair pipeline; do not invent undocumented APIs, endpoints, or package behavior. "
+            "Escalation is valid only when it is necessary to pass the declared verification contract and the generated artifact remains sandbox-testable. "
             "The entrypoint function must accept one optional dict payload and return a JSON-serializable dict; "
             "all nested output values must be JSON-native values such as strings, numbers, booleans, lists, dicts, or null. "
             "The Python code must be real executable implementation code, not a placeholder, not blueprint-only, and not a stub. "
@@ -253,6 +259,10 @@ class RuntimeBlueprintArtifactGenerator:
             "do not import pytest or any external test runner. "
             "The test file must run locally without external network calls, assert the declared verification behavior, "
             "and verify that json.dumps(run(payload)) succeeds. "
+            "If generated code uses zoneinfo, UTC/GMT/Z must work without the optional tzdata package by using datetime.timezone.utc; "
+            "call zoneinfo.ZoneInfo only when an IANA timezone name is actually required by the supplied contract, "
+            "and handle unavailable timezone data with a structured error instead of crashing. "
+            "Never declare standard-library modules such as datetime, json, pathlib, or zoneinfo as pip dependencies. "
             "Return only a JSON object; no markdown, no prose."
         )
         user = "Generate the runtime artifact from this contract:\n" + json.dumps(contract, ensure_ascii=False, indent=2, default=str)
@@ -420,6 +430,81 @@ class RuntimeBlueprintArtifactGenerator:
             seen.add(key)
             merged.append(item)
         return merged
+
+    def _drop_stdlib_dependencies(self, dependencies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        stdlib = getattr(sys, "stdlib_module_names", set())
+        kept: list[dict[str, Any]] = []
+        for item in dependencies:
+            import_name = str(item.get("import_name") or item.get("module") or "").split(".", 1)[0]
+            package = str(item.get("package") or item.get("name") or "").replace("-", "_").split(".", 1)[0]
+            if import_name in stdlib or package in stdlib:
+                continue
+            kept.append(item)
+        return kept
+
+    def _stabilize_standard_library_runtime_files(self, files: list[dict[str, Any]], *, blueprint: dict[str, Any]) -> list[dict[str, Any]]:
+        """Apply generic stdlib-only runtime safety tweaks to generated files.
+
+        The common failure mode on Windows isolated Python is timezone database
+        absence: zoneinfo is stdlib, but IANA data may not be installed. UTC
+        verification must never depend on the optional tzdata package.
+        """
+        text = json.dumps(blueprint, ensure_ascii=False, default=str).casefold()
+        if "timezone" not in text and "zoneinfo" not in text:
+            return files
+        out: list[dict[str, Any]] = []
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            cloned = dict(item)
+            path = str(cloned.get("path") or "")
+            content = str(cloned.get("content") or "")
+            if path.endswith(".py") and not path.rsplit("/", 1)[-1].startswith("test_"):
+                content = self._stabilize_zoneinfo_source(content)
+            cloned["content"] = content
+            out.append(cloned)
+        return out
+
+    def _stabilize_zoneinfo_source(self, source: str) -> str:
+        if "ZoneInfo(" not in source:
+            return source
+        text = source
+        text = re.sub(r"ZoneInfo\(([^()]+)\)", r"_runtime_zoneinfo(\1)", text)
+        if "from datetime import timezone as _runtime_timezone_cls" not in text:
+            if "from datetime import" in text:
+                text = re.sub(
+                    r"from datetime import ([^\n]+)",
+                    lambda m: m.group(0) if "timezone" in m.group(1) else m.group(0) + "\nfrom datetime import timezone as _runtime_timezone_cls",
+                    text,
+                    count=1,
+                )
+            elif "import datetime" in text:
+                text = text.replace("import datetime", "import datetime\nfrom datetime import timezone as _runtime_timezone_cls", 1)
+            else:
+                text = "from datetime import timezone as _runtime_timezone_cls\n" + text
+        helper = '''
+
+def _runtime_zoneinfo(name):
+    value = str(name or "UTC").strip() or "UTC"
+    if value.upper() in {"UTC", "Z", "GMT"}:
+        return _runtime_timezone_cls.utc
+    try:
+        return ZoneInfo(value)
+    except Exception:
+        return None
+'''
+        if "def _runtime_zoneinfo(" not in text:
+            lines = text.splitlines()
+            insert_at = 0
+            for idx, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped.startswith(("import ", "from ")) or not stripped:
+                    insert_at = idx + 1
+                    continue
+                break
+            lines.insert(insert_at, helper.strip("\n"))
+            text = "\n".join(lines) + ("\n" if source.endswith("\n") else "")
+        return text
 
     def _dependency_import_names(self, dependencies: list[dict[str, Any]]) -> set[str]:
         imports: set[str] = set()

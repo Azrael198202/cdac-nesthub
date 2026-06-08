@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,9 @@ class BasePerceptionProcessor:
         text = self._clip(text, 4000).strip()
         if not text:
             return "", []
+        if str(os.environ.get("AI_CORE_PERCEPTION_ENABLE_LLM_SUMMARY") or "").strip().casefold() not in {"1", "true", "yes", "on"}:
+            compact = " ".join(text.split())
+            return compact[:500], ["llm_summary_skipped:disabled_by_default"]
         prompt = (
             "Summarize the following normalized user artifact for a runtime input parser. "
             "Do not infer business intent. Extract only neutral structure, key facts, and warnings. "
