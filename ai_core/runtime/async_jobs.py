@@ -104,6 +104,27 @@ class RuntimeAsyncJobStore:
             record["updated_at"] = record["finished_at"]
             runtime_state_manager.emit(
                 run_id=job_id,
+                step_id="job.queue",
+                level="developer",
+                kind="lifecycle",
+                status="completed",
+                title="Job accepted",
+                message="The queued job was picked up by a worker.",
+                progress=100,
+            )
+            runtime_state_manager.emit(
+                run_id=job_id,
+                step_id="job.run",
+                level="user",
+                kind="lifecycle",
+                status=record["status"],
+                title="Job running",
+                message=f"The async job worker finished with status={record['status']}.",
+                method="async_worker",
+                progress=100,
+            )
+            runtime_state_manager.emit(
+                run_id=job_id,
                 step_id="job.result",
                 level="user",
                 kind="output",
@@ -111,7 +132,7 @@ class RuntimeAsyncJobStore:
                 title="Job result",
                 message=f"Async job finished with status={record['status']}.",
                 output={"result_status": result_status},
-                progress=95,
+                progress=100,
             )
             runtime_state_manager.finish_run(job_id, status=record["status"], summary=f"Async job {record['status']}", output={"result_status": result_status})
         except Exception as exc:

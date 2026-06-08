@@ -168,9 +168,17 @@ class RuntimeStateManager:
             step.event_count += 1
             run.steps[step_id] = step
             self._update_flow_from_step(run, step)
-            run.status = "failed" if status == "failed" else ("running" if run.status in {"created", "queued"} else run.status)
+            active_statuses = {"created", "queued", "waiting_input", "planning", "generating", "validating", "running", "verifying", "repairing", "paused"}
+            terminal_statuses = {"completed", "failed", "skipped", "cancelled"}
+            if status == "failed":
+                run.status = "failed"
+            elif status in active_statuses:
+                run.status = status if status not in {"created"} else "running"
+                run.active_step_id = step_id
+            elif status in terminal_statuses:
+                if run.active_step_id == step_id:
+                    run.active_step_id = self._find_active_step_id(run)
             run.updated_at = now
-            run.active_step_id = step_id if status not in {"completed", "failed", "skipped"} else run.active_step_id
             run.event_count = seq
             run.last_event_id = str(event.get("event_id") or "")
             self._recalculate_run_progress(run)
@@ -319,13 +327,28 @@ class RuntimeStateManager:
             node["updated_at"] = utc_now()
             break
 
+    def _find_active_step_id(self, run: RuntimeRunState) -> str:
+        active_statuses = {"created", "queued", "waiting_input", "planning", "generating", "validating", "running", "verifying", "repairing", "paused"}
+        for step_id, step in reversed(list(run.steps.items())):
+            if step.status in active_statuses:
+                return step_id
+        return ""
+
     def _recalculate_run_progress(self, run: RuntimeRunState) -> None:
         if not run.steps:
             return
+        terminal_statuses = {"completed", "failed", "skipped", "cancelled"}
+        active_statuses = {"created", "queued", "waiting_input", "planning", "generating", "validating", "running", "verifying", "repairing", "paused"}
         values = [float(step.progress or 0.0) for step in run.steps.values()]
         run.progress = max(0.0, min(100.0, sum(values) / max(1, len(values))))
         if any(step.status == "failed" for step in run.steps.values()):
             run.status = "failed"
+            return
+        active_step = self._find_active_step_id(run)
+        run.active_step_id = active_step
+        if not active_step and run.steps and all(step.status in terminal_statuses for step in run.steps.values()):
+            run.status = "completed"
+            run.progress = 100.0
 
     def _safe_id(self, value: str) -> str:
         raw = str(value or "runtime")[:160]

@@ -539,8 +539,14 @@ async function sendMessage(){
     let data=null;
     for(let i=0;i<720;i++){
       await new Promise(resolve=>setTimeout(resolve, 1000));
-      const jobRes=await fetch('/api/runtime/jobs/'+encodeURIComponent(accepted.job_id),{cache:'no-store'});
-      const jobData=await jobRes.json();
+      let jobData=null;
+      try{
+        jobData=await fetchJsonWithRetry('/api/runtime/jobs/'+encodeURIComponent(accepted.job_id),{cache:'no-store'},3,1200);
+      }catch(fetchErr){
+        addProgressMessage('job poll retry: '+String(fetchErr.message||fetchErr));
+        await refreshState();
+        continue;
+      }
       const job=jobData.job||{};
       addProgressMessage('job status: '+(job.status||'unknown'));
       await refreshState();
@@ -557,7 +563,9 @@ async function sendMessage(){
     // Final answers are rendered by renderStudioResponse; do not duplicate or show raw runtime JSON here.
     await refreshState();
   }catch(e){
-    addMessage('Error: '+e,'item error');
+    const msg=String((e&&e.message)||e||'request failed');
+    addMessage('Error: '+msg+'
+The request may have been interrupted by a local server reload. Check Runtime State Console for the durable run state.','item error');
   } finally{
     if(pollTimer) clearInterval(pollTimer);
     if(hintTimer) clearInterval(hintTimer);
@@ -567,6 +575,25 @@ async function sendMessage(){
     setStudioStatus('ready', false);
   }
 }
+
+async function fetchJsonWithRetry(url, options, attempts=5, delayMs=1000){
+  let lastError=null;
+  for(let i=0;i<attempts;i++){
+    try{
+      const res=await fetch(url, options||{});
+      const text=await res.text();
+      let data={};
+      try{ data=text?JSON.parse(text):{}; }catch(parseErr){ data={ok:false,status:'failed',message:text||String(parseErr)}; }
+      if(!res.ok){ throw new Error((data&&data.message)||('HTTP '+res.status)); }
+      return data;
+    }catch(err){
+      lastError=err;
+      if(i<attempts-1){ await new Promise(resolve=>setTimeout(resolve, delayMs)); }
+    }
+  }
+  throw lastError || new Error('request failed');
+}
+
 function addMissingInputs(items, pendingInstruction, runId){
   lastMissingInputs = Array.isArray(items) ? items : [];
   lastPendingInstruction = pendingInstruction || lastPendingInstruction || lastSubmittedInstruction || '';

@@ -911,3 +911,9 @@ runtime_assets/seeds/capability_planners/__pycache__/default_capability_planner.
 tools/__pycache__/verify_v22_4_llm_based_code_generator.cpython-311.pyc
 tools/__pycache__/verify_v22_5_policy_backed_local_codegen_registration.cpython-311.pyc
 tools/__pycache__/verify_v22_4_no_fake_time_and_planner_answer.cpython-311.pyc
+ai_core/runtime/state/__pycache__/__init__.cpython-311.pyc
+ai_core/runtime/state/__pycache__/contracts.cpython-311.pyc
+ai_core/runtime/state/__pycache__/manager.cpython-311.pyc
+auxiliary_brain/capability_acquisition/classification/__pycache__/__init__.cpython-311.pyc
+auxiliary_brain/capability_acquisition/classification/__pycache__/capability_class.cpython-311.pyc
+auxiliary_brain/capability_acquisition/classification/__pycache__/capability_classifier.cpython-311.pyc
