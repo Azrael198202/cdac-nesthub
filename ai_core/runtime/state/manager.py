@@ -7,7 +7,7 @@ from typing import Any, Iterable
 
 from ai_core.config.paths import RUNTIME_TRACES
 from ai_core.runtime.observability.runtime_console import emit_console_event
-from .contracts import RuntimeRunState, RuntimeStateEvent, RuntimeStepState, utc_now
+from .contracts import RuntimeRunState, RuntimeStateEvent, RuntimeStepState, default_runtime_flow, resolve_flow_id, utc_now
 
 
 class RuntimeStateManager:
@@ -39,6 +39,8 @@ class RuntimeStateManager:
             run.updated_at = utc_now()
             if isinstance(metadata, dict):
                 run.metadata.update(self._redact_data(metadata))
+            if not run.flow:
+                run.flow = default_runtime_flow()
             self._runs[run_id] = run
             self._write_run(run)
         self.emit(run_id=run_id, step_id="runtime", kind="lifecycle", level="user", status="running", title="Run started", message=run.title, progress=0, metadata=metadata or {})
@@ -101,10 +103,12 @@ class RuntimeStateManager:
             run = self._runs.get(run_id) or self._read_run(run_id) or RuntimeRunState(run_id=run_id, title=run_id)
             seq = self._sequence.get(run_id, int(run.event_count or 0)) + 1
             self._sequence[run_id] = seq
+            flow_id = resolve_flow_id(step_id, kind=kind, method=method)
             event = RuntimeStateEvent(
                 run_id=run_id,
                 task_id=task_id or run.task_id,
                 step_id=step_id,
+                flow_id=flow_id,
                 parent_step_id=parent_step_id,
                 sequence=seq,
                 level=level,
@@ -125,7 +129,8 @@ class RuntimeStateManager:
                 next_action=next_action,
                 metadata=self._redact_data(metadata or {}),
             ).to_dict()
-            step = run.steps.get(step_id) or RuntimeStepState(step_id=step_id, name=title or step_id)
+            step = run.steps.get(step_id) or RuntimeStepState(step_id=step_id, flow_id=flow_id, name=title or step_id)
+            step.flow_id = flow_id or step.flow_id
             step.name = title or step.name or step_id
             step.status = status or step.status
             step.level = level or step.level
@@ -162,6 +167,7 @@ class RuntimeStateManager:
             step.last_message = str(message or title or "")[-2000:]
             step.event_count += 1
             run.steps[step_id] = step
+            self._update_flow_from_step(run, step)
             run.status = "failed" if status == "failed" else ("running" if run.status in {"created", "queued"} else run.status)
             run.updated_at = now
             run.active_step_id = step_id if status not in {"completed", "failed", "skipped"} else run.active_step_id
@@ -250,7 +256,7 @@ class RuntimeStateManager:
         except Exception:
             return None
         run = RuntimeRunState(run_id=str(data.get("run_id") or run_id))
-        for key in ("task_id", "status", "title", "created_at", "updated_at", "started_at", "ended_at", "progress", "active_step_id", "summary", "metadata", "event_count", "last_event_id", "last_error"):
+        for key in ("task_id", "status", "title", "created_at", "updated_at", "started_at", "ended_at", "progress", "active_step_id", "summary", "metadata", "flow", "event_count", "last_event_id", "last_error"):
             if key in data:
                 setattr(run, key, data.get(key))
         steps = data.get("steps") if isinstance(data.get("steps"), list) else []
@@ -261,7 +267,13 @@ class RuntimeStateManager:
             for k, v in item.items():
                 if hasattr(step, k):
                     setattr(step, k, v)
+            if not getattr(step, "flow_id", ""):
+                step.flow_id = resolve_flow_id(step.step_id, kind=getattr(step, "kind", ""), method=getattr(step, "method", ""))
             run.steps[step.step_id] = step
+        if not run.flow:
+            run.flow = default_runtime_flow()
+        for step in run.steps.values():
+            self._update_flow_from_step(run, step, persist_event=False)
         return run
 
     def _read_events(self, run_id: str) -> list[dict[str, Any]]:
@@ -281,6 +293,31 @@ class RuntimeStateManager:
 
     def _run_dir(self, run_id: str) -> Path:
         return self.state_dir / self._safe_id(run_id)
+
+    def _update_flow_from_step(self, run: RuntimeRunState, step: RuntimeStepState, *, persist_event: bool = True) -> None:
+        if not run.flow:
+            run.flow = default_runtime_flow()
+        target = step.flow_id or resolve_flow_id(step.step_id, kind=step.kind, method=step.method)
+        for node in run.flow:
+            if node.get("flow_id") != target:
+                continue
+            node["status"] = step.status
+            node["progress"] = max(float(node.get("progress") or 0.0), float(step.progress or 0.0))
+            node["active"] = step.status not in {"completed", "failed", "skipped", "cancelled"}
+            node["last_step_id"] = step.step_id
+            node["last_message"] = step.last_message
+            node["last_level"] = step.level
+            node["last_kind"] = step.kind
+            node["method"] = step.method
+            node["tool"] = step.tool
+            node["input"] = step.input
+            node["output"] = step.output
+            node["error"] = step.error
+            node["trace"] = step.trace
+            node["evidence"] = step.evidence
+            node["next_action"] = step.next_action
+            node["updated_at"] = utc_now()
+            break
 
     def _recalculate_run_progress(self, run: RuntimeRunState) -> None:
         if not run.steps:

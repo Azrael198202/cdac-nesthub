@@ -5,96 +5,82 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Runtime State Console</title>
   <style>
-    :root{--bg:#0b1020;--panel:#11182c;--panel2:#0f172a;--line:#26334d;--text:#e5e7eb;--muted:#94a3b8;--good:#22c55e;--warn:#f59e0b;--bad:#ef4444;--info:#38bdf8;--purple:#a78bfa}
-    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    :root{--bg:#09111f;--panel:#101827;--panel2:#0c1424;--line:#26344f;--text:#e5e7eb;--muted:#94a3b8;--good:#22c55e;--warn:#f59e0b;--bad:#ef4444;--info:#38bdf8;--purple:#a78bfa;--idle:#475569}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
     header{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--line);background:#0b1224;position:sticky;top:0;z-index:5}
     h1{font-size:17px;margin:0}.nav a{color:var(--muted);text-decoration:none;margin-left:12px}.nav a:hover{color:var(--text)}
-    main{display:grid;grid-template-columns:330px 1fr;gap:14px;padding:14px;height:calc(100vh - 58px)}
+    main{display:grid;grid-template-columns:310px 1fr;gap:14px;padding:14px;height:calc(100vh - 58px)}
     .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;min-height:0}.panel h2{margin:0;padding:10px 12px;font-size:13px;border-bottom:1px solid var(--line);color:#cbd5e1;background:#0d1528}
     .toolbar{display:flex;gap:8px;align-items:center;padding:10px;border-bottom:1px solid var(--line);flex-wrap:wrap}.toolbar input,.toolbar select{background:#080f1f;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:7px 9px}.toolbar button{background:#1e293b;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:7px 10px;cursor:pointer}.toolbar button:hover{background:#334155}
-    #runs{height:calc(100% - 91px);overflow:auto}.run{padding:10px 12px;border-bottom:1px solid var(--line);cursor:pointer}.run:hover,.run.active{background:#172036}.run .id{font-size:12px;color:#cbd5e1;word-break:break-all}.run .meta{color:var(--muted);font-size:11px;margin-top:3px}.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:1px 7px;font-size:11px;margin-right:5px}.running{color:var(--info)}.completed{color:var(--good)}.failed{color:var(--bad)}.queued,.waiting_input,.paused{color:var(--warn)}
+    #runs{height:calc(100% - 91px);overflow:auto}.run{padding:10px 12px;border-bottom:1px solid var(--line);cursor:pointer}.run:hover,.run.active{background:#172036}.run .id{font-size:12px;color:#cbd5e1;word-break:break-all}.run .meta{color:var(--muted);font-size:11px;margin-top:3px}.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:1px 7px;font-size:11px;margin-right:5px}.running,.planning,.generating,.validating,.verifying,.repairing{color:var(--info)}.completed{color:var(--good)}.failed{color:var(--bad)}.queued,.waiting_input,.paused{color:var(--warn)}.created,.skipped{color:var(--idle)}
     .detail{display:grid;grid-template-rows:auto auto 1fr;min-height:0}.summary{padding:12px;border-bottom:1px solid var(--line);background:var(--panel2)}.summary .row{display:flex;gap:12px;flex-wrap:wrap;color:var(--muted)}.bar{height:9px;background:#0b1224;border:1px solid var(--line);border-radius:999px;overflow:hidden;margin-top:10px}.bar span{display:block;height:100%;background:linear-gradient(90deg,#38bdf8,#a78bfa);width:0%}
-    .steps{display:flex;gap:8px;overflow:auto;padding:10px;border-bottom:1px solid var(--line);background:#0c1325}.step{min-width:220px;border:1px solid var(--line);border-radius:10px;padding:8px;background:#0b1224}.step .name{font-weight:700;color:#e2e8f0}.step .msg{font-size:11px;color:var(--muted);height:34px;overflow:hidden}.step .bar{height:6px;margin-top:6px}
-    .events{overflow:auto;padding:8px 10px}.event{display:grid;grid-template-columns:82px 92px 120px 1fr;gap:8px;border-bottom:1px dashed #223047;padding:7px 0}.event .ts{color:#64748b}.event .lvl{font-weight:700}.lvl.user{color:#7dd3fc}.lvl.developer{color:#c4b5fd}.lvl.advanced{color:#fcd34d}.lvl.diagnostic{color:#fca5a5}.kind{color:#93c5fd}.msg{white-space:pre-wrap;word-break:break-word}.json{margin-top:6px;color:#94a3b8;background:#070d1a;border:1px solid #172036;border-radius:8px;padding:7px;max-height:180px;overflow:auto;font-size:11px}
-    .split{display:flex;gap:6px;flex-wrap:wrap}.small{font-size:11px;color:var(--muted)}
-    @media(max-width:900px){main{grid-template-columns:1fr;height:auto}.panel{min-height:360px}.event{grid-template-columns:1fr}.events{max-height:70vh}}
+    .content{display:grid;grid-template-columns:minmax(420px,0.95fr) minmax(420px,1.05fr);min-height:0}.flow{overflow:auto;padding:14px}.flow-node{display:grid;grid-template-columns:34px 1fr;gap:10px;position:relative}.flow-node:not(:last-child)::after{content:"";position:absolute;left:16px;top:34px;bottom:-8px;width:2px;background:#223047}.dot{width:32px;height:32px;border-radius:999px;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;background:#0b1224;color:#cbd5e1;z-index:1}.dot.completed{border-color:#14532d;color:#86efac}.dot.running,.dot.planning,.dot.generating,.dot.validating,.dot.verifying,.dot.repairing{border-color:#0e7490;color:#7dd3fc}.dot.failed{border-color:#7f1d1d;color:#fca5a5}.card{border:1px solid var(--line);border-radius:12px;background:#0b1224;margin-bottom:12px;overflow:hidden}.card.active{box-shadow:0 0 0 1px #38bdf8 inset}.card-head{display:flex;justify-content:space-between;gap:8px;padding:10px 11px;border-bottom:1px solid #1e2c44}.title{font-weight:700;color:#e2e8f0}.desc{color:var(--muted);font-size:12px;padding:0 11px 10px}.kv{display:grid;grid-template-columns:70px 1fr;gap:5px;padding:0 11px 10px;font-size:12px}.k{color:#64748b}.v{color:#cbd5e1;word-break:break-word}.node-actions{border-top:1px solid #1e2c44;background:#07101f;padding:8px 11px}.action{padding:6px 0;border-bottom:1px dashed #1e2c44}.action:last-child{border-bottom:0}.action .line1{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.action .msg{color:#cbd5e1;white-space:pre-wrap}.small{font-size:11px;color:var(--muted)}
+    .right{display:grid;grid-template-rows:auto 1fr;border-left:1px solid var(--line);min-height:0}.events{overflow:auto;padding:8px 10px}.event{display:grid;grid-template-columns:72px 86px 110px 1fr;gap:8px;border-bottom:1px dashed #223047;padding:7px 0}.event .ts{color:#64748b}.event .lvl{font-weight:700}.lvl.user{color:#7dd3fc}.lvl.developer{color:#c4b5fd}.lvl.advanced{color:#fcd34d}.lvl.diagnostic{color:#fca5a5}.kind{color:#93c5fd}.msg{white-space:pre-wrap;word-break:break-word}.json{margin-top:6px;color:#94a3b8;background:#070d1a;border:1px solid #172036;border-radius:8px;padding:7px;max-height:220px;overflow:auto;font-size:11px}.tabs{display:flex;gap:6px;padding:8px 10px;border-bottom:1px solid var(--line);background:#0c1325}.tab{background:#111827;border:1px solid var(--line);border-radius:999px;padding:5px 9px;cursor:pointer;color:#cbd5e1}.tab.active{background:#1e293b;color:#fff;border-color:#38bdf8}
+    @media(max-width:1100px){main{grid-template-columns:1fr;height:auto}.content{grid-template-columns:1fr}.right{border-left:0;border-top:1px solid var(--line);min-height:520px}.panel{min-height:360px}.event{grid-template-columns:1fr}.events{max-height:70vh}}
   </style>
 </head>
 <body>
 <header>
-  <h1>Runtime State Console <span class="small">/ end-to-end async state</span></h1>
+  <h1>Runtime State Console <span class="small">/ system-flow async state</span></h1>
   <div class="nav"><a href="/agent-studio">Agent Studio</a><a href="/runtime-console">Runtime Console</a><a href="/graph-runtime">Graph Runtime</a></div>
 </header>
 <main>
   <section class="panel">
     <h2>Runs</h2>
-    <div class="toolbar">
-      <button onclick="loadRuns()">刷新</button>
-      <input id="runFilter" placeholder="过滤 run_id / title" oninput="renderRuns()" />
-    </div>
+    <div class="toolbar"><button onclick="loadRuns()">刷新</button><input id="runFilter" placeholder="过滤 run_id / title" oninput="renderRuns()" /></div>
     <div id="runs"></div>
   </section>
   <section class="panel detail">
     <h2>Selected Run</h2>
     <div class="summary" id="summary">请选择一个运行任务，或通过 /runtime-state?run_id=xxx 直接打开。</div>
-    <div class="steps" id="steps"></div>
-    <div>
-      <div class="toolbar">
-        <span class="small">显示等级</span>
-        <select id="level" onchange="restartStream()">
-          <option value="user">user</option>
-          <option value="developer" selected>developer</option>
-          <option value="advanced">advanced</option>
-          <option value="diagnostic">diagnostic</option>
-        </select>
-        <button onclick="toggleAuto()" id="autoBtn">自动滚动: ON</button>
-        <button onclick="clearEvents()">清空画面</button>
-        <span class="small" id="streamState">stream: idle</span>
+    <div class="content">
+      <div class="flow" id="flow"></div>
+      <div class="right">
+        <div>
+          <div class="tabs">
+            <button class="tab active" id="tabTimeline" onclick="setMode('timeline')">流程作业</button>
+            <button class="tab" id="tabCli" onclick="setMode('cli')">CLI 事件流</button>
+          </div>
+          <div class="toolbar">
+            <span class="small">显示等级</span>
+            <select id="level" onchange="restartStream()"><option value="user">user</option><option value="developer" selected>developer</option><option value="advanced">advanced</option><option value="diagnostic">diagnostic</option></select>
+            <button onclick="toggleAuto()" id="autoBtn">自动滚动: ON</button>
+            <button onclick="clearEvents()">清空画面</button>
+            <span class="small" id="streamState">stream: idle</span>
+          </div>
+        </div>
+        <div class="events" id="events"></div>
       </div>
-      <div class="events" id="events"></div>
     </div>
   </section>
 </main>
 <script>
-let runs=[], selectedRunId='', source=null, cursor=0, autoScroll=true;
-const levelOrder={user:0,developer:1,advanced:2,diagnostic:3};
+let runs=[], selectedRunId='', source=null, cursor=0, autoScroll=true, mode='timeline', currentRun=null, eventCache=[];
 function cls(s){return String(s||'').replace(/[^a-zA-Z0-9_-]/g,'_')}
-function statusHtml(s){return `<span class="pill ${cls(s)}">${s||'unknown'}</span>`}
+function statusHtml(s){return `<span class="pill ${cls(s)}">${s||'created'}</span>`}
 function shortTime(v){if(!v)return ''; try{return new Date(v).toLocaleTimeString()}catch(e){return String(v).slice(11,19)}}
-async function loadRuns(){
-  const res=await fetch('/api/runtime-state/runs?limit=100',{cache:'no-store'}); const data=await res.json(); runs=data.runs||[]; renderRuns();
-  if(!selectedRunId){const url=new URL(location.href); const rid=url.searchParams.get('run_id'); if(rid) selectRun(rid); else if(runs[0]) selectRun(runs[0].run_id)}
-}
-function renderRuns(){
-  const f=(document.getElementById('runFilter').value||'').toLowerCase();
-  document.getElementById('runs').innerHTML=runs.filter(r=>!f||JSON.stringify(r).toLowerCase().includes(f)).map(r=>`<div class="run ${r.run_id===selectedRunId?'active':''}" onclick="selectRun('${r.run_id}')"><div>${statusHtml(r.status)} <span class="id">${r.run_id}</span></div><div class="meta">${r.title||''}</div><div class="meta">progress=${Math.round(r.progress||0)}% · events=${r.event_count||0} · ${shortTime(r.updated_at)}</div></div>`).join('') || '<div class="run"><span class="small">暂无运行状态</span></div>';
-}
-async function selectRun(id){selectedRunId=id; cursor=0; renderRuns(); document.getElementById('events').innerHTML=''; await loadRun(); restartStream(); history.replaceState(null,'',`/runtime-state?run_id=${encodeURIComponent(id)}`)}
-async function loadRun(){
-  if(!selectedRunId)return; const res=await fetch(`/api/runtime-state/runs/${encodeURIComponent(selectedRunId)}`,{cache:'no-store'}); const data=await res.json(); if(!data.ok)return;
-  const r=data.run; document.getElementById('summary').innerHTML=`<div class="row"><b>${r.title||r.run_id}</b>${statusHtml(r.status)}<span>run_id=${r.run_id}</span><span>active=${r.active_step_id||'-'}</span><span>events=${r.event_count||0}</span></div><div class="bar"><span style="width:${Math.round(r.progress||0)}%"></span></div><div class="small">${r.summary||''}</div>`;
-  document.getElementById('steps').innerHTML=(r.steps||[]).map(s=>`<div class="step"><div>${statusHtml(s.status)} <span class="name">${s.name||s.step_id}</span></div><div class="small">${s.step_id}</div><div class="msg">${s.last_message||''}</div><div class="bar"><span style="width:${Math.round(s.progress||0)}%"></span></div><div class="small">method=${s.method||'-'} · tool=${s.tool||'-'}</div></div>`).join('') || '<span class="small">暂无步骤</span>';
-}
-function restartStream(){ if(source){source.close(); source=null} cursor=0; document.getElementById('events').innerHTML=''; startStream(); }
-function startStream(){
-  if(!selectedRunId)return; const min=document.getElementById('level').value;
-  source=new EventSource(`/api/runtime-state/runs/${encodeURIComponent(selectedRunId)}/stream?after_sequence=${cursor}&min_level=${encodeURIComponent(min)}`);
-  document.getElementById('streamState').textContent='stream: connected';
-  source.onmessage=(ev)=>{try{const e=JSON.parse(ev.data); cursor=Math.max(cursor,Number(e.sequence||0)); appendEvent(e); if(cursor%5===0) loadRun();}catch(err){console.error(err)}};
-  source.onerror=()=>{document.getElementById('streamState').textContent='stream: reconnecting';};
-}
-function appendEvent(e){
-  const extra={input:e.input,output:e.output,error:e.error,trace:e.trace,evidence:e.evidence,next_action:e.next_action,metadata:e.metadata};
-  const compact=Object.fromEntries(Object.entries(extra).filter(([k,v])=>v!==null&&v!==''&&!(Array.isArray(v)&&!v.length)&&!(typeof v==='object'&&v&&!Array.isArray(v)&&!Object.keys(v).length)));
-  const detail=Object.keys(compact).length?`<div class="json">${escapeHtml(JSON.stringify(compact,null,2))}</div>`:'';
-  const row=document.createElement('div'); row.className='event'; row.innerHTML=`<div class="ts">#${e.sequence}<br>${shortTime(e.ts)}</div><div class="lvl ${e.level}">${e.level}<br>${statusHtml(e.status)}</div><div class="kind">${e.kind}<br><span class="small">${e.step_id||''}</span></div><div class="msg"><b>${escapeHtml(e.title||'')}</b><br>${escapeHtml(e.message||'')}${detail}</div>`;
-  const box=document.getElementById('events'); box.appendChild(row); if(box.children.length>1000) box.removeChild(box.firstChild); if(autoScroll) box.scrollTop=box.scrollHeight;
-}
-function clearEvents(){document.getElementById('events').innerHTML=''}
+async function loadRuns(){const res=await fetch('/api/runtime-state/runs?limit=100',{cache:'no-store'}); const data=await res.json(); runs=data.runs||[]; renderRuns(); if(!selectedRunId){const url=new URL(location.href); const rid=url.searchParams.get('run_id'); if(rid) selectRun(rid); else if(runs[0]) selectRun(runs[0].run_id)}}
+function renderRuns(){const f=(document.getElementById('runFilter').value||'').toLowerCase(); document.getElementById('runs').innerHTML=runs.filter(r=>!f||JSON.stringify(r).toLowerCase().includes(f)).map(r=>`<div class="run ${r.run_id===selectedRunId?'active':''}" onclick="selectRun('${r.run_id}')"><div>${statusHtml(r.status)} <span class="id">${r.run_id}</span></div><div class="meta">${escapeHtml(r.title||'')}</div><div class="meta">progress=${Math.round(r.progress||0)}% · events=${r.event_count||0} · ${shortTime(r.updated_at)}</div></div>`).join('') || '<div class="run"><span class="small">暂无运行状态</span></div>'}
+async function selectRun(id){selectedRunId=id; cursor=0; eventCache=[]; renderRuns(); document.getElementById('events').innerHTML=''; await loadRun(); restartStream(); history.replaceState(null,'',`/runtime-state?run_id=${encodeURIComponent(id)}`)}
+async function loadRun(){if(!selectedRunId)return; const res=await fetch(`/api/runtime-state/runs/${encodeURIComponent(selectedRunId)}`,{cache:'no-store'}); const data=await res.json(); if(!data.ok)return; currentRun=data.run; renderSummary(); renderFlow(); if(mode==='timeline') renderTimeline();}
+function renderSummary(){const r=currentRun; document.getElementById('summary').innerHTML=`<div class="row"><b>${escapeHtml(r.title||r.run_id)}</b>${statusHtml(r.status)}<span>run_id=${r.run_id}</span><span>active=${r.active_step_id||'-'}</span><span>events=${r.event_count||0}</span></div><div class="bar"><span style="width:${Math.round(r.progress||0)}%"></span></div><div class="small">${escapeHtml(r.summary||'')}</div>`}
+function renderFlow(){const r=currentRun||{}; const flow=(r.flow&&r.flow.length?r.flow:defaultFlow()); const eventsByFlow=groupEventsByFlow(); document.getElementById('flow').innerHTML=flow.map((n,i)=>{const status=n.status||'created'; const items=(eventsByFlow[n.flow_id]||[]).slice(-4); const io=ioBlock(n); return `<div class="flow-node"><div class="dot ${cls(status)}">${i+1}</div><div class="card ${n.active?'active':''}"><div class="card-head"><div><div class="title">${escapeHtml(n.title||n.flow_id)}</div><div class="small">${escapeHtml(n.owner||'')} · ${escapeHtml(n.flow_id||'')}</div></div><div>${statusHtml(status)}</div></div><div class="desc">${escapeHtml(n.description||'')}</div><div class="bar" style="margin:0 11px 10px"><span style="width:${Math.round(n.progress||0)}%"></span></div><div class="kv"><div class="k">输入</div><div class="v">${escapeHtml(summarize(n.input)||n.expected_input||'-')}</div><div class="k">输出</div><div class="v">${escapeHtml(summarize(n.output)||n.expected_output||'-')}</div><div class="k">手段</div><div class="v">${escapeHtml(n.method||'-')}</div><div class="k">工具</div><div class="v">${escapeHtml(n.tool||'-')}</div><div class="k">下一步</div><div class="v">${escapeHtml(n.next_action||'-')}</div></div>${io}${items.length?`<div class="node-actions">${items.map(actionHtml).join('')}</div>`:''}</div></div>`}).join('')}
+function ioBlock(n){const detail={trace:n.trace,evidence:n.evidence,error:n.error}; const compact=Object.fromEntries(Object.entries(detail).filter(([k,v])=>v&&(!(Array.isArray(v))||v.length)&&(!(typeof v==='object'&&!Array.isArray(v))||Object.keys(v).length))); return Object.keys(compact).length?`<div class="json" style="margin:0 11px 10px">${escapeHtml(JSON.stringify(compact,null,2))}</div>`:''}
+function actionHtml(e){return `<div class="action"><div class="line1"><span class="small">#${e.sequence}</span><span class="lvl ${e.level}">${e.level}</span>${statusHtml(e.status)}<span class="kind">${e.kind}</span><span class="small">${shortTime(e.ts)}</span></div><div class="msg">${escapeHtml(e.title||'')} — ${escapeHtml(e.message||'')}</div><div class="small">step=${escapeHtml(e.step_id||'')} · method=${escapeHtml(e.method||'-')} · tool=${escapeHtml(e.tool||'-')}</div></div>`}
+function groupEventsByFlow(){const out={}; for(const e of eventCache){const fid=e.flow_id||guessFlow(e); (out[fid]||(out[fid]=[])).push(e)} return out}
+function renderTimeline(){document.getElementById('events').innerHTML=eventCache.slice(-200).map(e=>`<div class="event"><div class="ts">#${e.sequence}<br>${shortTime(e.ts)}</div><div class="lvl ${e.level}">${e.level}<br>${statusHtml(e.status)}</div><div class="kind">${e.kind}<br><span class="small">${e.flow_id||guessFlow(e)}</span></div><div class="msg"><b>${escapeHtml(e.title||'')}</b><br>${escapeHtml(e.message||'')}<div class="small">step=${escapeHtml(e.step_id||'')} · method=${escapeHtml(e.method||'-')} · tool=${escapeHtml(e.tool||'-')}</div>${detailHtml(e)}</div></div>`).join('')}
+function renderCliEvent(e){const detail=detailHtml(e); const row=document.createElement('div'); row.className='event'; row.innerHTML=`<div class="ts">#${e.sequence}<br>${shortTime(e.ts)}</div><div class="lvl ${e.level}">${e.level}<br>${statusHtml(e.status)}</div><div class="kind">${e.kind}<br><span class="small">${e.step_id||''}</span></div><div class="msg"><b>${escapeHtml(e.title||'')}</b><br>${escapeHtml(e.message||'')}${detail}</div>`; const box=document.getElementById('events'); box.appendChild(row); if(box.children.length>1000) box.removeChild(box.firstChild); if(autoScroll) box.scrollTop=box.scrollHeight}
+function detailHtml(e){const extra={input:e.input,output:e.output,error:e.error,trace:e.trace,evidence:e.evidence,next_action:e.next_action,metadata:e.metadata}; const compact=Object.fromEntries(Object.entries(extra).filter(([k,v])=>v!==null&&v!==''&&!(Array.isArray(v)&&!v.length)&&!(typeof v==='object'&&v&&!Array.isArray(v)&&!Object.keys(v).length))); return Object.keys(compact).length?`<div class="json">${escapeHtml(JSON.stringify(compact,null,2))}</div>`:''}
+function restartStream(){if(source){source.close(); source=null} cursor=0; eventCache=[]; document.getElementById('events').innerHTML=''; startStream();}
+function startStream(){if(!selectedRunId)return; const min=document.getElementById('level').value; source=new EventSource(`/api/runtime-state/runs/${encodeURIComponent(selectedRunId)}/stream?after_sequence=${cursor}&min_level=${encodeURIComponent(min)}`); document.getElementById('streamState').textContent='stream: connected'; source.onmessage=(ev)=>{try{const e=JSON.parse(ev.data); cursor=Math.max(cursor,Number(e.sequence||0)); eventCache.push(e); if(eventCache.length>1000) eventCache=eventCache.slice(-1000); if(mode==='cli') renderCliEvent(e); else renderTimeline(); if(currentRun) renderFlow(); if(cursor%4===0) loadRun();}catch(err){console.error(err)}}; source.onerror=()=>{document.getElementById('streamState').textContent='stream: reconnecting'}}
+function setMode(m){mode=m; document.getElementById('tabTimeline').classList.toggle('active',m==='timeline'); document.getElementById('tabCli').classList.toggle('active',m==='cli'); document.getElementById('events').innerHTML=''; if(m==='timeline') renderTimeline(); else eventCache.slice(-200).forEach(renderCliEvent)}
+function clearEvents(){document.getElementById('events').innerHTML=''; if(mode==='timeline') eventCache=[]}
 function toggleAuto(){autoScroll=!autoScroll; document.getElementById('autoBtn').textContent='自动滚动: '+(autoScroll?'ON':'OFF')}
+function summarize(v){if(v===null||v===undefined||v==='')return ''; if(typeof v==='string')return v.slice(0,360); try{return JSON.stringify(v).slice(0,360)}catch(e){return String(v).slice(0,360)}}
+function guessFlow(e){const s=String(e.step_id||e.method||e.kind||'').toLowerCase(); if(s.includes('normalize'))return 'perception_brain'; if(s.includes('input_parsing'))return 'ai_core.input_parsing'; if(s.includes('intent')||s.includes('interaction'))return 'ai_core.intent_interaction'; if(s.includes('parameter')||s.includes('memory')||s.includes('context'))return 'auxiliary_memory.parameters'; if(s.includes('workflow')||s.includes('graph')||s.includes('task.'))return 'ai_core.workflow_graph'; if(s.includes('pre_execution')||s.includes('validation'))return 'verification.pre_execution'; if(s.includes('result.verify')||s.includes('verification'))return 'verification.result'; if(s.includes('repair'))return 'repair_brain'; if(s.includes('final')||s.includes('presentation'))return 'presentation_brain'; if(s.includes('evidence')||s.includes('trace')||s.includes('provenance'))return 'evidence.trace'; if(s.includes('async')||s.includes('server'))return 'apps.api.server'; return 'runtime.execution'}
+function defaultFlow(){return ['User / UI','apps/api/server.py','perception_brain','ai_core.input_parsing','ai_core.intent_recognition / interaction','auxiliary_brain.parameters + memory_brain','ai_core.workflow / graph / orchestration','verification_brain','runtime kernel / ai_core.executors / registered tools','evidence_engine + trace / provenance','verification_brain.result_verification','repair_brain','presentation_brain','Final Answer / Artifacts / Trace Summary'].map((title,i)=>({flow_id:'flow_'+i,title,description:'等待该流程产生状态事件。',status:'created',progress:0}))}
 function escapeHtml(s){return String(s||'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
-setInterval(()=>{loadRuns(); if(selectedRunId) loadRun()},3000);
-loadRuns();
+setInterval(()=>{loadRuns(); if(selectedRunId) loadRun()},3000); loadRuns();
 </script>
 </body>
 </html>
