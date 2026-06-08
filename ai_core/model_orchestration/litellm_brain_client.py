@@ -13,6 +13,7 @@ from typing import Any
 
 from ai_core.model_orchestration.brain_model_router import BrainModelRoute, BrainModelRouter
 from ai_core.config.paths import CONFIGS_DIR
+from ai_core.runtime.observability.runtime_console import emit_console_event
 
 
 @dataclass
@@ -95,13 +96,16 @@ class LiteLLMBrainClient:
                 continue
             model = self._litellm_model(prepared_route)
             options = self._merge_options(route=prepared_route, response_format=response_format, kwargs=kwargs)
+            self._emit_model_event("model_generation_started", "running", prepared_route, {"mode": "async"})
             try:
                 raw = await acompletion(model=model, messages=messages, **options)
+                self._emit_model_event("model_generation_completed", "completed", prepared_route, {"mode": "async"})
                 route_payload = prepared_route.to_dict()
                 if errors:
                     route_payload["previous_attempts"] = errors
                 return LiteLLMBrainResult(status="completed", content=self._extract_content(raw), route=route_payload, raw=raw)
             except Exception as exc:
+                self._emit_model_event("model_generation_failed", "failed", prepared_route, {"error_type": exc.__class__.__name__, "error": str(exc)[:500]})
                 errors.append({"provider": prepared_route.provider, "model": prepared_route.model, "error": str(exc)[:1000]})
         status = "missing_required_secret" if self._only_or_final_actionable_secret_error(errors) else "failed"
         return LiteLLMBrainResult(status=status, route={**route.to_dict(), **self._interaction_payload_from_errors(errors)}, error=json_dumps_compact(errors))
@@ -134,13 +138,16 @@ class LiteLLMBrainClient:
                 continue
             model = self._litellm_model(prepared_route)
             options = self._merge_options(route=prepared_route, response_format=response_format, kwargs=kwargs)
+            self._emit_model_event("model_generation_started", "running", prepared_route, {"mode": "sync"})
             try:
                 raw = completion(model=model, messages=messages, **options)
+                self._emit_model_event("model_generation_completed", "completed", prepared_route, {"mode": "sync"})
                 route_payload = prepared_route.to_dict()
                 if errors:
                     route_payload["previous_attempts"] = errors
                 return LiteLLMBrainResult(status="completed", content=self._extract_content(raw), route=route_payload, raw=raw)
             except Exception as exc:
+                self._emit_model_event("model_generation_failed", "failed", prepared_route, {"error_type": exc.__class__.__name__, "error": str(exc)[:500]})
                 errors.append({"provider": prepared_route.provider, "model": prepared_route.model, "error": str(exc)[:1000]})
         status = "missing_required_secret" if self._only_or_final_actionable_secret_error(errors) else "failed"
         return LiteLLMBrainResult(status=status, route={**route.to_dict(), **self._interaction_payload_from_errors(errors)}, error=json_dumps_compact(errors))
@@ -162,6 +169,13 @@ class LiteLLMBrainClient:
         """
         cleaned = dict(options or {})
         cleaned.setdefault("drop_params", True)
+        # Generic model call guard: capability acquisition must never wait forever.
+        # The value can be overridden per route/env, but default is bounded and visible.
+        if "timeout" not in cleaned and "request_timeout" not in cleaned:
+            try:
+                cleaned["timeout"] = float(os.environ.get("AI_CORE_LLM_TIMEOUT_SECONDS", "180") or "180")
+            except Exception:
+                cleaned["timeout"] = 180
         provider = str(route.provider or "").lower()
         model = str(route.model or "").lower()
         if provider == "openai" and (model.startswith("gpt-5") or "/gpt-5" in model):
@@ -188,20 +202,41 @@ class LiteLLMBrainClient:
             return requested
         if os.environ.get("AI_CORE_DISABLE_OLLAMA_MODEL_PREPARE", "").lower() in {"1", "true", "yes"}:
             return requested
+
+        # Imported/custom model names must be honored exactly when present.
+        # When absent, do not blindly pull the requested name: imported models
+        # usually need a local Modelfile/source and may not exist in a public
+        # provider catalog. Pull only candidates that policy/env marks as
+        # pullable, then fall back to an installed model selected by generic
+        # capability tags such as code-generation suitability.
+        self._emit_model_event("model_prepare_started", "running", BrainModelRoute(provider="ollama", model=requested), {"requested_model": requested})
         binary = self._ollama_binary()
         tags = self._ollama_list(binary)
         if self._ollama_model_exists(tags, requested):
+            self._emit_model_event("model_prepare_completed", "completed", BrainModelRoute(provider="ollama", model=requested), {"resolved_model": requested, "source": "local_exact_match"})
             return requested
+
+        last_tags = tags
         for candidate in self._ollama_candidate_models(requested):
-            tags = self._ollama_list(binary)
-            if self._ollama_model_exists(tags, candidate):
+            last_tags = self._ollama_list(binary)
+            if self._ollama_model_exists(last_tags, candidate):
+                self._emit_model_event("model_prepare_completed", "completed", BrainModelRoute(provider="ollama", model=candidate), {"requested_model": requested, "resolved_model": candidate, "source": "local_candidate_match"})
                 return candidate
-            if self._ollama_pull(binary, candidate):
-                tags = self._ollama_list(binary)
-                if self._ollama_model_exists(tags, candidate):
-                    return candidate
-        installed = self._select_installed_ollama_model(tags, requested)
-        return installed or requested
+            if self._is_ollama_model_pullable(candidate):
+                self._emit_model_event("model_download_started", "running", BrainModelRoute(provider="ollama", model=candidate), {"requested_model": requested})
+                if self._ollama_pull(binary, candidate):
+                    last_tags = self._ollama_list(binary)
+                    if self._ollama_model_exists(last_tags, candidate):
+                        self._emit_model_event("model_download_completed", "completed", BrainModelRoute(provider="ollama", model=candidate), {"requested_model": requested, "resolved_model": candidate})
+                        return candidate
+                self._emit_model_event("model_download_failed", "failed", BrainModelRoute(provider="ollama", model=candidate), {"requested_model": requested})
+
+        installed = self._select_installed_ollama_model(last_tags, requested)
+        if installed:
+            self._emit_model_event("model_prepare_completed", "completed", BrainModelRoute(provider="ollama", model=installed), {"requested_model": requested, "resolved_model": installed, "source": "installed_fallback"})
+            return installed
+        self._emit_model_event("model_prepare_failed", "failed", BrainModelRoute(provider="ollama", model=requested), {"reason": "no_installed_or_pullable_model"})
+        return requested
 
     def _ollama_binary(self) -> str:
         explicit = os.environ.get("AI_CORE_OLLAMA_BINARY")
@@ -251,7 +286,7 @@ class LiteLLMBrainClient:
         return wanted in set(names or [])
 
     def _ollama_candidate_models(self, requested: str) -> list[str]:
-        candidates: list[str] = []
+        candidates: list[str] = [requested]
         env_candidates = os.environ.get("AI_CORE_OLLAMA_MODEL_CANDIDATES", "")
         candidates.extend([item.strip() for item in env_candidates.split(",") if item.strip()])
         config = self._load_model_resolution_config()
@@ -259,9 +294,10 @@ class LiteLLMBrainClient:
         for item in aliases.get(requested, []) if isinstance(aliases.get(requested), list) else []:
             if str(item).strip():
                 candidates.append(str(item).strip())
+        preferred = config.get("preferred_code_models") if isinstance(config.get("preferred_code_models"), list) else []
+        candidates.extend(str(item).strip() for item in preferred if str(item).strip())
         fallbacks = config.get("fallback_models") if isinstance(config.get("fallback_models"), list) else []
         candidates.extend(str(item).strip() for item in fallbacks if str(item).strip())
-        candidates.insert(0, requested)
         out: list[str] = []
         seen: set[str] = set()
         for item in candidates:
@@ -289,8 +325,22 @@ class LiteLLMBrainClient:
                     return section
         return {}
 
+    def _is_ollama_model_pullable(self, model: str) -> bool:
+        candidate = str(model or "").strip()
+        if not candidate:
+            return False
+        env_value = os.environ.get("AI_CORE_OLLAMA_PULLABLE_MODELS", "")
+        env_models = {item.strip() for item in env_value.split(",") if item.strip()}
+        if candidate in env_models:
+            return True
+        config = self._load_model_resolution_config()
+        pullable = config.get("pullable_models") if isinstance(config.get("pullable_models"), list) else []
+        return candidate in {str(item).strip() for item in pullable if str(item).strip()}
+
     def _ollama_pull(self, binary: str, model: str) -> bool:
         if os.environ.get("AI_CORE_DISABLE_OLLAMA_MODEL_PULL", "").lower() in {"1", "true", "yes"}:
+            return False
+        if not self._is_ollama_model_pullable(model):
             return False
         timeout = int(os.environ.get("AI_CORE_OLLAMA_PULL_TIMEOUT_SECONDS", "3600") or "3600")
         if binary:
@@ -314,13 +364,43 @@ class LiteLLMBrainClient:
             return False
 
     def _select_installed_ollama_model(self, names: list[str], requested: str) -> str:
-        if not names:
+        available = [str(name).strip() for name in names or [] if str(name).strip()]
+        if not available:
             return ""
+        config = self._load_model_resolution_config()
+        preferred = config.get("preferred_code_models") if isinstance(config.get("preferred_code_models"), list) else []
+        for candidate in [str(item).strip() for item in preferred if str(item).strip()]:
+            if candidate in available:
+                return candidate
         requested_root = requested.split(":", 1)[0]
-        for name in names:
+        for name in available:
             if name.split(":", 1)[0] == requested_root:
                 return name
-        return names[0]
+        scorer = self._installed_model_score
+        return sorted(available, key=scorer)[0]
+
+    def _installed_model_score(self, name: str) -> tuple[int, str]:
+        lowered = str(name or "").lower()
+        if "coder" in lowered or "code" in lowered:
+            return (0, lowered)
+        if any(token in lowered for token in ["qwen", "deepseek", "starcoder", "codellama"]):
+            return (1, lowered)
+        return (2, lowered)
+
+    def _emit_model_event(self, event: str, status: str, route: BrainModelRoute, data: dict[str, Any] | None = None) -> None:
+        try:
+            payload = {"provider": route.provider, "model": route.model}
+            if data:
+                payload.update(data)
+            emit_console_event(
+                area="model_orchestration",
+                event=event,
+                status=status,
+                message=f"{event}: {route.provider}/{route.model}",
+                data=payload,
+            )
+        except Exception:
+            return
 
     def _missing_provider_secret(self, route: BrainModelRoute) -> str:
         provider = str(route.provider or "").strip().lower()

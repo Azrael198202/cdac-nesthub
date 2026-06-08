@@ -1149,6 +1149,8 @@ class RuntimeCapabilityGapImplementer:
             clean[key] = value
         if pythonpath:
             clean["PYTHONPATH"] = pythonpath
+        clean["PYTHONBREAKPOINT"] = "0"
+        clean["PYDEVD_DISABLE_FILE_VALIDATION"] = "1"
         clean.setdefault("PYTHONNOUSERSITE", "1")
         clean.setdefault("PYTHONDONTWRITEBYTECODE", "1")
         return clean
@@ -1207,7 +1209,7 @@ class RuntimeCapabilityGapImplementer:
                 if not environment_failure:
                     return {**attempt, "attempts": attempts}
             except Exception as exc:
-                attempts.append({"executable": exe, "returncode": -1, "stdout": "", "stderr": f"{exc.__class__.__name__}: {exc}"})
+                attempts.append({"executable": exe, "returncode": -1, "stdout": "", "stderr": f"{exc.__class__.__name__}: {exc}", "environment_note": "timeout may indicate debugger pause if launched from IDE with break-on-exception" if exc.__class__.__name__ == "TimeoutExpired" else ""})
                 continue
         last = attempts[-1] if attempts else {"executable": "", "returncode": -1, "stdout": "", "stderr": "no_python_executable_available"}
         return {**last, "attempts": attempts}

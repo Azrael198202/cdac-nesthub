@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import sys
 import tempfile
@@ -329,6 +330,25 @@ class RuntimeBlueprintArtifactGenerator:
         user = "Generate the runtime artifact from this contract:\n" + json.dumps(contract, ensure_ascii=False, indent=2, default=str)
         return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
+    def _clean_validation_env(self) -> dict[str, str]:
+        clean: dict[str, str] = {}
+        blocked_prefixes = ("PYDEVD", "DEBUGPY", "VSCODE", "PYCHARM")
+        blocked_names = {
+            "PYTHONPATH",
+            "PYTHONHOME",
+            "PYTHONSTARTUP",
+        }
+        for key, value in os.environ.items():
+            upper = key.upper()
+            if upper in blocked_names or any(upper.startswith(prefix) for prefix in blocked_prefixes):
+                continue
+            clean[key] = value
+        clean["PYTHONBREAKPOINT"] = "0"
+        clean["PYDEVD_DISABLE_FILE_VALIDATION"] = "1"
+        clean.setdefault("PYTHONNOUSERSITE", "1")
+        clean.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+        return clean
+
     def _preflight_generated_artifact(self, artifact: dict[str, Any], *, entrypoint: dict[str, Any], verification_input: dict[str, Any]) -> dict[str, Any]:
         """Run a small generic preflight before writing/registering a generated artifact.
 
@@ -370,6 +390,7 @@ class RuntimeBlueprintArtifactGenerator:
                 proc = subprocess.run(
                     [sys.executable, "-I", "-c", runner],
                     cwd=str(root),
+                    env=self._clean_validation_env(),
                     text=True,
                     capture_output=True,
                     timeout=12,
@@ -384,7 +405,7 @@ class RuntimeBlueprintArtifactGenerator:
         except subprocess.TimeoutExpired as exc:
             return {
                 "passed": False,
-                "reason": "entrypoint_preflight_timeout",
+                "reason": "entrypoint_preflight_timeout_or_debugger_pause",
                 "stdout": str(getattr(exc, "stdout", "") or "")[-1000:],
                 "stderr": str(getattr(exc, "stderr", "") or "")[-1000:],
             }
@@ -670,14 +691,24 @@ class RuntimeBlueprintArtifactGenerator:
         return "default"
 
     def _generation_attempts(self, base_complexity: str) -> list[dict[str, Any]]:
-        order = ["basic", "medium", "high", "critical"]
+        # Keep capability acquisition predictable: a declared basic/local task must
+        # not be silently escalated into hosted/critical routes just because a
+        # local attempt failed. Repair evidence is passed back to the same policy
+        # band first; broader escalation must be selected by runtime policy or a
+        # user-approved provider configuration, not by capability-specific code.
         base = str(base_complexity or "default").strip().lower()
-        if base not in order:
-            base = "medium" if base == "default" else "high"
-        start = order.index(base)
-        complexities = order[start:]
+        if base == "default":
+            sequence = ["medium"]
+        elif base == "basic":
+            sequence = ["basic", "medium"]
+        elif base == "medium":
+            sequence = ["medium", "high"]
+        elif base == "high":
+            sequence = ["high", "critical"]
+        else:
+            sequence = [base if base in {"basic", "medium", "high", "critical"} else "medium"]
         attempts: list[dict[str, Any]] = []
-        for complexity in complexities:
+        for complexity in sequence:
             attempts.append({"complexity": complexity, "force_json": True, "compact": False})
             attempts.append({"complexity": complexity, "force_json": False, "compact": True})
         return attempts
