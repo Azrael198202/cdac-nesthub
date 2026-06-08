@@ -1,3 +1,9 @@
+## Development server reload boundary
+
+Use `python dev_server.py` for local reload mode. It watches source directories only and excludes runtime-owned generated material such as `runtime/generated`, `runtime/traces`, `runtime/logs`, and registries. Do not start the API with `uvicorn apps.api.server:app --reload` from the project root, because generated capability files are runtime outputs and will otherwise trigger WatchFiles reload while a job is running.
+
+For the most stable runtime acquisition test, use `python main.py` with reload disabled.
+
 # cdac-nesthub v15
 
 This package keeps `ai_core` as a generic runtime brain and operating-system layer. Concrete capabilities are generated, combined, executed, verified, and registered at runtime-owned boundaries instead of being embedded as fixed core behavior.

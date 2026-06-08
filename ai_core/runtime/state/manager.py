@@ -174,7 +174,7 @@ class RuntimeStateManager:
             run.steps[step_id] = step
             self._update_flow_from_step(run, step)
             active_statuses = {"created", "queued", "waiting_input", "planning", "generating", "validating", "running", "verifying", "repairing", "paused"}
-            terminal_statuses = {"completed", "failed", "skipped", "cancelled"}
+            terminal_statuses = {"completed", "failed", "skipped", "cancelled", "interrupted"}
             if status == "failed":
                 run.status = "failed"
             elif status in active_statuses:
@@ -201,7 +201,7 @@ class RuntimeStateManager:
 
     def _force_terminal_state(self, run: RuntimeRunState, *, status: str, summary: str = "", error: dict[str, Any] | None = None) -> None:
         terminal_status = "failed" if status in {"failed", "error"} else str(status or "completed")
-        if terminal_status not in {"completed", "failed", "cancelled", "paused"}:
+        if terminal_status not in {"completed", "failed", "cancelled", "paused", "interrupted"}:
             terminal_status = "completed"
         now = utc_now()
         run.status = terminal_status
@@ -231,7 +231,7 @@ class RuntimeStateManager:
                         node["status"] = "skipped"
                         node["last_message"] = "This flow node was not used by the selected execution path."
                     node["progress"] = 100.0
-            elif terminal_status == "failed" and node_status in {"running", "queued", "waiting_input", "planning", "generating", "validating", "verifying", "repairing"}:
+            elif terminal_status in {"failed", "interrupted"} and node_status in {"running", "queued", "waiting_input", "planning", "generating", "validating", "verifying", "repairing"}:
                 node["status"] = "failed"
                 node["progress"] = 100.0
             node["active"] = False
@@ -239,6 +239,32 @@ class RuntimeStateManager:
         run.active_step_id = ""
         if terminal_status == "completed":
             run.progress = 100.0
+
+
+    def close_non_terminal_runs_on_startup(self, *, reason: str = "Runtime process restarted before the previous worker finished.") -> int:
+        """Mark durable runs left active by a server reload/restart as interrupted.
+
+        This is observability cleanup only. It does not retry or alter the
+        workflow plan. It prevents the UI from showing stale `running` states
+        after WatchFiles or a manual server restart kills the in-process worker.
+        """
+        active_statuses = {"created", "queued", "waiting_input", "planning", "generating", "validating", "running", "verifying", "repairing"}
+        count = 0
+        with self._lock:
+            try:
+                paths = list(self.state_dir.glob("*/run_state.json"))
+            except Exception:
+                paths = []
+            for path in paths:
+                run_id = path.parent.name
+                run = self._read_run(run_id)
+                if not run or str(run.status or "") not in active_statuses:
+                    continue
+                self._force_terminal_state(run, status="interrupted", summary=reason, error={"type": "RuntimeRestart", "message": reason})
+                self._runs[run_id] = run
+                self._write_run(run)
+                count += 1
+        return count
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         run_id = self._safe_id(run_id)
@@ -356,7 +382,7 @@ class RuntimeStateManager:
             if node.get("flow_id") != target:
                 continue
             previous_status = str(node.get("status") or "")
-            terminal = {"completed", "failed", "skipped", "cancelled"}
+            terminal = {"completed", "failed", "skipped", "cancelled", "interrupted"}
             active = {"queued", "waiting_input", "planning", "generating", "validating", "running", "verifying", "repairing", "paused"}
             # Do not let an old lifecycle event keep a flow node active after a
             # later event in the same flow has completed. The node represents
@@ -392,7 +418,7 @@ class RuntimeStateManager:
     def _recalculate_run_progress(self, run: RuntimeRunState) -> None:
         if not run.steps:
             return
-        terminal_statuses = {"completed", "failed", "skipped", "cancelled"}
+        terminal_statuses = {"completed", "failed", "skipped", "cancelled", "interrupted"}
         active_statuses = {"created", "queued", "waiting_input", "planning", "generating", "validating", "running", "verifying", "repairing", "paused"}
         # Use observable flow nodes as the user-facing progress model. This
         # avoids a single long-lived wrapper step (for example the UI/request

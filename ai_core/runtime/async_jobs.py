@@ -166,6 +166,32 @@ class RuntimeAsyncJobStore:
             return asyncio.run(value)
         return value
 
+
+    def close_non_terminal_jobs_on_startup(self, *, reason: str = "Runtime process restarted before the async worker finished.") -> int:
+        active = {"queued", "running"}
+        count = 0
+        try:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            paths = list(self.state_dir.glob("job_*.json"))
+        except Exception:
+            paths = []
+        now = self._now()
+        for path in paths:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(record, dict) or str(record.get("status") or "") not in active:
+                continue
+            record["status"] = "interrupted"
+            record["updated_at"] = now
+            record["finished_at"] = record.get("finished_at") or now
+            record["error"] = {"type": "RuntimeRestart", "message": reason}
+            self._jobs[str(record.get("job_id") or path.stem)] = record
+            self._write(record)
+            count += 1
+        return count
+
     def _write(self, record: dict[str, Any]) -> None:
         try:
             self.state_dir.mkdir(parents=True, exist_ok=True)

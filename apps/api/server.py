@@ -50,6 +50,24 @@ feedback_repair_orchestrator = FeedbackRepairOrchestrator()
 scheduled_task_runner = ScheduledTaskRunner()
 async_job_store = RuntimeAsyncJobStore()
 
+@app.on_event("startup")
+async def _runtime_state_restart_cleanup():
+    reason = "Runtime server restarted; any in-process async worker from the previous process was interrupted."
+    try:
+        closed_runs = runtime_state_manager.close_non_terminal_runs_on_startup(reason=reason)
+        closed_jobs = async_job_store.close_non_terminal_jobs_on_startup(reason=reason)
+        if closed_runs or closed_jobs:
+            emit_console_event(
+                area="runtime_state",
+                event="restart_cleanup",
+                status="completed",
+                message=f"Closed stale runtime state after restart: runs={closed_runs}, jobs={closed_jobs}.",
+                data={"closed_runs": closed_runs, "closed_jobs": closed_jobs},
+            )
+    except Exception:
+        pass
+
+
 
 def _scheduler_config_enabled() -> bool:
     env = str(os.getenv("AI_RUNTIME_SCHEDULER_ENABLED") or "").strip().lower()
