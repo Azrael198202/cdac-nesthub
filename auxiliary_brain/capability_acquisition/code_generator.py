@@ -2,16 +2,9 @@ from __future__ import annotations
 
 import ast
 import json
-import os
 import re
 import sys
-import tempfile
-import subprocess
 import time
-import threading
-import queue
-import importlib.util
-from pathlib import Path
 from typing import Any
 
 from ai_core.model_orchestration import LiteLLMBrainClient
@@ -61,10 +54,6 @@ class RuntimeBlueprintArtifactGenerator:
         generation_status = "not_attempted"
         generation_route: dict[str, Any] = {}
         generation_error = ""
-        generation_interaction_request: dict[str, Any] = {}
-        generation_attempts: list[dict[str, Any]] = []
-        generation_preflight: dict[str, Any] = {}
-        generation_failed_artifact: dict[str, Any] = {}
         dependencies = self._normalized_dependencies(blueprint.get("dependencies"))
 
         if self._valid_files(files) and not self._files_look_like_stub(files):
@@ -86,10 +75,6 @@ class RuntimeBlueprintArtifactGenerator:
             generation_status = str(llm_artifact.get("generation_status") or "failed")
             generation_route = llm_artifact.get("generation_route") if isinstance(llm_artifact.get("generation_route"), dict) else {}
             generation_error = str(llm_artifact.get("generation_error") or "")
-            generation_interaction_request = llm_artifact.get("generation_interaction_request") if isinstance(llm_artifact.get("generation_interaction_request"), dict) else {}
-            generation_attempts = llm_artifact.get("generation_attempts") if isinstance(llm_artifact.get("generation_attempts"), list) else []
-            generation_preflight = llm_artifact.get("generation_preflight") if isinstance(llm_artifact.get("generation_preflight"), dict) else {}
-            generation_failed_artifact = llm_artifact.get("generation_failed_artifact") if isinstance(llm_artifact.get("generation_failed_artifact"), dict) else {}
             if self._valid_generated_artifact(llm_artifact):
                 files = llm_artifact["files"]
                 input_schema = llm_artifact.get("input_schema") if isinstance(llm_artifact.get("input_schema"), dict) else input_schema
@@ -136,10 +121,6 @@ class RuntimeBlueprintArtifactGenerator:
                 "status": generation_status,
                 "route": generation_route,
                 "error": generation_error,
-                **({"attempts": generation_attempts} if generation_attempts else {}),
-                **({"preflight": generation_preflight} if generation_preflight else {}),
-                **({"failed_artifact": generation_failed_artifact} if generation_failed_artifact else {}),
-                **({"interaction_request": generation_interaction_request} if generation_interaction_request else {}),
             },
             "generated_at": self._now_iso(),
         }
@@ -159,7 +140,6 @@ class RuntimeBlueprintArtifactGenerator:
     ) -> dict[str, Any]:
         base_complexity = self._generation_complexity(blueprint=blueprint, identity_contract=identity_contract)
         attempts: list[dict[str, Any]] = []
-        previous_failure: dict[str, Any] | None = None
         for attempt in self._generation_attempts(base_complexity):
             messages = self._generation_messages(
                 tool_id=tool_id,
@@ -172,7 +152,6 @@ class RuntimeBlueprintArtifactGenerator:
                 secret_schema=secret_schema,
                 verification_input=verification_input,
                 compact=bool(attempt.get("compact")),
-                previous_failure=previous_failure,
             )
             result = self.llm_client.complete_sync(
                 brain="auxiliary_brain",
@@ -209,87 +188,16 @@ class RuntimeBlueprintArtifactGenerator:
                 record["error"] = "LLM JSON did not contain executable artifact files."
                 attempts.append(record)
                 continue
-            preflight = self._preflight_generated_artifact(parsed, entrypoint=entrypoint, verification_input=verification_input)
-            if not preflight.get("passed"):
-                record["status"] = "preflight_failed"
-                record["error"] = "Generated artifact did not pass local runtime preflight."
-                record["preflight"] = preflight
-                record["failed_artifact"] = self._artifact_failure_summary(parsed)
-                previous_failure = {
-                    "status": "preflight_failed",
-                    "reason": preflight.get("reason"),
-                    "stderr": str(preflight.get("stderr") or "")[-2000:],
-                    "stdout": str(preflight.get("stdout") or "")[-1000:],
-                    "verification_input": verification_input,
-                    "artifact_summary": record.get("failed_artifact"),
-                }
-                attempts.append(record)
-                continue
             parsed["generation_status"] = "completed"
             parsed["generation_route"] = route
             parsed["generation_attempts"] = attempts + [record]
-            parsed["generation_preflight"] = preflight
             return parsed
         last = attempts[-1] if attempts else {}
-        interaction_request = self._interaction_request_from_generation_attempts(attempts)
         return {
-            "generation_status": "interaction_required" if interaction_request else str(last.get("status") or "llm_generation_failed"),
+            "generation_status": str(last.get("status") or "llm_generation_failed"),
             "generation_route": last.get("route") if isinstance(last.get("route"), dict) else {},
-            "generation_error": self._generation_failure_message(last),
+            "generation_error": str(last.get("error") or "LLM did not produce a registerable runtime artifact."),
             "generation_attempts": attempts,
-            **({"generation_preflight": last.get("preflight")} if isinstance(last.get("preflight"), dict) else {}),
-            **({"generation_failed_artifact": last.get("failed_artifact")} if isinstance(last.get("failed_artifact"), dict) else {}),
-            **({"generation_interaction_request": interaction_request} if interaction_request else {}),
-        }
-
-    def _generation_failure_message(self, last_attempt: dict[str, Any]) -> str:
-        error = str(last_attempt.get("error") or "LLM did not produce a registerable runtime artifact.")
-        preflight = last_attempt.get("preflight") if isinstance(last_attempt.get("preflight"), dict) else {}
-        if preflight:
-            detail = {
-                "reason": preflight.get("reason"),
-                "returncode": preflight.get("returncode"),
-                "stderr": str(preflight.get("stderr") or preflight.get("error") or "")[-1200:],
-                "stdout": str(preflight.get("stdout") or "")[-600:],
-            }
-            return error + " | preflight=" + json.dumps(detail, ensure_ascii=False, default=str)
-        return error
-
-    def _artifact_failure_summary(self, artifact: dict[str, Any]) -> dict[str, Any]:
-        files = artifact.get("files") if isinstance(artifact.get("files"), list) else []
-        summarized: list[dict[str, str]] = []
-        for item in files[:8]:
-            if not isinstance(item, dict):
-                continue
-            content = str(item.get("content") or "")
-            summarized.append({
-                "path": str(item.get("path") or ""),
-                "content_excerpt": content[:4000],
-                "content_length": str(len(content)),
-            })
-        return {"files": summarized}
-
-    def _interaction_request_from_generation_attempts(self, attempts: list[dict[str, Any]]) -> dict[str, Any]:
-        fields: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for attempt in attempts or []:
-            route = attempt.get("route") if isinstance(attempt.get("route"), dict) else {}
-            request = route.get("interaction_request") if isinstance(route.get("interaction_request"), dict) else {}
-            for field in request.get("fields", []) if isinstance(request.get("fields"), list) else []:
-                if not isinstance(field, dict):
-                    continue
-                name = str(field.get("parameter_name") or field.get("name") or "").strip()
-                if not name or name in seen:
-                    continue
-                seen.add(name)
-                fields.append(field)
-        if not fields:
-            return {}
-        return {
-            "type": "provider_secret_configuration",
-            "kind": "provider_secret_configuration",
-            "message": "Provide missing provider secret values, or switch to an available local model.",
-            "fields": fields,
         }
 
     def _generation_messages(
@@ -305,7 +213,6 @@ class RuntimeBlueprintArtifactGenerator:
         secret_schema: dict[str, Any],
         verification_input: dict[str, Any],
         compact: bool = False,
-        previous_failure: dict[str, Any] | None = None,
     ) -> list[dict[str, str]]:
         contract = {
             "tool_id": tool_id,
@@ -317,7 +224,6 @@ class RuntimeBlueprintArtifactGenerator:
             "connection_schema": connection_schema,
             "secret_schema": secret_schema,
             "verification_input": verification_input,
-            **({"previous_failure": previous_failure} if previous_failure else {}),
             "required_return_shape": {
                 "files": [{"path": "tool.py", "content": "Python source code"}, {"path": "test_tool.py", "content": "plain Python test source code"}],
                 "input_schema": "JSON schema object",
@@ -338,7 +244,6 @@ class RuntimeBlueprintArtifactGenerator:
                 "input_schema": input_schema,
                 "output_schema": output_schema,
                 "verification_input": verification_input,
-                **({"previous_failure": previous_failure} if previous_failure else {}),
                 "required_return_shape": contract["required_return_shape"],
             }
         system = (
@@ -351,19 +256,16 @@ class RuntimeBlueprintArtifactGenerator:
             "If external documentation, web evidence, or a stronger model is needed, rely only on evidence and routing supplied by the acquisition/repair pipeline; do not invent undocumented APIs, endpoints, or package behavior. "
             "Escalation is valid only when it is necessary to pass the declared verification contract and the generated artifact remains sandbox-testable. "
             "The entrypoint function must accept one optional dict payload and return a JSON-serializable dict. "
-            "The generated artifact must execute successfully with the supplied verification_input exactly as provided; the test file should use that payload shape rather than inventing different sample values. "
-            "If a default/sample value names a case-sensitive platform resource, the implementation must handle that value safely or report a structured failure quickly; it must not hang or depend on unavailable external data. "
             "The payload may be either direct input fields or a runtime envelope with input, connection, secrets, and _runtime keys; read user parameters from payload['input'] when it is a dict, otherwise from the top-level payload. "
             "Connection values declared in connection_schema must be read only from payload['connection']; secret values declared in secret_schema must be read only from payload['secrets']; do not duplicate connection or secret fields into input_schema or verification_input['input']. "
             "Do not store secrets in generated source code, generated manifests, tests, logs, or ordinary input fields; tests may use fake secret values only inside the secrets envelope or through mocks. "
-            "all nested output values must be JSON-native values such as strings, numbers, booleans, lists, dicts, or null; never return runtime objects, class instances, file handles, exceptions, or other non-primitive runtime objects directly. "
-            "Do not assume schema defaults or sample inputs are already canonical for the libraries you use; normalize user strings when the standard library accepts a stricter canonical spelling, and return structured JSON errors instead of uncaught exceptions when validation fails. "
+            "all nested output values must be JSON-native values such as strings, numbers, booleans, lists, dicts, or null. "
             "The Python code must be real executable implementation code, not a placeholder, not blueprint-only, and not a stub. "
             "The test file must be a plain Python script that uses only standard-library imports and assert statements; "
             "do not import pytest or any external test runner. "
             "The test file must run locally without external network calls, assert the declared verification behavior, "
             "and verify that json.dumps(run(payload)) succeeds. "
-            "The implementation must inspect a generic test-mode flag from the optional runtime envelope before any operation that can affect external state, contact a remote service, mutate local files, or require credentials; runtime flags may be absent during live execution, so read them with safe defaults rather than direct required-key indexing. "
+            "The implementation must inspect a generic test-mode flag such as payload['_runtime']['dry_run'] before any operation that can affect external state, contact a remote service, mutate local files, or require credentials. "
             "When test-mode is true, return a successful structured verification result using local deterministic behavior only; do not initialize external clients, open network connections, require live credentials, or perform irreversible side effects. "
             "Live execution may use connection and secret envelopes after sandbox registration and approval, but the sandbox path must remain fully local and deterministic. "
             "If live end-to-end verification needs real user values, expose those values through input_schema, connection_schema, and secret_schema so the runtime interaction layer can ask the user after sandbox registration. "
@@ -374,209 +276,138 @@ class RuntimeBlueprintArtifactGenerator:
         user = "Generate the runtime artifact from this contract:\n" + json.dumps(contract, ensure_ascii=False, indent=2, default=str)
         return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
-    def _clean_validation_env(self) -> dict[str, str]:
-        clean: dict[str, str] = {}
-        blocked_prefixes = ("PYDEVD", "DEBUGPY", "VSCODE", "PYCHARM")
-        blocked_names = {
-            "PYTHONPATH",
-            "PYTHONHOME",
-            "PYTHONSTARTUP",
-        }
-        for key, value in os.environ.items():
-            upper = key.upper()
-            if upper in blocked_names or any(upper.startswith(prefix) for prefix in blocked_prefixes):
-                continue
-            clean[key] = value
-        clean["PYTHONBREAKPOINT"] = "0"
-        clean["PYDEVD_DISABLE_FILE_VALIDATION"] = "1"
-        clean.setdefault("PYTHONNOUSERSITE", "1")
-        clean.setdefault("PYTHONDONTWRITEBYTECODE", "1")
-        return clean
+    def _parse_json_object(self, content: str) -> dict[str, Any] | None:
+        text = str(content or "").strip()
+        if not text:
+            return None
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s*```$", "", text)
+        try:
+            data = json.loads(text)
+            return data if isinstance(data, dict) else None
+        except Exception:
+            pass
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                data = json.loads(text[start : end + 1])
+                return data if isinstance(data, dict) else None
+            except Exception:
+                return None
+        return None
 
-    def _debugger_subprocess_injection_active(self) -> bool:
-        """Detect IDE/debugger modes that rewrite child Python command lines.
+    def _valid_generated_artifact(self, artifact: dict[str, Any]) -> bool:
+        if not isinstance(artifact, dict):
+            return False
+        files = artifact.get("files")
+        if not self._valid_files(files) or self._files_look_like_stub(files):
+            return False
+        if not self._generated_tests_have_defined_names(files):
+            return False
+        text = "\n".join(str(item.get("content") or "") for item in files if isinstance(item, dict))
+        if "def " not in text or "return" not in text:
+            return False
+        return True
 
-        VS Code/debugpy can monkey-patch subprocess creation and prepend a
-        pydevd bootstrap to ``python -c`` calls. In that mode the preflight may
-        stop inside debugpy's injected ``<string>`` before generated code runs.
-        This check is capability-neutral and only protects the validation runner.
-        """
-        if sys.gettrace() is not None:
-            return True
-        module_names = " ".join(sys.modules.keys()).lower()
-        if "debugpy" in module_names or "pydevd" in module_names:
-            return True
-        for key, value in os.environ.items():
-            text = f"{key}={value}".lower()
-            if "debugpy" in text or "pydevd" in text or "ms-python" in text:
-                return True
-        return False
-
-    def _write_artifact_files_for_preflight(self, artifact: dict[str, Any], root: Path) -> None:
-        files = artifact.get("files") if isinstance(artifact.get("files"), list) else []
+    def _generated_tests_have_defined_names(self, files: list[dict[str, Any]]) -> bool:
         for item in files:
             if not isinstance(item, dict):
                 continue
-            rel = str(item.get("path") or "").replace("\\", "/").lstrip("/")
-            if not rel or ".." in Path(rel).parts:
+            if not self._is_test_path(str(item.get("path") or "")):
                 continue
-            target = root / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(str(item.get("content") or ""), encoding="utf-8")
+            try:
+                tree = ast.parse(str(item.get("content") or ""))
+            except SyntaxError:
+                return False
+            if self._undefined_loaded_names(tree):
+                return False
+        return True
 
-    def _preflight_generated_artifact_inprocess(
-        self,
-        artifact: dict[str, Any],
-        *,
-        entrypoint: dict[str, Any],
-        verification_input: dict[str, Any],
-        timeout_seconds: float = 12.0,
-    ) -> dict[str, Any]:
-        """Run preflight without spawning Python when a debugger owns subprocesses.
-
-        This path exists only to avoid debugpy/pydevd child-process injection.
-        It still imports the generated entrypoint from a temporary directory,
-        calls the declared function with the exact verification envelope, and
-        verifies JSON serialization.
-        """
-        module_name = str(entrypoint.get("module") or "tool.py")
-        function_name = str(entrypoint.get("function") or "run")
+    def _undefined_loaded_names(self, tree: ast.AST) -> list[str]:
+        defined: set[str] = {"__name__", "True", "False", "None"}
         try:
-            with tempfile.TemporaryDirectory(prefix="runtime_capability_preflight_") as tmp:
-                root = Path(tmp)
-                self._write_artifact_files_for_preflight(artifact, root)
-                module_path = root / module_name
-                if not module_path.exists():
-                    return {"passed": False, "reason": "entrypoint_module_missing", "module": module_name}
+            import builtins
+            defined.update(name for name in dir(builtins) if isinstance(name, str))
+        except Exception:
+            pass
+        loaded: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    defined.add(str(alias.asname or alias.name).split(".", 1)[0])
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    defined.add(str(alias.asname or alias.name))
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                defined.add(str(node.name))
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]:
+                        defined.add(str(arg.arg))
+                    if node.args.vararg:
+                        defined.add(str(node.args.vararg.arg))
+                    if node.args.kwarg:
+                        defined.add(str(node.args.kwarg.arg))
+            elif isinstance(node, ast.Name):
+                if isinstance(node.ctx, ast.Store):
+                    defined.add(str(node.id))
+                elif isinstance(node.ctx, ast.Load):
+                    loaded.add(str(node.id))
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                defined.add(str(node.name))
+        return sorted(name for name in loaded if name not in defined and not name.startswith("__"))
 
-                result_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
+    def _generated_tests_use_allowed_imports(self, files: list[dict[str, Any]], dependencies: list[dict[str, Any]]) -> bool:
+        local_modules = {
+            self._module_stem_from_path(str(item.get("path") or ""))
+            for item in files
+            if isinstance(item, dict) and str(item.get("path") or "").endswith(".py")
+        }
+        local_modules.discard("")
+        declared_imports = self._dependency_import_names(dependencies)
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "")
+            if not self._is_test_path(path):
+                continue
+            content = str(item.get("content") or "")
+            try:
+                tree = ast.parse(content)
+            except SyntaxError:
+                return False
+            for node in ast.walk(tree):
+                module = ""
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        module = str(alias.name or "").split(".", 1)[0]
+                        if module and not self._allowed_generated_test_import(module, local_modules, declared_imports):
+                            return False
+                elif isinstance(node, ast.ImportFrom):
+                    module = str(node.module or "").split(".", 1)[0]
+                    if module and not self._allowed_generated_test_import(module, local_modules, declared_imports):
+                        return False
+        return True
 
-                def worker() -> None:
-                    old_path = list(sys.path)
-                    module_key = f"runtime_preflight_tool_{int(time.time() * 1000000)}"
-                    try:
-                        sys.path.insert(0, str(root))
-                        spec = importlib.util.spec_from_file_location(module_key, str(module_path))
-                        if not spec or not spec.loader:
-                            raise RuntimeError("entrypoint_spec_loader_missing")
-                        module = importlib.util.module_from_spec(spec)
-                        spec.loader.exec_module(module)
-                        fn = getattr(module, function_name)
-                        payload = json.loads(json.dumps(verification_input, ensure_ascii=False, default=str))
-                        result = fn(payload)
-                        json.dumps(result, ensure_ascii=False)
-                        result_queue.put({"passed": True, "reason": "", "stdout": "RUNTIME_PREFLIGHT_OK", "stderr": ""})
-                    except BaseException as exc:
-                        result_queue.put({
-                            "passed": False,
-                            "reason": "entrypoint_execution_or_json_serialization_failed",
-                            "error": f"{type(exc).__name__}: {exc}"[:2000],
-                            "stdout": "",
-                            "stderr": "",
-                        })
-                    finally:
-                        sys.path[:] = old_path
-                        sys.modules.pop(module_key, None)
+    def _allowed_generated_test_import(self, module: str, local_modules: set[str], declared_imports: set[str]) -> bool:
+        if module in local_modules:
+            return True
+        if module in declared_imports:
+            return True
+        return module in getattr(sys, "stdlib_module_names", set())
 
-                thread = threading.Thread(target=worker, name="runtime-capability-preflight", daemon=True)
-                thread.start()
-                thread.join(timeout_seconds)
-                if thread.is_alive():
-                    return {
-                        "passed": False,
-                        "reason": "entrypoint_preflight_timeout",
-                        "error": "in_process_preflight_timeout",
-                    }
-                try:
-                    return result_queue.get_nowait()
-                except queue.Empty:
-                    return {"passed": False, "reason": "entrypoint_preflight_no_result"}
-        except Exception as exc:
-            return {"passed": False, "reason": "entrypoint_preflight_exception", "error": str(exc)[:1000]}
+    def _is_test_path(self, path: str) -> bool:
+        name = path.replace("\\", "/").rsplit("/", 1)[-1]
+        return name.startswith("test_") and name.endswith(".py")
 
-    def _preflight_generated_artifact(self, artifact: dict[str, Any], *, entrypoint: dict[str, Any], verification_input: dict[str, Any]) -> dict[str, Any]:
-        """Run a small generic preflight before writing/registering a generated artifact.
-
-        This is capability-neutral: it only verifies that the declared entrypoint
-        can be imported, called with the exact verification envelope, and encoded
-        as JSON. It does not inspect capability names or patch generated code.
-        """
-        module_name = str(entrypoint.get("module") or "tool.py")
-        function_name = str(entrypoint.get("function") or "run")
-        if self._debugger_subprocess_injection_active():
-            result = self._preflight_generated_artifact_inprocess(
-                artifact,
-                entrypoint=entrypoint,
-                verification_input=verification_input,
-            )
-            result.setdefault("mode", "in_process_debugger_safe")
-            return result
-        try:
-            with tempfile.TemporaryDirectory(prefix="runtime_capability_preflight_") as tmp:
-                root = Path(tmp)
-                self._write_artifact_files_for_preflight(artifact, root)
-                module_path = root / module_name
-                if not module_path.exists():
-                    return {"passed": False, "reason": "entrypoint_module_missing", "module": module_name}
-                runner = (
-                    "import importlib.util, json; "
-                    f"module_path = {json.dumps(str(module_path))}; "
-                    f"function_name = {json.dumps(function_name)}; "
-                    f"payload = json.loads({json.dumps(json.dumps(verification_input, ensure_ascii=False, default=str))}); "
-                    "spec = importlib.util.spec_from_file_location('runtime_preflight_tool', module_path); "
-                    "module = importlib.util.module_from_spec(spec); "
-                    "assert spec and spec.loader; "
-                    "spec.loader.exec_module(module); "
-                    "result = getattr(module, function_name)(payload); "
-                    "json.dumps(result, ensure_ascii=False); "
-                    "print('RUNTIME_PREFLIGHT_OK')"
-                )
-                proc = subprocess.run(
-                    [sys.executable, "-I", "-c", runner],
-                    cwd=str(root),
-                    env=self._clean_validation_env(),
-                    text=True,
-                    capture_output=True,
-                    timeout=12,
-                )
-                debug_injected = "debugpy" in (proc.stderr or "").lower() or "pydevd" in (proc.stderr or "").lower()
-                if debug_injected:
-                    retry = self._preflight_generated_artifact_inprocess(
-                        artifact, entrypoint=entrypoint, verification_input=verification_input
-                    )
-                    retry.setdefault("mode", "in_process_debugger_safe_retry")
-                    return retry
-                return {
-                    "passed": proc.returncode == 0,
-                    "reason": "" if proc.returncode == 0 else "entrypoint_execution_or_json_serialization_failed",
-                    "returncode": proc.returncode,
-                    "stdout": (proc.stdout or "")[-2000:],
-                    "stderr": (proc.stderr or "")[-3000:],
-                }
-        except subprocess.TimeoutExpired as exc:
-            timeout_material = (str(getattr(exc, "stdout", "") or "") + str(getattr(exc, "stderr", "") or "")).lower()
-            if "debugpy" in timeout_material or "pydevd" in timeout_material:
-                retry = self._preflight_generated_artifact_inprocess(
-                    artifact, entrypoint=entrypoint, verification_input=verification_input
-                )
-                retry.setdefault("mode", "in_process_debugger_safe_timeout_retry")
-                return retry
-            return {
-                "passed": False,
-                "reason": "entrypoint_preflight_timeout",
-                "stdout": str(getattr(exc, "stdout", "") or "")[-1000:],
-                "stderr": str(getattr(exc, "stderr", "") or "")[-1000:],
-            }
-        except Exception as exc:
-            return {"passed": False, "reason": "entrypoint_preflight_exception", "error": str(exc)[:1000]}
-
+    def _module_stem_from_path(self, path: str) -> str:
+        name = path.replace("\\", "/").rsplit("/", 1)[-1]
+        if not name.endswith(".py"):
+            return ""
+        return name[:-3]
 
     def _normalized_dependencies(self, value: Any) -> list[dict[str, Any]]:
-        """Normalize dependency declarations inside the artifact generator.
-
-        This is intentionally generic. It only normalizes declared package/module
-        metadata and does not infer capability/domain behavior.
-        """
         if not isinstance(value, list):
             return []
         result: list[dict[str, Any]] = []
@@ -587,57 +418,71 @@ class RuntimeBlueprintArtifactGenerator:
             package = str(item.get("package") or item.get("name") or import_name).strip()
             if not package and not import_name:
                 continue
-            normalized = {
-                "package": package or import_name,
-                "import_name": import_name or package.replace("-", "_"),
-                "auto_install": bool(item.get("auto_install", True)),
-            }
-            if item.get("source"):
-                normalized["source"] = item.get("source")
-            result.append(normalized)
-        return result
-
-    def _merge_dependencies(self, left: list[dict[str, Any]], right: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        merged: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
-        for item in [*(left or []), *(right or [])]:
-            if not isinstance(item, dict):
-                continue
-            package = str(item.get("package") or item.get("name") or "").strip()
-            import_name = str(item.get("import_name") or item.get("module") or "").strip()
-            if not package and not import_name:
-                continue
-            key = (package, import_name)
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append({
+            result.append({
                 "package": package or import_name,
                 "import_name": import_name or package.replace("-", "_"),
                 "auto_install": bool(item.get("auto_install", True)),
                 **({"source": item.get("source")} if item.get("source") else {}),
             })
+        return result
+
+    def _merge_dependencies(self, left: list[dict[str, Any]], right: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in [*left, *right]:
+            package = str(item.get("package") or item.get("name") or "").strip()
+            import_name = str(item.get("import_name") or item.get("module") or "").strip()
+            key = (package, import_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
         return merged
 
     def _drop_stdlib_dependencies(self, dependencies: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Keep runtime dependency manifests limited to external packages.
+        stdlib = getattr(sys, "stdlib_module_names", set())
+        kept: list[dict[str, Any]] = []
+        for item in dependencies:
+            import_name = str(item.get("import_name") or item.get("module") or "").split(".", 1)[0]
+            package = str(item.get("package") or item.get("name") or "").replace("-", "_").split(".", 1)[0]
+            if import_name in stdlib or package in stdlib:
+                continue
+            kept.append(item)
+        return kept
 
-        Uses Python's stdlib module names when available. This avoids writing
-        domain/capability-specific exclusions in the generator.
+    def _stabilize_standard_library_runtime_files(self, files: list[dict[str, Any]], *, blueprint: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return generated files without capability-specific rewriting.
+
+        The generator must not infer, replace, or patch artifacts using
+        domain keywords. Runtime safety requirements are provided by the
+        blueprint, verification input, approval policy, and sandbox executor.
         """
-        stdlib = set(getattr(sys, "stdlib_module_names", set()) or set())
-        result: list[dict[str, Any]] = []
-        for item in dependencies or []:
-            if not isinstance(item, dict):
-                continue
-            import_name = str(item.get("import_name") or item.get("module") or "").strip().split(".", 1)[0]
-            package = str(item.get("package") or item.get("name") or "").strip().replace("-", "_").split(".", 1)[0]
-            if import_name and import_name in stdlib:
-                continue
-            if package and package in stdlib:
-                continue
-            result.append(item)
-        return result
+        out: list[dict[str, Any]] = []
+        for item in files:
+            if isinstance(item, dict):
+                cloned = dict(item)
+                cloned["path"] = str(cloned.get("path") or "")
+                cloned["content"] = str(cloned.get("content") or "")
+                out.append(cloned)
+        return out
+
+    def _approval_policy_or_default(self, value: Any) -> dict[str, Any]:
+        if isinstance(value, dict) and value.get("supported_modes") and value.get("default_mode"):
+            policy = dict(value)
+        else:
+            policy = {
+                "required": True,
+                "supported_modes": ["always", "once", "never"],
+                "default_mode": "always",
+                "mode": "always",
+                "preview_required": True,
+            }
+        policy.setdefault("supported_modes", ["always", "once", "never"])
+        policy.setdefault("default_mode", "always")
+        policy.setdefault("mode", policy.get("default_mode", "always"))
+        policy.setdefault("required", True)
+        policy.setdefault("preview_required", True)
+        return policy
 
     def _dependency_import_names(self, dependencies: list[dict[str, Any]]) -> set[str]:
         imports: set[str] = set()
@@ -710,27 +555,16 @@ class RuntimeBlueprintArtifactGenerator:
         return "default"
 
     def _generation_attempts(self, base_complexity: str) -> list[dict[str, Any]]:
-        # Keep capability acquisition predictable: a declared basic/local task must
-        # not be silently escalated into hosted/critical routes just because a
-        # local attempt failed. Repair evidence is passed back to the same policy
-        # band first; broader escalation must be selected by runtime policy or a
-        # user-approved provider configuration, not by capability-specific code.
+        order = ["basic", "medium", "high", "critical"]
         base = str(base_complexity or "default").strip().lower()
-        if base == "default":
-            sequence = ["medium"]
-        elif base == "basic":
-            sequence = ["basic"]
-        elif base == "medium":
-            sequence = ["medium"]
-        elif base == "high":
-            sequence = ["high"]
-        else:
-            sequence = [base if base in {"basic", "medium", "high", "critical"} else "medium"]
+        if base not in order:
+            base = "medium" if base == "default" else "high"
+        start = order.index(base)
+        complexities = order[start:]
         attempts: list[dict[str, Any]] = []
-        for complexity in sequence:
-            attempts.append({"complexity": complexity, "force_json": True, "compact": False, "phase": "initial"})
-            attempts.append({"complexity": complexity, "force_json": True, "compact": False, "phase": "repair_full"})
-            attempts.append({"complexity": complexity, "force_json": False, "compact": True, "phase": "repair_compact"})
+        for complexity in complexities:
+            attempts.append({"complexity": complexity, "force_json": True, "compact": False})
+            attempts.append({"complexity": complexity, "force_json": False, "compact": True})
         return attempts
 
     def _capability_contract(self, *, tool_id: str, blueprint: dict[str, Any]) -> dict[str, Any]:
