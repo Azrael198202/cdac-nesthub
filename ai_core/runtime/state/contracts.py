@@ -179,7 +179,9 @@ STEP_FLOW_ALIASES = {
     "result.verify.capability_execution": "verification.result",
     "final.capability_verification": "final.delivery",
     "repair.capability_acquisition": "repair_brain",
-    "runtime": "surface.user_ui",
+    "runtime": "apps.api.server",
+    "run.lifecycle": "apps.api.server",
+    "surface.request": "surface.user_ui",
     "async_job": "apps.api.server",
     "input.normalize": "perception_brain",
     "input_parsing": "ai_core.input_parsing",
@@ -212,6 +214,7 @@ STEP_FLOW_ALIASES = {
     "repair": "repair_brain",
     "feedback_repair": "repair_brain",
     "final.synthesis": "presentation_brain",
+    "final_synthesis": "presentation_brain",
     "presentation": "presentation_brain",
     "final": "final.delivery",
 }

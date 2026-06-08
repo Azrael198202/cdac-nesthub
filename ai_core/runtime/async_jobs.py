@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -96,7 +97,12 @@ class RuntimeAsyncJobStore:
             progress=15,
         )
         try:
-            result = await runner()
+            # Run the supplied runtime operation outside the FastAPI event loop.
+            # Some runtime layers perform local model calls, filesystem work,
+            # sandbox validation, installs, or other blocking operations.  If
+            # those operations run directly inside the server loop, other pages
+            # such as Runtime State Console cannot load until the job ends.
+            result = await asyncio.to_thread(self._run_runner_in_private_loop, runner)
             record["result"] = result if isinstance(result, dict) else {"value": result}
             result_status = str((record["result"] or {}).get("status") or "completed")
             record["status"] = "failed" if result_status in {"failed", "error"} else "completed"
@@ -153,6 +159,12 @@ class RuntimeAsyncJobStore:
             )
             runtime_state_manager.finish_run(job_id, status="failed", summary=str(exc), error=record["error"])
         self._write(record)
+
+    def _run_runner_in_private_loop(self, runner: Callable[[], Awaitable[dict[str, Any]]]) -> Any:
+        value = runner()
+        if inspect.isawaitable(value):
+            return asyncio.run(value)
+        return value
 
     def _write(self, record: dict[str, Any]) -> None:
         try:

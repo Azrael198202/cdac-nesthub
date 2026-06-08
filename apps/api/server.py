@@ -1156,6 +1156,18 @@ async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any
     )
     runtime_state_manager.emit(
         run_id=state_run_id,
+        step_id="surface.request",
+        level="user",
+        kind="input",
+        status="completed",
+        title="Request submitted",
+        message="User request was accepted by Agent Studio.",
+        input={"text_length": len(str(req.message or "")), "artifact_count": len(req.uploaded_artifacts or [])},
+        output={"state_run_id": state_run_id},
+        progress=100,
+    )
+    runtime_state_manager.emit(
+        run_id=state_run_id,
         step_id="input.normalize",
         level="user",
         kind="input",
@@ -1235,11 +1247,13 @@ async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any
             )
             payload["session_boundary"] = session_store.boundary_status(active_session_id)
     final_status = str(payload.get("status") or "completed") if isinstance(payload, dict) else "completed"
+    waiting_statuses = {"requires_input", "requires_key", "waiting_input", "paused", "blocked_waiting_input"}
+    terminal_status = "failed" if final_status in {"failed", "error"} else ("paused" if final_status in waiting_statuses else "completed")
     runtime_state_manager.finish_run(
         state_run_id,
-        status="failed" if final_status in {"failed", "error"} else "completed",
+        status=terminal_status,
         summary=str((payload or {}).get("final_answer") or (payload or {}).get("message") or final_status)[:1000] if isinstance(payload, dict) else "completed",
-        output={"status": final_status} if isinstance(payload, dict) else {"result_type": type(payload).__name__},
+        output={"status": final_status, "terminal_status": terminal_status} if isinstance(payload, dict) else {"result_type": type(payload).__name__},
     )
     return payload if isinstance(payload, dict) else {"ok": True, "status": "completed", "runtime_state": {"run_id": state_run_id, "state_url": f"/runtime-state?run_id={state_run_id}"}, "result": payload}
 

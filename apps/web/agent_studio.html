@@ -40,7 +40,7 @@
     </div>
   </div>
 </header>
-<aside id="sessionSidebar" class="sessionSidebar"><div class="sessionHeader"><div class="sessionBrand">Runtime Agent Studio</div><div class="sessionActions"><button class="copyBtn sessionToggleBtn" title="Collapse sidebar" onclick="toggleSessionSidebar()">☰</button><button class="copyBtn" title="Refresh sessions" onclick="refreshSessions()">↻</button></div></div><div class="sessionToolbar"><button class="btn primary" onclick="createNewSession()">+ New Session</button></div><div id="sessionBoundaryWarning"></div><div id="sessionList" class="sessionList"><div class="empty">Loading...</div></div><div class="sessionFooter"><a class="btn primary" href="/graph-runtime" target="_blank" rel="noopener">Graph Runtime</a><a class="btn" href="/runtime-console" target="_blank" rel="noopener">Runtime Console</a><a class="btn" href="/settings" target="_blank" rel="noopener">Settings</a></div></aside>
+<aside id="sessionSidebar" class="sessionSidebar"><div class="sessionHeader"><div class="sessionBrand">Runtime Agent Studio</div><div class="sessionActions"><button class="copyBtn sessionToggleBtn" title="Collapse sidebar" onclick="toggleSessionSidebar()">☰</button><button class="copyBtn" title="Refresh sessions" onclick="refreshSessions()">↻</button></div></div><div class="sessionToolbar"><button class="btn primary" onclick="createNewSession()">+ New Session</button></div><div id="sessionBoundaryWarning"></div><div id="sessionList" class="sessionList"><div class="empty">Loading...</div></div><div class="sessionFooter"><a class="btn primary" href="/graph-runtime" target="_blank" rel="noopener">Graph Runtime</a><a class="btn" href="/runtime-state" target="_blank" rel="noopener">Runtime State Console</a><a class="btn" href="/runtime-console" target="_blank" rel="noopener">Runtime Console</a><a class="btn" href="/settings" target="_blank" rel="noopener">Settings</a></div></aside>
 <main id="studioMain">
   <section class="panel"><h2>Interactive Console <span id="profileCount" class="small"></span></h2><div class="scroll" id="messages"></div><div class="console"><div class="uploadBox"><div class="cardHeader"><b>Uploaded artifacts</b><button class="copyBtn" onclick="refreshArtifacts()">Refresh</button></div><input id="artifactUploadInput" class="fileInput" type="file" multiple onchange="uploadArtifacts()" /><div class="small">Files selected here can be bound to create-agent messages and used as external methods during execution.</div><div id="artifactList" class="artifactList"><div class="empty">No uploaded artifact.</div></div></div><textarea id="input" class="input" placeholder="Enter a message, request, or runtime instruction."></textarea><div class="row consoleActions"><button id="sendBtn" class="btn primary" onclick="sendMessage()">Send</button><button class="btn" onclick="quickExecute()">Execute Named Task</button></div></div></section>
   <section class="panel"><h2>Generated Participants <span id="participantCount" class="small"></span></h2><div class="scroll" id="participants"></div></section>
@@ -532,8 +532,7 @@ async function sendMessage(){
     const accepted=await res.json();
     consumeSelectedArtifactsAfterRequest();
     if(accepted && accepted.runtime_state && accepted.runtime_state.state_url){
-      addProgressMessage('runtime state: '+accepted.runtime_state.state_url);
-      try{ window.open(accepted.runtime_state.state_url, '_blank'); }catch(e){}
+      addProgressMessage('runtime state available: '+accepted.runtime_state.state_url);
     }
     if(!accepted || !accepted.job_id){ throw new Error((accepted&&accepted.message)||'async job was not accepted'); }
     let data=null;
@@ -553,6 +552,7 @@ async function sendMessage(){
       if(['completed','failed','cancelled'].includes(String(job.status||''))){
         data=(job.result||{});
         if(job.error && !data.error){ data={ok:false,status:'failed',error:job.error,message:job.error.message}; }
+        setStudioStatus('job completed; rendering result', false);
         break;
       }
     }

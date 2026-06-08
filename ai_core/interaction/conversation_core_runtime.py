@@ -17,6 +17,7 @@ from ai_core.web_evidence_optimizer import WebEvidenceOptimizer
 from auxiliary_brain.capability_acquisition import RuntimeCapabilityGapImplementer
 from ai_core.events.need_capability_event import NeedCapabilityEvent
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
+from ai_core.runtime.state import runtime_state_manager
 
 
 class ConversationCoreRuntime:
@@ -38,12 +39,14 @@ class ConversationCoreRuntime:
         self.web_evidence_optimizer = WebEvidenceOptimizer()
         self.capability_implementer = RuntimeCapabilityGapImplementer()
 
-    async def run(self, message: str, *, latest_task: str | None = None, session_id: str | None = None) -> dict[str, Any]:
-        run_id = "conversation_core_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    async def run(self, message: str, *, latest_task: str | None = None, session_id: str | None = None, runtime_state_run_id: str | None = None) -> dict[str, Any]:
+        conversation_trace_id = "conversation_core_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+        run_id = str(runtime_state_run_id or conversation_trace_id)
         active_session_id = self.sessions.start_or_get_session(session_id, metadata={"latest_task": latest_task or ""})
         context_window = self.sessions.load_context_window(active_session_id)
         state: dict[str, Any] = {
             "run_id": run_id,
+            "conversation_trace_id": conversation_trace_id,
             "session_id": active_session_id,
             "input": str(message or ""),
             "latest_task": latest_task,
@@ -1535,11 +1538,50 @@ class ConversationCoreRuntime:
             pass
 
     def _event(self, state: dict[str, Any], stage: str, status: str) -> None:
-        state.setdefault("progress_events", []).append({
+        event = {
             "stage": stage,
             "status": status,
             "at": datetime.now(timezone.utc).isoformat(),
-        })
+        }
+        state.setdefault("progress_events", []).append(event)
+        try:
+            stage_flow = {
+                "input_parsing": "ai_core.input_parsing",
+                "intent_recognition": "ai_core.intent_interaction",
+                "context_awareness": "auxiliary_memory.parameters",
+                "workflow_planning": "ai_core.workflow_graph",
+                "execution": "runtime.execution",
+                "result_verification": "verification.result",
+                "final_synthesis": "presentation_brain",
+            }.get(stage, "runtime.execution")
+            stage_title = {
+                "input_parsing": "Input parsing",
+                "intent_recognition": "Intent recognition",
+                "context_awareness": "Context binding",
+                "workflow_planning": "Workflow planning",
+                "execution": "Runtime execution",
+                "result_verification": "Result verification",
+                "final_synthesis": "Final synthesis",
+            }.get(stage, stage)
+            completed_order = ["input_parsing", "intent_recognition", "context_awareness", "workflow_planning", "execution", "result_verification", "final_synthesis"]
+            base = max(5.0, (completed_order.index(stage) / max(1, len(completed_order))) * 100.0) if stage in completed_order else 50.0
+            progress = min(99.0, base + (10.0 if status == "running" else 100.0 / max(1, len(completed_order))))
+            if status == "completed":
+                progress = 100.0
+            runtime_state_manager.emit(
+                run_id=str(state.get("run_id") or "conversation_runtime"),
+                step_id=stage,
+                level="developer",
+                kind="lifecycle" if status == "running" else "output",
+                status="running" if status == "running" else ("completed" if status in {"completed", "needs_review"} else str(status or "running")),
+                title=stage_title,
+                message=f"{stage_title}: {status}",
+                method="ai_core.conversation_pipeline",
+                progress=progress,
+                trace={"conversation_trace_id": state.get("conversation_trace_id")},
+            )
+        except Exception:
+            pass
 
     def _write_trace(self, state: dict[str, Any]) -> None:
         try:

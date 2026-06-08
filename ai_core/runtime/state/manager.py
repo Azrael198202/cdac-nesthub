@@ -43,7 +43,7 @@ class RuntimeStateManager:
                 run.flow = default_runtime_flow()
             self._runs[run_id] = run
             self._write_run(run)
-        self.emit(run_id=run_id, step_id="runtime", kind="lifecycle", level="user", status="running", title="Run started", message=run.title, progress=0, metadata=metadata or {})
+        self.emit(run_id=run_id, step_id="run.lifecycle", kind="lifecycle", level="developer", status="running", title="Run started", message=run.title, progress=0, metadata=metadata or {})
         return run.to_dict()
 
     def finish_run(self, run_id: str, *, status: str = "completed", summary: str = "", output: Any | None = None, error: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -61,17 +61,22 @@ class RuntimeStateManager:
             self._write_run(run)
         self.emit(
             run_id=run_id,
-            step_id="runtime",
-            kind="output" if run.status == "completed" else "error",
-            level="user" if run.status == "completed" else "developer",
+            step_id="run.lifecycle",
+            kind="output" if run.status in {"completed", "paused"} else "error",
+            level="user" if run.status in {"completed", "paused"} else "developer",
             status=run.status,
             title="Run finished",
             message=summary or run.status,
             output=output,
             error=error,
-            progress=100.0 if run.status == "completed" else None,
+            progress=100.0 if run.status in {"completed", "paused"} else None,
         )
-        return run.to_dict()
+        with self._lock:
+            final = self._runs.get(run_id) or self._read_run(run_id) or run
+            self._force_terminal_state(final, status=run.status, summary=summary, error=error)
+            self._runs[run_id] = final
+            self._write_run(final)
+            return final.to_dict()
 
     def emit(
         self,
@@ -194,6 +199,47 @@ class RuntimeStateManager:
         )
         return event
 
+    def _force_terminal_state(self, run: RuntimeRunState, *, status: str, summary: str = "", error: dict[str, Any] | None = None) -> None:
+        terminal_status = "failed" if status in {"failed", "error"} else str(status or "completed")
+        if terminal_status not in {"completed", "failed", "cancelled", "paused"}:
+            terminal_status = "completed"
+        now = utc_now()
+        run.status = terminal_status
+        run.ended_at = run.ended_at or now
+        run.updated_at = now
+        run.summary = str(summary or run.summary or terminal_status)[-4000:]
+        if error:
+            run.last_error = self._redact_data(error)
+        active_statuses = {"created", "queued", "waiting_input", "planning", "generating", "validating", "running", "verifying", "repairing", "paused"}
+        for step in run.steps.values():
+            if step.status in active_statuses:
+                if step.step_id in {"run.lifecycle", "job.result", "job.run", "job.queue"}:
+                    step.status = terminal_status if terminal_status != "paused" else "paused"
+                else:
+                    step.status = "skipped" if terminal_status == "completed" else terminal_status
+                step.progress = 100.0 if terminal_status in {"completed", "skipped"} else max(float(step.progress or 0.0), 100.0 if terminal_status == "failed" else float(step.progress or 0.0))
+                step.ended_at = step.ended_at or now
+        used_flow_ids = {step.flow_id for step in run.steps.values() if step.flow_id}
+        for node in run.flow or []:
+            node_status = str(node.get("status") or "created")
+            if terminal_status == "completed":
+                if node_status in {"created", "pending", "not_started", "queued", "waiting_input", "planning", "generating", "validating", "running", "verifying", "repairing", "paused"}:
+                    if node.get("flow_id") in used_flow_ids:
+                        node["status"] = "completed"
+                        node["last_message"] = node.get("last_message") or "Flow completed by the selected execution path."
+                    else:
+                        node["status"] = "skipped"
+                        node["last_message"] = "This flow node was not used by the selected execution path."
+                    node["progress"] = 100.0
+            elif terminal_status == "failed" and node_status in {"running", "queued", "waiting_input", "planning", "generating", "validating", "verifying", "repairing"}:
+                node["status"] = "failed"
+                node["progress"] = 100.0
+            node["active"] = False
+            node["updated_at"] = now
+        run.active_step_id = ""
+        if terminal_status == "completed":
+            run.progress = 100.0
+
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         run_id = self._safe_id(run_id)
         with self._lock:
@@ -309,9 +355,18 @@ class RuntimeStateManager:
         for node in run.flow:
             if node.get("flow_id") != target:
                 continue
-            node["status"] = step.status
+            previous_status = str(node.get("status") or "")
+            terminal = {"completed", "failed", "skipped", "cancelled"}
+            active = {"queued", "waiting_input", "planning", "generating", "validating", "running", "verifying", "repairing", "paused"}
+            # Do not let an old lifecycle event keep a flow node active after a
+            # later event in the same flow has completed. The node represents
+            # the latest observable state of that flow, not every nested step.
+            if previous_status in terminal and step.status in active:
+                pass
+            else:
+                node["status"] = step.status
             node["progress"] = max(float(node.get("progress") or 0.0), float(step.progress or 0.0))
-            node["active"] = step.status not in {"completed", "failed", "skipped", "cancelled"}
+            node["active"] = str(node.get("status") or step.status) not in terminal
             node["last_step_id"] = step.step_id
             node["last_message"] = step.last_message
             node["last_level"] = step.level
@@ -339,7 +394,19 @@ class RuntimeStateManager:
             return
         terminal_statuses = {"completed", "failed", "skipped", "cancelled"}
         active_statuses = {"created", "queued", "waiting_input", "planning", "generating", "validating", "running", "verifying", "repairing", "paused"}
-        values = [float(step.progress or 0.0) for step in run.steps.values()]
+        # Use observable flow nodes as the user-facing progress model. This
+        # avoids a single long-lived wrapper step (for example the UI/request
+        # lifecycle) making the whole run look stuck while inner stages advance.
+        flow_values = []
+        for node in run.flow or []:
+            status = str(node.get("status") or "created")
+            if status in {"skipped", "cancelled"}:
+                continue
+            if status in {"created", "not_started", "pending"}:
+                flow_values.append(0.0)
+            else:
+                flow_values.append(float(node.get("progress") or 0.0))
+        values = flow_values or [float(step.progress or 0.0) for step in run.steps.values()]
         run.progress = max(0.0, min(100.0, sum(values) / max(1, len(values))))
         if any(step.status == "failed" for step in run.steps.values()):
             run.status = "failed"
