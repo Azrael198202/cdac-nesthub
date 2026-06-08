@@ -625,7 +625,17 @@ class RuntimeCapabilityGapImplementer:
             pattern = re.compile(rf"{re.escape(name)}\s*[:：-]?\s*([^\n]*)", flags=re.IGNORECASE)
             match = pattern.search(text)
             detail = (match.group(1) if match else "").casefold()
-            if "optional" not in detail and "default" not in detail:
+            # Boundary rule: a schema section that says "must include" only declares
+            # field existence. It does not mean every field is mandatory at runtime.
+            # A field becomes required only when the field line explicitly says so,
+            # or when a default is absent and the planner/code later proves it is
+            # structurally required. This keeps ai_core generic and prevents optional
+            # values from becoming forced UI inputs.
+            explicitly_required = any(marker in detail for marker in [
+                "required", "mandatory", "must provide", "must be provided",
+                "must supply", "must be supplied", "not optional",
+            ])
+            if explicitly_required and "optional" not in detail and "default" not in detail:
                 required.append(name)
             if "boolean" in detail or "true" in detail or "false" in detail:
                 props[name]["type"] = "boolean"

@@ -50,7 +50,6 @@ class ScheduledTaskRunner:
 
     async def run_once(self, executor: Callable[..., Awaitable[dict[str, Any]]]) -> list[dict[str, Any]]:
         now = datetime.now(timezone.utc)
-        self._trace({"event": "scheduler_tick"})
         executed: list[dict[str, Any]] = []
         for path in sorted(self.tasks_dir.glob("*.json")):
             task_graph = self._read(path)
@@ -173,13 +172,15 @@ class ScheduledTaskRunner:
                 fh.write(json.dumps(event_payload, ensure_ascii=False) + "\n")
             try:
                 from ai_core.runtime.observability.runtime_console import emit_console_event
-                emit_console_event(
-                    area="scheduler",
-                    event=str(payload.get("event") or "scheduler_event"),
-                    status="info",
-                    message=str(payload.get("event") or "scheduler_event"),
-                    data={k: v for k, v in payload.items() if k != "event"},
-                )
+                event_name = str(payload.get("event") or "scheduler_event")
+                if event_name != "scheduler_tick":
+                    emit_console_event(
+                        area="scheduler",
+                        event=event_name,
+                        status="info",
+                        message=event_name,
+                        data={k: v for k, v in payload.items() if k != "event"},
+                    )
             except Exception:
                 pass
         except Exception:

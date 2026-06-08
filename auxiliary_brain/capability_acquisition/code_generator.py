@@ -58,6 +58,10 @@ class RuntimeBlueprintArtifactGenerator:
 
         if self._valid_files(files) and not self._files_look_like_stub(files):
             files = self._stabilize_standard_library_runtime_files(files, blueprint=blueprint)
+            input_schema = self._reconcile_required_fields_from_source(input_schema, files, scope="input")
+            connection_schema = self._reconcile_required_fields_from_source(connection_schema, files, scope="connection")
+            secret_schema = self._reconcile_required_fields_from_source(secret_schema, files, scope="secrets")
+            verification_input = self._verification_input_with_schema_sample(verification_input, input_schema, connection_schema, secret_schema)
             artifact_kind = "real_runtime_implementation"
             generation_status = "provided_blueprint_files_used"
         elif self._should_request_llm_generation(blueprint, identity_contract):
@@ -85,6 +89,10 @@ class RuntimeBlueprintArtifactGenerator:
                 verification_input = self._verification_input_with_schema_sample(verification_input, input_schema, connection_schema, secret_schema)
                 verification_expectations = llm_artifact.get("verification_expectations") if isinstance(llm_artifact.get("verification_expectations"), dict) else verification_expectations
                 files = self._stabilize_standard_library_runtime_files(files, blueprint=blueprint)
+                input_schema = self._reconcile_required_fields_from_source(input_schema, files, scope="input")
+                connection_schema = self._reconcile_required_fields_from_source(connection_schema, files, scope="connection")
+                secret_schema = self._reconcile_required_fields_from_source(secret_schema, files, scope="secrets")
+                verification_input = self._verification_input_with_schema_sample(verification_input, input_schema, connection_schema, secret_schema)
                 dependencies = self._merge_dependencies(dependencies, self._normalized_dependencies(llm_artifact.get("dependencies")))
                 dependencies = self._drop_stdlib_dependencies(dependencies)
                 capability_contract = self._capability_contract(tool_id=tool_id, blueprint={**blueprint, **llm_artifact})
@@ -621,6 +629,113 @@ class RuntimeBlueprintArtifactGenerator:
             schema.setdefault("additionalProperties", False)
             return schema
         return {"type": "object", "properties": {}, "required": [], "additionalProperties": False, "x-empty-schema-allowed": True}
+
+
+    def _reconcile_required_fields_from_source(self, schema: dict[str, Any], files: Any, *, scope: str) -> dict[str, Any]:
+        """Reconcile schema.required with structural source usage.
+
+        This is capability-neutral: it does not know field meanings.  It only
+        distinguishes values accessed as mapping subscripts from values accessed
+        through safe optional getters in generated Python source.
+        """
+        if not isinstance(schema, dict):
+            return schema
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        if not props:
+            return schema
+        source = "\n".join(str(item.get("content") or "") for item in files if isinstance(item, dict))
+        if not source.strip():
+            return schema
+        required_by_source = self._required_fields_used_by_source(source, scope=scope, declared=set(str(k) for k in props.keys()))
+        optional_by_source = self._optional_fields_used_by_source(source, scope=scope, declared=set(str(k) for k in props.keys()))
+        current_required = {str(x) for x in schema.get("required", []) if isinstance(x, str)} if isinstance(schema.get("required"), list) else set()
+        if required_by_source:
+            next_required = (current_required & required_by_source) | required_by_source
+        else:
+            next_required = set(current_required)
+        next_required -= optional_by_source
+        cleaned = dict(schema)
+        cleaned["required"] = [name for name in props.keys() if str(name) in next_required]
+        return cleaned
+
+    def _required_fields_used_by_source(self, source: str, *, scope: str, declared: set[str]) -> set[str]:
+        direct: set[str] = set()
+        aliases = self._scope_aliases_from_source(source, scope=scope)
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return direct
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Subscript):
+                continue
+            field = self._constant_subscript_key(node.slice)
+            if field not in declared:
+                continue
+            base = node.value
+            if isinstance(base, ast.Name) and base.id in aliases:
+                direct.add(field)
+            elif self._is_payload_scope_subscript(base, scope=scope):
+                direct.add(field)
+        return direct
+
+    def _optional_fields_used_by_source(self, source: str, *, scope: str, declared: set[str]) -> set[str]:
+        optional: set[str] = set()
+        aliases = self._scope_aliases_from_source(source, scope=scope)
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return optional
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Attribute) or func.attr != "get":
+                continue
+            if not node.args:
+                continue
+            field = self._constant_node_value(node.args[0])
+            if field not in declared:
+                continue
+            base = func.value
+            if isinstance(base, ast.Name) and base.id in aliases:
+                optional.add(field)
+            elif self._is_payload_scope_subscript(base, scope=scope):
+                optional.add(field)
+        return optional
+
+    def _scope_aliases_from_source(self, source: str, *, scope: str) -> set[str]:
+        aliases: set[str] = set()
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return aliases
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                if self._is_payload_scope_subscript(node.value, scope=scope):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            aliases.add(target.id)
+            elif isinstance(node, ast.AnnAssign):
+                if self._is_payload_scope_subscript(node.value, scope=scope) and isinstance(node.target, ast.Name):
+                    aliases.add(node.target.id)
+        return aliases
+
+    def _is_payload_scope_subscript(self, node: ast.AST, *, scope: str) -> bool:
+        if not isinstance(node, ast.Subscript):
+            return False
+        if self._constant_subscript_key(node.slice) != scope:
+            return False
+        return isinstance(node.value, ast.Name) and node.value.id == "payload"
+
+    def _constant_subscript_key(self, node: ast.AST) -> str | None:
+        return self._constant_node_value(node)
+
+    def _constant_node_value(self, node: ast.AST) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if hasattr(ast, "Index") and isinstance(node, ast.Index):
+            return self._constant_node_value(node.value)
+        return None
 
     def _files_look_like_stub(self, files: Any) -> bool:
         text = "\n".join(str(item.get("content") or "") for item in files if isinstance(item, dict)).casefold()
