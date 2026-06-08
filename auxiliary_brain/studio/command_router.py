@@ -108,9 +108,12 @@ class StudioCommandRouter:
         return None
 
     def _extract_execute_name(self, text: str) -> str | None:
+        match = re.search(r"^\s*(?:execute|run|start)\s+([^\s,.;:]+)", text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip(" .,:;\"'") or None
         parts = text.strip().split()
         if len(parts) >= 2:
-            return parts[-1].strip(" .,:;\"'") or None
+            return parts[1].strip(" .,:;\"'") or None
         return self._extract_named_value(text)
 
     def _extract_feedback_target(self, text: str) -> str | None:
