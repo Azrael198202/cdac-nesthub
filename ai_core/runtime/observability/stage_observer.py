@@ -10,6 +10,7 @@ from typing import Any, Iterator
 
 from ai_core.config.paths import RUNTIME_DIR
 from ai_core.runtime.observability.runtime_console import emit_console_event
+from ai_core.runtime.state import runtime_state_manager
 
 
 @dataclass
@@ -113,6 +114,21 @@ class RuntimeStageObserver:
             status=status,
             message=message,
             data={k: v for k, v in payload.items() if k not in {"message"}},
+        )
+        runtime_state_manager.emit(
+            run_id=run_id,
+            step_id=stage_id,
+            level="developer",
+            kind="lifecycle" if event.endswith("started") else ("error" if status == "failed" else "output"),
+            status=status,
+            title=stage_id,
+            message=message,
+            method=area,
+            tool=provider or model_id or "",
+            progress=0 if status == "running" else (100 if status == "completed" else None),
+            error=(metadata or {}) if status == "failed" else None,
+            trace={"prompt_trace_path": prompt_trace_path, "output_trace_path": output_trace_path},
+            metadata={"duration_ms": duration_ms, "model_id": model_id, "provider": provider, **(metadata or {})},
         )
         return payload
 

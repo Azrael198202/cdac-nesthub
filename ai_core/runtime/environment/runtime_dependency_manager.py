@@ -15,6 +15,7 @@ from ai_core.utils.safe_json import safe_json_dumps
 
 from .permission_policy import RuntimePermissionPolicy
 from .runtime_command_executor import RuntimeCommandExecutor, RuntimeCommandResult
+from ai_core.runtime.state import runtime_state_manager
 
 
 @dataclass
@@ -53,6 +54,20 @@ class RuntimeDependencyManager:
         trace_path = self._trace_path(dependency_id)
         result = RuntimeDependencyResult(dependency_id=dependency_id, status="unknown", trace_path=str(trace_path))
         self._record(trace_path, "start", {"dependency_id": dependency_id, "context": context, "policy": self.policy.to_dict()})
+        runtime_state_manager.emit(
+            run_id=self.run_id,
+            step_id=f"dependency.{self._safe_step_id(dependency_id)}",
+            level="developer",
+            kind="validation",
+            status="running",
+            title="Dependency check",
+            message="Checking runtime dependency.",
+            method="dependency_manager",
+            tool=dependency_id,
+            input={"dependency_id": dependency_id, "context": context},
+            progress=10,
+            trace={"trace_path": str(trace_path)},
+        )
 
         if dependency_id in {"playwright_browser", "browser_runtime", "browser_network_observer"}:
             result = await self._ensure_playwright_browser(trace_path=trace_path, dependency_id=dependency_id)
@@ -68,6 +83,20 @@ class RuntimeDependencyManager:
 
         result.trace_path = str(trace_path)
         self._record(trace_path, "finish", result.to_dict())
+        runtime_state_manager.emit(
+            run_id=self.run_id,
+            step_id=f"dependency.{self._safe_step_id(dependency_id)}",
+            level="developer",
+            kind="install" if result.changed else "validation",
+            status="completed" if result.status == "ready" else ("skipped" if result.status in {"blocked", "unsupported_dependency_id", "missing"} else "failed"),
+            title="Dependency result",
+            message=result.message or result.status,
+            method="dependency_manager",
+            tool=dependency_id,
+            output=result.to_dict(),
+            progress=100,
+            trace={"trace_path": str(trace_path)},
+        )
         return result
 
     async def _ensure_python_package(self, package: str, *, trace_path: Path, dependency_id: str) -> RuntimeDependencyResult:
@@ -182,6 +211,9 @@ class RuntimeDependencyManager:
         result.status = "failed"
         result.message = "playwright_browser_repair_failed"
         return result
+
+    def _safe_step_id(self, value: str) -> str:
+        return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in str(value or "dependency"))[:100] or "dependency"
 
     def _trace_path(self, dependency_id: str) -> Path:
         safe_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in dependency_id)[:80]

@@ -30,6 +30,7 @@ from ai_core.runtime.observability.runtime_console import emit_console_event, li
 from ai_core.runtime.self_repair.repair_orchestrator import FeedbackRepairOrchestrator
 from ai_core.runtime.scheduler import ScheduledTaskRunner
 from ai_core.runtime.async_jobs import RuntimeAsyncJobStore
+from ai_core.runtime.state import runtime_state_manager
 
 import traceback
 import os
@@ -439,6 +440,51 @@ async def execution_monitor_home():
             "Expires": "0",
         },
     )
+
+
+@app.get("/runtime-state")
+@app.get("/runtime_state")
+async def runtime_state_home():
+    html = open("apps/web/runtime_state.html", "r", encoding="utf-8").read()
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@app.get("/api/runtime-state/runs")
+async def runtime_state_runs(limit: int = 50):
+    return JSONResponse({"ok": True, "runs": runtime_state_manager.list_runs(limit=limit)})
+
+
+@app.get("/api/runtime-state/runs/{run_id}")
+async def runtime_state_run(run_id: str):
+    run = runtime_state_manager.get_run(run_id)
+    if not run:
+        return JSONResponse({"ok": False, "status": "not_found", "run_id": run_id}, status_code=404)
+    return JSONResponse({"ok": True, "run": run})
+
+
+@app.get("/api/runtime-state/runs/{run_id}/events")
+async def runtime_state_events(run_id: str, after_sequence: int = 0, limit: int = 300, min_level: str | None = None):
+    return JSONResponse({"ok": True, "run_id": run_id, "events": runtime_state_manager.list_events(run_id, after_sequence=after_sequence, limit=limit, min_level=min_level)})
+
+
+@app.get("/api/runtime-state/runs/{run_id}/stream")
+async def runtime_state_stream(run_id: str, after_sequence: int = 0, min_level: str | None = None):
+    async def stream():
+        cursor = int(after_sequence or 0)
+        while True:
+            events = runtime_state_manager.list_events(run_id, after_sequence=cursor, limit=100, min_level=min_level)
+            for event in events:
+                cursor = max(cursor, int(event.get("sequence") or cursor))
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(0.7)
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 @app.get("/api/runtime-console/sources")
@@ -1097,15 +1143,59 @@ async def perception_normalize(req: AgentStudioRequest):
 
 
 async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any]:
+    provided_inputs = dict(req.provided_inputs or {})
+    state_run_id = str(provided_inputs.get("_runtime_state_run_id") or provided_inputs.get("_state_run_id") or "").strip()
+    if not state_run_id:
+        state_run_id = f"studio_{uuid4().hex[:16]}"
+        provided_inputs["_runtime_state_run_id"] = state_run_id
+    runtime_state_manager.start_run(
+        state_run_id,
+        task_id="agent_studio_message",
+        title="Agent Studio runtime operation",
+        metadata={"surface": "agent_studio", "session_id": req.session_id, "message_preview": str(req.message or "")[:160]},
+    )
+    runtime_state_manager.emit(
+        run_id=state_run_id,
+        step_id="input.normalize",
+        level="user",
+        kind="input",
+        status="running",
+        title="Input normalization",
+        message="Normalizing user input and uploaded artifacts.",
+        input={"text_length": len(str(req.message or "")), "artifact_count": len(req.uploaded_artifacts or [])},
+        method="perception_brain",
+        progress=10,
+    )
     active_session_id = session_store.start_or_get_session(req.session_id, metadata={"surface": "agent_studio"})
     perception_package = perception_brain_service.normalize(
         text=req.message,
         uploaded_artifacts=req.uploaded_artifacts,
         context={"surface": "agent_studio", "session_id": active_session_id},
     )
+    runtime_state_manager.emit(
+        run_id=state_run_id,
+        step_id="input.normalize",
+        level="developer",
+        kind="output",
+        status="completed",
+        title="Input normalized",
+        message="Input normalization completed.",
+        output={"artifact_count": len(perception_package.get("artifacts") or []), "confidence": perception_package.get("confidence"), "warnings": perception_package.get("warnings") or []},
+        progress=100,
+    )
     normalized_message = str(perception_package.get("normalized_text") or req.message or "")
-    provided_inputs = dict(req.provided_inputs or {})
     provided_inputs.setdefault("_perception_package", perception_package)
+    runtime_state_manager.emit(
+        run_id=state_run_id,
+        step_id="operation.dispatch",
+        level="user",
+        kind="method",
+        status="running",
+        title="Runtime dispatch",
+        message="Dispatching normalized request to the runtime service.",
+        method="agent_studio_service",
+        progress=25,
+    )
     payload = await studio_service.handle_message(
         normalized_message,
         provided_inputs=provided_inputs,
@@ -1113,8 +1203,20 @@ async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any
         session_id=active_session_id,
         presentation_profile=req.presentation_profile,
     )
+    runtime_state_manager.emit(
+        run_id=state_run_id,
+        step_id="operation.dispatch",
+        level="developer",
+        kind="output",
+        status=str(payload.get("status") or "completed") if isinstance(payload, dict) else "completed",
+        title="Runtime dispatch result",
+        message="Runtime service returned a result.",
+        output={"status": payload.get("status"), "action": payload.get("action"), "run_id": payload.get("run_id")} if isinstance(payload, dict) else {"result_type": type(payload).__name__},
+        progress=100,
+    )
     if isinstance(payload, dict):
         payload.setdefault("session_id", active_session_id)
+        payload.setdefault("runtime_state", {"run_id": state_run_id, "state_url": f"/runtime-state?run_id={state_run_id}"})
         payload.setdefault("perception", {
             "status": "completed",
             "artifact_count": len(perception_package.get("artifacts") or []),
@@ -1132,7 +1234,14 @@ async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any
                 metadata={"action": str(payload.get("action") or ""), "perception_enabled": True},
             )
             payload["session_boundary"] = session_store.boundary_status(active_session_id)
-    return payload if isinstance(payload, dict) else {"ok": True, "status": "completed", "result": payload}
+    final_status = str(payload.get("status") or "completed") if isinstance(payload, dict) else "completed"
+    runtime_state_manager.finish_run(
+        state_run_id,
+        status="failed" if final_status in {"failed", "error"} else "completed",
+        summary=str((payload or {}).get("final_answer") or (payload or {}).get("message") or final_status)[:1000] if isinstance(payload, dict) else "completed",
+        output={"status": final_status} if isinstance(payload, dict) else {"result_type": type(payload).__name__},
+    )
+    return payload if isinstance(payload, dict) else {"ok": True, "status": "completed", "runtime_state": {"run_id": state_run_id, "state_url": f"/runtime-state?run_id={state_run_id}"}, "result": payload}
 
 
 @app.post("/api/agent-studio/message")
@@ -1140,11 +1249,17 @@ async def agent_studio_message(req: AgentStudioRequest):
     try:
         async_requested = bool(req.async_mode) or bool((req.provided_inputs or {}).get("_async"))
         if async_requested:
+            job_id = f"job_{uuid4().hex[:16]}"
+            merged_inputs = dict(req.provided_inputs or {})
+            merged_inputs["_runtime_state_run_id"] = job_id
+            req.provided_inputs = merged_inputs
             accepted = async_job_store.submit(
                 name="agent_studio_message",
                 runner=lambda: _handle_agent_studio_message(req),
                 metadata={"surface": "agent_studio", "session_id": req.session_id, "message_preview": str(req.message or "")[:120]},
+                job_id=job_id,
             )
+            accepted["runtime_state"] = {"run_id": job_id, "state_url": f"/runtime-state?run_id={job_id}"}
             return JSONResponse(accepted, status_code=202)
         return JSONResponse(await _handle_agent_studio_message(req))
     except Exception as exc:

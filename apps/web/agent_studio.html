@@ -528,9 +528,29 @@ async function sendMessage(){
       if(hintIndex<hints.length){ addProgressMessage(hints[hintIndex++]); }
       if(localStageIndex<localStages.length){ const st=localStages[localStageIndex++]; setLocalExecutionStage(st[0],st[1],st[2]); }
     }, 1800);
-    const res=await fetch('/api/agent-studio/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, session_id:activeSessionId, uploaded_artifacts:selectedArtifactsForRequest(text), presentation_profile:getPresentationProfile()})});
-    const data=await res.json();
+    const res=await fetch('/api/agent-studio/message-async',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text, async_mode:true, session_id:activeSessionId, uploaded_artifacts:selectedArtifactsForRequest(text), presentation_profile:getPresentationProfile()})});
+    const accepted=await res.json();
     consumeSelectedArtifactsAfterRequest();
+    if(accepted && accepted.runtime_state && accepted.runtime_state.state_url){
+      addProgressMessage('runtime state: '+accepted.runtime_state.state_url);
+      try{ window.open(accepted.runtime_state.state_url, '_blank'); }catch(e){}
+    }
+    if(!accepted || !accepted.job_id){ throw new Error((accepted&&accepted.message)||'async job was not accepted'); }
+    let data=null;
+    for(let i=0;i<720;i++){
+      await new Promise(resolve=>setTimeout(resolve, 1000));
+      const jobRes=await fetch('/api/runtime/jobs/'+encodeURIComponent(accepted.job_id),{cache:'no-store'});
+      const jobData=await jobRes.json();
+      const job=jobData.job||{};
+      addProgressMessage('job status: '+(job.status||'unknown'));
+      await refreshState();
+      if(['completed','failed','cancelled'].includes(String(job.status||''))){
+        data=(job.result||{});
+        if(job.error && !data.error){ data={ok:false,status:'failed',error:job.error,message:job.error.message}; }
+        break;
+      }
+    }
+    if(!data){ throw new Error('async job did not return a visible result'); }
     renderStudioResponse(data, text);
     const pendingItems = collectMissingInputs(data);
     if(pendingItems.length){ lastMissingInputs=pendingItems; lastPendingRunId=data.run_id||''; lastPendingInstruction=text; addMissingInputs(pendingItems, text, lastPendingRunId); }

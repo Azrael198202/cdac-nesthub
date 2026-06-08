@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
+from ai_core.runtime.state import runtime_state_manager
+
 
 class RuntimeAsyncJobStore:
     """Small process-local async job registry with durable JSON snapshots.
@@ -20,8 +22,8 @@ class RuntimeAsyncJobStore:
         self._jobs: dict[str, dict[str, Any]] = {}
         self._tasks: dict[str, asyncio.Task[Any]] = {}
 
-    def submit(self, *, name: str, runner: Callable[[], Awaitable[dict[str, Any]]], metadata: dict[str, Any] | None = None) -> dict[str, Any]:
-        job_id = f"job_{uuid4().hex[:16]}"
+    def submit(self, *, name: str, runner: Callable[[], Awaitable[dict[str, Any]]], metadata: dict[str, Any] | None = None, job_id: str | None = None) -> dict[str, Any]:
+        job_id = str(job_id or f"job_{uuid4().hex[:16]}").strip() or f"job_{uuid4().hex[:16]}"
         now = self._now()
         record = {
             "job_id": job_id,
@@ -35,8 +37,25 @@ class RuntimeAsyncJobStore:
         }
         self._jobs[job_id] = record
         self._write(record)
+        runtime_state_manager.start_run(
+            job_id,
+            task_id=record["name"],
+            title=f"Async runtime job: {record['name']}",
+            metadata={"job_id": job_id, "metadata": record.get("metadata") or {}},
+        )
+        runtime_state_manager.emit(
+            run_id=job_id,
+            step_id="job.queue",
+            level="user",
+            kind="lifecycle",
+            status="queued",
+            title="Job accepted",
+            message="The runtime job has been accepted and queued.",
+            progress=5,
+            output={"job_id": job_id, "name": record["name"]},
+        )
         self._tasks[job_id] = asyncio.create_task(self._run(job_id, runner))
-        return {"ok": True, "status": "accepted", "job_id": job_id, "job": self.public(job_id)}
+        return {"ok": True, "status": "accepted", "job_id": job_id, "state_run_id": job_id, "job": self.public(job_id)}
 
     def public(self, job_id: str) -> dict[str, Any] | None:
         record = self._jobs.get(job_id) or self._read(job_id)
@@ -65,6 +84,17 @@ class RuntimeAsyncJobStore:
         record["started_at"] = self._now()
         record["updated_at"] = record["started_at"]
         self._write(record)
+        runtime_state_manager.emit(
+            run_id=job_id,
+            step_id="job.run",
+            level="user",
+            kind="lifecycle",
+            status="running",
+            title="Job running",
+            message="The async job worker has started execution.",
+            method="async_worker",
+            progress=15,
+        )
         try:
             result = await runner()
             record["result"] = result if isinstance(result, dict) else {"value": result}
@@ -72,11 +102,35 @@ class RuntimeAsyncJobStore:
             record["status"] = "failed" if result_status in {"failed", "error"} else "completed"
             record["finished_at"] = self._now()
             record["updated_at"] = record["finished_at"]
+            runtime_state_manager.emit(
+                run_id=job_id,
+                step_id="job.result",
+                level="user",
+                kind="output",
+                status=record["status"],
+                title="Job result",
+                message=f"Async job finished with status={record['status']}.",
+                output={"result_status": result_status},
+                progress=95,
+            )
+            runtime_state_manager.finish_run(job_id, status=record["status"], summary=f"Async job {record['status']}", output={"result_status": result_status})
         except Exception as exc:
             record["status"] = "failed"
             record["error"] = {"type": exc.__class__.__name__, "message": str(exc)}
             record["finished_at"] = self._now()
             record["updated_at"] = record["finished_at"]
+            runtime_state_manager.emit(
+                run_id=job_id,
+                step_id="job.error",
+                level="developer",
+                kind="error",
+                status="failed",
+                title="Job failed",
+                message=str(exc),
+                error=record["error"],
+                progress=100,
+            )
+            runtime_state_manager.finish_run(job_id, status="failed", summary=str(exc), error=record["error"])
         self._write(record)
 
     def _write(self, record: dict[str, Any]) -> None:

@@ -31,6 +31,7 @@ from auxiliary_brain.studio.runtime_semantic_planner import RuntimeSemanticPlann
 from ai_core.runtime.capability.registered_tool_agent_binder import RegisteredToolAgentBinder
 from verification_brain import RuntimeVerificationFoundation
 from presentation_brain import FailureMessageRenderer, PresentationProfileRegistry
+from ai_core.runtime.state import runtime_state_manager
 
 
 class AgentStudioService:
@@ -66,6 +67,18 @@ class AgentStudioService:
         self.community_id = self._ensure_community()
 
     async def handle_message(self, message: str, provided_inputs: dict[str, Any] | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None, session_id: str | None = None, presentation_profile: str | None = None) -> dict[str, Any]:
+        state_run_id = str((provided_inputs or {}).get("_runtime_state_run_id") or (provided_inputs or {}).get("_state_run_id") or "studio_runtime")
+        runtime_state_manager.emit(
+            run_id=state_run_id,
+            step_id="intent.route",
+            level="user",
+            kind="method",
+            status="running",
+            title="Intent and command routing",
+            message="Classifying the request into a generic runtime action.",
+            method="studio_command_router",
+            progress=10,
+        )
         direct = self._direct_ephemeral_answer(message)
         if direct is not None:
             self.execution_reuse_store.save_short_answer(query=message, answer=direct, source="ephemeral_direct")
@@ -78,6 +91,17 @@ class AgentStudioService:
                 "context_trace": {"short_answer_cache": False, "llm_used": False, "planning_used": False},
             }
         routed = self.router.route(message)
+        runtime_state_manager.emit(
+            run_id=state_run_id,
+            step_id="intent.route",
+            level="developer",
+            kind="output",
+            status="completed",
+            title="Routing completed",
+            message=f"Selected action: {routed.action}",
+            output={"action": routed.action, "name": routed.name},
+            progress=100,
+        )
         if routed.action == "list_command_set":
             return self.list_command_set()
         if routed.action == "update_command_set":
@@ -568,6 +592,7 @@ class AgentStudioService:
             }
         task_graph = self.store.read_json(f"generated/tasks/{target_task}.json")
         if not task_graph:
+            runtime_state_manager.emit(run_id=state_run_id, step_id="task.load", level="developer", kind="validation", status="failed", title="Task graph not found", message="The requested task graph was not found.", output={"task_name": task_name}, progress=100)
             return {
                 "action": "runtime_feedback",
                 "origin": "auxiliary_brain",
@@ -1633,7 +1658,7 @@ class AgentStudioService:
             runtime_parameters.update({
                 k: v
                 for k, v in provided_inputs.items()
-                if v not in (None, "", [], {}) and not str(k).startswith("_scheduled_") and str(k) != "_payload_only_selected_participant_ids"
+                if v not in (None, "", [], {}) and not str(k).startswith("_scheduled_") and str(k) not in {"_payload_only_selected_participant_ids", "_runtime_state_run_id", "_state_run_id", "_perception_package"}
             })
         artifact_refs = uploaded_artifacts if isinstance(uploaded_artifacts, list) else []
         task_graph = {
@@ -1871,6 +1896,19 @@ class AgentStudioService:
 
 
     async def execute_task(self, task_name: str | None, provided_inputs: dict[str, Any] | None = None, instruction: str | None = None) -> dict[str, Any]:
+        state_run_id = str((provided_inputs or {}).get("_runtime_state_run_id") or (provided_inputs or {}).get("_state_run_id") or "studio_runtime")
+        runtime_state_manager.emit(
+            run_id=state_run_id,
+            step_id="task.load",
+            level="user",
+            kind="validation",
+            status="running",
+            title="Task graph loading",
+            message="Loading and validating the requested task graph.",
+            method="json_store",
+            input={"task_name": task_name},
+            progress=10,
+        )
         if not task_name:
             return {
                 "action": "execute_task_graph",
@@ -1886,8 +1924,11 @@ class AgentStudioService:
                 "status": "not_found",
                 "task_name": task_name,
             }
+        runtime_state_manager.emit(run_id=state_run_id, step_id="task.load", level="developer", kind="validation", status="completed", title="Task graph loaded", message="Task graph loaded from runtime storage.", output={"task_name": task_name, "task_count": len(task_graph.get("tasks") or []) if isinstance(task_graph, dict) else 0}, progress=100)
         if self._task_instruction_changed(task_graph):
+            runtime_state_manager.emit(run_id=state_run_id, step_id="task.rebuild", level="developer", kind="repair", status="running", title="Task graph rebuild", message="Instruction changed; rebuilding the task graph from current instruction.", method="instruction_workflow_planner", progress=20)
             task_graph = self._rebuild_task_graph_from_current_instruction(task_graph)
+            runtime_state_manager.emit(run_id=state_run_id, step_id="task.rebuild", level="developer", kind="repair", status="completed", title="Task graph rebuilt", message="Task graph rebuild completed.", progress=100)
         provided_inputs = provided_inputs or {}
         payload_only_ids = self._execution_payload_only_ids(task_graph, provided_inputs)
         payload_only_execution = bool(payload_only_ids)
@@ -1915,9 +1956,11 @@ class AgentStudioService:
             runtime_parameters.update({
                 k: v
                 for k, v in provided_inputs.items()
-                if v not in (None, "", [], {}) and not str(k).startswith("_scheduled_") and str(k) != "_payload_only_selected_participant_ids"
+                if v not in (None, "", [], {}) and not str(k).startswith("_scheduled_") and str(k) not in {"_payload_only_selected_participant_ids", "_runtime_state_run_id", "_state_run_id", "_perception_package"}
             })
+        runtime_state_manager.emit(run_id=state_run_id, step_id="pre_execution.parameters", level="user", kind="validation", status="running", title="Parameter preflight", message="Checking runtime parameters before execution.", method="parameter_contract", input={"known_parameter_count": len(runtime_parameters)}, progress=30)
         preflight = self._preflight_runtime_parameters(task_graph, participants, runtime_parameters)
+        runtime_state_manager.emit(run_id=state_run_id, step_id="pre_execution.parameters", level="developer", kind="validation", status="waiting_input" if preflight.get("status") == "requires_input" else "completed", title="Parameter preflight result", message=str(preflight.get("status") or "completed"), output={"status": preflight.get("status"), "missing_count": len(preflight.get("missing_inputs") or [])}, progress=100)
         if preflight.get("status") == "requires_input":
             run_id = new_id("delegation_run")
             run_payload = {
@@ -1943,7 +1986,9 @@ class AgentStudioService:
                 return reuse_response
             task_graph = dict(task_graph)
             task_graph["runtime_parameters"] = runtime_parameters
+            runtime_state_manager.emit(run_id=state_run_id, step_id="execution.graph", level="user", kind="lifecycle", status="running", title="Graph execution", message="Executing the locked task graph.", method="delegation_runtime", progress=20)
             result = await self.delegation_runtime.execute_task(task_graph, participants)
+            runtime_state_manager.emit(run_id=state_run_id, step_id="execution.graph", level="developer", kind="output", status=str(result.get("status") or "completed"), title="Graph execution result", message=str(result.get("status") or "completed"), output={"run_id": result.get("run_id"), "status": result.get("status")}, progress=100)
         status = result.get("status", "completed")
         if status == "completed":
             try:
@@ -1970,7 +2015,10 @@ class AgentStudioService:
                 "message": self._paused_message(response["missing_inputs"], pending_action),
             }
             response["message"] = self._paused_message(response["missing_inputs"], pending_action)
+        runtime_state_manager.emit(run_id=state_run_id, step_id="result.verify", level="user", kind="verification", status="running", title="Result verification", message="Verifying execution material and response quality.", method="verification_brain", progress=40)
         self._attach_verification_report(task_graph=task_graph, participants=participants, run_payload=result, response=response, stage="execute_task")
+        runtime_state_manager.emit(run_id=state_run_id, step_id="result.verify", level="developer", kind="verification", status="completed", title="Result verification completed", message=str((response.get("verification") or {}).get("status") or "completed"), output={"verification": response.get("verification")}, progress=100)
+        runtime_state_manager.emit(run_id=state_run_id, step_id="final.synthesis", level="user", kind="output", status=status, title="Final synthesis", message="Final response prepared for the user.", output={"status": status, "has_final_answer": bool(response.get("final_answer"))}, progress=100)
         return response
 
     async def resume_run(self, run_id: str, provided_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
