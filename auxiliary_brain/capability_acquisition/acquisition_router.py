@@ -625,7 +625,15 @@ class RuntimeCapabilityGapImplementer:
             pattern = re.compile(rf"{re.escape(name)}\s*[:：-]?\s*([^\n]*)", flags=re.IGNORECASE)
             match = pattern.search(text)
             detail = (match.group(1) if match else "").casefold()
-            if "optional" not in detail and "default" not in detail:
+            # A field listed under a schema section means the schema must expose
+            # that property.  It does not mean the runtime must block execution
+            # until the user fills it.  Mark a field as required only when the
+            # field's own declaration explicitly says so.  This keeps the
+            # parser generic and prevents ``must include`` from becoming
+            # ``must input``.
+            explicitly_required = bool(re.search(r"\b(required|mandatory|must\s+be\s+provided|must\s+be\s+supplied)\b", detail, flags=re.IGNORECASE))
+            explicitly_optional = bool(re.search(r"\b(optional|not\s+required)\b", detail, flags=re.IGNORECASE))
+            if explicitly_required and not explicitly_optional:
                 required.append(name)
             if "boolean" in detail or "true" in detail or "false" in detail:
                 props[name]["type"] = "boolean"

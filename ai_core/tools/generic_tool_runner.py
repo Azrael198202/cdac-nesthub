@@ -75,7 +75,8 @@ class GenericToolRunner:
 
         try:
             fn = self._load_function(path, function_name)
-            output = fn(input_data)
+            invocation_input = self._with_default_runtime_flags(input_data)
+            output = fn(invocation_input)
             if inspect.isawaitable(output):
                 result = self._error("async_tool_not_supported_here", "Async tool output must be awaited by an async runner.")
                 trace = self.provenance.finish(trace, output=result, status="error", error=result.get("error"))
@@ -113,6 +114,27 @@ class GenericToolRunner:
             result = self._error("tool_execution_failed", str(exc))
             trace = self.provenance.finish(trace, output=result, status="error", error=result.get("error"))
             return self.provenance.attach(result, trace)
+
+    def _with_default_runtime_flags(self, input_data: Any) -> Any:
+        """Ensure the neutral runtime envelope is stable for generated tools.
+
+        Runtime-generated tools may check generic sandbox flags.  During a live
+        execution those flags are often absent, so the runner supplies false
+        defaults instead of forcing every generated artifact to guard every
+        lookup.  This is a generic runtime-envelope rule, not capability logic.
+        """
+        if not isinstance(input_data, dict):
+            return input_data
+        if not any(key in input_data for key in {"input", "connection", "secrets", "_runtime"}):
+            return input_data
+        copied = dict(input_data)
+        runtime = copied.get("_runtime") if isinstance(copied.get("_runtime"), dict) else {}
+        runtime = dict(runtime)
+        runtime.setdefault("dry_run", False)
+        runtime.setdefault("mock", False)
+        runtime.setdefault("test_mode", False)
+        copied["_runtime"] = runtime
+        return copied
 
 
     def _runtime_input_for_schema_validation(self, input_data: Any) -> Any:

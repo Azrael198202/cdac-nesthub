@@ -265,7 +265,7 @@ class RuntimeBlueprintArtifactGenerator:
             "do not import pytest or any external test runner. "
             "The test file must run locally without external network calls, assert the declared verification behavior, "
             "and verify that json.dumps(run(payload)) succeeds. "
-            "The implementation must inspect a generic test-mode flag such as payload['_runtime']['dry_run'] before any operation that can affect external state, contact a remote service, mutate local files, or require credentials. "
+            "The implementation must inspect a generic test-mode flag from the optional runtime envelope before any operation that can affect external state, contact a remote service, mutate local files, or require credentials; runtime flags may be absent during live execution, so read them with safe defaults rather than direct required-key indexing. "
             "When test-mode is true, return a successful structured verification result using local deterministic behavior only; do not initialize external clients, open network connections, require live credentials, or perform irreversible side effects. "
             "Live execution may use connection and secret envelopes after sandbox registration and approval, but the sandbox path must remain fully local and deterministic. "
             "If live end-to-end verification needs real user values, expose those values through input_schema, connection_schema, and secret_schema so the runtime interaction layer can ask the user after sandbox registration. "
