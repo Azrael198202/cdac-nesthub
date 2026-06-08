@@ -46,6 +46,7 @@ class RuntimeBlueprintArtifactGenerator:
         connection_schema = self._closed_schema(blueprint.get("connection_schema"))
         secret_schema = self._closed_schema(blueprint.get("secret_schema"))
         verification_input = blueprint.get("verification_input") if isinstance(blueprint.get("verification_input"), dict) else self._generic_verification_input(input_schema)
+        verification_input = self._verification_input_with_schema_sample(verification_input, input_schema)
         verification_expectations = blueprint.get("verification_expectations") if isinstance(blueprint.get("verification_expectations"), dict) else {"status": "completed"}
         capability_contract = self._capability_contract(tool_id=tool_id, blueprint=blueprint)
         files = blueprint.get("files") if isinstance(blueprint.get("files"), list) else []
@@ -80,6 +81,7 @@ class RuntimeBlueprintArtifactGenerator:
                 connection_schema = self._closed_schema(llm_artifact.get("connection_schema"))
                 secret_schema = self._closed_schema(llm_artifact.get("secret_schema"))
                 verification_input = llm_artifact.get("verification_input") if isinstance(llm_artifact.get("verification_input"), dict) else self._generic_verification_input(input_schema)
+                verification_input = self._verification_input_with_schema_sample(verification_input, input_schema)
                 verification_expectations = llm_artifact.get("verification_expectations") if isinstance(llm_artifact.get("verification_expectations"), dict) else verification_expectations
                 files = self._stabilize_standard_library_runtime_files(files, blueprint=blueprint)
                 dependencies = self._merge_dependencies(dependencies, self._normalized_dependencies(llm_artifact.get("dependencies")))
@@ -252,7 +254,8 @@ class RuntimeBlueprintArtifactGenerator:
             "Do not avoid dependencies by faking behavior, and do not add dependencies that are not needed for the verified objective. "
             "If external documentation, web evidence, or a stronger model is needed, rely only on evidence and routing supplied by the acquisition/repair pipeline; do not invent undocumented APIs, endpoints, or package behavior. "
             "Escalation is valid only when it is necessary to pass the declared verification contract and the generated artifact remains sandbox-testable. "
-            "The entrypoint function must accept one optional dict payload and return a JSON-serializable dict; "
+            "The entrypoint function must accept one optional dict payload and return a JSON-serializable dict. "
+            "The payload may be either direct input fields or a runtime envelope with input, connection, secrets, and _runtime keys; read user parameters from payload['input'] when it is a dict, otherwise from the top-level payload. "
             "all nested output values must be JSON-native values such as strings, numbers, booleans, lists, dicts, or null. "
             "The Python code must be real executable implementation code, not a placeholder, not blueprint-only, and not a stub. "
             "The test file must be a plain Python script that uses only standard-library imports and assert statements; "
@@ -262,6 +265,7 @@ class RuntimeBlueprintArtifactGenerator:
             "If generated code uses zoneinfo, UTC/GMT/Z must work without the optional tzdata package by using datetime.timezone.utc; "
             "call zoneinfo.ZoneInfo only when an IANA timezone name is actually required by the supplied contract, "
             "and handle unavailable timezone data with a structured error instead of crashing. "
+            "When a standard-library feature needs a platform support package to satisfy the contract, declare the support package rather than the standard-library module itself. "
             "Never declare standard-library modules such as datetime, json, pathlib, or zoneinfo as pip dependencies. "
             "Return only a JSON object; no markdown, no prose."
         )
@@ -469,7 +473,7 @@ class RuntimeBlueprintArtifactGenerator:
         if "ZoneInfo(" not in source:
             return source
         text = source
-        text = re.sub(r"ZoneInfo\(([^()]+)\)", r"_runtime_zoneinfo(\1)", text)
+        text = re.sub(r"\b(?:[A-Za-z_]\w*\.)?ZoneInfo\(([^()]+)\)", r"_runtime_zoneinfo(\1)", text)
         if "from datetime import timezone as _runtime_timezone_cls" not in text:
             if "from datetime import" in text:
                 text = re.sub(
@@ -489,7 +493,16 @@ def _runtime_zoneinfo(name):
     if value.upper() in {"UTC", "Z", "GMT"}:
         return _runtime_timezone_cls.utc
     try:
-        return ZoneInfo(value)
+        factory = ZoneInfo
+    except NameError:
+        try:
+            factory = zoneinfo.ZoneInfo
+        except Exception:
+            factory = None
+    if factory is None:
+        return None
+    try:
+        return factory(value)
     except Exception:
         return None
 '''
@@ -658,6 +671,21 @@ def _runtime_zoneinfo(name):
             if name in required or "default" in (schema if isinstance(schema, dict) else {}):
                 runtime_input[name] = self._sample_value(schema if isinstance(schema, dict) else {})
         return {"input": runtime_input, "connection": {}, "secrets": {}, "_runtime": {"dry_run": True}}
+
+    def _verification_input_with_schema_sample(self, verification_input: dict[str, Any], input_schema: dict[str, Any]) -> dict[str, Any]:
+        props = input_schema.get("properties") if isinstance(input_schema.get("properties"), dict) else {}
+        if not props:
+            return verification_input
+        current_input = verification_input.get("input") if isinstance(verification_input.get("input"), dict) else {}
+        if current_input:
+            return verification_input
+        sampled = self._generic_verification_input(input_schema)
+        merged = dict(verification_input)
+        merged["input"] = sampled.get("input", {})
+        merged.setdefault("connection", {})
+        merged.setdefault("secrets", {})
+        merged.setdefault("_runtime", {"dry_run": True})
+        return merged
 
     def _sample_value(self, schema: dict[str, Any]) -> Any:
         if "default" in schema:

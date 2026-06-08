@@ -1758,12 +1758,18 @@ class RuntimeCapabilityGapImplementer:
         return fn
 
     def _matches_expectations(self, output: Any, expectations: dict[str, Any]) -> bool:
+        success_statuses = {"completed", "success", "ok", "executed", "passed", ""}
         if not expectations:
-            return isinstance(output, dict) and str(output.get("status") or "").lower() in {"completed", "success", "ok", "executed", ""}
+            return isinstance(output, dict) and str(output.get("status") or "").lower() in success_statuses
         if not isinstance(output, dict):
             return False
         for key, expected in expectations.items():
             actual = output.get(key)
+            if key == "status":
+                expected_status = str(expected or "").strip().lower()
+                actual_status = str(actual or "").strip().lower()
+                if expected_status in success_statuses and actual_status in success_statuses:
+                    continue
             if actual != expected:
                 data = output.get("data") if isinstance(output.get("data"), dict) else {}
                 if data.get(key) != expected:
