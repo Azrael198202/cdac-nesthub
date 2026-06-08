@@ -18,6 +18,7 @@ from ai_core.runtime.capability.acquisition_gate import RuntimeCapabilityAcquisi
 from ai_core.runtime.capability.runtime_capability_template_store import RuntimeCapabilityTemplateStore
 from ai_core.runtime.self_repair.engine import RuntimeSelfRepairEngine
 from ai_core.runtime.observability.runtime_console import emit_console_event
+from ai_core.runtime.state import runtime_state_manager
 from ai_core.runtime.observability.stage_observer import RuntimeStageObserver
 from auxiliary_brain.capability_acquisition.code_generator import RuntimeBlueprintArtifactGenerator
 from auxiliary_brain.capability_acquisition.classification import CapabilityClassifier
@@ -93,6 +94,36 @@ class RuntimeCapabilityGapImplementer:
                 )
             except Exception:
                 pass
+            try:
+                stage_index = len(pipeline)
+                progress_hint = min(95.0, max(1.0, stage_index * 5.0))
+                normalized_status = str(status or "running")
+                if normalized_status in {"accepted", "planned", "runtime_native", "safe_to_register", "passed"}:
+                    state_status = "completed"
+                elif normalized_status in {"skipped", "not_required"}:
+                    state_status = "skipped"
+                elif normalized_status in {"failed", "blocked", "planner_failed", "code_generation_failed"}:
+                    state_status = "failed"
+                else:
+                    state_status = "completed" if stage_index > 1 else "running"
+                stage_step = self._runtime_state_stage_step(stage)
+                runtime_state_manager.emit(
+                    run_id=run_id,
+                    step_id=stage_step,
+                    level="developer",
+                    kind="lifecycle" if state_status == "running" else ("error" if state_status == "failed" else "output"),
+                    status=state_status,
+                    title=stage,
+                    message=f"{stage}: {status}",
+                    input={"stage": stage} if stage_index == 1 else None,
+                    output={k: v for k, v in data.items() if k not in {"template", "planner"}},
+                    method="capability_acquisition",
+                    progress=100.0 if state_status in {"completed", "skipped"} else progress_hint,
+                    trace={"pipeline_stage_index": stage_index},
+                    next_action=self._runtime_state_next_action(stage, state_status),
+                )
+            except Exception:
+                pass
 
         mark("CapabilityAcquisitionRouter", "accepted" if allow_implementation else "not_requested", user_input_excerpt=str(user_input or "")[:1000], evidence_keys=sorted(list(evidence.keys())) if isinstance(evidence, dict) else [])
         try:
@@ -119,7 +150,7 @@ class RuntimeCapabilityGapImplementer:
         # compatibility by AI_CORE_ALLOW_TEMPLATE_FALLBACK=true.
         mark("TemplateResolver", "skipped", reason="template_less_blueprint_generation_is_default")
         planner_record = self._plan_capability_with_runtime_planner(
-            user_input=user_input, identity_contract=identity_contract, evidence=evidence, event_contract=event_contract
+            user_input=user_input, identity_contract=identity_contract, evidence=evidence, event_contract=event_contract, state_run_id=run_id
         )
         mark("BlueprintPlanner", str(planner_record.get("status") or "planner_failed"), planner=planner_record)
 
@@ -465,6 +496,62 @@ class RuntimeCapabilityGapImplementer:
         return merged
 
 
+
+
+    def _runtime_state_stage_step(self, stage: str) -> str:
+        value = str(stage or "capability_stage")
+        aliases = {
+            "CapabilityAcquisitionRouter": "intent_recognition.capability_acquisition",
+            "NeedCapabilityContract": "intent_recognition.capability_contract",
+            "CapabilityIdentityExtractor": "input_parsing.capability_identity",
+            "TemplateResolver": "workflow.capability_template_resolution",
+            "BlueprintPlanner": "workflow.capability_blueprint_planning",
+            "BlueprintMaterializer": "workflow.capability_blueprint_materialization",
+            "CapabilityAcquisitionClass": "pre_execution.capability_classification",
+            "WebEvidenceRetriever": "evidence.capability_material",
+            "DependencyResolver": "dependency.resolution",
+            "ArtifactGenerator": "execution.artifact_generation",
+            "ArtifactDependencyResolver": "dependency.artifact_resolution",
+            "AcquisitionGate": "pre_execution.acquisition_gate",
+            "CapabilityMatchContract": "verification.capability_match_contract",
+            "SandboxValidator": "validation.sandbox",
+            "VerificationRun": "result.verify.capability_execution",
+            "RegistrationGate": "pre_execution.registration_gate",
+            "RegistryWriter": "execution.registry_write",
+            "LiveVerificationInteraction": "final.capability_verification",
+            "RuntimeSelfRepairEngine": "repair.capability_acquisition",
+        }
+        return aliases.get(value, "capability." + self._safe_name(value))
+
+    def _runtime_state_next_action(self, stage: str, state_status: str) -> str:
+        if state_status == "failed":
+            return "inspect failure payload and allowed repair policy"
+        order = [
+            "CapabilityAcquisitionRouter",
+            "NeedCapabilityContract",
+            "CapabilityIdentityExtractor",
+            "TemplateResolver",
+            "BlueprintPlanner",
+            "BlueprintMaterializer",
+            "CapabilityAcquisitionClass",
+            "WebEvidenceRetriever",
+            "DependencyResolver",
+            "ArtifactGenerator",
+            "ArtifactDependencyResolver",
+            "AcquisitionGate",
+            "CapabilityMatchContract",
+            "SandboxValidator",
+            "VerificationRun",
+            "RegistrationGate",
+            "RegistryWriter",
+            "LiveVerificationInteraction",
+        ]
+        try:
+            idx = order.index(str(stage or ""))
+            return order[idx + 1] if idx + 1 < len(order) else "finalize runtime result"
+        except ValueError:
+            return ""
+
     def _plan_capability_with_runtime_planner(
         self,
         *,
@@ -472,6 +559,7 @@ class RuntimeCapabilityGapImplementer:
         identity_contract: dict[str, Any],
         evidence: dict[str, Any],
         event_contract: dict[str, Any] | None = None,
+        state_run_id: str = "",
     ) -> dict[str, Any]:
         """Invoke a runtime-configured planner hook for template-less acquisition.
 
@@ -491,7 +579,7 @@ class RuntimeCapabilityGapImplementer:
                 planner = self._load_runtime_generated_default_planner()
             if not callable(planner):
                 raise TypeError("planner_hook_not_callable")
-            with self.stage_observer.span(run_id="capability_planner", stage_id="blueprint_planning", area="capability_acquisition", metadata={"planner_origin": planner_origin}) as span:
+            with self.stage_observer.span(run_id=state_run_id or "capability_planner", stage_id="workflow.capability_blueprint_planning", area="capability_acquisition", metadata={"planner_origin": planner_origin}) as span:
                 payload = planner({
                     "user_input": user_input,
                     "identity_contract": identity_contract,

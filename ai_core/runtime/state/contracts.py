@@ -159,6 +159,26 @@ DEFAULT_RUNTIME_FLOW = [
 ]
 
 STEP_FLOW_ALIASES = {
+
+    "intent_recognition.capability_acquisition": "ai_core.intent_interaction",
+    "intent_recognition.capability_contract": "ai_core.intent_interaction",
+    "input_parsing.capability_identity": "ai_core.input_parsing",
+    "workflow.capability_template_resolution": "ai_core.workflow_graph",
+    "workflow.capability_blueprint_planning": "ai_core.workflow_graph",
+    "workflow.capability_blueprint_materialization": "ai_core.workflow_graph",
+    "pre_execution.capability_classification": "verification.pre_execution",
+    "pre_execution.acquisition_gate": "verification.pre_execution",
+    "pre_execution.registration_gate": "verification.pre_execution",
+    "evidence.capability_material": "evidence.trace",
+    "dependency.resolution": "runtime.execution",
+    "dependency.artifact_resolution": "runtime.execution",
+    "execution.artifact_generation": "runtime.execution",
+    "execution.registry_write": "runtime.execution",
+    "validation.sandbox": "verification.pre_execution",
+    "verification.capability_match_contract": "verification.result",
+    "result.verify.capability_execution": "verification.result",
+    "final.capability_verification": "final.delivery",
+    "repair.capability_acquisition": "repair_brain",
     "runtime": "surface.user_ui",
     "async_job": "apps.api.server",
     "input.normalize": "perception_brain",
