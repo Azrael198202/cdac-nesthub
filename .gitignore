@@ -917,3 +917,12 @@ ai_core/runtime/state/__pycache__/manager.cpython-311.pyc
 auxiliary_brain/capability_acquisition/classification/__pycache__/__init__.cpython-311.pyc
 auxiliary_brain/capability_acquisition/classification/__pycache__/capability_class.cpython-311.pyc
 auxiliary_brain/capability_acquisition/classification/__pycache__/capability_classifier.cpython-311.pyc
+ai_core/architecture/__pycache__/__init__.cpython-313.pyc
+ai_core/architecture/__pycache__/layer_contracts.cpython-313.pyc
+ai_core/runtime/__pycache__/async_jobs.cpython-313.pyc
+ai_core/runtime/state/__pycache__/__init__.cpython-313.pyc
+ai_core/runtime/state/__pycache__/contracts.cpython-313.pyc
+ai_core/runtime/state/__pycache__/manager.cpython-313.pyc
+auxiliary_brain/capability_acquisition/classification/__pycache__/__init__.cpython-313.pyc
+auxiliary_brain/capability_acquisition/classification/__pycache__/capability_class.cpython-313.pyc
+auxiliary_brain/capability_acquisition/classification/__pycache__/capability_classifier.cpython-313.pyc

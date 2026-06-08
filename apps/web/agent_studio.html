@@ -564,8 +564,7 @@ async function sendMessage(){
     await refreshState();
   }catch(e){
     const msg=String((e&&e.message)||e||'request failed');
-    addMessage('Error: '+msg+'
-The request may have been interrupted by a local server reload. Check Runtime State Console for the durable run state.','item error');
+    addMessage('Error: '+msg+'\nThe request may have been interrupted by a local server reload. Check Runtime State Console for the durable run state.','item error');
   } finally{
     if(pollTimer) clearInterval(pollTimer);
     if(hintTimer) clearInterval(hintTimer);
