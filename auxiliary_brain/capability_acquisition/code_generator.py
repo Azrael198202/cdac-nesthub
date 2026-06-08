@@ -4,7 +4,10 @@ import ast
 import json
 import re
 import sys
+import tempfile
+import subprocess
 import time
+from pathlib import Path
 from typing import Any
 
 from ai_core.model_orchestration import LiteLLMBrainClient
@@ -140,6 +143,7 @@ class RuntimeBlueprintArtifactGenerator:
     ) -> dict[str, Any]:
         base_complexity = self._generation_complexity(blueprint=blueprint, identity_contract=identity_contract)
         attempts: list[dict[str, Any]] = []
+        previous_failure: dict[str, Any] | None = None
         for attempt in self._generation_attempts(base_complexity):
             messages = self._generation_messages(
                 tool_id=tool_id,
@@ -152,6 +156,7 @@ class RuntimeBlueprintArtifactGenerator:
                 secret_schema=secret_schema,
                 verification_input=verification_input,
                 compact=bool(attempt.get("compact")),
+                previous_failure=previous_failure,
             )
             result = self.llm_client.complete_sync(
                 brain="auxiliary_brain",
@@ -188,9 +193,24 @@ class RuntimeBlueprintArtifactGenerator:
                 record["error"] = "LLM JSON did not contain executable artifact files."
                 attempts.append(record)
                 continue
+            preflight = self._preflight_generated_artifact(parsed, entrypoint=entrypoint, verification_input=verification_input)
+            if not preflight.get("passed"):
+                record["status"] = "preflight_failed"
+                record["error"] = "Generated artifact did not pass local runtime preflight."
+                record["preflight"] = preflight
+                previous_failure = {
+                    "status": "preflight_failed",
+                    "reason": preflight.get("reason"),
+                    "stderr": str(preflight.get("stderr") or "")[-2000:],
+                    "stdout": str(preflight.get("stdout") or "")[-1000:],
+                    "verification_input": verification_input,
+                }
+                attempts.append(record)
+                continue
             parsed["generation_status"] = "completed"
             parsed["generation_route"] = route
             parsed["generation_attempts"] = attempts + [record]
+            parsed["generation_preflight"] = preflight
             return parsed
         last = attempts[-1] if attempts else {}
         return {
@@ -213,6 +233,7 @@ class RuntimeBlueprintArtifactGenerator:
         secret_schema: dict[str, Any],
         verification_input: dict[str, Any],
         compact: bool = False,
+        previous_failure: dict[str, Any] | None = None,
     ) -> list[dict[str, str]]:
         contract = {
             "tool_id": tool_id,
@@ -224,6 +245,7 @@ class RuntimeBlueprintArtifactGenerator:
             "connection_schema": connection_schema,
             "secret_schema": secret_schema,
             "verification_input": verification_input,
+            **({"previous_failure": previous_failure} if previous_failure else {}),
             "required_return_shape": {
                 "files": [{"path": "tool.py", "content": "Python source code"}, {"path": "test_tool.py", "content": "plain Python test source code"}],
                 "input_schema": "JSON schema object",
@@ -244,6 +266,7 @@ class RuntimeBlueprintArtifactGenerator:
                 "input_schema": input_schema,
                 "output_schema": output_schema,
                 "verification_input": verification_input,
+                **({"previous_failure": previous_failure} if previous_failure else {}),
                 "required_return_shape": contract["required_return_shape"],
             }
         system = (
@@ -256,10 +279,12 @@ class RuntimeBlueprintArtifactGenerator:
             "If external documentation, web evidence, or a stronger model is needed, rely only on evidence and routing supplied by the acquisition/repair pipeline; do not invent undocumented APIs, endpoints, or package behavior. "
             "Escalation is valid only when it is necessary to pass the declared verification contract and the generated artifact remains sandbox-testable. "
             "The entrypoint function must accept one optional dict payload and return a JSON-serializable dict. "
+            "The generated artifact must execute successfully with the supplied verification_input exactly as provided; the test file should use that payload shape rather than inventing different sample values. "
+            "If a default/sample value names a case-sensitive platform resource, the implementation must handle that value safely or report a structured failure quickly; it must not hang or depend on unavailable external data. "
             "The payload may be either direct input fields or a runtime envelope with input, connection, secrets, and _runtime keys; read user parameters from payload['input'] when it is a dict, otherwise from the top-level payload. "
             "Connection values declared in connection_schema must be read only from payload['connection']; secret values declared in secret_schema must be read only from payload['secrets']; do not duplicate connection or secret fields into input_schema or verification_input['input']. "
             "Do not store secrets in generated source code, generated manifests, tests, logs, or ordinary input fields; tests may use fake secret values only inside the secrets envelope or through mocks. "
-            "all nested output values must be JSON-native values such as strings, numbers, booleans, lists, dicts, or null. "
+            "all nested output values must be JSON-native values such as strings, numbers, booleans, lists, dicts, or null; never return runtime objects, class instances, file handles, exceptions, or other non-primitive runtime objects directly. "
             "The Python code must be real executable implementation code, not a placeholder, not blueprint-only, and not a stub. "
             "The test file must be a plain Python script that uses only standard-library imports and assert statements; "
             "do not import pytest or any external test runner. "
@@ -275,6 +300,68 @@ class RuntimeBlueprintArtifactGenerator:
         )
         user = "Generate the runtime artifact from this contract:\n" + json.dumps(contract, ensure_ascii=False, indent=2, default=str)
         return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+    def _preflight_generated_artifact(self, artifact: dict[str, Any], *, entrypoint: dict[str, Any], verification_input: dict[str, Any]) -> dict[str, Any]:
+        """Run a small generic preflight before writing/registering a generated artifact.
+
+        This is capability-neutral: it only verifies that the declared entrypoint
+        can be imported, called with the exact verification envelope, and encoded
+        as JSON. It does not inspect capability names or patch generated code.
+        """
+        files = artifact.get("files") if isinstance(artifact.get("files"), list) else []
+        module_name = str(entrypoint.get("module") or "tool.py")
+        function_name = str(entrypoint.get("function") or "run")
+        try:
+            with tempfile.TemporaryDirectory(prefix="runtime_capability_preflight_") as tmp:
+                root = Path(tmp)
+                for item in files:
+                    if not isinstance(item, dict):
+                        continue
+                    rel = str(item.get("path") or "").replace("\\", "/").lstrip("/")
+                    if not rel or ".." in Path(rel).parts:
+                        continue
+                    target = root / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(str(item.get("content") or ""), encoding="utf-8")
+                module_path = root / module_name
+                if not module_path.exists():
+                    return {"passed": False, "reason": "entrypoint_module_missing", "module": module_name}
+                runner = (
+                    "import importlib.util, json; "
+                    f"module_path = {json.dumps(str(module_path))}; "
+                    f"function_name = {json.dumps(function_name)}; "
+                    f"payload = json.loads({json.dumps(json.dumps(verification_input, ensure_ascii=False, default=str))}); "
+                    "spec = importlib.util.spec_from_file_location('runtime_preflight_tool', module_path); "
+                    "module = importlib.util.module_from_spec(spec); "
+                    "assert spec and spec.loader; "
+                    "spec.loader.exec_module(module); "
+                    "result = getattr(module, function_name)(payload); "
+                    "json.dumps(result, ensure_ascii=False); "
+                    "print('RUNTIME_PREFLIGHT_OK')"
+                )
+                proc = subprocess.run(
+                    [sys.executable, "-I", "-c", runner],
+                    cwd=str(root),
+                    text=True,
+                    capture_output=True,
+                    timeout=12,
+                )
+                return {
+                    "passed": proc.returncode == 0,
+                    "reason": "" if proc.returncode == 0 else "entrypoint_execution_or_json_serialization_failed",
+                    "returncode": proc.returncode,
+                    "stdout": (proc.stdout or "")[-2000:],
+                    "stderr": (proc.stderr or "")[-3000:],
+                }
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "passed": False,
+                "reason": "entrypoint_preflight_timeout",
+                "stdout": str(getattr(exc, "stdout", "") or "")[-1000:],
+                "stderr": str(getattr(exc, "stderr", "") or "")[-1000:],
+            }
+        except Exception as exc:
+            return {"passed": False, "reason": "entrypoint_preflight_exception", "error": str(exc)[:1000]}
 
     def _parse_json_object(self, content: str) -> dict[str, Any] | None:
         text = str(content or "").strip()
