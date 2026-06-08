@@ -45,8 +45,8 @@ class RuntimeBlueprintArtifactGenerator:
         output_schema = self._schema_or_default(blueprint.get("output_schema"), "output")
         connection_schema = self._closed_schema(blueprint.get("connection_schema"))
         secret_schema = self._closed_schema(blueprint.get("secret_schema"))
-        verification_input = blueprint.get("verification_input") if isinstance(blueprint.get("verification_input"), dict) else self._generic_verification_input(input_schema)
-        verification_input = self._verification_input_with_schema_sample(verification_input, input_schema)
+        verification_input = blueprint.get("verification_input") if isinstance(blueprint.get("verification_input"), dict) else self._generic_verification_input(input_schema, connection_schema, secret_schema)
+        verification_input = self._verification_input_with_schema_sample(verification_input, input_schema, connection_schema, secret_schema)
         verification_expectations = blueprint.get("verification_expectations") if isinstance(blueprint.get("verification_expectations"), dict) else {"status": "completed"}
         capability_contract = self._capability_contract(tool_id=tool_id, blueprint=blueprint)
         files = blueprint.get("files") if isinstance(blueprint.get("files"), list) else []
@@ -81,8 +81,8 @@ class RuntimeBlueprintArtifactGenerator:
                 output_schema = llm_artifact.get("output_schema") if isinstance(llm_artifact.get("output_schema"), dict) else output_schema
                 connection_schema = self._closed_schema(llm_artifact.get("connection_schema"))
                 secret_schema = self._closed_schema(llm_artifact.get("secret_schema"))
-                verification_input = llm_artifact.get("verification_input") if isinstance(llm_artifact.get("verification_input"), dict) else self._generic_verification_input(input_schema)
-                verification_input = self._verification_input_with_schema_sample(verification_input, input_schema)
+                verification_input = llm_artifact.get("verification_input") if isinstance(llm_artifact.get("verification_input"), dict) else self._generic_verification_input(input_schema, connection_schema, secret_schema)
+                verification_input = self._verification_input_with_schema_sample(verification_input, input_schema, connection_schema, secret_schema)
                 verification_expectations = llm_artifact.get("verification_expectations") if isinstance(llm_artifact.get("verification_expectations"), dict) else verification_expectations
                 files = self._stabilize_standard_library_runtime_files(files, blueprint=blueprint)
                 dependencies = self._merge_dependencies(dependencies, self._normalized_dependencies(llm_artifact.get("dependencies")))
@@ -265,7 +265,9 @@ class RuntimeBlueprintArtifactGenerator:
             "do not import pytest or any external test runner. "
             "The test file must run locally without external network calls, assert the declared verification behavior, "
             "and verify that json.dumps(run(payload)) succeeds. "
-            "For any integration that can affect external state, contact remote services, mutate local files, or require credentials, sandbox verification must use dry-run behavior or standard-library mocks; it must not contact external services, require live credentials, or perform irreversible side effects. "
+            "The implementation must inspect a generic test-mode flag such as payload['_runtime']['dry_run'] before any operation that can affect external state, contact a remote service, mutate local files, or require credentials. "
+            "When test-mode is true, return a successful structured verification result using local deterministic behavior only; do not initialize external clients, open network connections, require live credentials, or perform irreversible side effects. "
+            "Live execution may use connection and secret envelopes after sandbox registration and approval, but the sandbox path must remain fully local and deterministic. "
             "If live end-to-end verification needs real user values, expose those values through input_schema, connection_schema, and secret_schema so the runtime interaction layer can ask the user after sandbox registration. "
             "When a standard-library feature needs a platform support package to satisfy the contract, declare the support package rather than the standard-library module itself. "
             "Never declare standard-library modules as pip dependencies. "
@@ -624,31 +626,35 @@ class RuntimeBlueprintArtifactGenerator:
         text = "\n".join(str(item.get("content") or "") for item in files if isinstance(item, dict)).casefold()
         return any(marker in text for marker in ["blueprint only", "requires_runtime_implementation", "runtime blueprint artifact verified", "not a registerable runtime implementation"])
 
-    def _generic_verification_input(self, input_schema: dict[str, Any]) -> dict[str, Any]:
-        props = input_schema.get("properties") if isinstance(input_schema.get("properties"), dict) else {}
-        required = input_schema.get("required") if isinstance(input_schema.get("required"), list) else []
-        runtime_input: dict[str, Any] = {"dry_run": True}
-        for name, schema in props.items():
-            if name == "dry_run":
-                continue
-            if name in required or "default" in (schema if isinstance(schema, dict) else {}):
-                runtime_input[name] = self._sample_value(schema if isinstance(schema, dict) else {})
-        return {"input": runtime_input, "connection": {}, "secrets": {}, "_runtime": {"dry_run": True}}
+    def _generic_verification_input(self, input_schema: dict[str, Any], connection_schema: dict[str, Any] | None = None, secret_schema: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {
+            "input": self._sample_payload_scope(input_schema),
+            "connection": self._sample_payload_scope(connection_schema or {}),
+            "secrets": self._sample_payload_scope(secret_schema or {}),
+            "_runtime": {"dry_run": True},
+        }
 
-    def _verification_input_with_schema_sample(self, verification_input: dict[str, Any], input_schema: dict[str, Any]) -> dict[str, Any]:
-        props = input_schema.get("properties") if isinstance(input_schema.get("properties"), dict) else {}
-        if not props:
-            return verification_input
-        current_input = verification_input.get("input") if isinstance(verification_input.get("input"), dict) else {}
-        if current_input:
-            return verification_input
-        sampled = self._generic_verification_input(input_schema)
-        merged = dict(verification_input)
-        merged["input"] = sampled.get("input", {})
-        merged.setdefault("connection", {})
-        merged.setdefault("secrets", {})
-        merged.setdefault("_runtime", {"dry_run": True})
+    def _verification_input_with_schema_sample(self, verification_input: dict[str, Any], input_schema: dict[str, Any], connection_schema: dict[str, Any] | None = None, secret_schema: dict[str, Any] | None = None) -> dict[str, Any]:
+        sampled = self._generic_verification_input(input_schema, connection_schema or {}, secret_schema or {})
+        merged = dict(verification_input or {})
+        for scope in ["input", "connection", "secrets"]:
+            current = merged.get(scope) if isinstance(merged.get(scope), dict) else {}
+            filled = dict(sampled.get(scope) or {})
+            filled.update(current)
+            merged[scope] = filled
+        runtime = merged.get("_runtime") if isinstance(merged.get("_runtime"), dict) else {}
+        runtime.setdefault("dry_run", True)
+        merged["_runtime"] = runtime
         return merged
+
+    def _sample_payload_scope(self, schema: dict[str, Any]) -> dict[str, Any]:
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        required = schema.get("required") if isinstance(schema.get("required"), list) else []
+        result: dict[str, Any] = {}
+        for name, field_schema in props.items():
+            if name in required or "default" in (field_schema if isinstance(field_schema, dict) else {}):
+                result[str(name)] = self._sample_value(field_schema if isinstance(field_schema, dict) else {})
+        return result
 
     def _sample_value(self, schema: dict[str, Any]) -> Any:
         if "default" in schema:

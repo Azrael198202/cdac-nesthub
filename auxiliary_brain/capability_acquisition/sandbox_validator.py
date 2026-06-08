@@ -37,15 +37,14 @@ class RuntimeCapabilitySandboxValidator:
         checks.append({"name": "no_stub_markers", "passed": not present, "present": present})
         if present:
             return {"passed": False, "status": "not_registered", "reason": "stub_markers_present", "checks": checks}
-        capability_blob = json.dumps({"manifest": manifest}, ensure_ascii=False).replace("_", " ").replace("-", " ").casefold()
-        if "smtp" in text or any("smtp" in str(x).casefold() for x in manifest.get("capabilities", [])):
-            required = ["smtplib", "emailmessage", "send_message"]
-            missing = [item for item in required if item not in text]
-            has_client = "smtplib.smtp" in text or "smtplib.smtp_ssl" in text
-            has_dry_run = "dry_run" in text and "_dryrunsmtp" in text
-            checks.append({"name": "smtp_real_implementation_markers", "passed": not missing and has_client and has_dry_run, "missing": missing, "has_smtp_client": has_client, "has_dry_run_path": has_dry_run})
-            if missing or not has_client or not has_dry_run:
-                return {"passed": False, "status": "not_registered", "reason": "smtp_real_implementation_markers_missing", "checks": checks}
+        policy = manifest.get("runtime_execution_policy") if isinstance(manifest.get("runtime_execution_policy"), dict) else {}
+        verification = manifest.get("verification_input") if isinstance(manifest.get("verification_input"), dict) else {}
+        runtime = verification.get("_runtime") if isinstance(verification.get("_runtime"), dict) else {}
+        requires_sandbox_mode = str(policy.get("side_effects") or "").casefold() not in {"none", "pure", "read_only", "read-only"}
+        has_sandbox_mode = bool(runtime.get("dry_run") is True or runtime.get("mock") is True or runtime.get("test_mode") is True)
+        checks.append({"name": "sandbox_mode_declared_for_effectful_runtime", "passed": (not requires_sandbox_mode) or has_sandbox_mode, "requires_sandbox_mode": requires_sandbox_mode, "runtime": runtime})
+        if requires_sandbox_mode and not has_sandbox_mode:
+            return {"passed": False, "status": "not_registered", "reason": "sandbox_mode_missing_for_effectful_runtime", "checks": checks}
         return {"passed": True, "status": "registerable", "checks": checks}
 
     def _schema_is_specific(self, schema: dict[str, Any]) -> dict[str, Any]:

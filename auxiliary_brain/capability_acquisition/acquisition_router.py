@@ -574,9 +574,15 @@ class RuntimeCapabilityGapImplementer:
         text = str(user_input or "")
         existing_description = str(merged.get("description") or "")
         merged["description"] = (existing_description + "\n" + text[:4000]).strip()
-        declared_input = self._extract_declared_schema_section(text, header_patterns=[r"Input\s+parameters?"])
-        if declared_input and not self._schema_has_specific_properties(merged.get("input_schema")):
+        declared_input = self._extract_declared_schema_section(text, header_patterns=[r"Input\s+schema\s+must\s+include(?:\s+only)?", r"Input\s+parameters?"])
+        if declared_input:
             merged["input_schema"] = declared_input
+        declared_connection = self._extract_declared_schema_section(text, header_patterns=[r"Connection\s+schema\s+must\s+include(?:\s+only)?", r"Connection\s+parameters?"])
+        if declared_connection:
+            merged["connection_schema"] = declared_connection
+        declared_secret = self._extract_declared_schema_section(text, header_patterns=[r"Secret\s+schema\s+must\s+include(?:\s+only)?", r"Secret\s+parameters?"])
+        if declared_secret:
+            merged["secret_schema"] = declared_secret
         declared_output_fields = self._extract_declared_field_names(text, header_patterns=[r"Output\s+fields?"])
         if declared_output_fields and not self._schema_has_specific_properties(merged.get("output_schema")):
             merged["output_schema"] = {
@@ -591,6 +597,14 @@ class RuntimeCapabilityGapImplementer:
                 "additionalProperties": False,
             }
         return merged
+
+    def _section_declares_only(self, text: str, header_patterns: list[str]) -> bool:
+        lines = str(text or "").splitlines()
+        for raw in lines:
+            line = raw.strip()
+            if any(re.search(pattern, line, flags=re.IGNORECASE) for pattern in header_patterns):
+                return bool(re.search(r"\bonly\b", line, flags=re.IGNORECASE))
+        return False
 
     def _schema_has_specific_properties(self, value: Any) -> bool:
         if not isinstance(value, dict):
@@ -637,7 +651,7 @@ class RuntimeCapabilityGapImplementer:
                 continue
             if active and re.match(r"^[A-Z][A-Za-z ]+requirements?\s*[:：]?$", section_line):
                 break
-            if active and re.match(r"^(Input\s+parameters?|Output\s+fields?|Capability\s+behavior\s+requirements?)\s*[:：]?$", section_line, flags=re.IGNORECASE):
+            if active and re.match(r"^(Input\s+(?:schema|parameters?)(?:\s+must\s+include(?:\s+only)?)?|Connection\s+(?:schema|parameters?)(?:\s+must\s+include(?:\s+only)?)?|Secret\s+(?:schema|parameters?)(?:\s+must\s+include(?:\s+only)?)?|Output\s+fields?|Approval\s+policy|Verification\s+requirements?|Capability\s+behavior\s+requirements?)\s*[:：]?$", section_line, flags=re.IGNORECASE):
                 break
             if active and re.match(r"^The\s+capability\s+acquisition\s+is\s+complete", section_line, flags=re.IGNORECASE):
                 break
@@ -1208,14 +1222,10 @@ class RuntimeCapabilityGapImplementer:
             target.write_text(content, encoding="utf-8")
             written.append(str(target))
         tests_dir = self.generated_tests_dir / safe_id
+        if tests_dir.exists():
+            shutil.rmtree(tests_dir)
         tests_dir.mkdir(parents=True, exist_ok=True)
         test_files: list[str] = []
-        for written_path in written:
-            source_path = Path(written_path)
-            if source_path.name.startswith("test_") and source_path.suffix == ".py":
-                target = tests_dir / source_path.name
-                target.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
-                test_files.append(str(target))
         manifest = {
             "tool_id": safe_id,
             "template_id": template.get("template_id"),
@@ -1241,7 +1251,42 @@ class RuntimeCapabilityGapImplementer:
         }
         manifest_path = tool_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        generated_test = self._generic_contract_test_source(tool_dir=tool_dir, manifest_path=manifest_path)
+        test_target = tests_dir / "test_contract_smoke.py"
+        test_target.write_text(generated_test, encoding="utf-8")
+        test_files.append(str(test_target))
+        manifest["test_files"] = test_files
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"tool_id": safe_id, "tool_dir": str(tool_dir), "test_dir": str(tests_dir), "manifest_path": str(manifest_path), "written_files": written, "test_files": test_files}
+
+    def _generic_contract_test_source(self, *, tool_dir: Path, manifest_path: Path) -> str:
+        return """import importlib.util
+import json
+from pathlib import Path
+
+TOOL_DIR = Path(%r)
+MANIFEST_PATH = Path(%r)
+
+
+def test_runtime_contract_smoke():
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    entrypoint = manifest.get("entrypoint") or {}
+    module_path = TOOL_DIR / str(entrypoint.get("module") or "tool.py")
+    function_name = str(entrypoint.get("function") or "run")
+    payload = manifest.get("verification_input") if isinstance(manifest.get("verification_input"), dict) else {}
+    runtime = payload.setdefault("_runtime", {})
+    if isinstance(runtime, dict):
+        runtime.setdefault("dry_run", True)
+    spec = importlib.util.spec_from_file_location("runtime_generated_tool_under_test", module_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    result = getattr(module, function_name)(payload)
+    json.dumps(result, ensure_ascii=False)
+    assert isinstance(result, dict)
+    status = str(result.get("status") or "").lower()
+    assert status not in {"error", "failure", "failed"}, result
+""" % (str(tool_dir), str(manifest_path))
 
     def _retry_artifact_after_validation_failure(
         self,
@@ -1284,7 +1329,8 @@ class RuntimeCapabilityGapImplementer:
             str(repair_blueprint.get("description") or "")
             + "\n\nPrevious generated artifact failed sandbox validation. "
             "Regenerate the runtime files so tests are self-contained, all names are imported or defined, "
-            "the entrypoint output is JSON-serializable, and the verification behavior is asserted by execution."
+            "the entrypoint output is JSON-serializable, and the verification behavior is asserted by execution. "
+            "The sandbox path must honor the declared generic test-mode flag before any external side effect and must return a successful structured result without remote calls or live credentials."
         ).strip()
         repaired_template = self.blueprint_artifact_generator.materialize(repair_blueprint, identity_contract=identity_contract)
         if repaired_template.get("artifact_kind") != "real_runtime_implementation":
@@ -1670,17 +1716,14 @@ class RuntimeCapabilityGapImplementer:
         if present_forbidden:
             return {"passed": False, "status": "not_registered", "reason": "stub_markers_present", "checks": checks}
 
-        capability_text = json.dumps({"manifest": manifest}, ensure_ascii=False).casefold() + "\n" + text.casefold()
-        if "smtp" in capability_text:
-            required = ["smtplib", "emailmessage", "send_message"]
-            missing = [item for item in required if item not in capability_text]
-            # Real path must contain a network SMTP class and a separate dry-run path.
-            has_smtp_client = "smtplib.smtp" in capability_text or "smtplib.smtp_ssl" in capability_text
-            has_dry_run = "dry_run" in capability_text and "_dryrunsmtp" in capability_text
-            smtp_passed = not missing and has_smtp_client and has_dry_run
-            checks.append({"name": "smtp_real_implementation_markers", "passed": smtp_passed, "missing": missing, "has_smtp_client": has_smtp_client, "has_dry_run_path": has_dry_run})
-            if not smtp_passed:
-                return {"passed": False, "status": "not_registered", "reason": "smtp_real_implementation_markers_missing", "checks": checks}
+        policy = manifest.get("runtime_execution_policy") if isinstance(manifest.get("runtime_execution_policy"), dict) else {}
+        verification = manifest.get("verification_input") if isinstance(manifest.get("verification_input"), dict) else {}
+        runtime = verification.get("_runtime") if isinstance(verification.get("_runtime"), dict) else {}
+        requires_sandbox_mode = str(policy.get("side_effects") or "").casefold() not in {"none", "pure", "read_only", "read-only"}
+        has_sandbox_mode = bool(runtime.get("dry_run") is True or runtime.get("mock") is True or runtime.get("test_mode") is True)
+        checks.append({"name": "sandbox_mode_declared_for_effectful_runtime", "passed": (not requires_sandbox_mode) or has_sandbox_mode, "requires_sandbox_mode": requires_sandbox_mode, "runtime": runtime})
+        if requires_sandbox_mode and not has_sandbox_mode:
+            return {"passed": False, "status": "not_registered", "reason": "sandbox_mode_missing_for_effectful_runtime", "checks": checks}
 
         return {"passed": True, "status": "registerable", "checks": checks}
 
