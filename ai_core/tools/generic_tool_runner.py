@@ -75,7 +75,8 @@ class GenericToolRunner:
 
         try:
             fn = self._load_function(path, function_name)
-            output = fn(input_data)
+            invocation_payload = self._prepare_invocation_payload(input_data)
+            output = fn(invocation_payload)
             if inspect.isawaitable(output):
                 result = self._error("async_tool_not_supported_here", "Async tool output must be awaited by an async runner.")
                 trace = self.provenance.finish(trace, output=result, status="error", error=result.get("error"))
@@ -113,6 +114,31 @@ class GenericToolRunner:
             result = self._error("tool_execution_failed", str(exc))
             trace = self.provenance.finish(trace, output=result, status="error", error=result.get("error"))
             return self.provenance.attach(result, trace)
+
+    def _prepare_invocation_payload(self, input_data: Any) -> Any:
+        """Return a safe invocation payload for runtime-generated tools.
+
+        The registered-tool runtime envelope may contain generic metadata under
+        ``_runtime``. Generated tools are allowed to read optional runtime flags,
+        but real executions should not fail just because a verification-only flag
+        such as ``dry_run`` is absent. The runner therefore supplies a minimal,
+        domain-neutral runtime object for envelope calls while leaving flat legacy
+        payloads unchanged.
+        """
+        if not isinstance(input_data, dict):
+            return input_data
+        envelope_keys = {"input", "connection", "secrets", "_runtime"}
+        if "input" not in input_data and not any(key in input_data for key in envelope_keys - {"input"}):
+            return input_data
+        payload = dict(input_data)
+        runtime = payload.get("_runtime")
+        if not isinstance(runtime, dict):
+            runtime = {}
+        else:
+            runtime = dict(runtime)
+        runtime.setdefault("dry_run", False)
+        payload["_runtime"] = runtime
+        return payload
 
 
     def _runtime_input_for_schema_validation(self, input_data: Any) -> Any:

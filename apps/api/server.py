@@ -29,8 +29,10 @@ from ai_core.graph.graph_visualization import GraphVisualStateBuilder
 from ai_core.runtime.observability.runtime_console import emit_console_event, list_console_sources, read_console_source
 from ai_core.runtime.self_repair.repair_orchestrator import FeedbackRepairOrchestrator
 from ai_core.runtime.scheduler import ScheduledTaskRunner
+from ai_core.runtime.async_jobs import RuntimeAsyncJobStore
 
 import traceback
+import os
 approval_learning = ApprovalLearningService()
 app = FastAPI()
 runtime = WorkflowRuntime()
@@ -45,33 +47,73 @@ registered_tool_service = RuntimeRegisteredToolService()
 approval_policy_store = RuntimeApprovalPolicyStore()
 feedback_repair_orchestrator = FeedbackRepairOrchestrator()
 scheduled_task_runner = ScheduledTaskRunner()
+async_job_store = RuntimeAsyncJobStore()
+
+
+def _scheduler_config_enabled() -> bool:
+    env = str(os.getenv("AI_RUNTIME_SCHEDULER_ENABLED") or "").strip().lower()
+    if env in {"1", "true", "yes", "on"}:
+        return True
+    path = Path("runtime") / "configs" / "scheduler.json"
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return bool(isinstance(cfg, dict) and cfg.get("enabled") is True)
+
+
+def _has_enabled_scheduled_task() -> bool:
+    tasks_dir = Path("runtime") / "generated" / "tasks"
+    try:
+        for path in tasks_dir.glob("*.json"):
+            try:
+                graph = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            policy = graph.get("schedule_policy") if isinstance(graph, dict) and isinstance(graph.get("schedule_policy"), dict) else {}
+            if policy.get("enabled") is True and str(policy.get("mode") or "") == "recurring":
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _ensure_scheduler_started_if_needed() -> None:
+    if not (_scheduler_config_enabled() or _has_enabled_scheduled_task()):
+        return
+    scheduled_task_runner.start(_execute_due_task, tick_seconds=5)
+
+
+async def _execute_due_task(task_name: str, task_graph: dict[str, Any] | None = None) -> dict[str, Any]:
+    task_graph = task_graph if isinstance(task_graph, dict) else {}
+    policy = task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {}
+    controller_ids = {str(x).strip() for x in (policy.get("controller_participant_ids") or []) if str(x).strip()}
+    selected_ids = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
+    payload_ids = [x for x in selected_ids if x not in controller_ids]
+    if not payload_ids:
+        tasks = task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []
+        for item in tasks:
+            if not isinstance(item, dict):
+                continue
+            pid = str(item.get("participant_id") or "").strip()
+            if pid and pid not in controller_ids:
+                payload_ids.append(pid)
+    return await studio_service.execute_task(
+        task_name,
+        provided_inputs={
+            "_scheduled_payload_dispatch": True,
+            "_payload_only_selected_participant_ids": payload_ids,
+        },
+        instruction="",
+    )
 
 
 @app.on_event("startup")
 async def _start_scheduled_task_runner():
-    async def _execute_due_task(task_name: str, task_graph: dict[str, Any] | None = None) -> dict[str, Any]:
-        task_graph = task_graph if isinstance(task_graph, dict) else {}
-        policy = task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {}
-        controller_ids = {str(x).strip() for x in (policy.get("controller_participant_ids") or []) if str(x).strip()}
-        selected_ids = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
-        payload_ids = [x for x in selected_ids if x not in controller_ids]
-        if not payload_ids:
-            tasks = task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []
-            for item in tasks:
-                if not isinstance(item, dict):
-                    continue
-                pid = str(item.get("participant_id") or "").strip()
-                if pid and pid not in controller_ids:
-                    payload_ids.append(pid)
-        return await studio_service.execute_task(
-            task_name,
-            provided_inputs={
-                "_scheduled_payload_dispatch": True,
-                "_payload_only_selected_participant_ids": payload_ids,
-            },
-            instruction="",
-        )
-    scheduled_task_runner.start(_execute_due_task, tick_seconds=5)
+    # The scheduler is a generic optional runtime service. It must not start just
+    # because a capability exists; it starts only when explicitly enabled or when
+    # an enabled recurring task graph exists.
+    _ensure_scheduler_started_if_needed()
 
 
 @app.on_event("shutdown")
@@ -209,6 +251,7 @@ class DeleteRuntimeCapabilityRequest(BaseModel):
 
 class AgentStudioRequest(BaseModel):
     message: str
+    async_mode: bool | None = None
     provided_inputs: dict[str, Any] | None = None
     uploaded_artifacts: list[dict[str, Any]] | None = None
     session_id: str | None = None
@@ -516,7 +559,9 @@ async def graph_runtime_pause_schedule(task_name: str):
 
 @app.post("/api/graph-runtime/tasks/{task_name}/schedule/resume")
 async def graph_runtime_resume_schedule(task_name: str):
-    return JSONResponse(studio_service.set_task_schedule_enabled(task_name, True))
+    payload = studio_service.set_task_schedule_enabled(task_name, True)
+    _ensure_scheduler_started_if_needed()
+    return JSONResponse(payload)
 
 
 @app.get("/api/graph-runtime/tasks/{task_name}/schedule/history")
@@ -1051,45 +1096,57 @@ async def perception_normalize(req: AgentStudioRequest):
         return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
 
 
+async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any]:
+    active_session_id = session_store.start_or_get_session(req.session_id, metadata={"surface": "agent_studio"})
+    perception_package = perception_brain_service.normalize(
+        text=req.message,
+        uploaded_artifacts=req.uploaded_artifacts,
+        context={"surface": "agent_studio", "session_id": active_session_id},
+    )
+    normalized_message = str(perception_package.get("normalized_text") or req.message or "")
+    provided_inputs = dict(req.provided_inputs or {})
+    provided_inputs.setdefault("_perception_package", perception_package)
+    payload = await studio_service.handle_message(
+        normalized_message,
+        provided_inputs=provided_inputs,
+        uploaded_artifacts=req.uploaded_artifacts,
+        session_id=active_session_id,
+        presentation_profile=req.presentation_profile,
+    )
+    if isinstance(payload, dict):
+        payload.setdefault("session_id", active_session_id)
+        payload.setdefault("perception", {
+            "status": "completed",
+            "artifact_count": len(perception_package.get("artifacts") or []),
+            "confidence": perception_package.get("confidence"),
+            "warnings": perception_package.get("warnings") or [],
+        })
+        final_answer = str(payload.get("final_answer") or payload.get("message") or payload.get("status") or "")
+        if final_answer.strip():
+            session_store.append_turn(
+                session_id=active_session_id,
+                run_id=str(payload.get("run_id") or payload.get("resumed_from_run_id") or payload.get("task_name") or "studio_run"),
+                user_input=req.message,
+                final_answer=final_answer,
+                stage_results={"agent_studio_payload": payload, "perception_package": perception_package},
+                metadata={"action": str(payload.get("action") or ""), "perception_enabled": True},
+            )
+            payload["session_boundary"] = session_store.boundary_status(active_session_id)
+    return payload if isinstance(payload, dict) else {"ok": True, "status": "completed", "result": payload}
+
+
 @app.post("/api/agent-studio/message")
 async def agent_studio_message(req: AgentStudioRequest):
     try:
-        active_session_id = session_store.start_or_get_session(req.session_id, metadata={"surface": "agent_studio"})
-        perception_package = perception_brain_service.normalize(
-            text=req.message,
-            uploaded_artifacts=req.uploaded_artifacts,
-            context={"surface": "agent_studio", "session_id": active_session_id},
-        )
-        normalized_message = str(perception_package.get("normalized_text") or req.message or "")
-        provided_inputs = dict(req.provided_inputs or {})
-        provided_inputs.setdefault("_perception_package", perception_package)
-        payload = await studio_service.handle_message(
-            normalized_message,
-            provided_inputs=provided_inputs,
-            uploaded_artifacts=req.uploaded_artifacts,
-            session_id=active_session_id,
-            presentation_profile=req.presentation_profile,
-        )
-        if isinstance(payload, dict):
-            payload.setdefault("session_id", active_session_id)
-            payload.setdefault("perception", {
-                "status": "completed",
-                "artifact_count": len(perception_package.get("artifacts") or []),
-                "confidence": perception_package.get("confidence"),
-                "warnings": perception_package.get("warnings") or [],
-            })
-            final_answer = str(payload.get("final_answer") or payload.get("message") or payload.get("status") or "")
-            if final_answer.strip():
-                session_store.append_turn(
-                    session_id=active_session_id,
-                    run_id=str(payload.get("run_id") or payload.get("resumed_from_run_id") or payload.get("task_name") or "studio_run"),
-                    user_input=req.message,
-                    final_answer=final_answer,
-                    stage_results={"agent_studio_payload": payload, "perception_package": perception_package},
-                    metadata={"action": str(payload.get("action") or ""), "perception_enabled": True},
-                )
-                payload["session_boundary"] = session_store.boundary_status(active_session_id)
-        return JSONResponse(payload)
+        async_requested = bool(req.async_mode) or bool((req.provided_inputs or {}).get("_async"))
+        if async_requested:
+            accepted = async_job_store.submit(
+                name="agent_studio_message",
+                runner=lambda: _handle_agent_studio_message(req),
+                metadata={"surface": "agent_studio", "session_id": req.session_id, "message_preview": str(req.message or "")[:120]},
+            )
+            return JSONResponse(accepted, status_code=202)
+        return JSONResponse(await _handle_agent_studio_message(req))
     except Exception as exc:
         _write_api_error_log(area="agent_studio_message", exc=exc, context={"session_id": req.session_id, "message_preview": str(req.message or "")[:300]})
         return JSONResponse(
@@ -1105,6 +1162,25 @@ async def agent_studio_message(req: AgentStudioRequest):
             },
             status_code=500,
         )
+
+
+@app.post("/api/agent-studio/message-async")
+async def agent_studio_message_async(req: AgentStudioRequest):
+    req.async_mode = True
+    return await agent_studio_message(req)
+
+
+@app.get("/api/runtime/jobs")
+async def runtime_jobs(limit: int = 50):
+    return JSONResponse({"ok": True, "jobs": async_job_store.list(limit=limit)})
+
+
+@app.get("/api/runtime/jobs/{job_id}")
+async def runtime_job_state(job_id: str):
+    job = async_job_store.public(job_id)
+    if not job:
+        return JSONResponse({"ok": False, "status": "not_found", "job_id": job_id}, status_code=404)
+    return JSONResponse({"ok": True, "job": job})
 
 
 @app.post("/api/agent-studio/secret")
