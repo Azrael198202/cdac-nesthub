@@ -1,1 +1,1 @@
-v23.3-generic-sandbox-gate-clean
+v24.1-layer-contract-boundary
