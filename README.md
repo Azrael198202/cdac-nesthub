@@ -138,3 +138,10 @@ The normal `qwen3.5:2b` Ollama tag remains available and is not remapped.
 - Adds `/api/runtime-console/sources` and `/api/runtime-console/read` with path boundary checks and secret redaction.
 - Adds runtime console events for model preparation and capability acquisition pipeline stages.
 - Adds a compact second-pass local planner prompt for small models when the first JSON-mode planner output is empty or non-JSON.
+
+## v23.6 Provider / model auto-prepare fix
+
+- Added provider-option compatibility in `LiteLLMBrainClient` so GPT-5-family routes no longer fail when policy asks for unsupported deterministic temperature values.
+- Added generic Ollama model preparation before LiteLLM calls: if the selected local model is missing, the runtime tries configured aliases and fallback models, pulls missing models automatically, then rechecks the local model list.
+- Added config-driven `model_resolution` policy so custom/local model aliases can map to downloadable runtime tags without embedding capability-specific logic in the code generator.
+- Kept capability code generation boundary clean: no capability-specific template replacement, no Gmail/SMTP/time/timezone special cases in `code_generator.py`.

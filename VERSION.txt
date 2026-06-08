@@ -1,1 +1,1 @@
-v23.5-runtime-artifact-preflight-repair
+v23.6-provider-model-auto-prepare

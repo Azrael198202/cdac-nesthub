@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
+import json
+import os
+import shutil
+import subprocess
+import time
 from typing import Any
 
 from ai_core.model_orchestration.brain_model_router import BrainModelRoute, BrainModelRouter
+from ai_core.config.paths import CONFIGS_DIR
 
 
 @dataclass
@@ -73,16 +80,17 @@ class LiteLLMBrainClient:
 
         errors: list[dict[str, Any]] = []
         for attempt_route in self._route_attempts(route):
-            model = self._litellm_model(attempt_route)
-            options = self._merge_options(route=attempt_route, response_format=response_format, kwargs=kwargs)
+            prepared_route = self._prepare_attempt_route(attempt_route)
+            model = self._litellm_model(prepared_route)
+            options = self._merge_options(route=prepared_route, response_format=response_format, kwargs=kwargs)
             try:
                 raw = await acompletion(model=model, messages=messages, **options)
-                route_payload = attempt_route.to_dict()
+                route_payload = prepared_route.to_dict()
                 if errors:
                     route_payload["previous_attempts"] = errors
                 return LiteLLMBrainResult(status="completed", content=self._extract_content(raw), route=route_payload, raw=raw)
             except Exception as exc:
-                errors.append({"provider": attempt_route.provider, "model": attempt_route.model, "error": str(exc)[:1000]})
+                errors.append({"provider": prepared_route.provider, "model": prepared_route.model, "error": str(exc)[:1000]})
         return LiteLLMBrainResult(status="failed", route=route.to_dict(), error=json_dumps_compact(errors))
 
     def complete_with_route_sync(
@@ -100,16 +108,17 @@ class LiteLLMBrainClient:
 
         errors: list[dict[str, Any]] = []
         for attempt_route in self._route_attempts(route):
-            model = self._litellm_model(attempt_route)
-            options = self._merge_options(route=attempt_route, response_format=response_format, kwargs=kwargs)
+            prepared_route = self._prepare_attempt_route(attempt_route)
+            model = self._litellm_model(prepared_route)
+            options = self._merge_options(route=prepared_route, response_format=response_format, kwargs=kwargs)
             try:
                 raw = completion(model=model, messages=messages, **options)
-                route_payload = attempt_route.to_dict()
+                route_payload = prepared_route.to_dict()
                 if errors:
                     route_payload["previous_attempts"] = errors
                 return LiteLLMBrainResult(status="completed", content=self._extract_content(raw), route=route_payload, raw=raw)
             except Exception as exc:
-                errors.append({"provider": attempt_route.provider, "model": attempt_route.model, "error": str(exc)[:1000]})
+                errors.append({"provider": prepared_route.provider, "model": prepared_route.model, "error": str(exc)[:1000]})
         return LiteLLMBrainResult(status="failed", route=route.to_dict(), error=json_dumps_compact(errors))
 
     def _merge_options(self, *, route: BrainModelRoute, response_format: dict[str, Any] | None, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -117,7 +126,146 @@ class LiteLLMBrainClient:
         options.update(kwargs)
         if response_format:
             options["response_format"] = response_format
-        return options
+        return self._sanitize_provider_options(route=route, options=options)
+
+    def _sanitize_provider_options(self, *, route: BrainModelRoute, options: dict[str, Any]) -> dict[str, Any]:
+        """Apply provider-protocol compatibility without changing capability logic.
+
+        The policy layer may request deterministic generation using parameters
+        that are not accepted by every hosted model family.  This adapter keeps
+        those details outside capability generation: unsupported options are
+        either normalized or left for LiteLLM's drop_params safety valve.
+        """
+        cleaned = dict(options or {})
+        cleaned.setdefault("drop_params", True)
+        provider = str(route.provider or "").lower()
+        model = str(route.model or "").lower()
+        if provider == "openai" and (model.startswith("gpt-5") or "/gpt-5" in model):
+            if "temperature" in cleaned and cleaned.get("temperature") != 1:
+                cleaned["temperature"] = 1
+        return cleaned
+
+    def _prepare_attempt_route(self, route: BrainModelRoute) -> BrainModelRoute:
+        provider = str(route.provider or "").strip().lower()
+        if provider != "ollama":
+            return route
+        resolved = self._ensure_ollama_model(route.model)
+        if not resolved or resolved == route.model:
+            return route
+        payload = route.to_dict()
+        payload["model"] = resolved
+        payload["source"] = str(payload.get("source") or "brain_model_policy") + ":model_prepared"
+        payload["decision_reason"] = str(payload.get("decision_reason") or "") + ";ollama_model_resolved"
+        return BrainModelRoute(**payload)
+
+    def _ensure_ollama_model(self, model: str) -> str:
+        requested = str(model or "").strip()
+        if not requested:
+            return requested
+        if os.environ.get("AI_CORE_DISABLE_OLLAMA_MODEL_PREPARE", "").lower() in {"1", "true", "yes"}:
+            return requested
+        binary = self._ollama_binary()
+        if not binary:
+            return requested
+        tags = self._ollama_list(binary)
+        if self._ollama_model_exists(tags, requested):
+            return requested
+        for candidate in self._ollama_candidate_models(requested):
+            tags = self._ollama_list(binary)
+            if self._ollama_model_exists(tags, candidate):
+                return candidate
+            if self._ollama_pull(binary, candidate):
+                tags = self._ollama_list(binary)
+                if self._ollama_model_exists(tags, candidate):
+                    return candidate
+        installed = self._select_installed_ollama_model(tags, requested)
+        return installed or requested
+
+    def _ollama_binary(self) -> str:
+        explicit = os.environ.get("AI_CORE_OLLAMA_BINARY")
+        if explicit and Path(explicit).exists():
+            return explicit
+        return shutil.which("ollama") or ""
+
+    def _ollama_list(self, binary: str) -> list[str]:
+        try:
+            proc = subprocess.run([binary, "list"], text=True, capture_output=True, timeout=20)
+        except Exception:
+            return []
+        if proc.returncode != 0:
+            return []
+        names: list[str] = []
+        for line in (proc.stdout or "").splitlines()[1:]:
+            parts = line.split()
+            if parts:
+                names.append(parts[0])
+        return names
+
+    def _ollama_model_exists(self, names: list[str], model: str) -> bool:
+        wanted = str(model or "").strip()
+        if not wanted:
+            return False
+        known = set(names or [])
+        known.update(item.split(":", 1)[0] for item in names or [] if item)
+        return wanted in known or wanted.split(":", 1)[0] in known
+
+    def _ollama_candidate_models(self, requested: str) -> list[str]:
+        candidates: list[str] = []
+        env_candidates = os.environ.get("AI_CORE_OLLAMA_MODEL_CANDIDATES", "")
+        candidates.extend([item.strip() for item in env_candidates.split(",") if item.strip()])
+        config = self._load_model_resolution_config()
+        aliases = config.get("aliases") if isinstance(config.get("aliases"), dict) else {}
+        for item in aliases.get(requested, []) if isinstance(aliases.get(requested), list) else []:
+            if str(item).strip():
+                candidates.append(str(item).strip())
+        fallbacks = config.get("fallback_models") if isinstance(config.get("fallback_models"), list) else []
+        candidates.extend(str(item).strip() for item in fallbacks if str(item).strip())
+        candidates.insert(0, requested)
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            if item and item not in seen:
+                seen.add(item)
+                out.append(item)
+        return out
+
+    def _load_model_resolution_config(self) -> dict[str, Any]:
+        paths = [
+            CONFIGS_DIR / "model_resolution.yaml",
+            CONFIGS_DIR / "brain_model_policy.yaml",
+        ]
+        for path in paths:
+            if not path.exists():
+                continue
+            try:
+                import yaml
+                data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                section = data.get("model_resolution") if isinstance(data.get("model_resolution"), dict) else data
+                if isinstance(section, dict):
+                    return section
+        return {}
+
+    def _ollama_pull(self, binary: str, model: str) -> bool:
+        if os.environ.get("AI_CORE_DISABLE_OLLAMA_MODEL_PULL", "").lower() in {"1", "true", "yes"}:
+            return False
+        timeout = int(os.environ.get("AI_CORE_OLLAMA_PULL_TIMEOUT_SECONDS", "3600") or "3600")
+        try:
+            proc = subprocess.run([binary, "pull", model], text=True, capture_output=True, timeout=timeout)
+            return proc.returncode == 0
+        except Exception:
+            return False
+
+    def _select_installed_ollama_model(self, names: list[str], requested: str) -> str:
+        if not names:
+            return ""
+        requested_root = requested.split(":", 1)[0]
+        for name in names:
+            if name.split(":", 1)[0] == requested_root:
+                return name
+        return names[0]
 
     def _extract_content(self, raw: Any) -> str:
         content = ""
