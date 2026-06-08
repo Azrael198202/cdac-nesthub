@@ -25,8 +25,15 @@ class RuntimeSemanticPlanner:
             asyncio.get_running_loop()
         except RuntimeError:
             return asyncio.run(self._build_plan_async(instruction=instruction, participants=participants, run_id=run_id))
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(lambda: asyncio.run(self._build_plan_async(instruction=instruction, participants=participants, run_id=run_id))).result(timeout=150)
+        pool = ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(lambda: asyncio.run(self._build_plan_async(instruction=instruction, participants=participants, run_id=run_id)))
+        try:
+            return future.result(timeout=150)
+        except TimeoutError:
+            future.cancel()
+            return {"steps": [], "coverage_notes": ["semantic_provider_timeout"]}
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     async def _build_plan_async(self, *, instruction: str, participants: list[dict[str, Any]], run_id: str) -> dict[str, Any]:
         participant_refs = []

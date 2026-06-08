@@ -126,13 +126,7 @@ class AgentStudioService:
         if routed.action == "chat" and bare_task_name:
             return await self.execute_task(bare_task_name, provided_inputs=provided_inputs, instruction=message)
 
-        # Direct invocation of an already-created participant must stay in the
-        # Agent/Task runtime instead of falling into the generic conversation
-        # pipeline.  The decision is generic: it matches the user's text
-        # against durable participant names, then creates a task-run wrapper so
-        # the existing missing-parameter form, approval, resume, and registered
-        # tool bridge are reused unchanged.
-        if routed.action == "chat" and not core_pipeline_requested:
+        if routed.action == "chat":
             direct_agent_response = await self._maybe_execute_direct_participant_invocation(
                 message,
                 provided_inputs=provided_inputs,
@@ -1110,11 +1104,15 @@ class AgentStudioService:
         artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
         explicit_runtime_parameters = self._extract_runtime_parameters_from_instruction(instruction)
         schedule_policy = self._extract_schedule_policy_from_instruction(instruction)
-        semantic_plan = self.runtime_semantic_planner.build_plan(
-            instruction=instruction,
-            participants=participants,
-            run_id=graph_id,
-        )
+        mentioned_participants = self._participants_mentioned_in_message(instruction, participants)
+        if len(mentioned_participants) == 1:
+            semantic_plan = {"steps": [], "coverage_notes": ["semantic_planner_skipped_explicit_single_participant"]}
+        else:
+            semantic_plan = self.runtime_semantic_planner.build_plan(
+                instruction=instruction,
+                participants=participants,
+                run_id=graph_id,
+            )
         workflow_plan = self.instruction_workflow_planner.plan(
             instruction=instruction,
             participants=participants,
@@ -1577,6 +1575,32 @@ class AgentStudioService:
             return None
         candidates.sort(key=lambda item: item[0], reverse=True)
         return candidates[0][1]
+
+    def _participants_mentioned_in_message(self, message: str, participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        text = str(message or "")
+        if not text.strip():
+            return []
+        lowered = text.casefold()
+        mentioned: list[tuple[int, str, dict[str, Any]]] = []
+        seen: set[str] = set()
+        for participant in participants:
+            if not isinstance(participant, dict):
+                continue
+            pid = str(participant.get("participant_id") or participant.get("id") or participant.get("name") or "").strip()
+            names = []
+            for key in ("display_name", "agent_name", "name", "role_name", "participant_id"):
+                value = str(participant.get(key) or "").strip()
+                if value and value not in names:
+                    names.append(value)
+            for name in names:
+                if self._contains_named_entity(lowered, name):
+                    dedupe_key = pid or self._logical_participant_key(participant)
+                    if dedupe_key and dedupe_key not in seen:
+                        seen.add(dedupe_key)
+                        mentioned.append((len(name), dedupe_key, participant))
+                    break
+        mentioned.sort(key=lambda item: item[0], reverse=True)
+        return [item[2] for item in mentioned]
 
     def _contains_named_entity(self, lowered_text: str, name: str) -> bool:
         normalized_name = str(name or "").strip()
