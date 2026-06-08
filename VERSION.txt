@@ -1,1 +1,1 @@
-v23.6-provider-model-auto-prepare
+v23.7-provider-secret-interaction-and-ollama-http-pull

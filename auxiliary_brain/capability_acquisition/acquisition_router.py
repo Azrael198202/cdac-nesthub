@@ -137,6 +137,19 @@ class RuntimeCapabilityGapImplementer:
                 else:
                     mark("TemplateFallback", "not_found", template_locations=[str(p) for p in self.template_store.candidate_paths()])
             if not match:
+                interaction_request = planner_record.get("interaction_request") if isinstance(planner_record.get("interaction_request"), dict) else None
+                if interaction_request:
+                    mark("ProviderConfigurationInteraction", "requested", request=interaction_request)
+                    return {
+                        "status": "interaction_required",
+                        "reason": str(planner_record.get("reason") or "provider_configuration_required"),
+                        "requested_identity_contract": identity_contract,
+                        "pipeline": pipeline,
+                        "interaction_request": interaction_request,
+                        "evidence_present": bool(urls),
+                        "diagnosis": "provider_configuration_required_before_code_generation",
+                        "generated_at": datetime.now(timezone.utc).isoformat(),
+                    }
                 repair = self._runtime_self_repair(
                     run_id=run_id,
                     stage="BlueprintPlanner",
@@ -514,6 +527,17 @@ class RuntimeCapabilityGapImplementer:
             template = self.blueprint_artifact_generator.materialize(raw_blueprint, identity_contract=identity_contract)
             code_generation = template.get("code_generation") if isinstance(template.get("code_generation"), dict) else {}
             if template.get("artifact_kind") != "real_runtime_implementation":
+                interaction_request = code_generation.get("interaction_request") if isinstance(code_generation.get("interaction_request"), dict) else None
+                if interaction_request:
+                    return {
+                        "status": "interaction_required",
+                        "reason": str(code_generation.get("error") or code_generation.get("status") or "runtime_interaction_required"),
+                        "confidence_score": confidence,
+                        "needs_external_evidence": False,
+                        "template": template,
+                        "code_generation": code_generation,
+                        "interaction_request": interaction_request,
+                    }
                 return {
                     "status": "code_generation_failed",
                     "reason": str(code_generation.get("error") or code_generation.get("status") or "runtime_artifact_not_registerable"),

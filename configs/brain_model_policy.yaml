@@ -1,3 +1,21 @@
+model_resolution:
+  aliases:
+    qwen3.5:4b-q4_k_m:
+    - qwen3:4b
+    - qwen3:8b
+    - qwen2.5-coder:7b
+    qwen2.5-coder:7b:
+    - qwen2.5-coder:7b
+    - qwen2.5-coder:3b
+    - qwen2.5-coder:1.5b
+    - qwen2.5-coder:0.5b
+  fallback_models:
+  - qwen2.5-coder:7b
+  - qwen2.5-coder:3b
+  - qwen2.5-coder:1.5b
+  - qwen3:4b
+  - qwen3:8b
+
 defaults:
   provider: ollama
   model: qwen3.5:2b
@@ -38,7 +56,12 @@ brains:
           temperature: 0
         fallback:
         - provider: ollama
-          model: qwen3.5:4b-q4_k_m
+          model: qwen2.5-coder:7b
+          options:
+            temperature: 0
+          reason: local_code_generation_fallback
+        - provider: ollama
+          model: qwen3:4b
           options:
             temperature: 0
           reason: local_general_model_fallback
@@ -50,7 +73,12 @@ brains:
               temperature: 0
             fallback:
             - provider: ollama
-              model: qwen3.5:4b-q4_k_m
+              model: qwen2.5-coder:7b
+              options:
+                temperature: 0
+              reason: local_code_generation_fallback
+            - provider: ollama
+              model: qwen3:4b
               options:
                 temperature: 0
               reason: local_general_model_fallback
@@ -61,7 +89,12 @@ brains:
               temperature: 0
             fallback:
             - provider: ollama
-              model: qwen3.5:4b-q4_k_m
+              model: qwen2.5-coder:7b
+              options:
+                temperature: 0
+              reason: local_code_generation_fallback
+            - provider: ollama
+              model: qwen3:4b
               options:
                 temperature: 0
               reason: local_general_model_fallback
@@ -72,10 +105,15 @@ brains:
               temperature: 1
             fallback:
             - provider: ollama
-              model: qwen3.5:4b-q4_k_m
+              model: qwen2.5-coder:7b
               options:
                 temperature: 0
               reason: local_code_generation_fallback
+            - provider: ollama
+              model: qwen3:4b
+              options:
+                temperature: 0
+              reason: local_general_model_fallback
           critical:
             provider: openai
             model: gpt-5.5-thinking
@@ -83,10 +121,15 @@ brains:
               temperature: 1
             fallback:
             - provider: ollama
-              model: qwen3.5:4b-q4_k_m
+              model: qwen2.5-coder:7b
               options:
                 temperature: 0
               reason: local_code_generation_fallback
+            - provider: ollama
+              model: qwen3:4b
+              options:
+                temperature: 0
+              reason: local_general_model_fallback
   repair_brain:
     default:
       provider: ollama

@@ -7,6 +7,8 @@ import os
 import shutil
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from typing import Any
 
 from ai_core.model_orchestration.brain_model_router import BrainModelRoute, BrainModelRouter
@@ -81,6 +83,16 @@ class LiteLLMBrainClient:
         errors: list[dict[str, Any]] = []
         for attempt_route in self._route_attempts(route):
             prepared_route = self._prepare_attempt_route(attempt_route)
+            missing_secret = self._missing_provider_secret(prepared_route)
+            if missing_secret:
+                errors.append({
+                    "provider": prepared_route.provider,
+                    "model": prepared_route.model,
+                    "status": "missing_required_secret",
+                    "secret_key": missing_secret,
+                    "error": f"Missing required provider secret: {missing_secret}",
+                })
+                continue
             model = self._litellm_model(prepared_route)
             options = self._merge_options(route=prepared_route, response_format=response_format, kwargs=kwargs)
             try:
@@ -91,7 +103,8 @@ class LiteLLMBrainClient:
                 return LiteLLMBrainResult(status="completed", content=self._extract_content(raw), route=route_payload, raw=raw)
             except Exception as exc:
                 errors.append({"provider": prepared_route.provider, "model": prepared_route.model, "error": str(exc)[:1000]})
-        return LiteLLMBrainResult(status="failed", route=route.to_dict(), error=json_dumps_compact(errors))
+        status = "missing_required_secret" if self._only_or_final_actionable_secret_error(errors) else "failed"
+        return LiteLLMBrainResult(status=status, route={**route.to_dict(), **self._interaction_payload_from_errors(errors)}, error=json_dumps_compact(errors))
 
     def complete_with_route_sync(
         self,
@@ -109,6 +122,16 @@ class LiteLLMBrainClient:
         errors: list[dict[str, Any]] = []
         for attempt_route in self._route_attempts(route):
             prepared_route = self._prepare_attempt_route(attempt_route)
+            missing_secret = self._missing_provider_secret(prepared_route)
+            if missing_secret:
+                errors.append({
+                    "provider": prepared_route.provider,
+                    "model": prepared_route.model,
+                    "status": "missing_required_secret",
+                    "secret_key": missing_secret,
+                    "error": f"Missing required provider secret: {missing_secret}",
+                })
+                continue
             model = self._litellm_model(prepared_route)
             options = self._merge_options(route=prepared_route, response_format=response_format, kwargs=kwargs)
             try:
@@ -119,7 +142,8 @@ class LiteLLMBrainClient:
                 return LiteLLMBrainResult(status="completed", content=self._extract_content(raw), route=route_payload, raw=raw)
             except Exception as exc:
                 errors.append({"provider": prepared_route.provider, "model": prepared_route.model, "error": str(exc)[:1000]})
-        return LiteLLMBrainResult(status="failed", route=route.to_dict(), error=json_dumps_compact(errors))
+        status = "missing_required_secret" if self._only_or_final_actionable_secret_error(errors) else "failed"
+        return LiteLLMBrainResult(status=status, route={**route.to_dict(), **self._interaction_payload_from_errors(errors)}, error=json_dumps_compact(errors))
 
     def _merge_options(self, *, route: BrainModelRoute, response_format: dict[str, Any] | None, kwargs: dict[str, Any]) -> dict[str, Any]:
         options = dict(route.options or {})
@@ -165,8 +189,6 @@ class LiteLLMBrainClient:
         if os.environ.get("AI_CORE_DISABLE_OLLAMA_MODEL_PREPARE", "").lower() in {"1", "true", "yes"}:
             return requested
         binary = self._ollama_binary()
-        if not binary:
-            return requested
         tags = self._ollama_list(binary)
         if self._ollama_model_exists(tags, requested):
             return requested
@@ -188,26 +210,45 @@ class LiteLLMBrainClient:
         return shutil.which("ollama") or ""
 
     def _ollama_list(self, binary: str) -> list[str]:
+        names: list[str] = []
+        if binary:
+            try:
+                proc = subprocess.run([binary, "list"], text=True, capture_output=True, timeout=20)
+            except Exception:
+                proc = None
+            if proc is not None and proc.returncode == 0:
+                for line in (proc.stdout or "").splitlines()[1:]:
+                    parts = line.split()
+                    if parts:
+                        names.append(parts[0])
+        if names:
+            return names
+        return self._ollama_list_http()
+
+    def _ollama_list_http(self) -> list[str]:
         try:
-            proc = subprocess.run([binary, "list"], text=True, capture_output=True, timeout=20)
+            base = self._ollama_base_url().rstrip("/")
+            with urllib.request.urlopen(base + "/api/tags", timeout=20) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            models = payload.get("models") if isinstance(payload, dict) else []
+            return [str(item.get("name") or "").strip() for item in models if isinstance(item, dict) and str(item.get("name") or "").strip()]
         except Exception:
             return []
-        if proc.returncode != 0:
-            return []
-        names: list[str] = []
-        for line in (proc.stdout or "").splitlines()[1:]:
-            parts = line.split()
-            if parts:
-                names.append(parts[0])
-        return names
+
+    def _ollama_base_url(self) -> str:
+        host = os.environ.get("OLLAMA_HOST") or os.environ.get("AI_CORE_OLLAMA_BASE_URL") or "http://127.0.0.1:11434"
+        host = str(host).strip()
+        if host.startswith(":"):
+            host = "http://127.0.0.1" + host
+        if not host.startswith(("http://", "https://")):
+            host = "http://" + host
+        return host
 
     def _ollama_model_exists(self, names: list[str], model: str) -> bool:
         wanted = str(model or "").strip()
         if not wanted:
             return False
-        known = set(names or [])
-        known.update(item.split(":", 1)[0] for item in names or [] if item)
-        return wanted in known or wanted.split(":", 1)[0] in known
+        return wanted in set(names or [])
 
     def _ollama_candidate_models(self, requested: str) -> list[str]:
         candidates: list[str] = []
@@ -252,9 +293,23 @@ class LiteLLMBrainClient:
         if os.environ.get("AI_CORE_DISABLE_OLLAMA_MODEL_PULL", "").lower() in {"1", "true", "yes"}:
             return False
         timeout = int(os.environ.get("AI_CORE_OLLAMA_PULL_TIMEOUT_SECONDS", "3600") or "3600")
+        if binary:
+            try:
+                proc = subprocess.run([binary, "pull", model], text=True, capture_output=True, timeout=timeout)
+                if proc.returncode == 0:
+                    return True
+            except Exception:
+                pass
+        return self._ollama_pull_http(model=model, timeout=timeout)
+
+    def _ollama_pull_http(self, *, model: str, timeout: int) -> bool:
         try:
-            proc = subprocess.run([binary, "pull", model], text=True, capture_output=True, timeout=timeout)
-            return proc.returncode == 0
+            base = self._ollama_base_url().rstrip("/")
+            body = json.dumps({"name": model, "stream": False}).encode("utf-8")
+            request = urllib.request.Request(base + "/api/pull", data=body, headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                response.read()
+            return self._ollama_model_exists(self._ollama_list_http(), model)
         except Exception:
             return False
 
@@ -266,6 +321,75 @@ class LiteLLMBrainClient:
             if name.split(":", 1)[0] == requested_root:
                 return name
         return names[0]
+
+    def _missing_provider_secret(self, route: BrainModelRoute) -> str:
+        provider = str(route.provider or "").strip().lower()
+        required = self._provider_secret_env(provider)
+        if required and not os.environ.get(required):
+            return required
+        return ""
+
+    def _provider_secret_env(self, provider: str) -> str:
+        provider = str(provider or "").strip().lower()
+        if not provider:
+            return ""
+        cfg = self._load_provider_config(provider)
+        for key in ("auth_env", "api_key_env", "secret_env"):
+            value = str(cfg.get(key) or "").strip() if isinstance(cfg, dict) else ""
+            if value:
+                return value
+        auth_type = str(cfg.get("auth_type") or "").strip().lower() if isinstance(cfg, dict) else ""
+        if provider == "openai" or (provider.startswith("openai") and auth_type != "none"):
+            return "OPENAI_API_KEY"
+        if provider in {"claude", "anthropic"}:
+            return "ANTHROPIC_API_KEY"
+        return ""
+
+    def _load_provider_config(self, provider: str) -> dict[str, Any]:
+        path = CONFIGS_DIR / "models" / "providers.yaml"
+        if not path.exists():
+            return {}
+        try:
+            import yaml
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        providers = data.get("providers") if isinstance(data, dict) and isinstance(data.get("providers"), dict) else {}
+        cfg = providers.get(provider) if isinstance(providers.get(provider), dict) else {}
+        return cfg if isinstance(cfg, dict) else {}
+
+    def _only_or_final_actionable_secret_error(self, errors: list[dict[str, Any]]) -> bool:
+        if not errors:
+            return False
+        return any(str(item.get("status") or "") == "missing_required_secret" for item in errors)
+
+    def _interaction_payload_from_errors(self, errors: list[dict[str, Any]]) -> dict[str, Any]:
+        secret_names: list[str] = []
+        for item in errors or []:
+            if str(item.get("status") or "") == "missing_required_secret":
+                name = str(item.get("secret_key") or "").strip()
+                if name and name not in secret_names:
+                    secret_names.append(name)
+        if not secret_names:
+            return {"previous_attempts": errors}
+        fields = [{
+            "kind": "provider_secret",
+            "scope": "environment",
+            "parameter_name": name,
+            "name": name,
+            "input_type": "password",
+            "required": True,
+            "secret": True,
+        } for name in secret_names]
+        return {
+            "previous_attempts": errors,
+            "interaction_request": {
+                "type": "provider_secret_configuration",
+                "kind": "provider_secret_configuration",
+                "message": "Provide missing provider secret values, or switch to an available local model.",
+                "fields": fields,
+            },
+        }
 
     def _extract_content(self, raw: Any) -> str:
         content = ""

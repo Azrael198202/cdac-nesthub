@@ -57,6 +57,7 @@ class RuntimeBlueprintArtifactGenerator:
         generation_status = "not_attempted"
         generation_route: dict[str, Any] = {}
         generation_error = ""
+        generation_interaction_request: dict[str, Any] = {}
         dependencies = self._normalized_dependencies(blueprint.get("dependencies"))
 
         if self._valid_files(files) and not self._files_look_like_stub(files):
@@ -78,6 +79,7 @@ class RuntimeBlueprintArtifactGenerator:
             generation_status = str(llm_artifact.get("generation_status") or "failed")
             generation_route = llm_artifact.get("generation_route") if isinstance(llm_artifact.get("generation_route"), dict) else {}
             generation_error = str(llm_artifact.get("generation_error") or "")
+            generation_interaction_request = llm_artifact.get("generation_interaction_request") if isinstance(llm_artifact.get("generation_interaction_request"), dict) else {}
             if self._valid_generated_artifact(llm_artifact):
                 files = llm_artifact["files"]
                 input_schema = llm_artifact.get("input_schema") if isinstance(llm_artifact.get("input_schema"), dict) else input_schema
@@ -124,6 +126,7 @@ class RuntimeBlueprintArtifactGenerator:
                 "status": generation_status,
                 "route": generation_route,
                 "error": generation_error,
+                **({"interaction_request": generation_interaction_request} if generation_interaction_request else {}),
             },
             "generated_at": self._now_iso(),
         }
@@ -213,11 +216,36 @@ class RuntimeBlueprintArtifactGenerator:
             parsed["generation_preflight"] = preflight
             return parsed
         last = attempts[-1] if attempts else {}
+        interaction_request = self._interaction_request_from_generation_attempts(attempts)
         return {
-            "generation_status": str(last.get("status") or "llm_generation_failed"),
+            "generation_status": "interaction_required" if interaction_request else str(last.get("status") or "llm_generation_failed"),
             "generation_route": last.get("route") if isinstance(last.get("route"), dict) else {},
             "generation_error": str(last.get("error") or "LLM did not produce a registerable runtime artifact."),
             "generation_attempts": attempts,
+            **({"generation_interaction_request": interaction_request} if interaction_request else {}),
+        }
+
+    def _interaction_request_from_generation_attempts(self, attempts: list[dict[str, Any]]) -> dict[str, Any]:
+        fields: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for attempt in attempts or []:
+            route = attempt.get("route") if isinstance(attempt.get("route"), dict) else {}
+            request = route.get("interaction_request") if isinstance(route.get("interaction_request"), dict) else {}
+            for field in request.get("fields", []) if isinstance(request.get("fields"), list) else []:
+                if not isinstance(field, dict):
+                    continue
+                name = str(field.get("parameter_name") or field.get("name") or "").strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                fields.append(field)
+        if not fields:
+            return {}
+        return {
+            "type": "provider_secret_configuration",
+            "kind": "provider_secret_configuration",
+            "message": "Provide missing provider secret values, or switch to an available local model.",
+            "fields": fields,
         }
 
     def _generation_messages(
