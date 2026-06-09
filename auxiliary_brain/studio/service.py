@@ -32,7 +32,6 @@ from ai_core.runtime.capability.registered_tool_agent_binder import RegisteredTo
 from verification_brain import RuntimeVerificationFoundation
 from presentation_brain import FailureMessageRenderer, PresentationProfileRegistry
 from ai_core.runtime.state import runtime_state_manager
-from ai_core.runtime.services import runtime_service_manager
 
 
 class AgentStudioService:
@@ -111,14 +110,6 @@ class AgentStudioService:
             return await self.create_participant(message, routed.name, uploaded_artifacts=uploaded_artifacts)
         if routed.action == "create_task":
             return self.create_task_graph(message, routed.name, uploaded_artifacts=uploaded_artifacts, presentation_profile=presentation_profile)
-        if routed.action == "create_runtime_service":
-            return self.create_runtime_service(message, routed.name)
-        if routed.action == "start_runtime_service":
-            return self.start_runtime_service(routed.name or self._extract_runtime_service_name(message))
-        if routed.action == "stop_runtime_service":
-            return self.stop_runtime_service(routed.name or self._extract_runtime_service_name(message))
-        if routed.action == "list_runtime_services":
-            return self.list_runtime_services()
 
         # Direct output-modality requests must be isolated from ordinary chat and
         # from text-model preflight.  If a provider is missing, the user should
@@ -709,151 +700,6 @@ class AgentStudioService:
             return {"ok": True, "status": "deleted", "participant_id": participant_id}
         return {"ok": False, "status": result.get("status") or "failed", "participant_id": participant_id, "error": result.get("error")}
 
-    def create_runtime_service(self, instruction: str, name: str | None = None) -> dict[str, Any]:
-        service_type = self._extract_runtime_service_type(instruction)
-        service_id = self._extract_runtime_service_id(instruction, name=name, service_type=service_type)
-        configuration = self._extract_runtime_service_configuration(instruction)
-        auto_start = self._extract_runtime_service_auto_start(instruction)
-        result = runtime_service_manager.create_service(
-            service_id=service_id,
-            name=name or service_id,
-            service_type=service_type,
-            configuration=configuration,
-            enabled=auto_start,
-        )
-        service = result.get("service") if isinstance(result, dict) else {}
-        status = str(result.get("status") or "created") if isinstance(result, dict) else "failed"
-        return {
-            "action": "create_runtime_service",
-            "origin": "auxiliary_brain",
-            "status": status if result.get("ok", True) else "failed",
-            "service_id": service_id,
-            "service_type": service_type,
-            "service": service,
-            "final_answer": self._format_runtime_service_result("Runtime service created", result),
-        }
-
-    def start_runtime_service(self, service_id: str | None) -> dict[str, Any]:
-        sid = self._normalize_runtime_service_name(service_id or "durable_task_dispatcher")
-        existing = runtime_service_manager.get_service(sid)
-        if not existing and sid == "durable_task_dispatcher":
-            runtime_service_manager.create_service(
-                service_id=sid,
-                name="Durable Task Dispatcher",
-                service_type="durable_task_dispatcher",
-                configuration={"tick_seconds": 5},
-                enabled=False,
-            )
-        result = runtime_service_manager.start_service(sid)
-        return {
-            "action": "start_runtime_service",
-            "origin": "auxiliary_brain",
-            "status": str(result.get("status") or ("completed" if result.get("ok") else "failed")),
-            "service_id": sid,
-            "service": result.get("service"),
-            "final_answer": self._format_runtime_service_result("Runtime service start requested", result),
-        }
-
-    def stop_runtime_service(self, service_id: str | None) -> dict[str, Any]:
-        sid = self._normalize_runtime_service_name(service_id or "durable_task_dispatcher")
-        result = runtime_service_manager.stop_service(sid)
-        return {
-            "action": "stop_runtime_service",
-            "origin": "auxiliary_brain",
-            "status": str(result.get("status") or ("completed" if result.get("ok") else "failed")),
-            "service_id": sid,
-            "service": result.get("service"),
-            "final_answer": self._format_runtime_service_result("Runtime service stop requested", result),
-        }
-
-    def list_runtime_services(self) -> dict[str, Any]:
-        services = runtime_service_manager.list_services()
-        lines = ["Runtime services:"]
-        if not services:
-            lines.append("- No runtime services have been created.")
-        for item in services:
-            lines.append(f"- {item.get('service_id')}: {item.get('status')} / {item.get('service_type')} / enabled={bool(item.get('enabled'))}")
-        return {
-            "action": "list_runtime_services",
-            "origin": "auxiliary_brain",
-            "status": "completed",
-            "services": services,
-            "final_answer": "\n".join(lines),
-        }
-
-    def _extract_runtime_service_type(self, instruction: str) -> str:
-        text = str(instruction or "").casefold()
-        # Service type is selected from runtime infrastructure semantics, not
-        # from a business capability implementation. The durable dispatcher is
-        # the generic background worker that runs due persisted task policies.
-        if any(token in text for token in ("dispatcher", "scheduled", "schedule", "timer", "timers", "recurring")):
-            return "durable_task_dispatcher"
-        return "runtime_service"
-
-    def _extract_runtime_service_id(self, instruction: str, *, name: str | None, service_type: str) -> str:
-        explicit = self._extract_runtime_service_name(instruction)
-        return self._normalize_runtime_service_name(explicit or name or service_type)
-
-    def _extract_runtime_service_name(self, instruction: str) -> str | None:
-        text = str(instruction or "")
-        patterns = [
-            r"runtime service\s+(?:named\s+)?[\"']([^\"']+)[\"']",
-            r"service\s+(?:named\s+)?[\"']([^\"']+)[\"']",
-            r"runtime service\s+(?:named\s+)?([A-Za-z0-9_\- ]+?)(?:\.|,|$)",
-            r"service\s+(?:named\s+)?([A-Za-z0-9_\- ]+?)(?:\.|,|$)",
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, text, flags=re.IGNORECASE)
-            if match:
-                value = match.group(1).strip()
-                if value:
-                    return value
-        return None
-
-    def _extract_runtime_service_configuration(self, instruction: str) -> dict[str, Any]:
-        cfg: dict[str, Any] = {}
-        interval = self._extract_generic_interval_seconds(instruction)
-        if interval:
-            cfg["tick_seconds"] = max(1, min(interval, 60))
-        if "tick" in str(instruction or "").casefold():
-            match = re.search(r"tick(?:_seconds)?\s*[:=]\s*(\d+)", str(instruction or ""), flags=re.IGNORECASE)
-            if match:
-                cfg["tick_seconds"] = max(1, int(match.group(1)))
-        cfg.setdefault("tick_seconds", 5)
-        return cfg
-
-    def _extract_runtime_service_auto_start(self, instruction: str) -> bool:
-        text = str(instruction or "").casefold()
-        return any(token in text for token in ("start", "enable", "running", "run mode: background", "background"))
-
-    def _normalize_runtime_service_name(self, value: str | None) -> str:
-        text = str(value or "runtime_service").strip().lower()
-        aliases = {
-            "durable task dispatcher": "durable_task_dispatcher",
-            "scheduler runtime service": "durable_task_dispatcher",
-            "scheduler service": "durable_task_dispatcher",
-            "scheduled task runner": "durable_task_dispatcher",
-        }
-        if text in aliases:
-            return aliases[text]
-        text = text.replace(" ", "_")
-        allowed = "abcdefghijklmnopqrstuvwxyz0123456789_-"
-        safe = "".join(ch for ch in text if ch in allowed).strip("_-")
-        return safe or "runtime_service"
-
-    def _format_runtime_service_result(self, title: str, result: dict[str, Any]) -> str:
-        service = result.get("service") if isinstance(result, dict) else {}
-        if not isinstance(service, dict):
-            service = {}
-        status = result.get("status") if isinstance(result, dict) else "unknown"
-        ok = result.get("ok") if isinstance(result, dict) else False
-        lines = [title, f"status: {status}", f"ok: {bool(ok)}"]
-        if service:
-            lines.append(f"service_id: {service.get('service_id')}")
-            lines.append(f"service_type: {service.get('service_type')}")
-            lines.append(f"enabled: {bool(service.get('enabled'))}")
-        return "\n".join(lines)
-
     def delete_task_graph(self, task_name: str) -> dict[str, Any]:
         task_name = str(task_name or "").strip()
         if not task_name:
@@ -1427,10 +1273,6 @@ class AgentStudioService:
                 },
             )
         self._update_community()
-        service_suggestion = runtime_service_manager.suggest_service_for_context(payload)
-        final_answer = "Task graph created."
-        if service_suggestion:
-            final_answer += "\nRuntime service suggestion: create and start a durable task dispatcher so recurring policies can run in the background."
         return {
             "action": "create_task_graph",
             "origin": "auxiliary_brain",
@@ -1439,8 +1281,6 @@ class AgentStudioService:
             "task_name": task_name,
             "path": str(path),
             "uploaded_artifacts": artifact_refs,
-            "runtime_service_suggestion": service_suggestion,
-            "final_answer": final_answer,
         }
 
 
