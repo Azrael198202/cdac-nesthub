@@ -303,6 +303,8 @@ class RuntimeBlueprintArtifactGenerator:
             "When a standard-library feature needs a platform support package to satisfy the contract, declare the support package rather than the standard-library module itself. "
             "Never declare standard-library modules as pip dependencies. "
             "Use the supplied specification_contract as the source of truth for field types, defaults, required values, formats, patterns, and output bindings. If the contract declares a user-facing format field or a format binding, generated code must implement the conversion or interpretation inside the generated implementation before formatting/parsing. Do not rely on sandbox or validator to repair formats. Do not return a declared format/template string itself as a runtime output value. "
+            "When reading optional fields, choose defaults that match the declared JSON schema type. Never call string methods on a value that may be a list, dict, boolean, number, or None. If code needs to split a value, first normalize the value with a generic helper that accepts string, list, tuple, set, None, and scalar values. "
+            "For iterable inputs, support both array values and delimiter-separated strings when the contract allows browser/runtime entry to provide either shape. Do not assume a missing optional field is a string or a list unless the contract declares that type. "
             "Return only a JSON object; no markdown, no prose."
         )
         user = "Generate the runtime artifact from this contract:\n" + json.dumps(contract, ensure_ascii=False, indent=2, default=str)

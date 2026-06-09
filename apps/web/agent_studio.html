@@ -823,23 +823,13 @@ function formatApiErrorMessage(value){
 
 async function maybeApplyRepairProposal(data, toolId, profileId){
   const repair = data && data.repair;
-  if(!repair || repair.requires_user_confirmation !== true){ return; }
+  if(!repair){ return; }
   const message = repair.user_message || (repair.diagnosis && repair.diagnosis.user_message) || 'A repair proposal is available.';
-  const approved = confirm(message + '\n\nAllow the runtime to execute this repair action?');
-  if(!approved){
-    await apiFetchRuntimeToolJson('/api/agent-studio/feedback-repair/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repair_id:repair.repair_id,approved:false})});
-    addMessage('assistant','Repair declined by user.\n'+renderJson(repair),'error');
-    return;
-  }
-  const applied = await apiFetchRuntimeToolJson('/api/agent-studio/feedback-repair/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repair_id:repair.repair_id,approved:true})});
-  addMessage('assistant','Repair result:\n'+renderJson(applied), applied.ok?'final':'error');
-  if(applied && applied.ok && applied.repaired_input){
-    const rerun = confirm('A repaired input payload was generated. Execute this tool again now?');
-    if(rerun){
-      const again = await apiFetchRuntimeToolJson('/api/agent-studio/runtime-tools/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:toolId,input_data:applied.repaired_input,profile_id:profileId,approval_confirmed:true})});
-      addMessage('assistant', again.ok ? ('Runtime tool executed after repair:\n'+renderJson(again.result)) : ('Runtime tool still failed after repair:\n'+renderJson(again)), again.ok?'final':'error');
-    }
-  }
+  addMessage(
+    'assistant',
+    'Runtime execution failed. A scoped repair proposal was recorded, but it will not be applied automatically.\n\n' + message + '\n\nRepair proposal:\n' + renderJson(repair),
+    'error'
+  );
 }
 
 async function skipCredentialAndContinue(){

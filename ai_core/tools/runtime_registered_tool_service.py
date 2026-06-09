@@ -11,6 +11,8 @@ from ai_core.tools.generic_tool_runner import GenericToolRunner
 from ai_core.runtime.approval_policy_store import RuntimeApprovalPolicyStore
 from ai_core.runtime.self_repair.repair_orchestrator import FeedbackRepairOrchestrator
 
+_NO_DEFAULT = object()
+
 
 class RuntimeRegisteredToolService:
     """Generic service for listing and executing runtime-registered tools.
@@ -125,6 +127,7 @@ class RuntimeRegisteredToolService:
         runtime_input = input_data if isinstance(input_data, dict) else {"value": input_data}
         runtime_input = self._coerce_by_schema(runtime_input, input_schema)
         runtime_input = self._apply_runtime_invocation_defaults(spec=spec, payload=runtime_input, approval_confirmed=approval_confirmed)
+        runtime_input = self._apply_schema_invocation_defaults(payload=runtime_input, schema=input_schema)
         runtime_input = self._coerce_by_schema(runtime_input, input_schema)
 
         input_validation = self.runner.schema_validator.validate_input(input_schema, runtime_input)
@@ -407,6 +410,44 @@ class RuntimeRegisteredToolService:
             if key not in data or data.get(key) in (None, "", [], {}):
                 data[key] = value
         return data
+
+
+    def _apply_schema_invocation_defaults(self, *, payload: Any, schema: dict[str, Any] | None) -> dict[str, Any]:
+        """Materialize neutral defaults for missing optional input fields.
+
+        This is contract-driven and capability-agnostic. Generated tools often
+        call methods on optional values. When a JSON schema declares a field
+        type, the runtime can safely provide the neutral value for a missing
+        optional field before invoking the tool, instead of letting generated
+        code choose an incompatible default.
+        """
+        data = dict(payload) if isinstance(payload, dict) else {"value": payload}
+        if not isinstance(schema, dict):
+            return data
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        for key, spec in props.items():
+            if key in data and data.get(key) is not None:
+                continue
+            if not isinstance(spec, dict):
+                continue
+            if "default" in spec:
+                data[key] = spec.get("default")
+                continue
+            expected = spec.get("type")
+            if isinstance(expected, list):
+                expected = next((x for x in expected if x != "null"), expected[0] if expected else None)
+            neutral = self._neutral_value_for_json_type(expected)
+            if neutral is not _NO_DEFAULT:
+                data[key] = neutral
+        return data
+
+    def _neutral_value_for_json_type(self, expected: Any) -> Any:
+        return {
+            "string": "",
+            "array": [],
+            "object": {},
+            "boolean": False,
+        }.get(str(expected), _NO_DEFAULT)
 
     def _approval_preview(self, input_data: Any) -> dict[str, Any]:
         if isinstance(input_data, dict):

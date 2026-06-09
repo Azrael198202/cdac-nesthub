@@ -75,7 +75,7 @@ class GenericToolRunner:
 
         try:
             fn = self._load_function(path, function_name)
-            invocation_payload = self._prepare_invocation_payload(input_data)
+            invocation_payload = self._prepare_invocation_payload(input_data, tool_spec=tool_spec)
             output = fn(invocation_payload)
             if inspect.isawaitable(output):
                 result = self._error("async_tool_not_supported_here", "Async tool output must be awaited by an async runner.")
@@ -115,7 +115,7 @@ class GenericToolRunner:
             trace = self.provenance.finish(trace, output=result, status="error", error=result.get("error"))
             return self.provenance.attach(result, trace)
 
-    def _prepare_invocation_payload(self, input_data: Any) -> Any:
+    def _prepare_invocation_payload(self, input_data: Any, *, tool_spec: dict[str, Any] | None = None) -> Any:
         """Return a safe invocation payload for runtime-generated tools.
 
         The registered-tool runtime envelope may contain generic metadata under
@@ -131,6 +131,10 @@ class GenericToolRunner:
         if "input" not in input_data and not any(key in input_data for key in envelope_keys - {"input"}):
             return input_data
         payload = dict(input_data)
+        schema = tool_spec.get("input_schema") if isinstance(tool_spec, dict) and isinstance(tool_spec.get("input_schema"), dict) else {}
+        nested = payload.get("input")
+        if isinstance(nested, dict) and isinstance(schema, dict):
+            payload["input"] = self._apply_schema_neutral_defaults(nested, schema)
         runtime = payload.get("_runtime")
         if not isinstance(runtime, dict):
             runtime = {}
@@ -139,6 +143,31 @@ class GenericToolRunner:
         runtime.setdefault("dry_run", False)
         payload["_runtime"] = runtime
         return payload
+
+
+    def _apply_schema_neutral_defaults(self, payload: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+        data = dict(payload)
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        for key, spec in props.items():
+            if key in data and data.get(key) is not None:
+                continue
+            if not isinstance(spec, dict):
+                continue
+            if "default" in spec:
+                data[key] = spec.get("default")
+                continue
+            expected = spec.get("type")
+            if isinstance(expected, list):
+                expected = next((x for x in expected if x != "null"), expected[0] if expected else None)
+            if expected == "string":
+                data[key] = ""
+            elif expected == "array":
+                data[key] = []
+            elif expected == "object":
+                data[key] = {}
+            elif expected == "boolean":
+                data[key] = False
+        return data
 
 
     def _runtime_input_for_schema_validation(self, input_data: Any) -> Any:

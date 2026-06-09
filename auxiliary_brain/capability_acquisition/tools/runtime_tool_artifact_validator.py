@@ -69,6 +69,9 @@ class RuntimeToolArtifactValidator:
                 if name not in available:
                     errors.append(f"undefined_callable: name '{name}' is called but not defined/imported")
 
+        unsafe_default_calls = self._unsafe_method_calls_on_incompatible_get_defaults(tree)
+        errors.extend(unsafe_default_calls)
+
         dynamic_check = DynamicValueHardcodeDetector().detect(source, runtime_variables or [])
         if not dynamic_check.get("passed"):
             for finding in dynamic_check.get("findings", []):
@@ -93,6 +96,72 @@ class RuntimeToolArtifactValidator:
             return {"valid": False, "errors": [f"import_validation_failed: {exc}"]}
 
         return {"valid": True, "errors": []}
+
+
+    def _unsafe_method_calls_on_incompatible_get_defaults(self, tree: ast.AST) -> list[str]:
+        """Detect generic type hazards such as value = obj.get(name, []); value.split(...).
+
+        This is structural Python validation, not capability logic. It prevents
+        registration of generated code that assigns an incompatible default and
+        later calls a method that the default type cannot support.
+        """
+        assigned_defaults: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+                continue
+            target = node.targets[0].id
+            value = node.value
+            if not (isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) and value.func.attr == "get"):
+                continue
+            default_node = None
+            if len(value.args) >= 2:
+                default_node = value.args[1]
+            for keyword in value.keywords or []:
+                if keyword.arg == "default":
+                    default_node = keyword.value
+            kind = self._literal_container_kind(default_node)
+            if kind:
+                assigned_defaults[target] = kind
+        errors: list[str] = []
+        incompatible = {
+            "split": {"list", "dict", "tuple", "set", "bool", "number", "none"},
+            "items": {"list", "tuple", "set", "str", "bool", "number", "none"},
+            "append": {"dict", "tuple", "set", "str", "bool", "number", "none"},
+            "extend": {"dict", "tuple", "set", "str", "bool", "number", "none"},
+        }
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)):
+                continue
+            name = node.func.value.id
+            method = node.func.attr
+            default_kind = assigned_defaults.get(name)
+            if default_kind and default_kind in incompatible.get(method, set()):
+                errors.append(f"unsafe_method_call_on_incompatible_default: variable '{name}' has default {default_kind} but method '{method}' is called")
+        return errors
+
+    def _literal_container_kind(self, node: ast.AST | None) -> str:
+        if node is None:
+            return ""
+        if isinstance(node, ast.List):
+            return "list"
+        if isinstance(node, ast.Dict):
+            return "dict"
+        if isinstance(node, ast.Tuple):
+            return "tuple"
+        if isinstance(node, ast.Set):
+            return "set"
+        if isinstance(node, ast.Constant):
+            if node.value is None:
+                return "none"
+            if isinstance(node.value, str):
+                return "str"
+            if isinstance(node.value, bool):
+                return "bool"
+            if isinstance(node.value, (int, float)):
+                return "number"
+        return ""
 
     def _assigned_names(self, target: ast.AST) -> set[str]:
         names: set[str] = set()
