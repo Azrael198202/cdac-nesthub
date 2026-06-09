@@ -47,6 +47,10 @@ class RuntimeBlueprintArtifactGenerator:
         output_schema = self._schema_or_default(blueprint.get("output_schema"), "output")
         connection_schema = self._closed_schema(blueprint.get("connection_schema"))
         secret_schema = self._closed_schema(blueprint.get("secret_schema"))
+        declared_input_schema = self._schema_or_default(blueprint.get("input_schema"), "input")
+        declared_output_schema = self._schema_or_default(blueprint.get("output_schema"), "output")
+        declared_connection_schema = self._closed_schema(blueprint.get("connection_schema"))
+        declared_secret_schema = self._closed_schema(blueprint.get("secret_schema"))
         verification_input = blueprint.get("verification_input") if isinstance(blueprint.get("verification_input"), dict) else self._generic_verification_input(input_schema, connection_schema, secret_schema)
         verification_input = self._verification_input_with_schema_sample(verification_input, input_schema, connection_schema, secret_schema)
         verification_expectations = blueprint.get("verification_expectations") if isinstance(blueprint.get("verification_expectations"), dict) else {"status": "completed"}
@@ -54,6 +58,8 @@ class RuntimeBlueprintArtifactGenerator:
             blueprint=blueprint,
             input_schema=input_schema,
             output_schema=output_schema,
+            connection_schema=connection_schema,
+            secret_schema=secret_schema,
             verification_input=verification_input,
             verification_expectations=verification_expectations,
         )
@@ -70,6 +76,10 @@ class RuntimeBlueprintArtifactGenerator:
             input_schema = self._reconcile_required_fields_from_source(input_schema, files, scope="input")
             connection_schema = self._reconcile_required_fields_from_source(connection_schema, files, scope="connection")
             secret_schema = self._reconcile_required_fields_from_source(secret_schema, files, scope="secrets")
+            input_schema = self._merge_declared_schema(declared_input_schema, input_schema, default_name="input")
+            output_schema = self._merge_declared_schema(declared_output_schema, output_schema, default_name="output")
+            connection_schema = self._merge_declared_schema(declared_connection_schema, connection_schema, default_name="connection")
+            secret_schema = self._merge_declared_schema(declared_secret_schema, secret_schema, default_name="secrets")
             verification_input = self._verification_input_with_schema_sample(verification_input, input_schema, connection_schema, secret_schema)
             artifact_kind = "real_runtime_implementation"
             generation_status = "provided_blueprint_files_used"
@@ -91,10 +101,10 @@ class RuntimeBlueprintArtifactGenerator:
             generation_error = str(llm_artifact.get("generation_error") or "")
             if self._valid_generated_artifact(llm_artifact):
                 files = llm_artifact["files"]
-                input_schema = llm_artifact.get("input_schema") if isinstance(llm_artifact.get("input_schema"), dict) else input_schema
-                output_schema = llm_artifact.get("output_schema") if isinstance(llm_artifact.get("output_schema"), dict) else output_schema
-                connection_schema = self._closed_schema(llm_artifact.get("connection_schema"))
-                secret_schema = self._closed_schema(llm_artifact.get("secret_schema"))
+                input_schema = self._merge_declared_schema(declared_input_schema, llm_artifact.get("input_schema") if isinstance(llm_artifact.get("input_schema"), dict) else input_schema, default_name="input")
+                output_schema = self._merge_declared_schema(declared_output_schema, llm_artifact.get("output_schema") if isinstance(llm_artifact.get("output_schema"), dict) else output_schema, default_name="output")
+                connection_schema = self._merge_declared_schema(declared_connection_schema, self._closed_schema(llm_artifact.get("connection_schema")), default_name="connection")
+                secret_schema = self._merge_declared_schema(declared_secret_schema, self._closed_schema(llm_artifact.get("secret_schema")), default_name="secrets")
                 verification_input = llm_artifact.get("verification_input") if isinstance(llm_artifact.get("verification_input"), dict) else self._generic_verification_input(input_schema, connection_schema, secret_schema)
                 verification_input = self._verification_input_with_schema_sample(verification_input, input_schema, connection_schema, secret_schema)
                 verification_expectations = llm_artifact.get("verification_expectations") if isinstance(llm_artifact.get("verification_expectations"), dict) else verification_expectations
@@ -622,6 +632,40 @@ class RuntimeBlueprintArtifactGenerator:
 
     def _valid_files(self, files: Any) -> bool:
         return isinstance(files, list) and bool(files) and all(isinstance(item, dict) and str(item.get("path") or "").strip() and isinstance(item.get("content"), str) for item in files)
+
+    def _merge_declared_schema(self, declared: dict[str, Any], generated: dict[str, Any], *, default_name: str) -> dict[str, Any]:
+        """Preserve interface fields declared before code generation.
+
+        LLM generation may refine descriptions, optionality, or add fields, but it
+        must not erase user/request-declared connection or secret fields. This is
+        generic schema merging; field names are treated as opaque interface keys.
+        """
+        base = self._schema_or_default(declared, default_name) if default_name in {"input", "output"} else self._closed_schema(declared)
+        other = self._schema_or_default(generated, default_name) if default_name in {"input", "output"} else self._closed_schema(generated)
+        merged = dict(other)
+        merged.setdefault("type", "object")
+        base_props = base.get("properties") if isinstance(base.get("properties"), dict) else {}
+        other_props = other.get("properties") if isinstance(other.get("properties"), dict) else {}
+        props: dict[str, Any] = {}
+        props.update(other_props)
+        for name, spec in base_props.items():
+            if name in props and isinstance(props.get(name), dict) and isinstance(spec, dict):
+                combined = dict(spec)
+                combined.update(props[name])
+                props[name] = combined
+            else:
+                props[name] = spec
+        merged["properties"] = props
+        base_required = [str(x) for x in base.get("required", []) if isinstance(x, str)] if isinstance(base.get("required"), list) else []
+        other_required = [str(x) for x in other.get("required", []) if isinstance(x, str)] if isinstance(other.get("required"), list) else []
+        ordered_required: list[str] = []
+        for name in [*base_required, *other_required]:
+            if name in props and name not in ordered_required:
+                ordered_required.append(name)
+        merged["required"] = ordered_required
+        if props:
+            merged["additionalProperties"] = False
+        return merged
 
     def _schema_or_default(self, value: Any, name: str) -> dict[str, Any]:
         if isinstance(value, dict) and value:

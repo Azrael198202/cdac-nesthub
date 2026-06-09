@@ -15,9 +15,11 @@ class CapabilitySpecificationContractCompiler:
     sandbox validation must verify this same contract.
     """
 
-    def compile(self, *, blueprint: dict[str, Any], input_schema: dict[str, Any], output_schema: dict[str, Any], verification_input: dict[str, Any], verification_expectations: dict[str, Any] | None = None) -> dict[str, Any]:
+    def compile(self, *, blueprint: dict[str, Any], input_schema: dict[str, Any], output_schema: dict[str, Any], connection_schema: dict[str, Any] | None = None, secret_schema: dict[str, Any] | None = None, verification_input: dict[str, Any], verification_expectations: dict[str, Any] | None = None) -> dict[str, Any]:
         source = deepcopy(blueprint if isinstance(blueprint, dict) else {})
         input_contracts = self._field_contracts(input_schema, root="input")
+        connection_contracts = self._field_contracts(connection_schema or {}, root="connection")
+        secret_contracts = self._field_contracts(secret_schema or {}, root="secrets")
         output_contracts = self._field_contracts(output_schema, root="output")
         bindings = self._declared_output_bindings(output_schema)
         default_bindings = self._infer_generic_default_bindings(input_contracts=input_contracts, output_contracts=output_contracts)
@@ -25,6 +27,8 @@ class CapabilitySpecificationContractCompiler:
         verification_contract = {
             "status": "contract_compiled",
             "input_contracts": input_contracts,
+            "connection_contracts": connection_contracts,
+            "secret_contracts": secret_contracts,
             "output_contracts": output_contracts,
             "output_bindings": bindings,
             "required_output_paths": self._required_output_paths(output_schema),
@@ -39,11 +43,15 @@ class CapabilitySpecificationContractCompiler:
                 "capability_name": source.get("capability_name") or source.get("name"),
             },
             "input_schema": deepcopy(input_schema),
+            "connection_schema": deepcopy(connection_schema or {}),
+            "secret_schema": deepcopy(secret_schema or {}),
             "output_schema": deepcopy(output_schema),
             "verification_contract": verification_contract,
             "generation_requirements": {
                 "must_implement_input_contracts": True,
                 "must_implement_output_contracts": True,
+                "must_preserve_declared_connection_contracts": True,
+                "must_preserve_declared_secret_contracts": True,
                 "must_not_copy_format_or_template_values_as_runtime_outputs": True,
                 "must_return_json_serializable_object": True,
                 "must_place_declared_output_values_under_top_level_or_data_object": True,

@@ -1596,13 +1596,13 @@ def test_runtime_contract_smoke():
             return False
 
     def _effectful_runtime_test_mode_guard(self, *, tool_dir: Path) -> dict[str, Any]:
-        """Require an explicit local test-mode branch for effectful artifacts.
+        """Require a local test-mode branch for artifacts declared effectful.
 
-        This check is technical, not capability-specific.  It looks for common
-        Python operations that can contact external systems or mutate state. If
-        such operations are present, the generated source must include an
-        explicit runtime test-mode guard so sandbox validation can run locally
-        without credentials, network, or side effects.
+        The guard is driven by runtime policy and generic Python structure, not
+        capability names or domain libraries. When an artifact may affect an
+        external system or local state, sandbox execution must be able to take a
+        local deterministic path before live clients, credentials, or mutations
+        are reached.
         """
         manifest_path = tool_dir / "manifest.json"
         try:
@@ -1612,6 +1612,7 @@ def test_runtime_contract_smoke():
         policy = manifest.get("runtime_execution_policy") if isinstance(manifest.get("runtime_execution_policy"), dict) else {}
         side_effects = str(policy.get("side_effects") or "").casefold()
         policy_effectful = side_effects not in {"", "none", "pure", "read_only", "read-only"}
+
         source_parts: list[str] = []
         for path in sorted(tool_dir.glob("*.py")):
             if path.name.startswith("test_"):
@@ -1621,35 +1622,98 @@ def test_runtime_contract_smoke():
             except Exception:
                 continue
         source = "\n".join(source_parts)
-        lowered = source.casefold()
-        effectful_markers = [
-            "socket.", "smtplib.", "smtp_ssl", "smtp(", "http.client", "urllib.request",
-            "subprocess.", "open(", ".write(", "remove(", "unlink(", "rmdir(", "mkdir(",
-            "requests.", "ftplib.", "poplib.", "imaplib.", "telnetlib.", "ssl.wrap_socket",
-        ]
-        present = [m for m in effectful_markers if m in lowered]
-        effectful = bool(policy_effectful or present)
+        structural = self._generic_effectful_source_signals(source)
+        effectful = bool(policy_effectful or structural)
         if not effectful:
-            return {"passed": True, "status": "not_required", "effectful_markers": present, "policy_side_effects": side_effects}
-        guard_terms = ["dry_run", "test_mode", "mock"]
-        has_guard_term = any(term in lowered for term in guard_terms)
-        # Avoid accepting a source file that only mentions the guard in comments.
-        executable_lines = []
-        for line in source.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            executable_lines.append(stripped)
-        executable_text = "\n".join(executable_lines).casefold()
-        has_executable_guard = any(term in executable_text for term in guard_terms) and bool(re.search(r"\bif\b[^\n]*(dry_run|test_mode|mock)", executable_text))
-        passed = bool(has_guard_term and has_executable_guard)
+            return {
+                "passed": True,
+                "status": "not_required",
+                "policy_side_effects": side_effects,
+                "structural_signals": structural,
+            }
+        guard = self._generic_test_mode_branch_signal(source)
+        passed = bool(guard.get("has_branch") and guard.get("branch_precedes_effectful_signal"))
         return {
             "passed": passed,
             "status": "completed" if passed else "missing_runtime_test_mode_guard",
-            "reason": "" if passed else "effectful_runtime_must_have_explicit_test_mode_branch",
-            "effectful_markers": present,
+            "reason": "" if passed else "effectful_runtime_must_have_early_test_mode_branch",
             "policy_side_effects": side_effects,
+            "structural_signals": structural,
+            "guard": guard,
         }
+
+    def _generic_effectful_source_signals(self, source: str) -> list[dict[str, Any]]:
+        """Return generic effectful-code signals without capability-specific terms."""
+        try:
+            tree = ast.parse(source or "")
+        except SyntaxError:
+            return [{"kind": "syntax_unavailable", "line": 0}]
+        signals: list[dict[str, Any]] = []
+        mutating_method_names = {
+            "write", "writelines", "remove", "unlink", "rmdir", "mkdir", "makedirs",
+            "replace", "rename", "send", "sendall", "sendto", "connect", "request",
+            "post", "put", "patch", "delete", "login", "commit", "execute",
+        }
+        external_constructor_suffixes = {"client", "connection", "session", "transport"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                name = self._call_name(node.func).casefold()
+                last = name.rsplit(".", 1)[-1]
+                if last in mutating_method_names:
+                    signals.append({"kind": "effectful_call", "line": getattr(node, "lineno", 0), "name": last})
+                elif any(last.endswith(suffix) for suffix in external_constructor_suffixes):
+                    signals.append({"kind": "external_handle_construction", "line": getattr(node, "lineno", 0), "name": last})
+                elif last == "open" and self._open_call_allows_write(node):
+                    signals.append({"kind": "mutable_file_open", "line": getattr(node, "lineno", 0), "name": last})
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                # Importing a module is not itself a side effect. Runtime policy
+                # remains the authoritative source for external behavior.
+                continue
+        return signals[:50]
+
+    def _generic_test_mode_branch_signal(self, source: str) -> dict[str, Any]:
+        try:
+            tree = ast.parse(source or "")
+        except SyntaxError:
+            return {"has_branch": False, "branch_precedes_effectful_signal": False, "reason": "syntax_unavailable"}
+        branch_lines: list[int] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.If) and self._test_mode_expression(node.test):
+                branch_lines.append(getattr(node, "lineno", 0))
+        signals = self._generic_effectful_source_signals(source)
+        signal_lines = [int(item.get("line") or 0) for item in signals if int(item.get("line") or 0) > 0]
+        first_branch = min(branch_lines) if branch_lines else 0
+        first_signal = min(signal_lines) if signal_lines else 0
+        return {
+            "has_branch": bool(first_branch),
+            "branch_line": first_branch,
+            "first_effectful_line": first_signal,
+            "branch_precedes_effectful_signal": bool(first_branch and (not first_signal or first_branch < first_signal)),
+        }
+
+    def _test_mode_expression(self, node: ast.AST) -> bool:
+        text = ast.unparse(node).casefold() if hasattr(ast, "unparse") else ""
+        return any(token in text for token in ["dry_run", "test_mode", "mock"])
+
+    def _call_name(self, node: ast.AST) -> str:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            prefix = self._call_name(node.value)
+            return f"{prefix}.{node.attr}" if prefix else node.attr
+        return ""
+
+    def _open_call_allows_write(self, node: ast.Call) -> bool:
+        if not node.args and not node.keywords:
+            return False
+        mode_value = None
+        if len(node.args) >= 2:
+            mode_value = self._constant_node_value(node.args[1])
+        for kw in node.keywords:
+            if kw.arg == "mode":
+                mode_value = self._constant_node_value(kw.value)
+        mode = str(mode_value or "r")
+        return any(ch in mode for ch in ["w", "a", "+", "x"])
 
     def _test_static_quality_gate(self, *, tool_dir: Path, test_candidates: list[Path]) -> dict[str, Any]:
         local_modules = {path.stem for path in tool_dir.rglob("*.py")}
