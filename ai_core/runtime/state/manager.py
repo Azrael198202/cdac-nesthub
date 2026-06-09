@@ -104,6 +104,10 @@ class RuntimeStateManager:
         run_id = self._safe_id(run_id or "runtime")
         step_id = self._safe_step_id(step_id or "runtime")
         now = utc_now()
+        terminal_statuses_for_event = {"completed", "failed", "skipped", "cancelled", "interrupted"}
+        effective_progress = progress
+        if str(status or "") in terminal_statuses_for_event:
+            effective_progress = 100.0
         with self._lock:
             run = self._runs.get(run_id) or self._read_run(run_id) or RuntimeRunState(run_id=run_id, title=run_id)
             seq = self._sequence.get(run_id, int(run.event_count or 0)) + 1
@@ -125,7 +129,7 @@ class RuntimeStateManager:
                 output=self._redact_data(output),
                 method=method,
                 tool=tool,
-                progress=progress,
+                progress=effective_progress,
                 started_at=now if status in {"running", "planning", "generating", "validating", "verifying", "repairing"} else None,
                 ended_at=now if status in {"completed", "failed", "skipped", "cancelled"} else None,
                 error=self._redact_data(error) if error else None,
@@ -148,17 +152,16 @@ class RuntimeStateManager:
                 step.method = method
             if tool:
                 step.tool = tool
-            if progress is not None:
+            if effective_progress is not None:
                 try:
-                    step.progress = max(0.0, min(100.0, float(progress)))
+                    step.progress = max(0.0, min(100.0, float(effective_progress)))
                 except Exception:
                     pass
             if status in {"running", "planning", "generating", "validating", "verifying", "repairing"}:
                 step.started_at = step.started_at or now
             if status in {"completed", "failed", "skipped", "cancelled"}:
                 step.ended_at = now
-                if status == "completed" and progress is None:
-                    step.progress = 100.0
+                step.progress = 100.0
             if error:
                 step.error = self._redact_data(error)
                 run.last_error = step.error
@@ -391,7 +394,10 @@ class RuntimeStateManager:
                 pass
             else:
                 node["status"] = step.status
-            node["progress"] = max(float(node.get("progress") or 0.0), float(step.progress or 0.0))
+            if str(step.status or "") in {"completed", "failed", "skipped", "cancelled", "interrupted"}:
+                node["progress"] = 100.0
+            else:
+                node["progress"] = max(float(node.get("progress") or 0.0), float(step.progress or 0.0))
             node["active"] = str(node.get("status") or step.status) not in terminal
             node["last_step_id"] = step.step_id
             node["last_message"] = step.last_message

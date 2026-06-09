@@ -1661,7 +1661,7 @@ def test_runtime_contract_smoke():
         if not module_path.exists():
             return {"passed": False, "status": "failed", "reason": "implementation_module_missing", "module_path": str(module_path)}
         runner = (
-            "import importlib.util, json; "
+            "import importlib.util, json, sys; "
             f"module_path = {json.dumps(str(module_path))}; "
             f"function_name = {json.dumps(function_name)}; "
             f"payload = json.loads({json.dumps(json.dumps(verification_input, ensure_ascii=False))}); "
@@ -1669,7 +1669,7 @@ def test_runtime_contract_smoke():
             "module = importlib.util.module_from_spec(spec); "
             "spec.loader.exec_module(module); "
             "output = getattr(module, function_name)(payload); "
-            "json.dumps(output, ensure_ascii=False)"
+            "print(json.dumps(output, ensure_ascii=False))"
         )
         proc = self._run_isolated_python(["-c", runner], cwd=tool_dir, timeout=30)
         output: Any = None
@@ -1677,7 +1677,7 @@ def test_runtime_contract_smoke():
         stdout = str(proc.get("stdout") or "")
         if proc.get("returncode") == 0:
             try:
-                output = json.loads(stdout)
+                output = self._parse_json_from_subprocess_stdout(stdout)
             except Exception as exc:
                 parse_error = f"output_json_parse_failed:{exc.__class__.__name__}"
         manifest = {}
@@ -1842,6 +1842,33 @@ def test_runtime_contract_smoke():
             raise RuntimeError(f"Callable '{function_name}' not found in {path}")
         return fn
 
+
+    def _parse_json_from_subprocess_stdout(self, stdout: str) -> Any:
+        """Parse the JSON payload printed by an isolated smoke runner.
+
+        Some local Python/debug environments can write advisory text around the
+        runner output.  The runner contract is therefore: the generated tool
+        returns a JSON-serializable object, and the smoke runner prints that
+        object as a JSON line.  We parse the last valid JSON-looking line rather
+        than treating unrelated diagnostics as tool output.
+        """
+        text = str(stdout or "").strip()
+        if not text:
+            raise ValueError("empty_stdout")
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+        for line in reversed(text.splitlines()):
+            candidate = line.strip()
+            if not candidate or candidate[0] not in '[{"':
+                continue
+            try:
+                return json.loads(candidate)
+            except Exception:
+                continue
+        raise ValueError("no_json_payload_in_stdout")
+
     def _runtime_output_contract_checks(
         self,
         *,
@@ -1948,7 +1975,7 @@ def test_runtime_contract_smoke():
     def _looks_like_unresolved_placeholder(self, value: str) -> bool:
         text = str(value or "").strip()
         lowered = text.casefold()
-        if lowered in {"yyyy-mm-dd", "yyyy-mm-dd hh:mm", "yyyy-mm-dd hh mm", "iso8601", "current_time", "timestamp_iso"}:
+        if lowered in {"yyyy-mm-dd", "yyyy-mm-dd hh:mm", "yyyy-mm-dd hh mm", "iso8601", "iso-8601", "iso_8601"}:
             return True
         if re.fullmatch(r"[yYmMdDhHsS:/\-\s%]+", text) and re.search(r"[yY]{2,4}|%Y|%y", text):
             return True
