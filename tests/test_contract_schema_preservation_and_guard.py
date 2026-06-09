@@ -75,3 +75,22 @@ def test_effectful_guard_open_mode_literal_helper_does_not_crash(tmp_path: Path)
     result = router._effectful_runtime_test_mode_guard(tool_dir=tool_dir)
     assert not result["passed"]
     assert result["status"] == "missing_runtime_test_mode_guard"
+
+
+def test_materialize_initializes_dependencies_before_runtime_policy():
+    gen = RuntimeBlueprintArtifactGenerator(llm_client=None)
+    artifact = gen.materialize({
+        "capability_id": "generic_timer",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "output_schema": {"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]},
+        "connection_schema": {"type": "object", "properties": {}, "required": []},
+        "secret_schema": {"type": "object", "properties": {}, "required": []},
+        "files": [
+            {
+                "path": "tool.py",
+                "content": "def run(payload=None):\n    return {'status': 'completed', 'data': {}}\n",
+            }
+        ],
+    })
+    assert artifact["dependencies"] == []
+    assert artifact["runtime_execution_policy"]

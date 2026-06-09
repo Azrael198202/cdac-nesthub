@@ -54,6 +54,7 @@ class RuntimeBlueprintArtifactGenerator:
         verification_input = blueprint.get("verification_input") if isinstance(blueprint.get("verification_input"), dict) else self._generic_verification_input(input_schema, connection_schema, secret_schema)
         verification_input = self._verification_input_with_schema_sample(verification_input, input_schema, connection_schema, secret_schema)
         verification_expectations = blueprint.get("verification_expectations") if isinstance(blueprint.get("verification_expectations"), dict) else {"status": "completed"}
+        dependencies = self._drop_stdlib_dependencies(self._normalized_dependencies(blueprint.get("dependencies")))
         specification_contract = self.contract_compiler.compile(
             blueprint=blueprint,
             input_schema=input_schema,
@@ -63,13 +64,20 @@ class RuntimeBlueprintArtifactGenerator:
             verification_input=verification_input,
             verification_expectations=verification_expectations,
         )
+        runtime_execution_policy = self._runtime_execution_policy_or_default(
+            blueprint.get("runtime_execution_policy"),
+            input_schema=input_schema,
+            connection_schema=connection_schema,
+            secret_schema=secret_schema,
+            dependencies=dependencies,
+        )
+        approval_policy = self._approval_policy_or_default(blueprint.get("approval_policy"), runtime_execution_policy=runtime_execution_policy)
         capability_contract = self._capability_contract(tool_id=tool_id, blueprint=blueprint)
         files = blueprint.get("files") if isinstance(blueprint.get("files"), list) else []
         artifact_kind = "blueprint_only_not_registerable"
         generation_status = "not_attempted"
         generation_route: dict[str, Any] = {}
         generation_error = ""
-        dependencies = self._normalized_dependencies(blueprint.get("dependencies"))
 
         if self._valid_files(files) and not self._files_look_like_stub(files):
             files = self._stabilize_standard_library_runtime_files(files, blueprint=blueprint)
@@ -142,9 +150,9 @@ class RuntimeBlueprintArtifactGenerator:
             "output_schema": output_schema,
             "connection_schema": connection_schema,
             "secret_schema": secret_schema,
-            "approval_policy": self._approval_policy_or_default(blueprint.get("approval_policy")),
+            "approval_policy": approval_policy,
             "runtime_interface": blueprint.get("runtime_interface") if isinstance(blueprint.get("runtime_interface"), dict) else {"input_mode": "json", "output_mode": "json"},
-            "runtime_execution_policy": blueprint.get("runtime_execution_policy") if isinstance(blueprint.get("runtime_execution_policy"), dict) else {"side_effects": "runtime_declared"},
+            "runtime_execution_policy": runtime_execution_policy,
             "verification_input": verification_input,
             "verification_expectations": verification_expectations,
             "specification_contract": specification_contract,
@@ -512,22 +520,56 @@ class RuntimeBlueprintArtifactGenerator:
                 out.append(cloned)
         return out
 
-    def _approval_policy_or_default(self, value: Any) -> dict[str, Any]:
+    def _approval_policy_or_default(self, value: Any, *, runtime_execution_policy: dict[str, Any] | None = None) -> dict[str, Any]:
+        runtime_execution_policy = runtime_execution_policy if isinstance(runtime_execution_policy, dict) else {}
+        side_effects = str(runtime_execution_policy.get("side_effects") or "").strip().casefold()
+        safe_effects = {"none", "pure", "read_only", "read-only"}
+        default_required = side_effects not in safe_effects
         if isinstance(value, dict) and value.get("supported_modes") and value.get("default_mode"):
             policy = dict(value)
         else:
+            mode = "always" if default_required else "never"
             policy = {
-                "required": True,
+                "required": default_required,
                 "supported_modes": ["always", "once", "never"],
-                "default_mode": "always",
-                "mode": "always",
-                "preview_required": True,
+                "default_mode": mode,
+                "mode": mode,
+                "preview_required": default_required,
             }
         policy.setdefault("supported_modes", ["always", "once", "never"])
-        policy.setdefault("default_mode", "always")
+        policy.setdefault("default_mode", "always" if bool(policy.get("required")) else "never")
         policy.setdefault("mode", policy.get("default_mode", "always"))
-        policy.setdefault("required", True)
-        policy.setdefault("preview_required", True)
+        policy.setdefault("required", default_required)
+        policy.setdefault("preview_required", bool(policy.get("required")))
+        if str(policy.get("mode") or "").strip().casefold() == "never":
+            policy["required"] = False
+            policy["preview_required"] = False
+        return policy
+
+    def _runtime_execution_policy_or_default(
+        self,
+        value: Any,
+        *,
+        input_schema: dict[str, Any],
+        connection_schema: dict[str, Any],
+        secret_schema: dict[str, Any],
+        dependencies: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        policy = dict(value) if isinstance(value, dict) else {}
+        side_effects = str(policy.get("side_effects") or "").strip().casefold()
+        ambiguous = {"", "runtime_declared", "unknown", "unspecified"}
+        if side_effects in ambiguous:
+            connection_required = bool((connection_schema.get("required") or [])) or bool(connection_schema.get("properties"))
+            secret_required = bool((secret_schema.get("required") or [])) or bool(secret_schema.get("properties"))
+            non_stdlib_dependencies = bool(dependencies)
+            if connection_required or secret_required:
+                side_effects = "external_write"
+            elif non_stdlib_dependencies:
+                side_effects = "external_read"
+            else:
+                side_effects = "none"
+        policy["side_effects"] = side_effects
+        policy.setdefault("classification_source", "specification_contract")
         return policy
 
     def _dependency_import_names(self, dependencies: list[dict[str, Any]]) -> set[str]:

@@ -932,3 +932,5 @@ tests/__pycache__/test_capability_scoped_state.cpython-313-pytest-9.0.2.pyc
 tests/__pycache__/test_runtime_smoke_and_state_projection.cpython-313-pytest-9.0.2.pyc
 auxiliary_brain/capability_acquisition/__pycache__/specification_contract_compiler.cpython-313.pyc
 ai_core/runtime/common/__pycache__/__init__.cpython-313.pyc
+ai_core/runtime/state/__pycache__/capability_scope.cpython-311.pyc
+auxiliary_brain/capability_acquisition/__pycache__/specification_contract_compiler.cpython-311.pyc

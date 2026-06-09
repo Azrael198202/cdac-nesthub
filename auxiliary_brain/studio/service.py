@@ -2015,9 +2015,23 @@ class AgentStudioService:
                 "message": self._paused_message(response["missing_inputs"], pending_action),
             }
             response["message"] = self._paused_message(response["missing_inputs"], pending_action)
-        runtime_state_manager.emit(run_id=state_run_id, step_id="result.verify", level="user", kind="verification", status="running", title="Result verification", message="Verifying execution material and response quality.", method="verification_brain", progress=40)
-        self._attach_verification_report(task_graph=task_graph, participants=participants, run_payload=result, response=response, stage="execute_task")
-        runtime_state_manager.emit(run_id=state_run_id, step_id="result.verify", level="developer", kind="verification", status="completed", title="Result verification completed", message=str((response.get("verification") or {}).get("status") or "completed"), output={"verification": response.get("verification")}, progress=100)
+        if status in {"requires_key", "requires_input", "paused"}:
+            runtime_state_manager.emit(
+                run_id=state_run_id,
+                step_id="result.verify",
+                level="developer",
+                kind="verification",
+                status="paused",
+                title="Result verification paused",
+                message="Execution is waiting for runtime interaction; result verification will resume after continuation.",
+                output={"verification": {"status": "waiting_for_runtime_interaction"}},
+                progress=100,
+            )
+            response["verification"] = {"status": "waiting_for_runtime_interaction"}
+        else:
+            runtime_state_manager.emit(run_id=state_run_id, step_id="result.verify", level="user", kind="verification", status="running", title="Result verification", message="Verifying execution material and response quality.", method="verification_brain", progress=40)
+            self._attach_verification_report(task_graph=task_graph, participants=participants, run_payload=result, response=response, stage="execute_task")
+            runtime_state_manager.emit(run_id=state_run_id, step_id="result.verify", level="developer", kind="verification", status="completed", title="Result verification completed", message=str((response.get("verification") or {}).get("status") or "completed"), output={"verification": response.get("verification")}, progress=100)
         runtime_state_manager.emit(run_id=state_run_id, step_id="final.synthesis", level="user", kind="output", status=status, title="Final synthesis", message="Final response prepared for the user.", output={"status": status, "has_final_answer": bool(response.get("final_answer"))}, progress=100)
         return response
 

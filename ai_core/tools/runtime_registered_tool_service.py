@@ -54,6 +54,24 @@ class RuntimeRegisteredToolService:
         out.setdefault("tool_id", str(tool_id))
         return out
 
+    def _approval_required(self, spec: dict[str, Any], approval: dict[str, Any]) -> bool:
+        if not bool(approval.get("required")):
+            return False
+        runtime_policy = spec.get("runtime_execution_policy") if isinstance(spec.get("runtime_execution_policy"), dict) else {}
+        side_effects = str(runtime_policy.get("side_effects") or "").strip().casefold()
+        safe_effects = {"none", "pure", "read_only", "read-only"}
+        if side_effects in safe_effects:
+            return False
+        ambiguous = {"", "runtime_declared", "unknown", "unspecified"}
+        if side_effects in ambiguous:
+            connection_schema = spec.get("connection_schema") if isinstance(spec.get("connection_schema"), dict) else {}
+            secret_schema = spec.get("secret_schema") if isinstance(spec.get("secret_schema"), dict) else {}
+            has_connection_contract = bool(connection_schema.get("required") or connection_schema.get("properties"))
+            has_secret_contract = bool(secret_schema.get("required") or secret_schema.get("properties"))
+            if not has_connection_contract and not has_secret_contract:
+                return False
+        return True
+
     def configure_tool_profile(
         self,
         *,
@@ -105,10 +123,11 @@ class RuntimeRegisteredToolService:
                 "tool": self._public_tool_summary(spec),
             }
         approval = spec.get("approval_policy") if isinstance(spec.get("approval_policy"), dict) else {}
+        approval_required = self._approval_required(spec, approval)
         approval_settings = self.approval_policy_store.get_tool_policy(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id)
-        if bool(approval.get("required")) and not approval_confirmed and self.approval_policy_store.is_auto_approved(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id):
+        if approval_required and not approval_confirmed and self.approval_policy_store.is_auto_approved(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id):
             approval_confirmed = True
-        if bool(approval.get("required")) and not approval_confirmed:
+        if approval_required and not approval_confirmed:
             return {
                 "ok": False,
                 "status": "requires_human_confirmation",

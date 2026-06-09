@@ -165,13 +165,13 @@ class RegisteredToolAgentBinder:
                 "name": "approval_confirmed",
                 "label": "Confirm execution",
                 "description": "Confirm that the runtime capability may execute for this task run.",
-                "required": False,
+                "required": True,
                 "type": "boolean",
                 "values": [],
                 "collection_mode": "single_value",
-                "runtime_required": False,
-                "blocking": False,
-                "execution_required": False,
+                "runtime_required": True,
+                "blocking": True,
+                "execution_required": True,
                 "source_schema_type": "boolean",
             })
         params.append({
@@ -199,10 +199,21 @@ class RegisteredToolAgentBinder:
 
     def _execution_policy(self, spec: dict[str, Any]) -> dict[str, Any]:
         approval = spec.get("approval_policy") if isinstance(spec.get("approval_policy"), dict) else {}
+        runtime_policy = spec.get("runtime_execution_policy") if isinstance(spec.get("runtime_execution_policy"), dict) else {}
+        side_effects = str(runtime_policy.get("side_effects") or "").strip().casefold()
+        safe_effects = {"none", "pure", "read_only", "read-only"}
+        ambiguous_effects = {"", "runtime_declared", "unknown", "unspecified"}
+        connection_schema = spec.get("connection_schema") if isinstance(spec.get("connection_schema"), dict) else {}
+        secret_schema = spec.get("secret_schema") if isinstance(spec.get("secret_schema"), dict) else {}
+        has_connection_contract = bool(connection_schema.get("required") or connection_schema.get("properties"))
+        has_secret_contract = bool(secret_schema.get("required") or secret_schema.get("properties"))
+        safe_ambiguous = side_effects in ambiguous_effects and not has_connection_contract and not has_secret_contract
+        requires_approval = bool(approval.get("required")) and side_effects not in safe_effects and not safe_ambiguous
         return {
             "execution_method": "runtime_registered_tool",
-            "requires_approval": bool(approval.get("required")),
-            "approval_policy": approval,
+            "requires_approval": requires_approval,
+            "approval_policy": approval if requires_approval else {**approval, "required": False, "mode": "never", "preview_required": False},
+            "runtime_execution_policy": runtime_policy,
             "connection_required": bool((spec.get("connection_schema") or {}).get("required")) if isinstance(spec.get("connection_schema"), dict) else False,
             "secret_required": bool((spec.get("secret_schema") or {}).get("required")) if isinstance(spec.get("secret_schema"), dict) else False,
         }

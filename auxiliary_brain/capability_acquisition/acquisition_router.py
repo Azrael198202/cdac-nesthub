@@ -1623,13 +1623,32 @@ def test_runtime_contract_smoke():
                 continue
         source = "\n".join(source_parts)
         structural = self._generic_effectful_source_signals(source)
-        effectful = bool(policy_effectful or structural)
-        if not effectful:
+        external_signals = [item for item in structural if item.get("scope") == "external"]
+        local_signals = [item for item in structural if item.get("scope") == "local_state"]
+
+        # Local runtime persistence is not the same as live external side
+        # effects. Capabilities that persist local state, such as timers, must
+        # be validated by writing to sandbox-owned storage. Requiring an early
+        # dry-run branch before every mkdir/open call would prevent the very
+        # persistence behavior that the contract asks the sandbox to verify.
+        # This guard therefore requires a test-mode branch only for external or
+        # irreversible effects, while still reporting local state signals for
+        # auditability.
+        local_only_policy_values = {
+            "", "none", "pure", "read_only", "read-only",
+            "local_state", "local_state_write", "local_write",
+            "local_persistence", "filesystem_write", "runtime_storage",
+        }
+        external_policy = side_effects not in local_only_policy_values
+        requires_early_test_branch = bool(external_policy or external_signals)
+        if not requires_early_test_branch:
             return {
                 "passed": True,
-                "status": "not_required",
+                "status": "local_state_sandbox_allowed" if local_signals else "not_required",
                 "policy_side_effects": side_effects,
                 "structural_signals": structural,
+                "external_signals": external_signals,
+                "local_state_signals": local_signals,
             }
         guard = self._generic_test_mode_branch_signal(source)
         passed = bool(guard.get("has_branch") and guard.get("branch_precedes_effectful_signal"))
@@ -1639,6 +1658,8 @@ def test_runtime_contract_smoke():
             "reason": "" if passed else "effectful_runtime_must_have_early_test_mode_branch",
             "policy_side_effects": side_effects,
             "structural_signals": structural,
+            "external_signals": external_signals,
+            "local_state_signals": local_signals,
             "guard": guard,
         }
 
@@ -1649,9 +1670,12 @@ def test_runtime_contract_smoke():
         except SyntaxError:
             return [{"kind": "syntax_unavailable", "line": 0}]
         signals: list[dict[str, Any]] = []
-        mutating_method_names = {
+        local_state_method_names = {
             "write", "writelines", "remove", "unlink", "rmdir", "mkdir", "makedirs",
-            "replace", "rename", "send", "sendall", "sendto", "connect", "request",
+            "replace", "rename",
+        }
+        external_method_names = {
+            "send", "sendall", "sendto", "connect", "request",
             "post", "put", "patch", "delete", "login", "commit", "execute",
         }
         external_constructor_suffixes = {"client", "connection", "session", "transport"}
@@ -1659,12 +1683,14 @@ def test_runtime_contract_smoke():
             if isinstance(node, ast.Call):
                 name = self._call_name(node.func).casefold()
                 last = name.rsplit(".", 1)[-1]
-                if last in mutating_method_names:
-                    signals.append({"kind": "effectful_call", "line": getattr(node, "lineno", 0), "name": last})
+                if last in external_method_names:
+                    signals.append({"kind": "effectful_call", "scope": "external", "line": getattr(node, "lineno", 0), "name": last})
+                elif last in local_state_method_names:
+                    signals.append({"kind": "effectful_call", "scope": "local_state", "line": getattr(node, "lineno", 0), "name": last})
                 elif any(last.endswith(suffix) for suffix in external_constructor_suffixes):
-                    signals.append({"kind": "external_handle_construction", "line": getattr(node, "lineno", 0), "name": last})
+                    signals.append({"kind": "external_handle_construction", "scope": "external", "line": getattr(node, "lineno", 0), "name": last})
                 elif last == "open" and self._open_call_allows_write(node):
-                    signals.append({"kind": "mutable_file_open", "line": getattr(node, "lineno", 0), "name": last})
+                    signals.append({"kind": "mutable_file_open", "scope": "local_state", "line": getattr(node, "lineno", 0), "name": last})
             elif isinstance(node, (ast.Import, ast.ImportFrom)):
                 # Importing a module is not itself a side effect. Runtime policy
                 # remains the authoritative source for external behavior.
@@ -2137,13 +2163,24 @@ def test_runtime_contract_smoke():
         return {"passed": True, "checks": checks}
 
     def _declared_output_fields(self, *, output_schema: dict[str, Any], expectations: dict[str, Any]) -> list[str]:
+        """Return output fields that must be present in a smoke-test response.
+
+        A JSON schema property is not required merely because it is declared in
+        ``properties``.  Some generated capabilities legitimately return
+        ``{"status": "completed"}`` for mutation-style operations while
+        returning an optional ``data`` object for read/list operations.
+
+        Therefore this method is contract-driven:
+        - require only fields listed in the schema's top-level ``required``;
+        - require explicit verification expectation keys;
+        - do not promote optional properties into mandatory smoke-test fields.
+
+        Nested field requirements remain handled by the specification contract
+        checks when the corresponding parent object is required or present.
+        """
         fields: list[str] = []
-        properties = output_schema.get("properties") if isinstance(output_schema.get("properties"), dict) else {}
         required = output_schema.get("required") if isinstance(output_schema.get("required"), list) else []
         for name in required:
-            if isinstance(name, str) and name not in fields:
-                fields.append(name)
-        for name in properties.keys():
             if isinstance(name, str) and name not in fields:
                 fields.append(name)
         for name in expectations.keys():

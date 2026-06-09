@@ -91,3 +91,28 @@ def test_specification_contract_compiler_feeds_generation_and_validation_contrac
     assert spec["schema_version"].endswith("/v1")
     assert any(item["path"] == "input.format" for item in vc["input_contracts"])
     assert any(item["output_path"] == "output.data.current_time" and item["source_path"] == "input.format" for item in vc["output_bindings"])
+
+
+def test_optional_output_properties_are_not_required_by_smoke_contract():
+    impl = RuntimeCapabilityGapImplementer()
+    result = impl._runtime_output_contract_checks(
+        verification_input={"input": {"action": "create"}, "_runtime": {"dry_run": True}},
+        output={"status": "completed"},
+        expectations={"status": "completed"},
+        manifest={
+            "output_schema": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string"},
+                    "data": {"type": "object"},
+                },
+                "required": ["status"],
+                "additionalProperties": False,
+            },
+            "specification_contract": {
+                "schema_version": "capability-specification-contract/v1",
+                "verification_contract": {"output_bindings": []},
+            },
+        },
+    )
+    assert result["passed"] is True
