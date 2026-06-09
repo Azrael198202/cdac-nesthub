@@ -1409,7 +1409,7 @@ def test_runtime_contract_smoke():
             return True
         checks = validation.get("checks") if isinstance(validation.get("checks"), list) else []
         text = json.dumps(checks, ensure_ascii=False, default=str).casefold()
-        return any(marker in text for marker in ["nameerror", "typeerror", "not json serializable", "undefined_names", "unit_test"])
+        return any(marker in text for marker in ["nameerror", "typeerror", "not json serializable", "undefined_names", "unit_test", "runtime_test_mode_guard", "missing_runtime_test_mode_guard", "timeoutexpired"])
 
     def _compact_validation_failure(self, validation: dict[str, Any]) -> dict[str, Any]:
         checks = validation.get("checks") if isinstance(validation.get("checks"), list) else []
@@ -1541,7 +1541,24 @@ def test_runtime_contract_smoke():
                 "reason": str(test_quality.get("status") or "generated_test_static_quality_failed"),
                 "checks": checks,
             }
-        for test_file in test_candidates:
+        effect_guard = self._effectful_runtime_test_mode_guard(tool_dir=tool_dir)
+        checks.append({"name": "effectful_runtime_test_mode_guard", **effect_guard})
+        if not effect_guard.get("passed"):
+            return {
+                "passed": False,
+                "status": "sandbox_failed",
+                "reason": str(effect_guard.get("reason") or effect_guard.get("status") or "runtime_test_mode_guard_failed"),
+                "checks": checks,
+            }
+
+        # Only execute validator-owned tests. Generated in-artifact tests are
+        # kept as source material but are not authoritative because they may
+        # perform live side effects or block. The sandbox-owned contract smoke
+        # test is generated from the manifest and verification contract.
+        executable_tests = [p for p in test_candidates if test_dir.exists() and self._is_relative_to(p, test_dir)]
+        if not executable_tests:
+            executable_tests = list(test_candidates)
+        for test_file in executable_tests:
             runner = (
                 "import runpy, sys; "
                 f"sys.path.insert(0, {json.dumps(str(tool_dir))}); "
@@ -1570,6 +1587,69 @@ def test_runtime_contract_smoke():
         if not quality.get("passed"):
             return {"passed": False, "status": "sandbox_failed", "reason": str(quality.get("reason") or "artifact_quality_gate_failed"), "checks": checks}
         return {"passed": True, "status": "completed", "checks": checks, "isolation_level": "clean_subprocess"}
+
+    def _is_relative_to(self, path: Path, parent: Path) -> bool:
+        try:
+            path.resolve().relative_to(parent.resolve())
+            return True
+        except Exception:
+            return False
+
+    def _effectful_runtime_test_mode_guard(self, *, tool_dir: Path) -> dict[str, Any]:
+        """Require an explicit local test-mode branch for effectful artifacts.
+
+        This check is technical, not capability-specific.  It looks for common
+        Python operations that can contact external systems or mutate state. If
+        such operations are present, the generated source must include an
+        explicit runtime test-mode guard so sandbox validation can run locally
+        without credentials, network, or side effects.
+        """
+        manifest_path = tool_dir / "manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+        except Exception:
+            manifest = {}
+        policy = manifest.get("runtime_execution_policy") if isinstance(manifest.get("runtime_execution_policy"), dict) else {}
+        side_effects = str(policy.get("side_effects") or "").casefold()
+        policy_effectful = side_effects not in {"", "none", "pure", "read_only", "read-only"}
+        source_parts: list[str] = []
+        for path in sorted(tool_dir.glob("*.py")):
+            if path.name.startswith("test_"):
+                continue
+            try:
+                source_parts.append(path.read_text(encoding="utf-8", errors="ignore"))
+            except Exception:
+                continue
+        source = "\n".join(source_parts)
+        lowered = source.casefold()
+        effectful_markers = [
+            "socket.", "smtplib.", "smtp_ssl", "smtp(", "http.client", "urllib.request",
+            "subprocess.", "open(", ".write(", "remove(", "unlink(", "rmdir(", "mkdir(",
+            "requests.", "ftplib.", "poplib.", "imaplib.", "telnetlib.", "ssl.wrap_socket",
+        ]
+        present = [m for m in effectful_markers if m in lowered]
+        effectful = bool(policy_effectful or present)
+        if not effectful:
+            return {"passed": True, "status": "not_required", "effectful_markers": present, "policy_side_effects": side_effects}
+        guard_terms = ["dry_run", "test_mode", "mock"]
+        has_guard_term = any(term in lowered for term in guard_terms)
+        # Avoid accepting a source file that only mentions the guard in comments.
+        executable_lines = []
+        for line in source.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            executable_lines.append(stripped)
+        executable_text = "\n".join(executable_lines).casefold()
+        has_executable_guard = any(term in executable_text for term in guard_terms) and bool(re.search(r"\bif\b[^\n]*(dry_run|test_mode|mock)", executable_text))
+        passed = bool(has_guard_term and has_executable_guard)
+        return {
+            "passed": passed,
+            "status": "completed" if passed else "missing_runtime_test_mode_guard",
+            "reason": "" if passed else "effectful_runtime_must_have_explicit_test_mode_branch",
+            "effectful_markers": present,
+            "policy_side_effects": side_effects,
+        }
 
     def _test_static_quality_gate(self, *, tool_dir: Path, test_candidates: list[Path]) -> dict[str, Any]:
         local_modules = {path.stem for path in tool_dir.rglob("*.py")}

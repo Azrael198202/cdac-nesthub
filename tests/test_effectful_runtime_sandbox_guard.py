@@ -1,0 +1,43 @@
+from pathlib import Path
+import json
+
+from auxiliary_brain.capability_acquisition.acquisition_router import RuntimeCapabilityGapImplementer
+
+
+def test_effectful_generated_source_without_dry_run_guard_is_rejected(tmp_path):
+    tool_dir = tmp_path / "tool"
+    tool_dir.mkdir()
+    (tool_dir / "manifest.json").write_text(json.dumps({
+        "runtime_execution_policy": {"side_effects": "runtime_declared"}
+    }), encoding="utf-8")
+    (tool_dir / "tool.py").write_text(
+        "import smtplib\n"
+        "def run(payload):\n"
+        "    with smtplib.SMTP_SSL('example.invalid', 465) as server:\n"
+        "        return {'status': 'success'}\n",
+        encoding="utf-8",
+    )
+    result = RuntimeCapabilityGapImplementer()._effectful_runtime_test_mode_guard(tool_dir=tool_dir)
+    assert result["passed"] is False
+    assert result["status"] == "missing_runtime_test_mode_guard"
+
+
+def test_effectful_generated_source_with_explicit_dry_run_guard_is_accepted(tmp_path):
+    tool_dir = tmp_path / "tool"
+    tool_dir.mkdir()
+    (tool_dir / "manifest.json").write_text(json.dumps({
+        "runtime_execution_policy": {"side_effects": "runtime_declared"}
+    }), encoding="utf-8")
+    (tool_dir / "tool.py").write_text(
+        "import smtplib\n"
+        "def run(payload):\n"
+        "    runtime = payload.get('_runtime', {}) if isinstance(payload, dict) else {}\n"
+        "    dry_run = bool(runtime.get('dry_run'))\n"
+        "    if dry_run:\n"
+        "        return {'status': 'success', 'data': {'dry_run': True}}\n"
+        "    with smtplib.SMTP_SSL('example.invalid', 465) as server:\n"
+        "        return {'status': 'success'}\n",
+        encoding="utf-8",
+    )
+    result = RuntimeCapabilityGapImplementer()._effectful_runtime_test_mode_guard(tool_dir=tool_dir)
+    assert result["passed"] is True

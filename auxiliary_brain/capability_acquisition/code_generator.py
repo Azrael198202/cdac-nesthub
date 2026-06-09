@@ -296,8 +296,10 @@ class RuntimeBlueprintArtifactGenerator:
             "do not import pytest or any external test runner. "
             "The test file must run locally without external network calls, assert the declared verification behavior, "
             "and verify that json.dumps(run(payload)) succeeds. "
-            "The implementation must inspect a generic test-mode flag such as payload['_runtime']['dry_run'] before any operation that can affect external state, contact a remote service, mutate local files, or require credentials. "
-            "When test-mode is true, return a successful structured verification result using local deterministic behavior only; do not initialize external clients, open network connections, require live credentials, or perform irreversible side effects. "
+            "At the very start of the entrypoint, extract payload['_runtime'] when it is a dict and compute a boolean test-mode flag from dry_run, mock, or test_mode. "
+            "If test-mode is true, immediately return a successful JSON-serializable structured verification result that satisfies the output contract, before checking required connection or secret values and before constructing external clients. "
+            "Never initialize external clients, open network connections, require live credentials, mutate files, or perform irreversible side effects while test-mode is true. "
+            "The generated source must contain an explicit test-mode branch inside the entrypoint; relying on tests or sandbox monkeypatches is not acceptable. "
             "Live execution may use connection and secret envelopes after sandbox registration and approval, but the sandbox path must remain fully local and deterministic. "
             "If live end-to-end verification needs real user values, expose those values through input_schema, connection_schema, and secret_schema so the runtime interaction layer can ask the user after sandbox registration. "
             "When a standard-library feature needs a platform support package to satisfy the contract, declare the support package rather than the standard-library module itself. "
@@ -796,8 +798,11 @@ class RuntimeBlueprintArtifactGenerator:
         required = schema.get("required") if isinstance(schema.get("required"), list) else []
         result: dict[str, Any] = {}
         for name, field_schema in props.items():
-            if name in required or "default" in (field_schema if isinstance(field_schema, dict) else {}):
-                result[str(name)] = self._sample_value(field_schema if isinstance(field_schema, dict) else {})
+            # Sandbox verification should exercise the full declared contract.
+            # Optional fields still receive neutral schema-shaped samples so the
+            # generated implementation can prove it handles every declared
+            # parameter without needing live user values.
+            result[str(name)] = self._sample_value(field_schema if isinstance(field_schema, dict) else {})
         return result
 
     def _sample_value(self, schema: dict[str, Any]) -> Any:
