@@ -934,3 +934,6 @@ auxiliary_brain/capability_acquisition/__pycache__/specification_contract_compil
 ai_core/runtime/common/__pycache__/__init__.cpython-313.pyc
 ai_core/runtime/state/__pycache__/capability_scope.cpython-311.pyc
 auxiliary_brain/capability_acquisition/__pycache__/specification_contract_compiler.cpython-311.pyc
+ai_core/runtime/services/__pycache__/__init__.cpython-313.pyc
+ai_core/runtime/services/__pycache__/service_manager.cpython-313.pyc
+ai_core/runtime/services/__pycache__/singleton.cpython-313.pyc

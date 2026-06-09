@@ -31,6 +31,7 @@ from ai_core.runtime.self_repair.repair_orchestrator import FeedbackRepairOrches
 from ai_core.runtime.scheduler import ScheduledTaskRunner
 from ai_core.runtime.async_jobs import RuntimeAsyncJobStore
 from ai_core.runtime.state import runtime_state_manager, capability_scoped_state_store
+from ai_core.runtime.services import runtime_service_manager
 
 import traceback
 import os
@@ -49,6 +50,33 @@ approval_policy_store = RuntimeApprovalPolicyStore()
 feedback_repair_orchestrator = FeedbackRepairOrchestrator()
 scheduled_task_runner = ScheduledTaskRunner()
 async_job_store = RuntimeAsyncJobStore()
+
+
+def _start_durable_task_dispatcher_service(configuration: dict[str, Any] | None = None) -> dict[str, Any]:
+    cfg = configuration if isinstance(configuration, dict) else {}
+    tick_seconds = int(cfg.get("tick_seconds") or 5)
+    scheduled_task_runner.start(_execute_due_task, tick_seconds=max(1, tick_seconds))
+    return {"status": "started", "tick_seconds": max(1, tick_seconds)}
+
+
+def _stop_durable_task_dispatcher_service(configuration: dict[str, Any] | None = None) -> dict[str, Any]:
+    # Actual task cancellation is performed in the FastAPI shutdown hook because
+    # the runner exposes an async stop method.  Marking the service disabled is
+    # still useful for operator state and for preventing startup auto-enable.
+    return {"status": "stop_requested"}
+
+
+def _status_durable_task_dispatcher_service(configuration: dict[str, Any] | None = None) -> dict[str, Any]:
+    task = getattr(scheduled_task_runner, "_task", None)
+    return {"running": bool(task is not None and not task.done())}
+
+
+runtime_service_manager.register_handler(
+    "durable_task_dispatcher",
+    start=_start_durable_task_dispatcher_service,
+    stop=_stop_durable_task_dispatcher_service,
+    status=_status_durable_task_dispatcher_service,
+)
 
 @app.on_event("startup")
 async def _runtime_state_restart_cleanup():
@@ -72,6 +100,9 @@ async def _runtime_state_restart_cleanup():
 def _scheduler_config_enabled() -> bool:
     env = str(os.getenv("AI_RUNTIME_SCHEDULER_ENABLED") or "").strip().lower()
     if env in {"1", "true", "yes", "on"}:
+        return True
+    service = runtime_service_manager.get_service("durable_task_dispatcher")
+    if isinstance(service, dict) and service.get("enabled") is True:
         return True
     path = Path("runtime") / "configs" / "scheduler.json"
     try:
@@ -734,6 +765,54 @@ async def graph_runtime_resume_schedule(task_name: str):
 async def graph_runtime_schedule_history(task_name: str, limit: int = 80):
     return JSONResponse({"ok": True, "task_name": task_name, "history": studio_service.task_execution_history(task_name, limit=limit)})
 
+
+
+@app.get("/api/runtime-services")
+async def runtime_services_list():
+    return JSONResponse({"ok": True, "services": runtime_service_manager.list_services()})
+
+
+@app.get("/api/runtime-services/{service_id}")
+async def runtime_services_status(service_id: str):
+    return JSONResponse(runtime_service_manager.status_service(service_id))
+
+
+class RuntimeServiceRequest(BaseModel):
+    service_id: str | None = None
+    name: str | None = None
+    service_type: str | None = None
+    enabled: bool = False
+    configuration: dict[str, Any] | None = None
+
+
+@app.post("/api/runtime-services")
+async def runtime_services_create(req: RuntimeServiceRequest):
+    service_type = str(req.service_type or "durable_task_dispatcher").strip()
+    service_id = str(req.service_id or service_type).strip()
+    result = runtime_service_manager.create_service(
+        service_id=service_id,
+        name=req.name or service_id,
+        service_type=service_type,
+        configuration=req.configuration or {},
+        enabled=bool(req.enabled),
+    )
+    return JSONResponse(result)
+
+
+@app.post("/api/runtime-services/{service_id}/start")
+async def runtime_services_start(service_id: str):
+    return JSONResponse(runtime_service_manager.start_service(service_id))
+
+
+@app.post("/api/runtime-services/{service_id}/stop")
+async def runtime_services_stop(service_id: str):
+    result = runtime_service_manager.stop_service(service_id)
+    try:
+        if service_id == "durable_task_dispatcher":
+            await scheduled_task_runner.stop()
+    except Exception:
+        pass
+    return JSONResponse(result)
 
 
 @app.get("/api/verification/failure-reports")
