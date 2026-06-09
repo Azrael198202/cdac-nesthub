@@ -733,9 +733,20 @@ class RuntimeCapabilityGapImplementer:
             elif "integer" in detail or "number" in detail:
                 props[name]["type"] = "number"
             if "default" in detail:
-                default_match = re.search(r"default\s+([a-zA-Z0-9_:/+.-]+)", detail)
+                # Preserve the original spelling/case of explicit defaults.
+                # The lower-cased detail string is only for keyword detection;
+                # using it as the source value turns user contracts like
+                # `YYYY-MM-DD HH:mm` into `yyyy-mm-dd` and can break generic
+                # runtime format handling.  Capture until a sentence delimiter
+                # or parenthesized clause, while allowing spaces inside values.
+                raw_detail = match.group(1) if match else ""
+                default_match = re.search(
+                    r"default\s+(.+?)(?:\s*[.;。]|\s+\(|$)",
+                    raw_detail,
+                    flags=re.IGNORECASE,
+                )
                 if default_match:
-                    props[name]["default"] = default_match.group(1)
+                    props[name]["default"] = default_match.group(1).strip().strip("`'\"")
         if "dry_run" not in props and "dry_run" in lowered:
             props["dry_run"] = {"type": "boolean", "default": False}
         return {"type": "object", "required": required, "properties": props, "additionalProperties": False}
@@ -2042,19 +2053,18 @@ def test_runtime_contract_smoke():
             return ""
         if text.casefold() in {"iso8601", "iso-8601", "iso_8601"}:
             return ""
-        # Tokenize first so overlapping tokens such as MM/month and mm/minute
-        # cannot corrupt each other during replacement.
-        token_map = {
-            "YYYY": "%Y", "yyyy": "%Y", "YY": "%y", "yy": "%y",
-            "MM": "%m", "DD": "%d", "dd": "%d",
-            "HH": "%H", "hh": "%H", "mm": "%M",
-            "SS": "%S", "ss": "%S",
-        }
-        converted = re.sub(
-            r"YYYY|yyyy|YY|yy|MM|DD|dd|HH|hh|mm|SS|ss",
-            lambda match: token_map.get(match.group(0), match.group(0)),
-            text,
-        )
+        # Generic conversion of common user-facing date/time tokens to Python
+        # strftime/strptime tokens. This is contract-format normalization, not
+        # capability-specific behavior. Lower-case `mm` is treated as month in
+        # date-only/date-prefix patterns and as minutes after an hour token.
+        converted = text
+        converted = re.sub(r"YYYY|yyyy", "%Y", converted)
+        converted = re.sub(r"YY|yy", "%y", converted)
+        converted = re.sub(r"DD|dd", "%d", converted)
+        converted = re.sub(r"HH|hh", "%H", converted)
+        converted = re.sub(r"SS|ss", "%S", converted)
+        converted = re.sub(r"(?<=%H[:\s])mm\b|(?<=%H[:\s])MM\b", "%M", converted)
+        converted = re.sub(r"(?<!%)MM|(?<!%)mm", "%m", converted)
         if "%" not in converted:
             return ""
         return converted

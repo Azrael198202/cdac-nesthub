@@ -279,6 +279,7 @@ class RuntimeBlueprintArtifactGenerator:
             "If live end-to-end verification needs real user values, expose those values through input_schema, connection_schema, and secret_schema so the runtime interaction layer can ask the user after sandbox registration. "
             "When a standard-library feature needs a platform support package to satisfy the contract, declare the support package rather than the standard-library module itself. "
             "Never declare standard-library modules as pip dependencies. "
+            "If an input field represents a date/time format, support both Python strftime tokens such as %Y-%m-%d %H:%M and common user-facing tokens such as YYYY-MM-DD HH:mm by converting them before formatting or parsing; do not return the format string itself as the runtime value. "
             "Return only a JSON object; no markdown, no prose."
         )
         user = "Generate the runtime artifact from this contract:\n" + json.dumps(contract, ensure_ascii=False, indent=2, default=str)
@@ -756,11 +757,43 @@ class RuntimeBlueprintArtifactGenerator:
             current = merged.get(scope) if isinstance(merged.get(scope), dict) else {}
             filled = dict(sampled.get(scope) or {})
             filled.update(current)
-            merged[scope] = filled
+            merged[scope] = self._normalize_runtime_sample_values(filled)
         runtime = merged.get("_runtime") if isinstance(merged.get("_runtime"), dict) else {}
         runtime.setdefault("dry_run", True)
         merged["_runtime"] = runtime
         return merged
+
+    def _normalize_runtime_sample_values(self, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(payload or {})
+        for key, value in list(normalized.items()):
+            lowered_key = str(key).casefold()
+            if isinstance(value, str) and ("format" in lowered_key or "template" in lowered_key):
+                converted = self._to_python_datetime_format(value)
+                if converted:
+                    normalized[key] = converted
+        return normalized
+
+    def _to_python_datetime_format(self, value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if text.casefold() in {"iso8601", "iso-8601", "iso_8601"}:
+            return ""
+        # Generic conversion of common user-facing date/time tokens to Python
+        # strftime/strptime tokens. This is contract-format normalization, not
+        # capability-specific behavior. Lower-case `mm` is treated as month in
+        # date-only/date-prefix patterns and as minutes after an hour token.
+        converted = text
+        converted = re.sub(r"YYYY|yyyy", "%Y", converted)
+        converted = re.sub(r"YY|yy", "%y", converted)
+        converted = re.sub(r"DD|dd", "%d", converted)
+        converted = re.sub(r"HH|hh", "%H", converted)
+        converted = re.sub(r"SS|ss", "%S", converted)
+        converted = re.sub(r"(?<=%H[:\s])mm\b|(?<=%H[:\s])MM\b", "%M", converted)
+        converted = re.sub(r"(?<!%)MM|(?<!%)mm", "%m", converted)
+        if "%" not in converted:
+            return ""
+        return converted
 
     def _sample_payload_scope(self, schema: dict[str, Any]) -> dict[str, Any]:
         props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
