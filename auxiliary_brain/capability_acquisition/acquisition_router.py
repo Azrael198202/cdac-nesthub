@@ -1715,6 +1715,23 @@ def test_runtime_contract_smoke():
         mode = str(mode_value or "r")
         return any(ch in mode for ch in ["w", "a", "+", "x"])
 
+    def _constant_node_value(self, node: ast.AST) -> Any:
+        """Return a literal AST value without evaluating runtime expressions.
+
+        This helper is intentionally generic. It is used by static quality gates
+        that inspect generated Python code. It does not contain capability names,
+        provider names, or domain-specific behavior.
+        """
+        if isinstance(node, ast.Constant):
+            return node.value
+        if hasattr(ast, "Index") and isinstance(node, ast.Index):
+            return self._constant_node_value(node.value)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            value = self._constant_node_value(node.operand)
+            if isinstance(value, (int, float)):
+                return value if isinstance(node.op, ast.UAdd) else -value
+        return None
+
     def _test_static_quality_gate(self, *, tool_dir: Path, test_candidates: list[Path]) -> dict[str, Any]:
         local_modules = {path.stem for path in tool_dir.rglob("*.py")}
         declared_imports = self._manifest_dependency_imports(tool_dir)

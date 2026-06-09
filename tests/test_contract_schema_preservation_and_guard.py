@@ -58,3 +58,20 @@ def test_effectful_guard_is_policy_driven_and_requires_early_test_branch(tmp_pat
     )
     result = router._effectful_runtime_test_mode_guard(tool_dir=tool_dir)
     assert result["passed"]
+
+
+def test_effectful_guard_open_mode_literal_helper_does_not_crash(tmp_path: Path):
+    tool_dir = tmp_path / "tool_open"
+    tool_dir.mkdir()
+    (tool_dir / "manifest.json").write_text(json.dumps({"runtime_execution_policy": {"side_effects": "external"}}), encoding="utf-8")
+    (tool_dir / "tool.py").write_text(
+        "def run(payload=None):\n"
+        "    with open('x.txt', 'w') as f:\n"
+        "        f.write('x')\n"
+        "    return {'status':'completed'}\n",
+        encoding="utf-8",
+    )
+    router = RuntimeCapabilityGapImplementer()
+    result = router._effectful_runtime_test_mode_guard(tool_dir=tool_dir)
+    assert not result["passed"]
+    assert result["status"] == "missing_runtime_test_mode_guard"
