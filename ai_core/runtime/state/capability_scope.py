@@ -131,7 +131,10 @@ class CapabilityScopedStateStore:
         out.setdefault("interaction_id", scope["interaction_id"])
         for field in out.get("fields") or []:
             if isinstance(field, dict):
-                field.setdefault("scope", dict(scope))
+                # field["scope"] may be a schema section such as input,
+                # connection, or secrets.  Do not overwrite it with runtime
+                # ownership metadata.  Store ownership in runtime_scope instead.
+                field["runtime_scope"] = dict(scope)
                 field.setdefault("source_run_id", scope["run_id"])
                 field.setdefault("capability_id", scope["capability_id"])
                 field.setdefault("interaction_id", scope["interaction_id"])

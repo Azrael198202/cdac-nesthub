@@ -176,6 +176,103 @@ def _write_api_error_log(*, area: str, exc: Exception, context: dict[str, Any] |
 
 
 
+def _scope_runtime_interactions(payload: dict[str, Any], *, session_id: str, state_run_id: str) -> None:
+    """Persist pending runtime interactions under the owning run/capability scope.
+
+    Interaction scoping is observability/coordination metadata only. It must not
+    change the primary runtime result and must never make the response fail.
+    """
+    if not isinstance(payload, dict):
+        return
+
+    def _as_dict(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    def _candidate_requests(root: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+        out: list[tuple[str, dict[str, Any]]] = []
+        for key in ("interaction_request", "pending_action", "pending_interaction", "approval_request", "repair_request"):
+            item = root.get(key)
+            if isinstance(item, dict):
+                out.append((key, item))
+        cap_impl = _as_dict(root.get("capability_implementation"))
+        runtime_impl = _as_dict(cap_impl.get("runtime_implementation"))
+        for source_name, source in (("capability_implementation", cap_impl), ("runtime_implementation", runtime_impl)):
+            item = source.get("interaction_request")
+            if isinstance(item, dict):
+                out.append((source_name + ".interaction_request", item))
+        return out
+
+    def _infer_capability_id(root: dict[str, Any], request: dict[str, Any]) -> str:
+        sources = [request, root, _as_dict(root.get("capability_implementation")), _as_dict(_as_dict(root.get("capability_implementation")).get("runtime_implementation"))]
+        for source in sources:
+            for key in ("capability_id", "tool_id", "requested_capability_id", "template_id"):
+                value = str(source.get(key) or "").strip()
+                if value:
+                    return value
+        return "runtime_capability"
+
+    def _attach_scope_to_request(request: dict[str, Any], *, run_id: str, capability_id: str) -> dict[str, Any]:
+        scoped = dict(request or {})
+        existing_scope = scoped.get("scope") if isinstance(scoped.get("scope"), dict) else {}
+        runtime_scope = dict(existing_scope)
+        runtime_scope.update({
+            "session_id": session_id or "default_session",
+            "run_id": run_id,
+            "capability_id": capability_id,
+            "interaction_type": str(scoped.get("kind") or scoped.get("type") or "runtime_interaction"),
+        })
+        scoped["scope"] = runtime_scope
+        scoped.setdefault("session_id", runtime_scope["session_id"])
+        scoped.setdefault("source_run_id", run_id)
+        scoped.setdefault("capability_id", capability_id)
+        scoped.setdefault("tool_id", capability_id)
+        fields = scoped.get("fields")
+        if isinstance(fields, list):
+            for field in fields:
+                if isinstance(field, dict):
+                    field.setdefault("source_run_id", run_id)
+                    field.setdefault("capability_id", capability_id)
+                    field.setdefault("tool_id", capability_id)
+                    # Keep field['scope'] available for schema grouping such as
+                    # input/connection/secrets. Runtime ownership is separate.
+                    field["runtime_scope"] = dict(runtime_scope)
+        return scoped
+
+    seen: set[str] = set()
+    for payload_key, request in _candidate_requests(payload):
+        kind = str(request.get("kind") or request.get("type") or "runtime_interaction").strip() or "runtime_interaction"
+        capability_id = _infer_capability_id(payload, request)
+        source_run_id = str(request.get("source_run_id") or request.get("run_id") or state_run_id or payload.get("run_id") or "runtime_run").strip()
+        scoped_request = _attach_scope_to_request(request, run_id=source_run_id, capability_id=capability_id)
+        key = f"{source_run_id}:{capability_id}:{kind}"
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            recorded = capability_scoped_state_store.record_interaction(
+                session_id=session_id or "default_session",
+                run_id=source_run_id,
+                capability_id=capability_id,
+                interaction_type=kind,
+                request=scoped_request,
+            )
+            recorded_request = recorded.get("request") if isinstance(recorded, dict) else None
+            if isinstance(recorded_request, dict):
+                if payload_key == "interaction_request":
+                    payload["interaction_request"] = recorded_request
+                elif payload_key == "pending_action":
+                    payload["pending_action"] = recorded_request
+                else:
+                    payload.setdefault("scoped_interactions", []).append(recorded_request)
+        except Exception as exc:
+            _write_api_error_log(
+                area="scope_runtime_interactions",
+                exc=exc,
+                context={"session_id": session_id, "state_run_id": state_run_id, "capability_id": capability_id, "interaction_type": kind},
+            )
+
+
+
 def _runtime_tool_execute_http_status(payload: dict[str, Any]) -> int:
     """Map registered-tool execution payloads to HTTP status codes.
 
