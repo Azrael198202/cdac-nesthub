@@ -171,6 +171,12 @@ class AgentStudioService:
 
         if routed.action == "execute_task":
             return await self.execute_task(routed.name, provided_inputs=provided_inputs, instruction=message)
+        if routed.action == "pause_task":
+            return self.pause_task_schedule(routed.name)
+        if routed.action == "resume_task":
+            return self.resume_task_schedule(routed.name)
+        if routed.action == "run_task_now":
+            return await self.run_task_now(routed.name, provided_inputs=provided_inputs, instruction=message)
 
         # Capability-gap / external-evidence requests can contain negative
         # wording such as "does not have", "missing", or "cannot handle".
@@ -745,6 +751,41 @@ class AgentStudioService:
         self._emit_schedule_observation("schedule_resumed" if enabled else "schedule_paused", task_name=resolved, data={"enabled": bool(enabled), "state": policy.get("state")})
         return {"ok": True, "status": "resumed" if enabled else "paused", "task_name": resolved, "schedule_policy": policy}
 
+    def pause_task_schedule(self, task_name: str | None) -> dict[str, Any]:
+        result = self.set_task_schedule_enabled(str(task_name or ""), False)
+        return {
+            "action": "pause_task",
+            "origin": "auxiliary_brain",
+            "status": result.get("status") or ("paused" if result.get("ok") else "failed"),
+            "task_name": result.get("task_name") or task_name,
+            "schedule_policy": result.get("schedule_policy"),
+            "message": result.get("message") or ("Task schedule paused." if result.get("ok") else "Task schedule could not be paused."),
+            "final_answer": result.get("message") or ("Task schedule paused." if result.get("ok") else "Task schedule could not be paused."),
+            "error": result.get("error"),
+        }
+
+    def resume_task_schedule(self, task_name: str | None) -> dict[str, Any]:
+        result = self.set_task_schedule_enabled(str(task_name or ""), True)
+        return {
+            "action": "resume_task",
+            "origin": "auxiliary_brain",
+            "status": result.get("status") or ("resumed" if result.get("ok") else "failed"),
+            "task_name": result.get("task_name") or task_name,
+            "schedule_policy": result.get("schedule_policy"),
+            "message": result.get("message") or ("Task schedule resumed." if result.get("ok") else "Task schedule could not be resumed."),
+            "final_answer": result.get("message") or ("Task schedule resumed." if result.get("ok") else "Task schedule could not be resumed."),
+            "error": result.get("error"),
+        }
+
+    async def run_task_now(self, task_name: str | None, provided_inputs: dict[str, Any] | None = None, instruction: str | None = None) -> dict[str, Any]:
+        inputs = dict(provided_inputs or {})
+        inputs["_run_scheduled_payload_now"] = True
+        inputs["_scheduled_payload_dispatch"] = True
+        result = await self.execute_task(task_name, provided_inputs=inputs, instruction=instruction or "")
+        result["action"] = "run_task_now"
+        result["manual_payload_run"] = True
+        return result
+
     def task_execution_history(self, task_name: str, *, limit: int = 80) -> list[dict[str, Any]]:
         """Return recent scheduler/runtime observations for one task graph."""
         resolved = self._resolve_task_name(task_name) or str(task_name or "").strip()
@@ -1248,6 +1289,7 @@ class AgentStudioService:
             "status": "created",
             "created_at": self._now(),
             "execution_policy": "delegated_participant_execution_via_ai_core",
+            "execution_type": "scheduled" if (isinstance(schedule_policy, dict) and schedule_policy.get("enabled")) else "one_shot",
             "selected_participant_ids": selected_ids,
             "uploaded_artifacts": artifact_refs,
             "parameter_contract": schema_contract,
@@ -2187,7 +2229,7 @@ class AgentStudioService:
                 return values
         policy = task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {}
         schedule_enabled = bool(policy.get("enabled"))
-        dispatch_requested = bool(provided_inputs.get("_scheduled_payload_dispatch"))
+        dispatch_requested = bool(provided_inputs.get("_scheduled_payload_dispatch") or provided_inputs.get("_run_scheduled_payload_now"))
         if not schedule_enabled and not dispatch_requested:
             return []
         controllers = {str(x).strip() for x in (policy.get("controller_participant_ids") or []) if str(x).strip()}

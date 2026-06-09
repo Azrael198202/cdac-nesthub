@@ -31,6 +31,9 @@ class StudioCommandRouter:
         """
         text = message.strip()
         lowered = text.lower()
+        direct_task_control = self._match_task_control_command(text)
+        if direct_task_control is not None:
+            return direct_task_control
         matched = self._match_registry(lowered)
         if matched:
             action = str(matched.get("action") or matched.get("command_id") or "chat")
@@ -56,6 +59,30 @@ class StudioCommandRouter:
                 continue
             if self._matches(lowered, entry.get("patterns", [])):
                 return entry
+        return None
+
+
+    def _match_task_control_command(self, text: str) -> RoutedCommand | None:
+        """Route task lifecycle controls before broad execute/run patterns.
+
+        This is intentionally structural and command-level only: it does not
+        inspect agent names, capability names, tool ids, or business domains.
+        """
+        value = str(text or "").strip()
+        if not value:
+            return None
+        patterns = [
+            ("run_task_now", r"^\s*(?:run|execute)\s+(?:task\s+)?(.+?)\s+now\s*[.!]?$"),
+            ("pause_task", r"^\s*(?:pause|suspend|disable\s+schedule\s+for)\s+(?:task\s+)?(.+?)\s*[.!]?$"),
+            ("resume_task", r"^\s*(?:resume|continue|enable\s+schedule\s+for)\s+(?:task\s+)?(.+?)\s*[.!]?$"),
+        ]
+        for action, pattern in patterns:
+            match = re.search(pattern, value, flags=re.IGNORECASE)
+            if not match:
+                continue
+            name = match.group(1).strip().strip(' .,:;\"\'')
+            if name:
+                return RoutedCommand(action, name, value)
         return None
 
     def _extract_name_for_action(self, action: str, text: str) -> str | None:
