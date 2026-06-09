@@ -741,8 +741,23 @@ class AgentDelegationRuntime:
         return False
 
     def _approval_trusted(self, *, participant: dict[str, Any], tool_id: str) -> bool:
+        """Return True when this run may execute without an approval pause.
+
+        This method intentionally stays policy-driven.  It does not inspect
+        agent names, task names, or capability-specific vocabulary.  It first
+        respects the runtime tool/profile approval policy, then falls back to
+        durable participant-tool trust created by an earlier explicit approval.
+        """
+        tool_id = str(tool_id or "").strip()
+        if not tool_id:
+            return False
+        try:
+            if self.registered_tool_service.approval_policy_store.is_auto_approved(tool_id=tool_id, profile_id="default"):
+                return True
+        except Exception:
+            pass
         pid = self._participant_identity(participant)
-        if not pid or not tool_id:
+        if not pid:
             return False
         record = self.store.read_json("configs/policies/approval_trust.json") or {}
         if not isinstance(record, dict):
@@ -750,6 +765,31 @@ class AgentDelegationRuntime:
         trusted = record.get("trusted") if isinstance(record.get("trusted"), dict) else {}
         entry = trusted.get(f"{pid}:{tool_id}") if isinstance(trusted, dict) else None
         return isinstance(entry, dict) and entry.get("enabled") is True
+
+    def _is_approval_parameter_field(self, field: dict[str, Any]) -> bool:
+        """Detect generic approval/confirmation parameter fields.
+
+        This is a structural execution-policy field filter, not a domain rule.
+        It keeps tool approval policy separate from ordinary task inputs.
+        """
+        if not isinstance(field, dict):
+            return False
+        names = [
+            field.get("parameter_name"),
+            field.get("name"),
+            field.get("field"),
+            field.get("key"),
+        ]
+        for item in names:
+            tail = str(item or "").strip().rsplit(".", 1)[-1].replace("-", "_").casefold()
+            if tail in {"approval_confirmed", "remember_approval", "confirm", "confirmed", "approval", "approved"}:
+                return True
+        role = str(field.get("input_role") or field.get("role") or "").strip().replace("-", "_").casefold()
+        return role in {"approval", "confirmation", "execution_approval"}
+
+    def _participant_tool_id(self, participant: dict[str, Any]) -> str:
+        profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+        return str(profile.get("tool_id") or "").strip()
 
     def _persist_approval_trust(self, *, participant: dict[str, Any], tool_id: str) -> None:
         pid = self._participant_identity(participant)
@@ -1478,6 +1518,8 @@ class AgentDelegationRuntime:
                 if not isinstance(field, dict):
                     continue
                 if not self._is_blocking_agent_parameter_field(participant, field):
+                    continue
+                if self._is_approval_parameter_field(field) and self._approval_trusted(participant=participant, tool_id=self._participant_tool_id(participant)):
                     continue
                 if self._runtime_field_already_bound(participant, field):
                     continue

@@ -6,6 +6,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, Fil
 from pydantic import BaseModel
 from pathlib import Path
 from uuid import uuid4
+from datetime import datetime, timezone
 import json
 import base64
 
@@ -98,9 +99,25 @@ def _has_enabled_scheduled_task() -> bool:
 
 
 def _ensure_scheduler_started_if_needed() -> None:
-    if not (_scheduler_config_enabled() or _has_enabled_scheduled_task()):
-        return
+    """Ensure the generic task scheduler loop is running.
+
+    The loop is runtime infrastructure, not a user-created business service.
+    It remains idle when no task declares an enabled schedule policy, so starting
+    it does not change ordinary task execution semantics.
+    """
     scheduled_task_runner.start(_execute_due_task, tick_seconds=5)
+
+
+def _maybe_start_scheduler_after_studio_payload(payload: dict[str, Any] | None) -> None:
+    """Start the generic scheduler after a request creates or activates a schedule."""
+    if not isinstance(payload, dict):
+        return
+    policy = payload.get("schedule_policy") if isinstance(payload.get("schedule_policy"), dict) else {}
+    if policy.get("enabled") is True and str(policy.get("mode") or "") == "recurring":
+        _ensure_scheduler_started_if_needed()
+        return
+    if str(payload.get("status") or "") in {"scheduled", "resumed"}:
+        _ensure_scheduler_started_if_needed()
 
 
 async def _execute_due_task(task_name: str, task_graph: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -117,10 +134,13 @@ async def _execute_due_task(task_name: str, task_graph: dict[str, Any] | None = 
             pid = str(item.get("participant_id") or "").strip()
             if pid and pid not in controller_ids:
                 payload_ids.append(pid)
+    dispatch_run_id = f"scheduled_{task_name}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
     return await studio_service.execute_task(
         task_name,
         provided_inputs={
             "_scheduled_payload_dispatch": True,
+            "_automated_runtime_dispatch": True,
+            "_runtime_state_run_id": dispatch_run_id,
             "_payload_only_selected_participant_ids": payload_ids,
         },
         instruction="",
@@ -129,9 +149,9 @@ async def _execute_due_task(task_name: str, task_graph: dict[str, Any] | None = 
 
 @app.on_event("startup")
 async def _start_scheduled_task_runner():
-    # The scheduler is a generic optional runtime service. It must not start just
-    # because a capability exists; it starts only when explicitly enabled or when
-    # an enabled recurring task graph exists.
+    # The scheduler is generic runtime infrastructure. It scans for durable
+    # schedule_policy declarations and is idle when none exist. It is not a
+    # user-created business service and it is not tied to any capability name.
     _ensure_scheduler_started_if_needed()
 
 
@@ -1337,6 +1357,7 @@ async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any
     )
     if isinstance(payload, dict):
         _scope_runtime_interactions(payload, session_id=active_session_id, state_run_id=state_run_id)
+        _maybe_start_scheduler_after_studio_payload(payload)
     runtime_state_manager.emit(
         run_id=state_run_id,
         step_id="operation.dispatch",

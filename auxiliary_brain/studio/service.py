@@ -1161,6 +1161,12 @@ class AgentStudioService:
         explicit_runtime_parameters.update(
             self._extract_named_parameter_blocks_from_instruction(instruction, workflow_plan.selected_participants)
         )
+        schedule_policy = self._materialize_schedule_policy_from_control_steps(
+            schedule_policy=schedule_policy,
+            tasks=workflow_tasks,
+            participants=workflow_plan.selected_participants,
+            runtime_parameters=explicit_runtime_parameters,
+        )
         if schedule_policy.get("enabled"):
             controller_ids = self._derive_execution_controller_participant_ids(
                 tasks=workflow_tasks,
@@ -1281,6 +1287,7 @@ class AgentStudioService:
             "task_name": task_name,
             "path": str(path),
             "uploaded_artifacts": artifact_refs,
+            "schedule_policy": schedule_policy,
         }
 
 
@@ -1930,6 +1937,24 @@ class AgentStudioService:
             task_graph = self._rebuild_task_graph_from_current_instruction(task_graph)
             runtime_state_manager.emit(run_id=state_run_id, step_id="task.rebuild", level="developer", kind="repair", status="completed", title="Task graph rebuilt", message="Task graph rebuild completed.", progress=100)
         provided_inputs = provided_inputs or {}
+        activation_response = self._maybe_activate_durable_schedule_on_manual_execution(
+            task_name=task_name,
+            task_graph=task_graph,
+            provided_inputs=provided_inputs,
+        )
+        if activation_response is not None:
+            runtime_state_manager.emit(
+                run_id=state_run_id,
+                step_id="execution.schedule",
+                level="user",
+                kind="lifecycle",
+                status="completed",
+                title="Schedule activated",
+                message="The task schedule was activated; payload execution will be dispatched by the runtime scheduler.",
+                output={"task_name": task_name, "schedule_policy": activation_response.get("schedule_policy")},
+                progress=100,
+            )
+            return activation_response
         payload_only_ids = self._execution_payload_only_ids(task_graph, provided_inputs)
         payload_only_execution = bool(payload_only_ids)
         if payload_only_ids:
@@ -3018,6 +3043,165 @@ class AgentStudioService:
         return "|".join(part for part in (name, objective, artifact_sig) if part)
 
 
+
+    def _materialize_schedule_policy_from_control_steps(
+        self,
+        *,
+        schedule_policy: dict[str, Any],
+        tasks: list[dict[str, Any]],
+        participants: list[dict[str, Any]],
+        runtime_parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Promote structural timing control steps into a durable task policy.
+
+        The rule is capability-neutral: any step that declares timing fields can
+        act as a control-plane step.  The generated task stores that timing on
+        the task graph and the scheduler dispatches the non-controller payload
+        steps when due.
+        """
+        policy = dict(schedule_policy or {})
+        if policy.get("enabled") and str(policy.get("mode") or "") == "recurring":
+            return policy
+
+        controller_ids = self._derive_execution_controller_participant_ids(
+            tasks=tasks,
+            participants=participants,
+            runtime_parameters=runtime_parameters,
+        )
+        if not controller_ids:
+            return policy or {"enabled": False, "mode": "none"}
+
+        interval_seconds = self._extract_interval_seconds_from_control_steps(
+            tasks=tasks,
+            controller_ids=controller_ids,
+            runtime_parameters=runtime_parameters,
+        )
+        if not interval_seconds:
+            return policy or {"enabled": False, "mode": "unresolved", "source": "control_step_timing"}
+
+        now = self._now()
+        return {
+            "enabled": True,
+            "mode": "recurring",
+            "interval_seconds": int(interval_seconds),
+            "next_run_at": now,
+            "created_at": now,
+            "state": "active",
+            "source": "control_step_timing",
+            "controller_participant_ids": controller_ids,
+        }
+
+    def _extract_interval_seconds_from_control_steps(
+        self,
+        *,
+        tasks: list[dict[str, Any]],
+        controller_ids: list[str],
+        runtime_parameters: dict[str, Any],
+    ) -> int | None:
+        controller_set = {str(x).strip() for x in controller_ids if str(x).strip()}
+        candidates: list[str] = []
+
+        for task in tasks or []:
+            if not isinstance(task, dict):
+                continue
+            pid = str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
+            if pid not in controller_set:
+                continue
+            fragment = str(task.get("source_instruction_fragment") or task.get("objective") or "")
+            if fragment:
+                candidates.append(fragment)
+            values = self._extract_runtime_parameters_from_instruction(fragment)
+            for key, value in values.items():
+                if self._is_timing_parameter_key(key):
+                    candidates.append(f"{key}={value}")
+
+        for key, value in (runtime_parameters or {}).items():
+            key_text = str(key or "")
+            base_key = key_text.rsplit(".", 1)[-1]
+            if self._is_timing_parameter_key(base_key):
+                candidates.append(f"{base_key}={value}")
+
+        for candidate in candidates:
+            seconds = self._extract_generic_interval_seconds(str(candidate))
+            if seconds:
+                return seconds
+        return None
+
+    def _is_timing_parameter_key(self, key: Any) -> bool:
+        normalized = str(key or "").strip().casefold()
+        if not normalized:
+            return False
+        return normalized in {
+            "interval",
+            "interval_seconds",
+            "every",
+            "repeat",
+            "repeat_every",
+            "schedule",
+            "schedule_definition",
+            "frequency",
+        } or normalized.endswith("_interval") or normalized.endswith("_schedule")
+
+    def _maybe_activate_durable_schedule_on_manual_execution(
+        self,
+        *,
+        task_name: str,
+        task_graph: dict[str, Any],
+        provided_inputs: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """When a task contains a timing controller, manual execution starts the schedule.
+
+        Scheduled payload dispatches pass a private marker and are allowed to run
+        the payload steps.  A user's direct execute request activates the durable
+        schedule instead of running the payload once immediately.
+        """
+        if bool((provided_inputs or {}).get("_scheduled_payload_dispatch")):
+            return None
+        policy = task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {}
+        if not (policy.get("enabled") is True and str(policy.get("mode") or "") == "recurring"):
+            return None
+        controllers = [str(x).strip() for x in (policy.get("controller_participant_ids") or []) if str(x).strip()]
+        if not controllers:
+            return None
+
+        updated_graph = dict(task_graph)
+        updated_policy = dict(policy)
+        interval = int(updated_policy.get("interval_seconds") or 0)
+        now = self._now()
+        updated_policy["enabled"] = True
+        updated_policy["state"] = "active"
+        updated_policy["activated_at"] = now
+        if interval > 0:
+            try:
+                from datetime import datetime, timedelta, timezone
+                due_at = datetime.now(timezone.utc) + timedelta(seconds=interval)
+                updated_policy["next_run_at"] = due_at.isoformat()
+            except Exception:
+                updated_policy["next_run_at"] = now
+        elif not updated_policy.get("next_run_at"):
+            updated_policy["next_run_at"] = now
+        updated_graph["schedule_policy"] = updated_policy
+        updated_graph["updated_at"] = now
+        self.store.write_json(f"generated/tasks/{task_name}.json", updated_graph)
+        self._emit_schedule_observation(
+            "schedule_activated",
+            task_name=str(task_name),
+            data={
+                "interval_seconds": updated_policy.get("interval_seconds"),
+                "next_run_at": updated_policy.get("next_run_at"),
+                "controller_participant_ids": controllers,
+            },
+        )
+        return {
+            "action": "execute_task_graph",
+            "origin": "auxiliary_brain",
+            "status": "scheduled",
+            "task_name": task_name,
+            "message": "Task schedule activated. Payload execution will be dispatched by the runtime scheduler when due.",
+            "final_answer": "Task schedule activated. Payload execution will be dispatched by the runtime scheduler when due.",
+            "schedule_policy": updated_policy,
+        }
+
     def _derive_execution_controller_participant_ids(self, *, tasks: list[dict[str, Any]], participants: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> list[str]:
         """Identify task participants that only define durable execution timing.
 
@@ -3071,7 +3255,8 @@ class AgentStudioService:
         """
         text = str(instruction or "")
         lower = text.casefold()
-        if not any(token in lower for token in ("execution policy", "repeat", "every", "run every", "once at", "schedule")):
+        has_schedule_language = any(token in lower for token in ("execution policy", "repeat", "every", "run every", "once at", "schedule", "interval"))
+        if not has_schedule_language:
             return {"enabled": False, "mode": "none"}
         interval_seconds = self._extract_generic_interval_seconds(text)
         if interval_seconds:

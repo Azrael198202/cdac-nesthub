@@ -22,11 +22,25 @@ class ScheduledTaskRunner:
         self._task: asyncio.Task[Any] | None = None
         self._stopped = asyncio.Event()
 
-    def start(self, executor: Callable[..., Awaitable[dict[str, Any]]], *, tick_seconds: int = 5) -> None:
+    def start(self, executor: Callable[..., Awaitable[dict[str, Any]]], *, tick_seconds: int = 5) -> bool:
+        """Start the background loop when an event loop is available.
+
+        Returning a boolean makes startup observable without forcing callers to
+        special-case synchronous contexts.  The scheduler is generic runtime
+        infrastructure and remains idle until it sees task graphs with enabled
+        schedule policies.
+        """
         if self._task and not self._task.done():
-            return
+            return True
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self._trace({"event": "scheduler_start_deferred", "reason": "no_running_event_loop"})
+            return False
         self._stopped = asyncio.Event()
         self._task = asyncio.create_task(self._loop(executor, max(1, int(tick_seconds))))
+        self._trace({"event": "scheduler_started", "tick_seconds": max(1, int(tick_seconds))})
+        return True
 
     async def stop(self) -> None:
         self._stopped.set()
