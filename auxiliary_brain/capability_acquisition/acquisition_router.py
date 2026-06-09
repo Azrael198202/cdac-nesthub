@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1660,16 +1661,22 @@ def test_runtime_contract_smoke():
         verification_input = manifest.get("verification_input") if isinstance(manifest.get("verification_input"), dict) else {}
         if not module_path.exists():
             return {"passed": False, "status": "failed", "reason": "implementation_module_missing", "module_path": str(module_path)}
+        smoke_output_path = Path(tempfile.gettempdir()) / (
+            f"runtime_capability_smoke_{tool_dir.name}_{os.getpid()}_{int(datetime.now(timezone.utc).timestamp() * 1000)}.json"
+        )
         runner = (
-            "import importlib.util, json, sys; "
+            "import importlib.util, json, pathlib, sys; "
             f"module_path = {json.dumps(str(module_path))}; "
             f"function_name = {json.dumps(function_name)}; "
             f"payload = json.loads({json.dumps(json.dumps(verification_input, ensure_ascii=False))}); "
+            f"output_path = pathlib.Path({json.dumps(str(smoke_output_path))}); "
             "spec = importlib.util.spec_from_file_location('runtime_generated_smoke_tool', module_path); "
             "module = importlib.util.module_from_spec(spec); "
             "spec.loader.exec_module(module); "
             "output = getattr(module, function_name)(payload); "
-            "print(json.dumps(output, ensure_ascii=False))"
+            "encoded = json.dumps(output, ensure_ascii=False); "
+            "output_path.write_text(encoded, encoding='utf-8'); "
+            "print(encoded, flush=True)"
         )
         proc = self._run_isolated_python(["-c", runner], cwd=tool_dir, timeout=30)
         output: Any = None
@@ -1678,8 +1685,15 @@ def test_runtime_contract_smoke():
         if proc.get("returncode") == 0:
             try:
                 output = self._parse_json_from_subprocess_stdout(stdout)
-            except Exception as exc:
-                parse_error = f"output_json_parse_failed:{exc.__class__.__name__}"
+            except Exception as stdout_exc:
+                try:
+                    output = json.loads(smoke_output_path.read_text(encoding="utf-8"))
+                except Exception as file_exc:
+                    parse_error = f"output_json_parse_failed:{stdout_exc.__class__.__name__};sidecar_failed:{file_exc.__class__.__name__}"
+        try:
+            smoke_output_path.unlink(missing_ok=True)
+        except Exception:
+            pass
         manifest = {}
         try:
             manifest = json.loads((tool_dir / "manifest.json").read_text(encoding="utf-8"))
