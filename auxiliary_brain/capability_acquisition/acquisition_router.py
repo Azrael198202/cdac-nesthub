@@ -19,7 +19,7 @@ from ai_core.runtime.capability.acquisition_gate import RuntimeCapabilityAcquisi
 from ai_core.runtime.capability.runtime_capability_template_store import RuntimeCapabilityTemplateStore
 from ai_core.runtime.self_repair.engine import RuntimeSelfRepairEngine
 from ai_core.runtime.observability.runtime_console import emit_console_event
-from ai_core.runtime.state import runtime_state_manager
+from ai_core.runtime.state import runtime_state_manager, capability_scoped_state_store
 from ai_core.runtime.observability.stage_observer import RuntimeStageObserver
 from auxiliary_brain.capability_acquisition.code_generator import RuntimeBlueprintArtifactGenerator
 from auxiliary_brain.capability_acquisition.classification import CapabilityClassifier
@@ -374,7 +374,7 @@ class RuntimeCapabilityGapImplementer:
             )
             mark("RegistryWriter", "completed", registration=registration)
             status = str((registration or {}).get("status") or "registered")
-            interaction_request = self._build_live_verification_interaction_request(registration=registration or {})
+            interaction_request = self._build_live_verification_interaction_request(registration=registration or {}, run_id=run_id, session_id="")
             if interaction_request:
                 mark("LiveVerificationInteraction", "requested", request=interaction_request)
             repair = None
@@ -2262,7 +2262,7 @@ def test_runtime_contract_smoke():
         self.module_registry_path.write_text(json.dumps(module_registry, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"status": "registered", "registry_path": str(self.registry_path), "module_registry_path": str(self.module_registry_path), "tool_record": tool_record, "module_record": module_record}
 
-    def _build_live_verification_interaction_request(self, *, registration: dict[str, Any]) -> dict[str, Any] | None:
+    def _build_live_verification_interaction_request(self, *, registration: dict[str, Any], run_id: str = "", session_id: str = "") -> dict[str, Any] | None:
         """Ask Agent Studio for real runtime values after sandbox registration.
 
         This is intentionally schema-driven.  The acquisition layer does not know
@@ -2288,15 +2288,26 @@ def test_runtime_contract_smoke():
         fields.extend(self._interaction_fields_from_schema(schema=input_schema, scope="input", tool_id=tool_id))
         if not fields:
             return None
-        return {
+        request = {
             "type": "runtime_tool_live_verification",
             "kind": "runtime_tool_live_verification",
             "tool_id": tool_id,
+            "capability_id": tool_id,
+            "source_run_id": run_id,
+            "session_id": session_id,
             "profile_id": "default",
             "message": "Provide runtime connection, secret, and sample input values to run a live verification after sandbox registration.",
             "fields": fields,
             "approval_confirmed": True,
         }
+        scoped = capability_scoped_state_store.record_interaction(
+            session_id=session_id or "default_session",
+            run_id=run_id or tool_id,
+            capability_id=tool_id,
+            interaction_type="runtime_tool_live_verification",
+            request=request,
+        )
+        return scoped.get("request") if isinstance(scoped, dict) else request
 
     def _interaction_fields_from_schema(self, *, schema: dict[str, Any], scope: str, tool_id: str, force_password: bool = False) -> list[dict[str, Any]]:
         properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}

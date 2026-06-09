@@ -825,7 +825,7 @@ async function maybeApplyRepairProposal(data, toolId, profileId){
   const repair = data && data.repair;
   if(!repair || repair.requires_user_confirmation !== true){ return; }
   const message = repair.user_message || (repair.diagnosis && repair.diagnosis.user_message) || 'A repair proposal is available.';
-  const approved = confirm(message + '\n\n是否允许系统执行该修复步骤？');
+  const approved = confirm(message + '\n\nAllow the runtime to execute this repair action?');
   if(!approved){
     await apiFetchRuntimeToolJson('/api/agent-studio/feedback-repair/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repair_id:repair.repair_id,approved:false})});
     addMessage('assistant','Repair declined by user.\n'+renderJson(repair),'error');
@@ -834,7 +834,7 @@ async function maybeApplyRepairProposal(data, toolId, profileId){
   const applied = await apiFetchRuntimeToolJson('/api/agent-studio/feedback-repair/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repair_id:repair.repair_id,approved:true})});
   addMessage('assistant','Repair result:\n'+renderJson(applied), applied.ok?'final':'error');
   if(applied && applied.ok && applied.repaired_input){
-    const rerun = confirm('修复后的输入已经生成，是否立即重新执行该工具？');
+    const rerun = confirm('A repaired input payload was generated. Execute this tool again now?');
     if(rerun){
       const again = await apiFetchRuntimeToolJson('/api/agent-studio/runtime-tools/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:toolId,input_data:applied.repaired_input,profile_id:profileId,approval_confirmed:true})});
       addMessage('assistant', again.ok ? ('Runtime tool executed after repair:\n'+renderJson(again.result)) : ('Runtime tool still failed after repair:\n'+renderJson(again)), again.ok?'final':'error');
@@ -1662,11 +1662,24 @@ function taskGraphCard(g){
   return el;
 }
 
+function requestScopeMatchesPayload(payload, req){
+  if(!req || typeof req !== 'object'){ return true; }
+  const scope=(req.scope && typeof req.scope==='object') ? req.scope : {};
+  const requestRun=String(scope.run_id || req.source_run_id || req.run_id || '').trim();
+  const requestCap=String(scope.capability_id || req.capability_id || req.tool_id || '').trim();
+  const payloadRun=String((payload && (payload.run_id || payload.source_run_id)) || '').trim();
+  const payloadCap=String((payload && (payload.capability_id || payload.tool_id)) || '').trim();
+  if(payloadRun && requestRun && payloadRun !== requestRun){ return false; }
+  if(payloadCap && requestCap && payloadCap !== requestCap){ return false; }
+  return true;
+}
+
 function collectMissingInputs(payload){
   if(!payload || typeof payload !== 'object'){ return []; }
   if(Array.isArray(payload.missing_inputs) && payload.missing_inputs.length){ return normalizeInteractionItems(payload.missing_inputs); }
   if(payload.pending_action && typeof payload.pending_action === 'object'){
     const pa = payload.pending_action;
+    if(!requestScopeMatchesPayload(payload, pa)){ return []; }
     if(Array.isArray(pa.fields) && pa.fields.length){ return normalizeInteractionItems(pa.fields.map(f=>({...f, kind:f.kind||pa.kind||pa.type||'human_information_required'}))); }
     if(pa.request && Array.isArray(pa.request.fields) && pa.request.fields.length){ return normalizeInteractionItems(pa.request.fields.map(f=>({...f, kind:f.kind||pa.kind||pa.type||'human_information_required'}))); }
     if(Array.isArray(pa.setup_actions) && pa.setup_actions.length){
@@ -1684,6 +1697,7 @@ function collectMissingInputs(payload){
   }
   if(payload.interaction_request && typeof payload.interaction_request === 'object'){
     const req = payload.interaction_request;
+    if(!requestScopeMatchesPayload(payload, req)){ return []; }
     if(Array.isArray(req.fields) && req.fields.length){ return normalizeInteractionItems(req.fields.map(f=>({...f, kind:f.kind||req.kind||req.type||'human_information_required'}))); }
     if(Array.isArray(req.config_fields) && req.config_fields.length){ return normalizeInteractionItems(req.config_fields.map(f=>({kind:req.kind||req.type||'runtime_config_input', field:f.name||f.env, label:f.name||f.env, message:req.message||'Please provide this runtime configuration value.', input_type:f.interaction_type==='secret'?'password':'text', required:f.required!==false}))); }
   }

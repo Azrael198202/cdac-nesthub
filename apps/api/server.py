@@ -30,7 +30,7 @@ from ai_core.runtime.observability.runtime_console import emit_console_event, li
 from ai_core.runtime.self_repair.repair_orchestrator import FeedbackRepairOrchestrator
 from ai_core.runtime.scheduler import ScheduledTaskRunner
 from ai_core.runtime.async_jobs import RuntimeAsyncJobStore
-from ai_core.runtime.state import runtime_state_manager
+from ai_core.runtime.state import runtime_state_manager, capability_scoped_state_store
 
 import traceback
 import os
@@ -1238,6 +1238,8 @@ async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any
         session_id=active_session_id,
         presentation_profile=req.presentation_profile,
     )
+    if isinstance(payload, dict):
+        _scope_runtime_interactions(payload, session_id=active_session_id, state_run_id=state_run_id)
     runtime_state_manager.emit(
         run_id=state_run_id,
         step_id="operation.dispatch",

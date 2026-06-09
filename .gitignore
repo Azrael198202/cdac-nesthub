@@ -927,3 +927,7 @@ auxiliary_brain/capability_acquisition/classification/__pycache__/__init__.cpyth
 auxiliary_brain/capability_acquisition/classification/__pycache__/capability_class.cpython-313.pyc
 auxiliary_brain/capability_acquisition/classification/__pycache__/capability_classifier.cpython-313.pyc
 ai_core/runtime/__pycache__/async_jobs.cpython-311.pyc
+ai_core/runtime/state/__pycache__/capability_scope.cpython-313.pyc
+tests/__pycache__/test_capability_scoped_state.cpython-313-pytest-9.0.2.pyc
+tests/__pycache__/test_runtime_smoke_and_state_projection.cpython-313-pytest-9.0.2.pyc
+auxiliary_brain/capability_acquisition/__pycache__/specification_contract_compiler.cpython-313.pyc
