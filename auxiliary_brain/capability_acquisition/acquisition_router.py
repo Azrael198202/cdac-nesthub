@@ -1259,6 +1259,8 @@ class RuntimeCapabilityGapImplementer:
             "runtime_execution_policy": template.get("runtime_execution_policy") if isinstance(template.get("runtime_execution_policy"), dict) else {},
             "artifact_kind": template.get("artifact_kind") or "unknown",
             "verification_input": template.get("verification_input") if isinstance(template.get("verification_input"), dict) else {},
+            "verification_expectations": template.get("verification_expectations") if isinstance(template.get("verification_expectations"), dict) else {},
+            "specification_contract": template.get("specification_contract") if isinstance(template.get("specification_contract"), dict) else {},
             "written_files": written,
             "test_dir": str(tests_dir),
             "test_files": test_files,
@@ -1672,24 +1674,36 @@ def test_runtime_contract_smoke():
         verification_input = manifest.get("verification_input") if isinstance(manifest.get("verification_input"), dict) else {}
         if not module_path.exists():
             return {"passed": False, "status": "failed", "reason": "implementation_module_missing", "module_path": str(module_path)}
-        smoke_output_path = Path(tempfile.gettempdir()) / (
-            f"runtime_capability_smoke_{tool_dir.name}_{os.getpid()}_{int(datetime.now(timezone.utc).timestamp() * 1000)}.json"
-        )
-        runner = (
-            "import importlib.util, json, pathlib, sys; "
-            f"module_path = {json.dumps(str(module_path))}; "
-            f"function_name = {json.dumps(function_name)}; "
-            f"payload = json.loads({json.dumps(json.dumps(verification_input, ensure_ascii=False))}); "
-            f"output_path = pathlib.Path({json.dumps(str(smoke_output_path))}); "
-            "spec = importlib.util.spec_from_file_location('runtime_generated_smoke_tool', module_path); "
-            "module = importlib.util.module_from_spec(spec); "
-            "spec.loader.exec_module(module); "
-            "output = getattr(module, function_name)(payload); "
-            "encoded = json.dumps(output, ensure_ascii=False); "
-            "output_path.write_text(encoded, encoding='utf-8'); "
-            "print(encoded, flush=True)"
-        )
-        proc = self._run_isolated_python(["-c", runner], cwd=tool_dir, timeout=30)
+
+        smoke_id = f"runtime_capability_smoke_{tool_dir.name}_{os.getpid()}_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+        smoke_output_path = Path(tempfile.gettempdir()) / f"{smoke_id}.json"
+        smoke_runner_path = Path(tempfile.gettempdir()) / f"{smoke_id}.py"
+        smoke_runner_source = "\n".join([
+            "import importlib.util, json, pathlib, sys, traceback",
+            f"module_path = {json.dumps(str(module_path))}",
+            f"function_name = {json.dumps(function_name)}",
+            f"payload = json.loads({json.dumps(json.dumps(verification_input, ensure_ascii=False))})",
+            f"output_path = pathlib.Path({json.dumps(str(smoke_output_path))})",
+            "try:",
+            "    spec = importlib.util.spec_from_file_location('runtime_generated_smoke_tool', module_path)",
+            "    if spec is None or spec.loader is None:",
+            "        raise RuntimeError('entrypoint_spec_not_loadable')",
+            "    module = importlib.util.module_from_spec(spec)",
+            "    spec.loader.exec_module(module)",
+            "    output = getattr(module, function_name)(payload)",
+            "    encoded = json.dumps(output, ensure_ascii=False)",
+            "    output_path.write_text(encoded, encoding='utf-8')",
+            "    sys.stdout.write(encoded + '\\n')",
+            "    sys.stdout.flush()",
+            "except Exception as exc:",
+            "    error_payload = {'status': 'failed', 'error_type': exc.__class__.__name__, 'error': str(exc), 'traceback': traceback.format_exc()[-4000:]}",
+            "    output_path.write_text(json.dumps(error_payload, ensure_ascii=False), encoding='utf-8')",
+            "    sys.stdout.write(json.dumps(error_payload, ensure_ascii=False) + '\\n')",
+            "    sys.stdout.flush()",
+            "    raise",
+        ])
+        smoke_runner_path.write_text(smoke_runner_source, encoding="utf-8")
+        proc = self._run_isolated_python([str(smoke_runner_path)], cwd=tool_dir, timeout=30)
         output: Any = None
         parse_error = ""
         stdout = str(proc.get("stdout") or "")
@@ -1698,18 +1712,21 @@ def test_runtime_contract_smoke():
                 output = self._parse_json_from_subprocess_stdout(stdout)
             except Exception as stdout_exc:
                 try:
-                    output = json.loads(smoke_output_path.read_text(encoding="utf-8"))
+                    sidecar_text = smoke_output_path.read_text(encoding="utf-8")
+                    output = json.loads(sidecar_text)
                 except Exception as file_exc:
-                    parse_error = f"output_json_parse_failed:{stdout_exc.__class__.__name__};sidecar_failed:{file_exc.__class__.__name__}"
+                    parse_error = (
+                        f"output_json_parse_failed:{stdout_exc.__class__.__name__};"
+                        f"sidecar_failed:{file_exc.__class__.__name__};"
+                        f"sidecar_exists:{smoke_output_path.exists()};"
+                        f"sidecar_size:{smoke_output_path.stat().st_size if smoke_output_path.exists() else 0}"
+                    )
         try:
             smoke_output_path.unlink(missing_ok=True)
+            smoke_runner_path.unlink(missing_ok=True)
         except Exception:
             pass
-        manifest = {}
-        try:
-            manifest = json.loads((tool_dir / "manifest.json").read_text(encoding="utf-8"))
-        except Exception:
-            manifest = {}
+
         expectations = manifest.get("verification_expectations") if isinstance(manifest.get("verification_expectations"), dict) else {}
         contract = self._runtime_output_contract_checks(
             verification_input=verification_input,
@@ -1947,10 +1964,14 @@ def test_runtime_contract_smoke():
         if placeholder_values:
             return {"passed": False, "reason": "unresolved_placeholder_output", "checks": checks}
 
-        temporal_format_checks = self._temporal_format_contract_checks(verification_input=verification_input, flattened_output=flattened_output)
-        checks.append(temporal_format_checks)
-        if not temporal_format_checks.get("passed"):
-            return {"passed": False, "reason": str(temporal_format_checks.get("reason") or "temporal_format_contract_failed"), "checks": checks}
+        specification_checks = self._specification_contract_checks(
+            output=output,
+            flattened_output=flattened_output,
+            manifest=manifest,
+        )
+        checks.append(specification_checks)
+        if not specification_checks.get("passed"):
+            return {"passed": False, "reason": str(specification_checks.get("reason") or "specification_contract_failed"), "checks": checks}
 
         return {"passed": True, "checks": checks}
 
@@ -1999,76 +2020,109 @@ def test_runtime_contract_smoke():
 
     def _looks_like_unresolved_placeholder(self, value: str) -> bool:
         text = str(value or "").strip()
-        lowered = text.casefold()
-        if lowered in {"yyyy-mm-dd", "yyyy-mm-dd hh:mm", "yyyy-mm-dd hh mm", "iso8601", "iso-8601", "iso_8601"}:
-            return True
-        if re.fullmatch(r"[yYmMdDhHsS:/\-\s%]+", text) and re.search(r"[yY]{2,4}|%Y|%y", text):
-            return True
         if re.search(r"\{\{[^{}]+\}\}|<[^<>]+>|\$\{[^{}]+\}", text):
             return True
+        # Pure alphabetic separator templates are unresolved placeholders when
+        # they contain no runtime data. This check is generic and does not map
+        # formats or repair generated outputs.
+        if text and not re.search(r"\d", text) and re.search(r"[-_:/ ]", text):
+            compact = re.sub(r"[^A-Za-z]", "", text)
+            if compact and len(set(compact)) <= 4 and any(ch in compact for ch in "YyMDdHhmsS"):
+                return True
         return False
 
-    def _temporal_format_contract_checks(self, *, verification_input: dict[str, Any], flattened_output: dict[str, Any]) -> dict[str, Any]:
-        format_value = None
-        for key, value in self._flatten_object(verification_input).items():
-            if isinstance(value, str) and "format" in str(key).casefold():
-                format_value = value
-                break
-        if not format_value:
-            return {"name": "temporal_format_contract", "passed": True, "reason": "no_declared_format_input"}
-        python_format = self._to_python_datetime_format(str(format_value))
-        if not python_format:
-            return {"name": "temporal_format_contract", "passed": True, "reason": "format_not_temporal_or_not_supported", "format": format_value}
-        candidates: list[dict[str, str]] = []
-        for key, value in flattened_output.items():
-            lowered_key = str(key).casefold()
-            if any(excluded in lowered_key for excluded in ["timezone", "time_zone", "utc_offset", "offset", "zone"]):
-                continue
-            if isinstance(value, str) and any(token in lowered_key for token in ["time", "date", "timestamp"]):
-                candidates.append({"key": str(key), "value": value})
-        if not candidates:
-            return {"name": "temporal_format_contract", "passed": True, "reason": "no_temporal_output_field_detected", "format": format_value}
-        failures: list[dict[str, str]] = []
-        for item in candidates:
-            raw = str(item["value"]).strip()
-            if self._looks_like_unresolved_placeholder(raw):
-                failures.append({"key": item["key"], "value": raw, "reason": "placeholder_or_format_string"})
-                continue
-            try:
-                datetime.strptime(raw, python_format)
-            except Exception as exc:
-                # ISO-8601 is also acceptable for timestamp-like outputs.
-                if "iso" in str(format_value).casefold():
-                    try:
-                        datetime.fromisoformat(raw.replace("Z", "+00:00"))
-                        continue
-                    except Exception:
-                        pass
-                failures.append({"key": item["key"], "value": raw, "reason": f"parse_failed:{exc.__class__.__name__}"})
-        return {"name": "temporal_format_contract", "passed": not failures, "format": format_value, "python_format": python_format, "checked": candidates, "failures": failures, "reason": "temporal_output_does_not_match_declared_format" if failures else ""}
+    def _specification_contract_checks(self, *, output: dict[str, Any], flattened_output: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+        specification = manifest.get("specification_contract") if isinstance(manifest.get("specification_contract"), dict) else {}
+        verification_contract = specification.get("verification_contract") if isinstance(specification.get("verification_contract"), dict) else {}
+        if not verification_contract:
+            return {"name": "specification_contract", "passed": True, "reason": "no_specification_contract"}
 
-    def _to_python_datetime_format(self, value: str) -> str:
-        text = str(value or "").strip()
-        if not text:
-            return ""
-        if text.casefold() in {"iso8601", "iso-8601", "iso_8601"}:
-            return ""
-        # Generic conversion of common user-facing date/time tokens to Python
-        # strftime/strptime tokens. This is contract-format normalization, not
-        # capability-specific behavior. Lower-case `mm` is treated as month in
-        # date-only/date-prefix patterns and as minutes after an hour token.
-        converted = text
-        converted = re.sub(r"YYYY|yyyy", "%Y", converted)
-        converted = re.sub(r"YY|yy", "%y", converted)
-        converted = re.sub(r"DD|dd", "%d", converted)
-        converted = re.sub(r"HH|hh", "%H", converted)
-        converted = re.sub(r"SS|ss", "%S", converted)
-        converted = re.sub(r"(?<=%H[:\s])mm\b|(?<=%H[:\s])MM\b", "%M", converted)
-        converted = re.sub(r"(?<!%)MM|(?<!%)mm", "%m", converted)
-        if "%" not in converted:
-            return ""
-        return converted
+        output_contracts = verification_contract.get("output_contracts") if isinstance(verification_contract.get("output_contracts"), list) else []
+        missing_required: list[str] = []
+        for item in output_contracts:
+            if not isinstance(item, dict) or not item.get("required"):
+                continue
+            path = str(item.get("path") or "")
+            if path and not self._has_contract_path(output, path):
+                missing_required.append(path)
+        if missing_required:
+            return {"name": "specification_contract", "passed": False, "reason": "required_contract_outputs_missing", "missing": missing_required}
 
+        bindings = verification_contract.get("output_bindings") if isinstance(verification_contract.get("output_bindings"), list) else []
+        copied: list[dict[str, str]] = []
+        for item in bindings:
+            if not isinstance(item, dict):
+                continue
+            output_path = str(item.get("output_path") or "")
+            source_path = str(item.get("source_path") or "")
+            source_value = self._get_nested_value(verification_contract.get("verification_input"), source_path.replace("input.", ""))
+            output_value = self._get_contract_output_value(output, output_path)
+            if isinstance(source_value, str) and isinstance(output_value, str) and source_value.strip() and output_value.strip().casefold() == source_value.strip().casefold():
+                copied.append({"output_path": output_path, "source_path": source_path, "copied_value": output_value[:200]})
+        if copied:
+            return {"name": "specification_contract", "passed": False, "reason": "output_copied_declared_format_or_template", "copied": copied}
+
+        type_failures: list[dict[str, str]] = []
+        for item in output_contracts:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "")
+            expected_type = str(item.get("json_type") or "").casefold()
+            if not path or not expected_type:
+                continue
+            value = self._get_contract_output_value(output, path)
+            if value is None:
+                continue
+            if not self._json_type_matches(value, expected_type):
+                type_failures.append({"path": path, "expected_type": expected_type, "actual_type": type(value).__name__})
+        if type_failures:
+            return {"name": "specification_contract", "passed": False, "reason": "output_type_contract_failed", "failures": type_failures}
+
+        return {"name": "specification_contract", "passed": True, "bindings_checked": len(bindings), "output_contract_count": len(output_contracts)}
+
+    def _has_contract_path(self, output: dict[str, Any], contract_path: str) -> bool:
+        sentinel = object()
+        return self._get_contract_output_value(output, contract_path, default=sentinel) is not sentinel
+
+    def _get_contract_output_value(self, output: dict[str, Any], contract_path: str, default: Any = None) -> Any:
+        path = str(contract_path or "")
+        if path.startswith("output."):
+            path = path[len("output."):]
+        value = self._get_nested_value(output, path, default=default)
+        if value is not default:
+            return value
+        data = output.get("data") if isinstance(output, dict) and isinstance(output.get("data"), dict) else None
+        if data is not None:
+            if path.startswith("data."):
+                return self._get_nested_value(output, path, default=default)
+            return self._get_nested_value(data, path, default=default)
+        return default
+
+    def _get_nested_value(self, value: Any, path: str, default: Any = None) -> Any:
+        current = value
+        for part in [p for p in str(path or "").split(".") if p]:
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            else:
+                return default
+        return current
+
+    def _json_type_matches(self, value: Any, expected_type: str) -> bool:
+        if expected_type in {"", "any"}:
+            return True
+        if expected_type == "string":
+            return isinstance(value, str)
+        if expected_type in {"number", "integer"}:
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+        if expected_type == "boolean":
+            return isinstance(value, bool)
+        if expected_type == "object":
+            return isinstance(value, dict)
+        if expected_type == "array":
+            return isinstance(value, list)
+        if expected_type == "null":
+            return value is None
+        return True
 
     def _matches_expectations(self, output: Any, expectations: dict[str, Any]) -> bool:
         success_statuses = {"completed", "success", "ok", "executed", "passed", ""}

@@ -483,7 +483,12 @@ async def runtime_state_runs(limit: int = 50):
 async def runtime_state_run(run_id: str):
     run = runtime_state_manager.get_run(run_id)
     if not run:
-        return JSONResponse({"ok": False, "status": "not_found", "run_id": run_id}, status_code=404)
+        # Runtime State Console may hold a stale selected run id after a reload,
+        # cleanup, or worker restart. Return a normal payload instead of HTTP
+        # 404 so the browser can clear the stale selection without spamming the
+        # server log. The store remains authoritative; no synthetic run is
+        # created here.
+        return JSONResponse({"ok": False, "status": "not_found", "run_id": run_id})
     return JSONResponse({"ok": True, "run": run})
 
 
