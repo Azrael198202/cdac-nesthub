@@ -30,9 +30,9 @@ class SessionMemoryStore:
     """
 
     def __init__(self, *, root: Path | None = None) -> None:
-        self.root = root or RUNTIME_SESSIONS
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.root = Path(root or RUNTIME_SESSIONS)
         self.sqlite_path = self.root / "session_memory.sqlite3"
+        self._ensure_storage_ready()
         self._init_sqlite()
         self._init_postgres_if_available()
 
@@ -40,7 +40,7 @@ class SessionMemoryStore:
         sid = str(session_id or "").strip() or "session_" + uuid4().hex[:16]
         now = self._now()
         meta = metadata or {}
-        with sqlite3.connect(self.sqlite_path) as con:
+        with self._sqlite_connect() as con:
             con.execute(
                 """
                 insert into sessions(session_id, created_at, updated_at, metadata_json)
@@ -80,7 +80,7 @@ class SessionMemoryStore:
             "metadata": metadata or {},
             "created_at": now,
         }
-        with sqlite3.connect(self.sqlite_path) as con:
+        with self._sqlite_connect() as con:
             con.execute(
                 """
                 insert into turns(turn_id, session_id, run_id, user_input, final_answer, stage_results_json, metadata_json, created_at)
@@ -108,7 +108,7 @@ class SessionMemoryStore:
         return record
 
     def load_context_window(self, session_id: str, *, limit: int = 8) -> ContextWindow:
-        with sqlite3.connect(self.sqlite_path) as con:
+        with self._sqlite_connect() as con:
             con.row_factory = sqlite3.Row
             rows = con.execute(
                 "select * from turns where session_id=? order by created_at desc limit ?",
@@ -144,7 +144,7 @@ class SessionMemoryStore:
         now = self._now()
         summary_id = "summary_" + uuid4().hex[:16]
         payload = json.dumps(open_items or [], ensure_ascii=False)
-        with sqlite3.connect(self.sqlite_path) as con:
+        with self._sqlite_connect() as con:
             con.execute(
                 "insert into session_summaries(summary_id, session_id, source_run_id, summary_text, open_items_json, created_at) values(?, ?, ?, ?, ?, ?)",
                 (summary_id, session_id, source_run_id or "", summary_text, payload, now),
@@ -172,7 +172,7 @@ class SessionMemoryStore:
             "note": str(note or ""),
             "created_at": now,
         }
-        with sqlite3.connect(self.sqlite_path) as con:
+        with self._sqlite_connect() as con:
             con.execute(
                 "insert into feedback(feedback_id, session_id, run_id, rating, note, created_at) values(?, ?, ?, ?, ?, ?)",
                 (record["feedback_id"], session_id, run_id, record["rating"], record["note"], now),
@@ -185,7 +185,7 @@ class SessionMemoryStore:
         return record
 
     def boundary_status(self, session_id: str, *, soft_turn_limit: int = 30, hard_turn_limit: int = 50) -> dict[str, Any]:
-        with sqlite3.connect(self.sqlite_path) as con:
+        with self._sqlite_connect() as con:
             count = con.execute("select count(*) from turns where session_id=?", (session_id,)).fetchone()[0]
         return {
             "turn_count": int(count),
@@ -203,7 +203,7 @@ class SessionMemoryStore:
         domain-specific assumptions.  Titles are derived from explicit metadata
         first, then from the latest user input, and finally from the session id.
         """
-        with sqlite3.connect(self.sqlite_path) as con:
+        with self._sqlite_connect() as con:
             con.row_factory = sqlite3.Row
             rows = con.execute(
                 """
@@ -256,7 +256,7 @@ class SessionMemoryStore:
     def rename_session(self, session_id: str, title: str) -> dict[str, Any]:
         sid = self.start_or_get_session(session_id)
         now = self._now()
-        with sqlite3.connect(self.sqlite_path) as con:
+        with self._sqlite_connect() as con:
             row = con.execute("select metadata_json from sessions where session_id=?", (sid,)).fetchone()
             try:
                 meta = json.loads((row[0] if row else "{}") or "{}")
@@ -269,44 +269,47 @@ class SessionMemoryStore:
         return {"session_id": sid, "title": str(title or "").strip(), "updated_at": now}
 
     def _init_sqlite(self) -> None:
-        with sqlite3.connect(self.sqlite_path) as con:
-            con.executescript(
-                """
-                create table if not exists sessions(
-                    session_id text primary key,
-                    created_at text not null,
-                    updated_at text not null,
-                    metadata_json text not null default '{}'
-                );
-                create table if not exists turns(
-                    turn_id text primary key,
-                    session_id text not null,
-                    run_id text not null,
-                    user_input text not null,
-                    final_answer text not null,
-                    stage_results_json text not null,
-                    metadata_json text not null,
-                    created_at text not null
-                );
-                create index if not exists idx_turns_session_created on turns(session_id, created_at);
-                create table if not exists session_summaries(
-                    summary_id text primary key,
-                    session_id text not null,
-                    source_run_id text not null,
-                    summary_text text not null,
-                    open_items_json text not null,
-                    created_at text not null
-                );
-                create table if not exists feedback(
-                    feedback_id text primary key,
-                    session_id text not null,
-                    run_id text not null,
-                    rating text not null,
-                    note text not null,
-                    created_at text not null
-                );
-                """
-            )
+        with self._sqlite_connect(initialize_schema=False) as con:
+            self._ensure_sqlite_schema(con)
+
+    def _ensure_sqlite_schema(self, con: sqlite3.Connection) -> None:
+        con.executescript(
+            """
+            create table if not exists sessions(
+                session_id text primary key,
+                created_at text not null,
+                updated_at text not null,
+                metadata_json text not null default '{}'
+            );
+            create table if not exists turns(
+                turn_id text primary key,
+                session_id text not null,
+                run_id text not null,
+                user_input text not null,
+                final_answer text not null,
+                stage_results_json text not null,
+                metadata_json text not null,
+                created_at text not null
+            );
+            create index if not exists idx_turns_session_created on turns(session_id, created_at);
+            create table if not exists session_summaries(
+                summary_id text primary key,
+                session_id text not null,
+                source_run_id text not null,
+                summary_text text not null,
+                open_items_json text not null,
+                created_at text not null
+            );
+            create table if not exists feedback(
+                feedback_id text primary key,
+                session_id text not null,
+                run_id text not null,
+                rating text not null,
+                note text not null,
+                created_at text not null
+            );
+            """
+        )
 
     def _init_postgres_if_available(self) -> None:
         self.pg_dsn = os.getenv("RUNTIME_POSTGRES_DSN") or os.getenv("DATABASE_URL") or ""
@@ -362,7 +365,35 @@ class SessionMemoryStore:
         except Exception:
             return
 
+    def _ensure_storage_ready(self) -> None:
+        """Ensure local persistence directories exist before any file access.
+
+        sqlite3.connect() can create a missing database file, but it cannot
+        create a missing parent directory.  Runtime folders may be deleted or
+        mounted after process startup, so the check is repeated before each
+        sqlite/jsonl write instead of only during object construction.
+        """
+        if self.root.exists() and not self.root.is_dir():
+            raise RuntimeError(f"Session storage path is not a directory: {self.root}")
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _sqlite_connect(self, *, initialize_schema: bool = True) -> sqlite3.Connection:
+        self._ensure_storage_ready()
+        db_was_missing = not self.sqlite_path.exists()
+        try:
+            con = sqlite3.connect(str(self.sqlite_path), timeout=30)
+        except sqlite3.OperationalError as exc:
+            raise sqlite3.OperationalError(
+                f"Unable to open session sqlite database at {self.sqlite_path}. "
+                f"Check that the parent directory exists and is writable."
+            ) from exc
+        if initialize_schema and db_was_missing:
+            self._ensure_sqlite_schema(con)
+        return con
+
     def _append_jsonl(self, name: str, record: dict[str, Any]) -> None:
+        self._ensure_storage_ready()
         path = self.root / name
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
