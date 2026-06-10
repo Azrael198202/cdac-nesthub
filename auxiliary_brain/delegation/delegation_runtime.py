@@ -740,7 +740,7 @@ class AgentDelegationRuntime:
                 return True
         return False
 
-    def _approval_trusted(self, *, participant: dict[str, Any], tool_id: str) -> bool:
+    def _approval_trusted(self, *, participant: dict[str, Any], tool_id: str, profile_id: str = "default") -> bool:
         """Return True when this run may execute without an approval pause.
 
         This method intentionally stays policy-driven.  It does not inspect
@@ -752,7 +752,7 @@ class AgentDelegationRuntime:
         if not tool_id:
             return False
         try:
-            if self.registered_tool_service.approval_policy_store.is_auto_approved(tool_id=tool_id, profile_id="default"):
+            if self.registered_tool_service.approval_policy_store.is_auto_approved(tool_id=tool_id, profile_id=profile_id or "default"):
                 return True
         except Exception:
             pass
@@ -812,20 +812,74 @@ class AgentDelegationRuntime:
         }
         self.store.write_json("configs/policies/approval_trust.json", record)
 
+    def _result_has_usable_material(self, result: Any) -> bool:
+        """Return True when a result has material that can safely feed downstream nodes.
+
+        Primary-runtime verification may mark a participant as failed when the
+        overall answer did not meet every verification criterion, while still
+        returning concrete final material.  Dataflow dependencies should not be
+        blocked merely because the upstream terminal status is non-completed
+        when usable result material is present.  This method is intentionally
+        generic: it checks structural result fields only and never inspects
+        participant names or domain-specific content.
+        """
+        if result is None:
+            return False
+        status = str(getattr(result, "status", "") or "").strip().lower()
+        if status in {"requires_key", "requires_input", "paused", "timeout", "dependency_blocked"}:
+            return False
+        workflow_results = getattr(result, "workflow_results", None)
+        if isinstance(workflow_results, dict):
+            gate = workflow_results.get("dependency_gate")
+            if isinstance(gate, dict) and str(gate.get("reason") or "") == "required_upstream_result_unavailable":
+                return False
+            verified = workflow_results.get("verified_result_material")
+            if verified not in (None, "", [], {}):
+                return True
+            for key in ("final_content", "final_answer", "answer", "result", "content", "text", "output", "material"):
+                value = workflow_results.get(key)
+                if value not in (None, "", [], {}):
+                    return True
+            # Primary-runtime results often store node outputs under nested
+            # workflow stage names.  Use the already generic extractor as a last
+            # structural check.
+            for value in workflow_results.values():
+                if isinstance(value, dict):
+                    for key in ("final_answer", "final_content", "answer", "result", "content", "text", "output"):
+                        nested = value.get(key)
+                        if nested not in (None, "", [], {}):
+                            return True
+        return bool(str(getattr(result, "final_answer", "") or "").strip())
+
+    def _dependency_result_is_available(self, result: Any) -> bool:
+        if result is None:
+            return False
+        status = str(getattr(result, "status", "") or "").strip().lower()
+        if status == "completed":
+            return True
+        return self._result_has_usable_material(result)
+
     def _blocked_dependency_ids(self, *, participant_id: str, completed_results: list[Any], dependency_plan: dict[str, Any]) -> list[str]:
         participants = dependency_plan.get("participants") if isinstance(dependency_plan, dict) else {}
         plan = participants.get(participant_id) if isinstance(participants, dict) else {}
         dependencies = [str(item).strip() for item in (plan.get("depends_on") if isinstance(plan, dict) else []) or [] if str(item).strip()]
         if not dependencies:
             return []
-        result_by_id = {str(getattr(result, "participant_id", "") or ""): result for result in completed_results}
+        result_by_id: dict[str, Any] = {}
+        for result in completed_results:
+            rid = str(getattr(result, "participant_id", "") or "").strip()
+            rname = str(getattr(result, "participant_name", "") or "").strip()
+            if rid:
+                result_by_id[rid] = result
+            if rname:
+                result_by_id[rname] = result
         blocked: list[str] = []
         for dependency_id in dependencies:
             result = result_by_id.get(dependency_id)
             if result is None:
                 blocked.append(dependency_id)
                 continue
-            if str(getattr(result, "status", "") or "").lower() != "completed":
+            if not self._dependency_result_is_available(result):
                 blocked.append(dependency_id)
         return blocked
 
@@ -1806,7 +1860,7 @@ class AgentDelegationRuntime:
         ref_map: dict[str, Any] = {}
         included_index = 0
         for absolute_index, result in enumerate(completed_results, start=1):
-            if str(getattr(result, "status", "") or "") != "completed":
+            if not self._dependency_result_is_available(result):
                 continue
             result_pid = str(getattr(result, "participant_id", "") or "").strip()
             result_name = str(getattr(result, "participant_name", "") or "").strip()
@@ -1960,7 +2014,7 @@ class AgentDelegationRuntime:
             result_name = str(getattr(result, "participant_name", "") or "")
             if deps and result_pid not in deps and result_name not in deps:
                 continue
-            if str(getattr(result, "status", "") or "") != "completed":
+            if not self._dependency_result_is_available(result):
                 continue
             material = self._extract_primary_material_from_result(result)
             if material:
@@ -2163,6 +2217,26 @@ class AgentDelegationRuntime:
         if changed:
             self.parameter_contract_service.apply_values(participant, scoped)
 
+    def _separate_registered_tool_approval_controls(self, *, input_data: dict[str, Any], missing: list[Any], approval_confirmed: bool) -> tuple[dict[str, Any], list[Any]]:
+        """Keep approval controls out of ordinary runtime tool input collection.
+
+        approval_confirmed / remember_approval are execution-control fields.
+        They must be governed by the persistent runtime approval policy store
+        instead of being treated as user business input.  When the policy is
+        auto-approved, inject approval_confirmed into the executable payload so
+        legacy generated tools that declared the field still pass schema checks.
+        """
+        cleaned_input = dict(input_data or {})
+        cleaned_missing: list[Any] = []
+        for item in missing or []:
+            tail = str(item or "").strip().rsplit(".", 1)[-1].replace("-", "_").casefold()
+            if tail in {"approval_confirmed", "remember_approval", "confirm", "confirmed", "approval", "approved"}:
+                continue
+            cleaned_missing.append(item)
+        if approval_confirmed:
+            cleaned_input.setdefault("approval_confirmed", True)
+        return cleaned_input, cleaned_missing
+
     async def _execute_registered_tool_capability(self, *, participant: dict[str, Any], task_name: str, completed_results: list[Any] | None = None, dependency_plan: dict[str, Any] | None = None) -> AgentExecutionResult | None:
         profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
         tool_id = str(profile.get("tool_id") or "").strip()
@@ -2180,11 +2254,22 @@ class AgentDelegationRuntime:
         )
         self._ensure_participant_structural_context(participant=participant, task_name=task_name)
         values = participant.get("runtime_parameters") if isinstance(participant.get("runtime_parameters"), dict) else {}
+        profile_id = str(values.get("profile_id") or "default")
+        policy_auto_approved = self._approval_trusted(participant=participant, tool_id=tool_id, profile_id=profile_id)
+        if policy_auto_approved:
+            values = dict(values)
+            values.setdefault("approval_confirmed", True)
+            runtime_parameters = participant.get("runtime_parameters") if isinstance(participant.get("runtime_parameters"), dict) else {}
+            runtime_parameters = dict(runtime_parameters)
+            runtime_parameters.setdefault("approval_confirmed", True)
+            participant["runtime_parameters"] = runtime_parameters
         bridge_result = self.registered_tool_parameter_bridge.build_invocation(participant=participant, provided_values=values)
         input_data = bridge_result.get("input_data") if isinstance(bridge_result.get("input_data"), dict) else {}
         missing = bridge_result.get("missing") if isinstance(bridge_result.get("missing"), list) else []
+        input_data, missing = self._separate_registered_tool_approval_controls(input_data=input_data, missing=missing, approval_confirmed=policy_auto_approved)
         if missing:
             input_data, missing = self._fill_registered_tool_input_from_runtime(participant, input_data, missing)
+            input_data, missing = self._separate_registered_tool_approval_controls(input_data=input_data, missing=missing, approval_confirmed=policy_auto_approved)
         if missing:
             raw_fields = self.registered_tool_parameter_bridge.input_fields_from_schema(participant=participant)
             missing_set = {str(x).casefold() for x in missing}
@@ -2200,6 +2285,7 @@ class AgentDelegationRuntime:
                 bridge_result = self.registered_tool_parameter_bridge.build_invocation(participant=participant, provided_values=participant.get("runtime_parameters") or {})
                 input_data = bridge_result.get("input_data") if isinstance(bridge_result.get("input_data"), dict) else {}
                 missing = bridge_result.get("missing") if isinstance(bridge_result.get("missing"), list) else []
+                input_data, missing = self._separate_registered_tool_approval_controls(input_data=input_data, missing=missing, approval_confirmed=policy_auto_approved)
                 if not missing:
                     pass
                 else:
@@ -2241,13 +2327,13 @@ class AgentDelegationRuntime:
         execution_policy = profile.get("execution_policy") if isinstance(profile.get("execution_policy"), dict) else {}
         approval_policy = execution_policy.get("approval_policy") if isinstance(execution_policy.get("approval_policy"), dict) else {}
         approval_confirmed = bool(values.get("approval_confirmed") or values.get("confirm") or values.get("confirmed"))
-        if not approval_confirmed and self._approval_trusted(participant=participant, tool_id=tool_id):
+        if not approval_confirmed and policy_auto_approved:
             approval_confirmed = True
         result = self.registered_tool_service.execute_tool(
             tool_id=tool_id,
             input_data=input_data,
             run_id=new_id("registered_tool_run"),
-            profile_id=str(values.get("profile_id") or "default"),
+            profile_id=profile_id,
             approval_confirmed=approval_confirmed,
         )
         status = str(result.get("status") or "").strip()

@@ -29,8 +29,6 @@
     <div class="studioSettingsSummary">
       <span id="modelPolicyHint" class="settingsChip">Model settings loading...</span>
       <span id="presentationProfileHint" class="settingsChip">View: Advanced</span>
-      <a class="btn" href="/model-prompt-studio" target="_blank" rel="noopener">Model/Prompt</a>
-      <a class="btn" href="/settings" target="_blank" rel="noopener">Settings</a>
       <button class="btn" title="Command help" aria-label="Command help" onclick="openCommandHelpModal()">?</button>
       <button class="btn" onclick="refreshState()">Refresh</button>
     </div>
@@ -494,6 +492,18 @@ async function uploadArtifacts(){
   finally{ if(input) input.value=''; setStudioStatus('ready', false); }
 }
 
+async function recoverAsyncJobResult(jobId){
+  try{
+    const runData=await fetchJsonWithRetry('/api/runtime-state/runs/'+encodeURIComponent(jobId),{cache:'no-store'},2,700);
+    const run=runData.run||{};
+    const st=String(run.status||'');
+    if(['completed','paused','failed','cancelled'].includes(st)){
+      return {ok: st==='completed'||st==='paused', status: st, run_id: jobId, runtime_state:{run_id:jobId,state_url:'/runtime-state?run_id='+encodeURIComponent(jobId)}, final_answer: run.summary || ('Runtime job '+st+'. See Runtime State Console for durable details.'), durable_recovered:true};
+    }
+  }catch(e){ addProgressMessage('durable state recovery retry: '+String(e.message||e)); }
+  return null;
+}
+
 async function sendMessage(){
   const input=document.getElementById('input');
   const text=input.value.trim();
@@ -550,14 +560,17 @@ async function sendMessage(){
       const job=jobData.job||{};
       addProgressMessage('job status: '+(job.status||'unknown'));
       await refreshState();
-      if(['completed','failed','cancelled'].includes(String(job.status||''))){
+      if(['completed','paused','failed','cancelled','interrupted'].includes(String(job.status||''))){
         data=(job.result||{});
+        if(String(job.status||'')==='interrupted' && (!data || !data.final_answer)){ data = await recoverAsyncJobResult(accepted.job_id) || data; }
         if(job.error && !data.error){ data={ok:false,status:'failed',error:job.error,message:job.error.message}; }
         setStudioStatus('job completed; rendering result', false);
         break;
       }
     }
+    if(!data){ data = await recoverAsyncJobResult(accepted.job_id); }
     if(!data){ throw new Error('async job did not return a visible result'); }
+    if(data.durable_recovered){ addProgressMessage('recovered visible result from durable runtime state'); }
     renderStudioResponse(data, text);
     const pendingItems = collectMissingInputs(data);
     if(pendingItems.length){ lastMissingInputs=pendingItems; lastPendingRunId=data.run_id||''; lastPendingInstruction=text; addMissingInputs(pendingItems, text, lastPendingRunId); }

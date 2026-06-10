@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "NestHub API - uvicorn main:app",
+      "name": "NestHub API (No Reload)",
       "type": "debugpy",
       "request": "launch",
       "module": "uvicorn",
@@ -11,8 +11,7 @@
         "--host",
         "127.0.0.1",
         "--port",
-        "8000",
-        "--reload"
+        "8000"
       ],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",

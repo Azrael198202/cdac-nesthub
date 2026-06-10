@@ -37,8 +37,19 @@ class ArtifactEditService:
         self.registry = UploadedArtifactRegistry()
         self.proposal_dir = RUNTIME_DIR / "uploads" / "edit_proposals"
         self.backup_dir = RUNTIME_DIR / "uploads" / "backups"
+        self.applied_dir = RUNTIME_DIR / "uploads" / "applied_edits"
+        self._ensure_dirs()
+
+    def _ensure_dirs(self) -> None:
+        """Ensure artifact edit runtime directories exist before every file write.
+
+        Runtime directories may be cleaned while the server process is still alive
+        during local testing.  The service therefore does not rely only on
+        __init__; every write path calls this method first.
+        """
         self.proposal_dir.mkdir(parents=True, exist_ok=True)
         self.backup_dir.mkdir(parents=True, exist_ok=True)
+        self.applied_dir.mkdir(parents=True, exist_ok=True)
 
     def list_artifacts(self) -> list[dict[str, Any]]:
         return self.registry.list()
@@ -82,9 +93,11 @@ class ArtifactEditService:
                 edited, generation = deterministic
             else:
                 edited, generation = await self._generate_edit(base_text=base_text, instruction=instruction, feedback=feedback, filename=str(artifact.get("filename") or original.name))
+        self._ensure_dirs()
         proposal_id = "edit_" + uuid4().hex[:12]
         suffix = original.suffix or ".txt"
         draft_path = self.proposal_dir / f"{proposal_id}{suffix}"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
         draft_path.write_text(edited, encoding="utf-8")
         meta = {
             "proposal_id": proposal_id,
@@ -99,7 +112,9 @@ class ArtifactEditService:
             "generation": generation,
             "download_url": f"/api/agent-studio/artifact-edit/{proposal_id}/download",
         }
-        self._proposal_meta_path(proposal_id).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        meta_path = self._proposal_meta_path(proposal_id)
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"ok": True, "status": "pending_review", "proposal": meta, "preview": edited[:4000]}
 
     def confirm(self, proposal_id: str) -> dict[str, Any]:
@@ -118,7 +133,9 @@ class ArtifactEditService:
         meta["status"] = "confirmed"
         meta["confirmed_at"] = self._now()
         meta["backup_path"] = str(backup)
-        self._proposal_meta_path(proposal_id).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        meta_path = self._proposal_meta_path(proposal_id)
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         self._mark_registry_replacement(str(meta.get("artifact_id") or ""), backup_path=str(backup), proposal_id=proposal_id)
         return {"ok": True, "status": "confirmed", "proposal": meta}
 
@@ -128,7 +145,9 @@ class ArtifactEditService:
             return {"ok": False, "status": "not_found", "message": "Edit proposal was not found."}
         meta["status"] = "cancelled"
         meta["cancelled_at"] = self._now()
-        self._proposal_meta_path(proposal_id).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        meta_path = self._proposal_meta_path(proposal_id)
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"ok": True, "status": "cancelled", "proposal": meta}
 
     def _mark_registry_replacement(self, artifact_id: str, *, backup_path: str, proposal_id: str) -> None:
@@ -296,6 +315,7 @@ class ArtifactEditService:
         return base_text, {"mode": "unchanged_empty_generation"}
 
     def _proposal_meta_path(self, proposal_id: str) -> Path:
+        self._ensure_dirs()
         clean = "".join(ch for ch in str(proposal_id or "") if ch.isalnum() or ch in "_-.")[:80]
         return self.proposal_dir / f"{clean}.json"
 

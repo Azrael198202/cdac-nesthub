@@ -541,6 +541,7 @@ async def model_prompt_studio_state():
 
 class ModelPromptUpdateRequest(BaseModel):
     location: str
+    mode: str | None = None
     model: str | None = None
     provider: str | None = None
     system_prompt: str | None = None
@@ -906,6 +907,23 @@ artifact_registry = UploadedArtifactRegistry()
 artifact_edit_service = ArtifactEditService()
 command_set_service = CommandSetService()
 
+def _ensure_agent_studio_runtime_dirs() -> None:
+    """Create runtime-only directories used by Agent Studio uploads and edits.
+
+    These directories are data/output locations, not source code. They must exist
+    before handlers write files and they may be safely recreated if cleaned during
+    local development.
+    """
+    for rel in (
+        "runtime/uploads/files",
+        "runtime/uploads/edit_proposals",
+        "runtime/uploads/backups",
+        "runtime/uploads/applied_edits",
+    ):
+        (Path(rel)).mkdir(parents=True, exist_ok=True)
+
+_ensure_agent_studio_runtime_dirs()
+
 def _read_artifact_registry() -> list[dict[str, Any]]:
     return artifact_registry.list()
 
@@ -917,6 +935,7 @@ async def agent_studio_artifacts():
     return JSONResponse({"ok": True, "artifacts": _read_artifact_registry()})
 
 def _store_uploaded_artifact_items(items: list[dict[str, Any]]) -> dict[str, Any]:
+    _ensure_agent_studio_runtime_dirs()
     upload_dir = Path("runtime") / "uploads" / "files"
     upload_dir.mkdir(parents=True, exist_ok=True)
     registry = _read_artifact_registry()
@@ -981,6 +1000,7 @@ async def agent_studio_upload_artifacts_json(req: ArtifactUploadJsonRequest):
 
 @app.post("/api/agent-studio/artifacts/{artifact_id}/edit-proposal")
 async def agent_studio_artifact_edit_proposal(artifact_id: str, req: ArtifactEditRequest):
+    _ensure_agent_studio_runtime_dirs()
     payload = await artifact_edit_service.propose_edit(
         artifact_id=artifact_id,
         instruction=req.instruction,
@@ -1025,6 +1045,7 @@ async def agent_studio_artifact_edit_confirm(proposal_id: str, req: ArtifactProp
         if meta:
             draft_path = artifact_edit_service._safe_path(str(meta.get("draft_path") or ""))
             if draft_path:
+                draft_path.parent.mkdir(parents=True, exist_ok=True)
                 draft_path.write_text(req.new_content, encoding="utf-8")
     payload = artifact_edit_service.confirm(proposal_id)
     return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)

@@ -62,6 +62,46 @@ class RuntimeAsyncJobStore:
         record = self._jobs.get(job_id) or self._read(job_id)
         if not isinstance(record, dict):
             return None
+        return self._merge_durable_runtime_state(record)
+
+    def _merge_durable_runtime_state(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Recover visible job result from durable runtime_state after reload.
+
+        WatchFiles/local reload can interrupt the process-local async worker while
+        the delegated runtime already finished and wrote runtime_state.  The job
+        snapshot should not hide that completed durable result.
+        """
+        job_id = str(record.get("job_id") or "")
+        if not job_id:
+            return record
+        try:
+            run = runtime_state_manager.get_run(job_id)
+        except Exception:
+            run = None
+        if not isinstance(run, dict):
+            return record
+        run_status = str(run.get("status") or "")
+        terminal = {"completed", "paused", "failed", "cancelled"}
+        if run_status not in terminal:
+            return record
+        current = str(record.get("status") or "")
+        if current in {"queued", "running", "interrupted"} or not record.get("result"):
+            recovered = dict(record)
+            recovered["status"] = run_status
+            recovered["updated_at"] = run.get("updated_at") or recovered.get("updated_at")
+            recovered["finished_at"] = recovered.get("finished_at") or run.get("ended_at") or run.get("updated_at")
+            recovered["error"] = run.get("last_error") if run_status == "failed" else None
+            recovered["result"] = recovered.get("result") or {
+                "ok": run_status in {"completed", "paused"},
+                "status": run_status,
+                "run_id": job_id,
+                "runtime_state": {"run_id": job_id, "state_url": f"/runtime-state?run_id={job_id}"},
+                "final_answer": run.get("summary") or f"Runtime job {run_status}. See Runtime State Console for details.",
+                "durable_recovered": True,
+            }
+            self._jobs[job_id] = recovered
+            self._write(recovered)
+            return recovered
         return record
 
     def list(self, *, limit: int = 50) -> list[dict[str, Any]]:
@@ -183,11 +223,17 @@ class RuntimeAsyncJobStore:
                 continue
             if not isinstance(record, dict) or str(record.get("status") or "") not in active:
                 continue
+            job_id = str(record.get("job_id") or path.stem)
+            recovered = self._merge_durable_runtime_state({**record, "job_id": job_id})
+            if str(recovered.get("status") or "") in {"completed", "paused", "failed", "cancelled"}:
+                self._jobs[job_id] = recovered
+                self._write(recovered)
+                continue
             record["status"] = "interrupted"
             record["updated_at"] = now
             record["finished_at"] = record.get("finished_at") or now
             record["error"] = {"type": "RuntimeRestart", "message": reason}
-            self._jobs[str(record.get("job_id") or path.stem)] = record
+            self._jobs[job_id] = record
             self._write(record)
             count += 1
         return count

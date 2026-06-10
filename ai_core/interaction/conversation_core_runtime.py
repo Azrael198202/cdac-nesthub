@@ -162,6 +162,28 @@ class ConversationCoreRuntime:
         }
 
     async def _intent_recognition(self, text: str, parsed: dict[str, Any], run_id: str) -> dict[str, Any]:
+        direct_guard = self._direct_conversation_signal(text)
+        if direct_guard:
+            return {
+                "intent_type": "direct_response",
+                "confidence": 0.9,
+                "response_mode": "direct_answer",
+                "needs_external_execution": False,
+                "requires_external_information": False,
+                "required_capabilities": [],
+                "source_policy": {
+                    "requires_source_material": False,
+                    "external_access": "not_required",
+                    "min_sources": 0,
+                },
+                "external_information_signals": [],
+                "capability_gap_detected": False,
+                "capability_gap_reason": "",
+                "reason": direct_guard,
+                "missing_information": [],
+                "_executor_type": "deterministic",
+                "_node_id": "conversation_intent_recognition",
+            }
         # Fast path for system-level runtime self-extension requests.  This
         # improves accuracy and latency because ai_core only recognizes the
         # control intent here; concrete capability details are still generated
@@ -230,7 +252,8 @@ class ConversationCoreRuntime:
                 "Recognize the user's interaction intent using generic labels only. "
                 "Choose whether the message can be answered directly or requires an external runtime action. "
                 "Set requires_external_information=true when the answer depends on outside, changing, source-backed, or explicitly requested online material. "
-                "Set capability_gap_detected=true when the user is asking the runtime to handle or implement an operation that the current system may not support and external implementation knowledge should be collected first. "
+                "Set capability_gap_detected=true only when the user explicitly asks to create, acquire, implement, register, install, integrate, configure, or fix a runtime capability/tool/module, and external implementation knowledge should be collected first. "
+                "Do not treat greetings, language preference changes, assistant capability questions, or simple conversation as capability gaps. "
                 "Use generic signal names only, such as freshness_required, external_source_required, evidence_required, local_context_insufficient, verification_required, and capability_gap_resolution. "
                 "Do not use domain-specific routing rules. Return only valid JSON matching the schema."
             ),
@@ -266,6 +289,19 @@ class ConversationCoreRuntime:
         )
         external_signals = self._external_information_signals(text)
         capability_gap = self._generic_capability_gap_signal(text)
+        if not capability_gap and bool(result.get("capability_gap_detected")):
+            # LLMs can over-generalize ordinary chat or assistant capability questions
+            # into runtime self-extension.  ai_core only accepts a capability gap
+            # when the generic structural runtime-extension signal is present.
+            result["capability_gap_detected"] = False
+            result["capability_gap_reason"] = ""
+            result["intent_type"] = "direct_response"
+            result["response_mode"] = "direct_answer"
+            result["needs_external_execution"] = False
+            result["requires_external_information"] = False
+            result["required_capabilities"] = []
+            result["source_policy"] = {"requires_source_material": False, "external_access": "not_required", "min_sources": 0}
+            result["reason"] = "capability_gap_rejected_without_runtime_extension_signal"
         requires_external = bool(external_signals or capability_gap or result.get("requires_external_information"))
         if requires_external:
             result["requires_external_information"] = True
@@ -1250,6 +1286,31 @@ class ConversationCoreRuntime:
             if len(terms) >= 20:
                 break
         return terms
+
+    def _direct_conversation_signal(self, text: str) -> str:
+        """Return a neutral direct-chat reason when no runtime action is requested.
+
+        This is a structural guard, not a business/domain route.  It protects
+        short interpersonal messages, language preference/capability questions,
+        and simple conversational turns from being escalated into capability
+        acquisition when the user has not asked to create or operate a runtime
+        tool.
+        """
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        value = " " + re.sub(r"\s+", " ", raw).casefold() + " "
+        if self._external_information_signals(raw) or self._generic_capability_gap_signal(raw):
+            return ""
+        if len(raw) <= 180 and not re.search(r"\b(create|acquire|register|implement|install|integrate|configure|generate code|fix|execute|run|schedule|send|download|upload|delete|update)\b", value):
+            question_like = "?" in raw or re.search(r"\b(can|could|would|do|are|is|what|who|where|when|why|how)\b", value)
+            assistant_reference = re.search(r"\b(you|your|assistant|chatgpt|model|speak|language|conversation|talk)\b", value)
+            social_or_short = len(raw.split()) <= 12
+            if question_like and assistant_reference:
+                return "direct_conversation_or_assistant_capability_question"
+            if social_or_short and re.search(r"[A-Za-z\u3040-\u30ff\u3400-\u9fff]", raw):
+                return "simple_conversation"
+        return ""
 
     def _generic_external_signal(self, text: str) -> bool:
         return bool(self._external_information_signals(text) or self._generic_capability_gap_signal(text))

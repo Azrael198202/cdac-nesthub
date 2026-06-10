@@ -730,9 +730,9 @@ class AgentStudioService:
         graph = self.store.read_json(f"generated/tasks/{resolved}.json")
         if not graph:
             return {"ok": False, "status": "not_found", "task_name": resolved}
-        policy = graph.get("schedule_policy") if isinstance(graph.get("schedule_policy"), dict) else {}
-        if not policy or str(policy.get("mode") or "") in {"", "none"}:
-            return {"ok": False, "status": "not_scheduled", "task_name": resolved, "message": "The selected task does not declare a durable schedule policy."}
+        policy = self._task_schedule_policy(graph)
+        if str(policy.get("mode") or "none") in {"", "none"} or self._task_execution_type(graph) != "scheduled":
+            return {"ok": False, "status": "not_scheduled", "task_name": resolved, "message": "The selected task is a one-shot task and does not declare a durable schedule policy."}
         policy["enabled"] = bool(enabled)
         now = self._now()
         if enabled:
@@ -1973,11 +1973,15 @@ class AgentStudioService:
                 "status": "not_found",
                 "task_name": task_name,
             }
-        runtime_state_manager.emit(run_id=state_run_id, step_id="task.load", level="developer", kind="validation", status="completed", title="Task graph loaded", message="Task graph loaded from runtime storage.", output={"task_name": task_name, "task_count": len(task_graph.get("tasks") or []) if isinstance(task_graph, dict) else 0}, progress=100)
+        execution_type = self._task_execution_type(task_graph)
+        schedule_policy = self._task_schedule_policy(task_graph)
+        runtime_state_manager.emit(run_id=state_run_id, step_id="task.load", level="developer", kind="validation", status="completed", title="Task graph loaded", message="Task graph loaded from runtime storage.", output={"task_name": task_name, "task_count": len(task_graph.get("tasks") or []) if isinstance(task_graph, dict) else 0, "execution_type": execution_type, "schedule_state": schedule_policy.get("state")}, progress=100)
         if self._task_instruction_changed(task_graph):
             runtime_state_manager.emit(run_id=state_run_id, step_id="task.rebuild", level="developer", kind="repair", status="running", title="Task graph rebuild", message="Instruction changed; rebuilding the task graph from current instruction.", method="instruction_workflow_planner", progress=20)
             task_graph = self._rebuild_task_graph_from_current_instruction(task_graph)
-            runtime_state_manager.emit(run_id=state_run_id, step_id="task.rebuild", level="developer", kind="repair", status="completed", title="Task graph rebuilt", message="Task graph rebuild completed.", progress=100)
+            execution_type = self._task_execution_type(task_graph)
+            schedule_policy = self._task_schedule_policy(task_graph)
+            runtime_state_manager.emit(run_id=state_run_id, step_id="task.rebuild", level="developer", kind="repair", status="completed", title="Task graph rebuilt", message="Task graph rebuild completed.", output={"execution_type": execution_type, "schedule_state": schedule_policy.get("state")}, progress=100)
         provided_inputs = provided_inputs or {}
         activation_response = self._maybe_activate_durable_schedule_on_manual_execution(
             task_name=task_name,
@@ -2068,6 +2072,9 @@ class AgentStudioService:
             "status": status,
             "task_name": task_name,
             "run_id": result.get("run_id"),
+            "execution_type": execution_type,
+            "schedule_policy": schedule_policy if execution_type == "scheduled" else {"enabled": False, "mode": "none", "state": "none"},
+            "schedule_state": str((schedule_policy or {}).get("state") or "none") if execution_type == "scheduled" else "none",
             "final_answer": self._compact_final_answer((result.get("synthesis") or {}).get("final_answer")),
             "delivery": result.get("delivery"),
         }
@@ -2075,11 +2082,16 @@ class AgentStudioService:
             pending_action = result.get("pending_action")
             response["pending_action"] = pending_action
             response["missing_inputs"] = self._normalize_missing_inputs(result.get("missing_inputs", []), pending_action)
+            pause_reason = self._execution_pause_reason(response["missing_inputs"], pending_action)
+            response["pause_reason"] = pause_reason
             response["interaction_request"] = {
                 "type": "collect_runtime_parameters",
                 "kind": str((pending_action or {}).get("kind") or "runtime_parameter_input"),
                 "fields": response["missing_inputs"],
                 "message": self._paused_message(response["missing_inputs"], pending_action),
+                "pause_reason": pause_reason,
+                "execution_type": execution_type,
+                "schedule_state": response.get("schedule_state"),
             }
             response["message"] = self._paused_message(response["missing_inputs"], pending_action)
         if status in {"requires_key", "requires_input", "paused"}:
@@ -2388,11 +2400,14 @@ class AgentStudioService:
     def _paused_message(self, missing_inputs: list[dict[str, Any]], pending_action: dict[str, Any] | None) -> str:
         pending = pending_action if isinstance(pending_action, dict) else {}
         kind = str(pending.get("kind") or "")
-        if missing_inputs:
-            return "Delegated primary-runtime execution is waiting for required input."
+        reason = self._execution_pause_reason(missing_inputs or [], pending)
+        if reason == "runtime_approval_required":
+            return "One-shot task execution is waiting for runtime approval. This is not a schedule pause."
+        if reason == "runtime_input_required":
+            return "One-shot task execution is waiting for required runtime input. This is not a schedule pause."
         if kind == "validation_recovery":
-            return "Delegated primary-runtime execution paused after schema validation failed. Runtime auto repair should handle structural errors before asking the user."
-        return "Delegated primary-runtime execution is paused."
+            return "One-shot task execution paused after schema validation failed. Runtime auto repair should handle structural errors before asking the user."
+        return "One-shot task execution is paused for runtime interaction. This is not a schedule pause."
 
 
 
@@ -2608,6 +2623,93 @@ class AgentStudioService:
             elif out.get(key) == value:
                 out[key] = value
 
+
+    def _field_participant_id(self, field: dict[str, Any]) -> str:
+        if not isinstance(field, dict):
+            return ""
+        explicit = str(field.get("participant_id") or "").strip()
+        if explicit:
+            return explicit
+        raw = str(field.get("field") or field.get("name") or "").strip()
+        if "." in raw:
+            return raw.split(".", 1)[0].strip()
+        return ""
+
+    def _find_participant_by_id(self, participants: list[dict[str, Any]], participant_id: str) -> dict[str, Any] | None:
+        wanted = str(participant_id or "").strip()
+        if not wanted:
+            return None
+        for participant in participants or []:
+            if not isinstance(participant, dict):
+                continue
+            aliases = {
+                str(participant.get("participant_id") or "").strip(),
+                str(participant.get("id") or "").strip(),
+            }
+            if wanted in aliases:
+                return participant
+        return None
+
+    def _participant_display_aliases(self, participant: dict[str, Any]) -> list[str]:
+        aliases: list[str] = []
+        for key in ("participant_id", "id", "name", "agent_name", "display_name", "role_name"):
+            value = str(participant.get(key) or "").strip() if isinstance(participant, dict) else ""
+            if value and value not in aliases:
+                aliases.append(value)
+            underscored = value.replace(" ", "_") if value else ""
+            if underscored and underscored not in aliases:
+                aliases.append(underscored)
+        return aliases
+
+    def _approval_field_is_auto_confirmed(self, *, field: dict[str, Any], participants: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> bool:
+        """Return True when a discovered approval field is already covered by policy.
+
+        Approval is an execution-control concern, not a business parameter.  The
+        Studio preflight layer used to surface approval_confirmed as missing
+        before the registered-tool executor could read its persisted approval
+        policy.  This bridge lets preflight consult the same policy store used by
+        execution and injects the legacy flag only when the policy allows it.
+        """
+        try:
+            if not self.delegation_runtime._is_approval_parameter_field(field):
+                return False
+        except Exception:
+            return False
+        participant = self._find_participant_by_id(participants, self._field_participant_id(field))
+        if not participant:
+            return False
+        try:
+            tool_id = self.delegation_runtime._participant_tool_id(participant)
+        except Exception:
+            tool_id = ""
+        if not tool_id:
+            return False
+        profile_id = str((participant.get("runtime_parameters") or {}).get("profile_id") or runtime_parameters.get("profile_id") or "default")
+        try:
+            trusted = self.delegation_runtime._approval_trusted(participant=participant, tool_id=tool_id, profile_id=profile_id)
+        except Exception:
+            trusted = False
+        if not trusted:
+            return False
+        runtime_parameters.setdefault("approval_confirmed", True)
+        for alias in self._participant_display_aliases(participant):
+            runtime_parameters.setdefault(f"{alias}.approval_confirmed", True)
+            runtime_parameters.setdefault(f"{alias}_approval_confirmed", True)
+        scoped = participant.setdefault("runtime_parameters", {})
+        if isinstance(scoped, dict):
+            scoped.setdefault("approval_confirmed", True)
+        return True
+
+    def _filter_auto_confirmed_approval_fields(self, *, fields: list[dict[str, Any]], participants: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> list[dict[str, Any]]:
+        filtered: list[dict[str, Any]] = []
+        for field in fields or []:
+            if not isinstance(field, dict):
+                continue
+            if self._approval_field_is_auto_confirmed(field=field, participants=participants, runtime_parameters=runtime_parameters):
+                continue
+            filtered.append(field)
+        return filtered
+
     def _preflight_runtime_parameters(self, task_graph: dict[str, Any], participants: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> dict[str, Any]:
         """Resolve pre-execution requirements through typed context layers.
 
@@ -2671,6 +2773,11 @@ class AgentStudioService:
                 tagged = dict(field)
                 tagged.setdefault("resolution_layer", "execution_input")
                 agent_fields.append(tagged)
+        agent_fields = self._filter_auto_confirmed_approval_fields(
+            fields=agent_fields,
+            participants=selected,
+            runtime_parameters=runtime_parameters,
+        )
 
         return self.parameter_resolution_pipeline.build_context(
             runtime_inputs=runtime_parameters,
@@ -3184,6 +3291,46 @@ class AgentStudioService:
             "frequency",
         } or normalized.endswith("_interval") or normalized.endswith("_schedule")
 
+    def _task_schedule_policy(self, task_graph: dict[str, Any]) -> dict[str, Any]:
+        """Return durable schedule policy without mixing it with run pause state."""
+        if not isinstance(task_graph, dict):
+            return {"enabled": False, "mode": "none", "state": "none"}
+        policy = task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {}
+        mode = str(policy.get("mode") or "none").strip().casefold()
+        if mode in {"", "none"}:
+            return {"enabled": False, "mode": "none", "state": "none"}
+        out = dict(policy)
+        out.setdefault("mode", mode)
+        out.setdefault("state", "active" if bool(out.get("enabled")) else "paused")
+        return out
+
+    def _task_execution_type(self, task_graph: dict[str, Any]) -> str:
+        explicit = str((task_graph or {}).get("execution_type") or "").strip().casefold()
+        if explicit in {"one_shot", "scheduled"}:
+            return explicit
+        policy = self._task_schedule_policy(task_graph)
+        return "scheduled" if str(policy.get("mode") or "none") not in {"", "none"} else "one_shot"
+
+    def _is_scheduled_task_graph(self, task_graph: dict[str, Any]) -> bool:
+        return self._task_execution_type(task_graph) == "scheduled"
+
+    def _is_schedule_dispatch(self, provided_inputs: dict[str, Any] | None) -> bool:
+        provided_inputs = provided_inputs or {}
+        return bool(provided_inputs.get("_scheduled_payload_dispatch") or provided_inputs.get("_run_scheduled_payload_now"))
+
+    def _execution_pause_reason(self, missing_inputs: list[dict[str, Any]], pending_action: dict[str, Any] | None) -> str:
+        pending = pending_action if isinstance(pending_action, dict) else {}
+        kind = str(pending.get("kind") or "").strip()
+        fields = missing_inputs or []
+        approval_fields = [f for f in fields if isinstance(f, dict) and self.delegation_runtime._is_approval_parameter_field(f)]
+        if kind == "runtime_tool_human_confirmation" or approval_fields:
+            return "runtime_approval_required"
+        if fields:
+            return "runtime_input_required"
+        if kind == "validation_recovery":
+            return "validation_recovery_required"
+        return "runtime_interaction_required"
+
     def _maybe_activate_durable_schedule_on_manual_execution(
         self,
         *,
@@ -3197,10 +3344,12 @@ class AgentStudioService:
         the payload steps.  A user's direct execute request activates the durable
         schedule instead of running the payload once immediately.
         """
-        if bool((provided_inputs or {}).get("_scheduled_payload_dispatch")):
+        if self._is_schedule_dispatch(provided_inputs):
             return None
-        policy = task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {}
-        if not (policy.get("enabled") is True and str(policy.get("mode") or "") == "recurring"):
+        if not self._is_scheduled_task_graph(task_graph):
+            return None
+        policy = self._task_schedule_policy(task_graph)
+        if str(policy.get("mode") or "") != "recurring":
             return None
         controllers = [str(x).strip() for x in (policy.get("controller_participant_ids") or []) if str(x).strip()]
         if not controllers:

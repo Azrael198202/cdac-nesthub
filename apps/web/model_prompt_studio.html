@@ -5,57 +5,98 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Model & Prompt Studio</title>
 <style>
-:root{color-scheme:dark;--bg:#0f172a;--panel:#111827;--card:#1f2937;--line:#334155;--text:#e5e7eb;--muted:#93c5fd;--accent:#0ea5e9}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif;font-size:14px;height:100vh;overflow:hidden}header{height:70px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:12px 18px;background:#0b1220}h1{font-size:18px;margin:0}.sub{font-size:12px;color:#a5b4fc;margin-top:4px}.btn{border:1px solid var(--line);background:#334155;color:#fff;border-radius:10px;padding:9px 12px;font-weight:700;cursor:pointer;text-decoration:none}.btn.primary{background:#0369a1;border-color:#38bdf8}.btn:disabled{opacity:.6;cursor:not-allowed}main{display:grid;grid-template-columns:34fr 66fr;gap:10px;height:calc(100vh - 70px);padding:10px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;min-height:0;display:flex;flex-direction:column;overflow:hidden}.panel h2{font-size:14px;margin:0;padding:12px 14px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:8px}.scroll{overflow:auto;padding:12px;min-height:0;flex:1}.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.input{background:#020617;border:1px solid var(--line);color:var(--text);border-radius:10px;padding:9px;width:100%}.select{background:#020617;border:1px solid var(--line);color:var(--text);border-radius:10px;padding:9px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px;cursor:pointer}.card.active{border-color:#38bdf8;background:#16243a}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.small{font-size:12px;color:#bfdbfe}.muted{font-size:12px;color:#94a3b8}.pill{display:inline-block;border:1px solid #0e7490;border-radius:999px;padding:2px 7px;color:#bae6fd;font-size:12px;margin:2px 4px 0 0}.field{margin:10px 0}.field label{display:block;color:#bfdbfe;font-weight:800;font-size:12px;margin-bottom:5px}.area{width:100%;min-height:180px;background:#020617;color:#e5e7eb;border:1px solid var(--line);border-radius:12px;padding:10px;font-family:ui-monospace,Consolas,monospace;resize:vertical}.area.large{min-height:340px;max-height:54vh;overflow:auto}.split{display:grid;grid-template-columns:1fr 1fr;gap:10px}.live{height:100%;display:grid;grid-template-rows:minmax(0,1fr) minmax(240px,46fr);gap:10px}.event{background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px;cursor:pointer}.event.active{border-color:#22c55e}.status{border:1px solid var(--line);border-radius:999px;padding:6px 10px;color:#bae6fd;background:#020617}.empty{color:#94a3b8;padding:14px}.kbd{font-family:ui-monospace,Consolas,monospace;color:#e0f2fe}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+:root{color-scheme:dark;--bg:#0f172a;--panel:#111827;--card:#1f2937;--line:#334155;--text:#e5e7eb;--muted:#93c5fd;--accent:#0ea5e9}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif;font-size:14px;height:100vh;overflow:hidden}header{height:70px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:12px 18px;background:#0b1220}h1{font-size:18px;margin:0}.sub{font-size:12px;color:#a5b4fc;margin-top:4px}.btn{border:1px solid var(--line);background:#334155;color:#fff;border-radius:10px;padding:9px 12px;font-weight:700;cursor:pointer;text-decoration:none}.btn.primary{background:#0369a1;border-color:#38bdf8}.btn:disabled{opacity:.6;cursor:not-allowed}.tabs{height:44px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--line);padding:6px 12px;background:#0b1220}.tab{border:1px solid var(--line);background:#020617;color:#bfdbfe;border-radius:999px;padding:8px 14px;font-weight:800;cursor:pointer}.tab.active{background:#0369a1;color:#fff;border-color:#38bdf8}main{height:calc(100vh - 114px);padding:10px}.view{display:none;height:100%;min-height:0}.view.active{display:grid}.defaultView{grid-template-columns:34fr 66fr;gap:10px}.runtimeView{grid-template-columns:30fr 70fr;gap:10px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;min-height:0;display:flex;flex-direction:column;overflow:hidden}.panel h2{font-size:14px;margin:0;padding:12px 14px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:8px}.scroll{overflow:auto;padding:12px;min-height:0;flex:1}.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.input{background:#020617;border:1px solid var(--line);color:var(--text);border-radius:10px;padding:9px;width:100%}.select{background:#020617;border:1px solid var(--line);color:var(--text);border-radius:10px;padding:9px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px;cursor:pointer}.card.active{border-color:#38bdf8;background:#16243a}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.small{font-size:12px;color:#bfdbfe}.muted{font-size:12px;color:#94a3b8}.pill{display:inline-block;border:1px solid #0e7490;border-radius:999px;padding:2px 7px;color:#bae6fd;font-size:12px;margin:2px 4px 0 0}.field{margin:10px 0}.field label{display:block;color:#bfdbfe;font-weight:800;font-size:12px;margin-bottom:5px}.area{width:100%;min-height:160px;background:#020617;color:#e5e7eb;border:1px solid var(--line);border-radius:12px;padding:10px;font-family:ui-monospace,Consolas,monospace;resize:vertical}.area.large{min-height:330px;max-height:52vh;overflow:auto}.area.runtime{min-height:560px;max-height:68vh;overflow:auto}.split{display:grid;grid-template-columns:1fr 1fr;gap:10px}.event{background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px;cursor:pointer}.event.active{border-color:#22c55e}.status{border:1px solid var(--line);border-radius:999px;padding:6px 10px;color:#bae6fd;background:#020617}.empty{color:#94a3b8;padding:14px}.kbd{font-family:ui-monospace,Consolas,monospace;color:#e0f2fe}.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}.grid4{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px}.area.response{min-height:220px;max-height:34vh;overflow:auto}.readonly{opacity:.86}.hidden{display:none!important}
 </style>
 </head>
 <body>
 <header>
-  <div><h1>Model & Prompt Studio</h1><div class="sub">Display and adjust model/prompt usage by location, layer, workflow, and graph.</div></div>
+  <div><h1>Model & Prompt Studio</h1><div class="sub">Default settings are editable. Runtime view is read-only and shows actual model/prompt usage.</div></div>
   <div class="toolbar"><span id="status" class="status">loading</span><a class="btn" href="/agent-studio">Agent Studio</a><button class="btn primary" onclick="loadState()">Refresh</button></div>
 </header>
+<nav class="tabs">
+  <button id="tabDefault" class="tab active" onclick="switchTab('default')">Default Model / Prompt</button>
+  <button id="tabRuntime" class="tab" onclick="switchTab('runtime')">Runtime Usage</button>
+</nav>
 <main>
-  <section class="panel">
-    <h2><span>Model / Prompt Map</span><span id="count" class="small"></span></h2>
-    <div class="scroll">
-      <div class="toolbar" style="margin-bottom:10px"><input id="filter" class="input" placeholder="Filter by layer / workflow / graph / location" oninput="renderList()" /><select id="groupMode" class="select" onchange="renderList()"><option value="layer">Group: layer</option><option value="workflow">Group: workflow</option><option value="graph">Group: graph</option></select></div>
-      <div id="list"><div class="empty">Loading...</div></div>
-    </div>
-  </section>
-  <section class="panel">
-    <h2><span>Runtime Dynamic View</span><span class="small">async polling</span></h2>
-    <div class="scroll live">
-      <div>
-        <div class="row" style="justify-content:space-between;margin-bottom:8px"><b>Live model/prompt events</b><button id="pollBtn" class="btn" onclick="togglePolling()">Pause</button></div>
-        <div id="events"><div class="empty">No runtime LLM trace yet.</div></div>
+  <section id="defaultView" class="view defaultView active">
+    <section class="panel">
+      <h2><span>Default Map</span><span id="count" class="small"></span></h2>
+      <div class="scroll">
+        <div class="toolbar" style="margin-bottom:10px">
+          <input id="filter" class="input" placeholder="Filter by layer / workflow / graph / location" oninput="renderList()" />
+          <select id="groupMode" class="select" onchange="renderList()">
+            <option value="all">All</option>
+            <option value="layer">Group: layer</option>
+            <option value="workflow">Group: workflow</option>
+            <option value="graph">Group: graph</option>
+          </select>
+        </div>
+        <div id="list"><div class="empty">Loading...</div></div>
       </div>
-      <div>
-        <div class="row" style="justify-content:space-between"><b>Selected prompt content</b><span id="selectedMeta" class="small"></span></div>
+    </section>
+    <section class="panel">
+      <h2><span>Editable Default</span><span id="selectedMeta" class="small"></span></h2>
+      <div class="scroll">
+        <div class="grid3">
+          <div class="field"><label>Mode</label><select id="mode" class="select" style="width:100%"></select></div>
+          <div class="field"><label>Provider</label><select id="provider" class="select" style="width:100%"></select></div>
+          <div class="field"><label>Model</label><select id="model" class="select" style="width:100%"></select></div>
+        </div>
         <div class="split">
           <div class="field"><label>System prompt</label><textarea id="systemPrompt" class="area large" spellcheck="false"></textarea></div>
-          <div class="field"><label>User / rendered prompt</label><textarea id="userPrompt" class="area large" spellcheck="false"></textarea></div>
-        </div>
-        <div class="grid2">
-          <div class="field"><label>Model</label><input id="model" class="input" /></div>
-          <div class="field"><label>Provider</label><input id="provider" class="input" /></div>
+          <div class="field"><label>User / rendered prompt template</label><textarea id="userPrompt" class="area large" spellcheck="false"></textarea></div>
         </div>
         <div class="row"><button class="btn primary" onclick="saveSelected()">Save override</button><span class="muted">Overrides are stored outside ai_core under runtime/configs.</span></div>
       </div>
-    </div>
+    </section>
+  </section>
+  <section id="runtimeView" class="view runtimeView">
+    <section class="panel">
+      <h2><span>Runtime Events</span><span class="small">async polling</span></h2>
+      <div class="scroll">
+        <div class="row" style="justify-content:space-between;margin-bottom:8px"><b>Live model/prompt events</b><button id="pollBtn" class="btn" onclick="togglePolling()">Pause</button></div>
+        <div id="events"><div class="empty">No runtime LLM trace yet.</div></div>
+      </div>
+    </section>
+    <section class="panel readonly">
+      <h2><span>Runtime Prompt Detail</span><span id="runtimeMeta" class="small"></span></h2>
+      <div class="scroll">
+        <div class="grid4">
+          <div class="field"><label>Mode</label><input id="rtMode" class="input" readonly /></div>
+          <div class="field"><label>Provider</label><input id="rtProvider" class="input" readonly /></div>
+          <div class="field"><label>Model</label><input id="rtModel" class="input" readonly /></div>
+          <div class="field"><label>Adapter</label><input id="rtAdapter" class="input" readonly /></div>
+        </div>
+        <div class="split">
+          <div class="field"><label>System prompt</label><textarea id="rtSystemPrompt" class="area runtime" readonly spellcheck="false"></textarea></div>
+          <div class="field"><label>User / rendered prompt</label><textarea id="rtUserPrompt" class="area runtime" readonly spellcheck="false"></textarea></div>
+        </div>
+        <div class="split">
+          <div class="field"><label>Model response</label><textarea id="rtAssistantResponse" class="area response" readonly spellcheck="false"></textarea></div>
+          <div class="field"><label>Parsed result / raw output</label><textarea id="rtParsedResult" class="area response" readonly spellcheck="false"></textarea></div>
+        </div>
+      </div>
+    </section>
   </section>
 </main>
 <script>
-let state={effective:[],live_events:[]};let selected=null;let poll=true;let timer=null;
+let state={effective:[],live_events:[],options:{modes:['local_only','api_only','hybrid'],providers:[],models:[]}};let selected=null;let runtimeSelected=null;let poll=true;
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function setStatus(t){document.getElementById('status').textContent=t;}
-async function loadState(){try{setStatus('loading');const r=await fetch('/api/model-prompt-studio/state',{cache:'no-store'});state=await r.json();setStatus('ready');renderList();renderEvents();if(!selected && state.effective?.length){selectItem(state.effective[0].location)}}catch(e){setStatus('error');}}
+function switchTab(name){document.getElementById('tabDefault').classList.toggle('active',name==='default');document.getElementById('tabRuntime').classList.toggle('active',name==='runtime');document.getElementById('defaultView').classList.toggle('active',name==='default');document.getElementById('runtimeView').classList.toggle('active',name==='runtime');}
+async function loadState(){try{setStatus('loading');const r=await fetch('/api/model-prompt-studio/state',{cache:'no-store'});state=await r.json();setStatus('ready');renderOptions();renderList();renderEvents();if(!selected&&state.effective?.length){selectItem(state.effective[0].location)}if(!runtimeSelected&&state.live_events?.length){selectEvent(state.live_events[0].trace_path||state.live_events[0].location)}}catch(e){setStatus('error');}}
+function optionHtml(values, current){const all=[...new Set([current,...(values||[])].filter(Boolean))];return all.map(v=>`<option value="${esc(v)}" ${v===current?'selected':''}>${esc(v)}</option>`).join('');}
+function renderOptions(){const o=state.options||{};document.getElementById('mode').innerHTML=optionHtml(o.modes||['local_only','api_only','hybrid'],selected?.mode||o.default_mode||'local_only');document.getElementById('provider').innerHTML=optionHtml(o.providers||[],selected?.provider||'');document.getElementById('model').innerHTML=optionHtml(o.models||[],selected?.model||'');}
 function filteredItems(){const f=(document.getElementById('filter').value||'').toLowerCase();return (state.effective||[]).filter(x=>!f||JSON.stringify(x).toLowerCase().includes(f));}
-function renderList(){const items=filteredItems();document.getElementById('count').textContent=items.length;const mode=document.getElementById('groupMode').value;const groups={};items.forEach(x=>{const k=x[mode]||'unknown';(groups[k]=groups[k]||[]).push(x)});let html='';Object.keys(groups).sort().forEach(g=>{html+=`<div class="small" style="margin:12px 0 6px;font-weight:800">${esc(mode)}: ${esc(g)}</div>`;groups[g].forEach(x=>{html+=`<div class="card ${selected&&selected.location===x.location?'active':''}" onclick='selectItem(${JSON.stringify(x.location)})'><div class="row" style="justify-content:space-between"><b>${esc(x.location)}</b><span class="pill">${esc(x.layer||'runtime')}</span></div><div class="muted">workflow=<span class="kbd">${esc(x.workflow||'')}</span></div><div class="muted">graph=<span class="kbd">${esc(x.graph||'')}</span></div><div class="small">model=${esc(x.model||'(default)')} · provider=${esc(x.provider||'(default)')}</div>${x.override?'<span class="pill">override</span>':''}</div>`})});document.getElementById('list').innerHTML=html||'<div class="empty">No model/prompt entries.</div>';}
-function selectItem(loc){const item=(state.effective||[]).find(x=>x.location===loc)||(state.live_events||[]).find(x=>x.location===loc||x.node_id===loc);if(!item)return;selected=item;document.getElementById('systemPrompt').value=item.system_prompt||'';document.getElementById('userPrompt').value=item.user_prompt||'';document.getElementById('model').value=item.model||'';document.getElementById('provider').value=item.provider||'';document.getElementById('selectedMeta').textContent=`${item.layer||'runtime'} / ${item.workflow||''} / ${item.graph||''}`;renderList();renderEvents();}
-function renderEvents(){const evs=state.live_events||[];let html='';evs.slice(0,80).forEach(ev=>{const loc=ev.location||ev.node_id||'unknown';html+=`<div class="event ${selected&&(selected.trace_path===ev.trace_path||selected.location===loc)?'active':''}" onclick='selectEvent(${JSON.stringify(ev.trace_path||loc)})'><div class="row" style="justify-content:space-between"><b>${esc(loc)}</b><span class="pill">${esc(ev.phase||'event')}</span></div><div class="muted">run=${esc(ev.run_id||'')} · layer=${esc(ev.layer||'runtime')}</div><div class="small">model=${esc(ev.model||'(not recorded)')} · provider=${esc(ev.provider||'(not recorded)')}</div></div>`});document.getElementById('events').innerHTML=html||'<div class="empty">No runtime LLM trace yet.</div>';}
-function selectEvent(key){const ev=(state.live_events||[]).find(x=>x.trace_path===key||x.location===key||x.node_id===key);if(!ev)return;selected=ev;document.getElementById('systemPrompt').value=ev.system_prompt||'';document.getElementById('userPrompt').value=ev.user_prompt||'';document.getElementById('model').value=ev.model||'';document.getElementById('provider').value=ev.provider||'';document.getElementById('selectedMeta').textContent=`${ev.layer||'runtime'} / ${ev.workflow||''} / ${ev.graph||''}`;renderEvents();}
-async function saveSelected(){if(!selected){alert('Select an entry first.');return;}const body={location:selected.location||selected.node_id,model:document.getElementById('model').value,provider:document.getElementById('provider').value,system_prompt:document.getElementById('systemPrompt').value,user_prompt:document.getElementById('userPrompt').value,prompt_id:selected.prompt_id||'',adapter_id:selected.adapter_id||''};const r=await fetch('/api/model-prompt-studio/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await r.json();if(!r.ok){alert(data.error||'save failed');return;}state.effective=data.effective||state.effective;setStatus('saved');renderList();}
+function renderList(){const items=filteredItems();document.getElementById('count').textContent=items.length;const mode=document.getElementById('groupMode').value;let html='';if(mode==='all'){items.forEach(x=>{html+=cardHtml(x)});}else{const groups={};items.forEach(x=>{const k=x[mode]||'unknown';(groups[k]=groups[k]||[]).push(x)});Object.keys(groups).sort().forEach(g=>{html+=`<div class="small" style="margin:12px 0 6px;font-weight:800">${esc(mode)}: ${esc(g)}</div>`;groups[g].forEach(x=>{html+=cardHtml(x)})});}document.getElementById('list').innerHTML=html||'<div class="empty">No model/prompt entries.</div>';}
+function cardHtml(x){return `<div class="card ${selected&&selected.location===x.location?'active':''}" onclick='selectItem(${JSON.stringify(x.location)})'><div class="row" style="justify-content:space-between"><b>${esc(x.location)}</b><span class="pill">${esc(x.layer||'runtime')}</span></div><div class="muted">workflow=<span class="kbd">${esc(x.workflow||'')}</span></div><div class="muted">graph=<span class="kbd">${esc(x.graph||'')}</span></div><div class="small">mode=${esc(x.mode||'local_only')} · model=${esc(x.model||'not configured')} · provider=${esc(x.provider||'not configured')}</div>${x.override?'<span class="pill">override</span>':''}</div>`;}
+function selectItem(loc){const item=(state.effective||[]).find(x=>x.location===loc);if(!item)return;selected=item;document.getElementById('systemPrompt').value=item.system_prompt||'';document.getElementById('userPrompt').value=item.user_prompt||'';document.getElementById('selectedMeta').textContent=`${item.layer||'runtime'} / ${item.workflow||''} / ${item.graph||''}`;renderOptions();renderList();}
+function eventKey(ev){return ev.event_id||ev.trace_path||`${ev.run_id||''}:${ev.node_id||ev.location||''}:${ev.phase||''}`;}
+function renderEvents(){const evs=state.live_events||[];let html='';evs.slice(0,120).forEach(ev=>{const loc=ev.location||ev.node_id||'unknown';const key=eventKey(ev);const active=runtimeSelected&&eventKey(runtimeSelected)===key;const phases=Array.isArray(ev.phases)?ev.phases.join(' + '):(ev.phase||'event');html+=`<div class="event ${active?'active':''}" onclick='selectEvent(${JSON.stringify(key)})'><div class="row" style="justify-content:space-between"><b>${esc(loc)}</b><span class="pill">${esc(phases)}</span></div><div class="muted">run=${esc(ev.run_id||'')} · layer=${esc(ev.layer||'runtime')} · workflow=${esc(ev.workflow||'')}</div><div class="small">model=${esc(ev.model||'not recorded')} · provider=${esc(ev.provider||'not recorded')}${ev.adapter_id?' · adapter='+esc(ev.adapter_id):''}</div></div>`});document.getElementById('events').innerHTML=html||'<div class="empty">No runtime LLM trace yet.</div>';}
+function selectEvent(key){const ev=(state.live_events||[]).find(x=>eventKey(x)===key||x.trace_path===key||x.location===key||x.node_id===key);if(!ev)return;runtimeSelected=ev;document.getElementById('rtSystemPrompt').value=ev.system_prompt||'';document.getElementById('rtUserPrompt').value=ev.user_prompt||'';document.getElementById('rtAssistantResponse').value=ev.assistant_response||ev.response_text||'';document.getElementById('rtParsedResult').value=ev.parsed_result||ev.raw_response||'';document.getElementById('rtMode').value=ev.mode||'';document.getElementById('rtModel').value=ev.model||'';document.getElementById('rtProvider').value=ev.provider||'';document.getElementById('rtAdapter').value=ev.adapter_id||'';document.getElementById('runtimeMeta').textContent=`${ev.layer||'runtime'} / ${ev.workflow||''} / ${ev.graph||''}`;renderEvents();}
+async function saveSelected(){if(!selected){alert('Select an entry first.');return;}const body={location:selected.location||selected.node_id,mode:document.getElementById('mode').value,model:document.getElementById('model').value,provider:document.getElementById('provider').value,system_prompt:document.getElementById('systemPrompt').value,user_prompt:document.getElementById('userPrompt').value,prompt_id:selected.prompt_id||'',adapter_id:selected.adapter_id||''};const r=await fetch('/api/model-prompt-studio/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await r.json();if(!r.ok){alert(data.error||'save failed');return;}state.effective=data.effective||state.effective;state.options=data.options||state.options;selected=(state.effective||[]).find(x=>x.location===body.location)||selected;setStatus('saved');renderOptions();renderList();}
 function togglePolling(){poll=!poll;document.getElementById('pollBtn').textContent=poll?'Pause':'Resume';if(poll)loadState();}
-timer=setInterval(()=>{if(poll)loadState()},2500);loadState();
+setInterval(()=>{if(poll)loadState()},2500);loadState();
 </script>
 </body>
 </html>
