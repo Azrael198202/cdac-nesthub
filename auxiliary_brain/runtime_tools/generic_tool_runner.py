@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ai_core.runtime.provenance import ExecutionProvenanceRecorder
-from ai_core.tools.tool_schema_validator import ToolSchemaValidator
+from auxiliary_brain.runtime_tools.tool_schema_validator import ToolSchemaValidator
 
 
 class GenericToolRunner:
@@ -39,8 +39,8 @@ class GenericToolRunner:
             return self._error("tool_input_schema_validation_failed", "; ".join(input_validation.get("errors", [])))
 
         if implementation.get("type") == "runtime_provider":
-            from ai_core.providers.runtime_provider_invoker import RuntimeProviderInvoker
-            from ai_core.providers.runtime_provider_registry import RuntimeProviderRegistry
+            from auxiliary_brain.providers.runtime_provider_invoker import RuntimeProviderInvoker
+            from auxiliary_brain.providers.runtime_provider_registry import RuntimeProviderRegistry
             provider = implementation.get("provider") if isinstance(implementation.get("provider"), dict) else None
             provider_id = implementation.get("provider_id")
             if provider is None and provider_id:

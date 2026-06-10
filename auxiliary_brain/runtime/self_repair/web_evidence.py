@@ -28,7 +28,7 @@ class WebEvidenceRepairAdvisor:
                 "reason": "Runtime policy did not allow external web evidence retrieval.",
             }
         try:
-            from ai_core.research.external_solution_discovery import ExternalSolutionDiscoveryEngine
+            from auxiliary_brain.research.external_solution_discovery import ExternalSolutionDiscoveryEngine
         except Exception as exc:
             return {
                 "status": "web_evidence_unavailable",

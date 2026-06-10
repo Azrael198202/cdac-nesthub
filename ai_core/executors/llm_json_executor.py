@@ -20,7 +20,7 @@ from ai_core.roles import RoleProfileSelector, PromptPackLoader, RoleScopedConte
 from ai_core.runtime.modeling import ModelStagePolicy
 from ai_core.runtime.governance import RuntimeCostPolicy
 from ai_core.llm.prompt_io_recorder import PromptIORecorder
-from ai_core.runtime.observability.stage_observer import RuntimeStageObserver
+from auxiliary_brain.runtime.observability.stage_observer import RuntimeStageObserver
 
 
 class LLMJsonExecutor:

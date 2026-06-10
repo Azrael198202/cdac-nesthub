@@ -20,7 +20,7 @@ from ai_core.validation.recoverable_validation_error import RecoverableValidatio
 from ai_core.execution.continuation_engine import ContinuationEngine
 from ai_core.workflow.workflow_state_merger import WorkflowStateMerger
 from ai_core.runtime.modeling.feedback_escalator import FeedbackEscalator
-from ai_core.runtime.observability.stage_observer import RuntimeStageObserver
+from auxiliary_brain.runtime.observability.stage_observer import RuntimeStageObserver
 
 
 class WorkflowRuntime:

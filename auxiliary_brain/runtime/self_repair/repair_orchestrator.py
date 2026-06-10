@@ -7,9 +7,9 @@ from typing import Any
 from uuid import uuid4
 
 from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_TRACES
-from ai_core.runtime.self_repair.engine import RuntimeSelfRepairEngine
-from ai_core.runtime.self_repair.execution_failure_repair import ExecutionFailureRepairClassifier
-from ai_core.runtime.self_repair.trace_logger import FeedbackRepairTraceLogger
+from auxiliary_brain.runtime.self_repair.engine import RuntimeSelfRepairEngine
+from auxiliary_brain.runtime.self_repair.execution_failure_repair import ExecutionFailureRepairClassifier
+from auxiliary_brain.runtime.self_repair.trace_logger import FeedbackRepairTraceLogger
 
 
 class FeedbackRepairOrchestrator:

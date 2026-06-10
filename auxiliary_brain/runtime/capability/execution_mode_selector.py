@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from ai_core.config.paths import CONFIGS_DIR, RUNTIME_GENERATED
-from ai_core.runtime.capability.source_priority_engine import SourcePriorityEngine
-from ai_core.runtime.capability.semantic.semantic_capability_classifier import SemanticCapabilityClassifier
+from auxiliary_brain.runtime.capability.source_priority_engine import SourcePriorityEngine
+from auxiliary_brain.runtime.capability.semantic.semantic_capability_classifier import SemanticCapabilityClassifier
 
 
 class ExecutionModeSelector:

@@ -7,9 +7,9 @@ from typing import Any
 
 from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_REGISTRY, RUNTIME_TRACES
 from ai_core.connections.connection_profile_store import ConnectionProfileStore
-from ai_core.tools.generic_tool_runner import GenericToolRunner
+from auxiliary_brain.runtime_tools.generic_tool_runner import GenericToolRunner
 from ai_core.runtime.approval_policy_store import RuntimeApprovalPolicyStore
-from ai_core.runtime.self_repair.repair_orchestrator import FeedbackRepairOrchestrator
+from auxiliary_brain.runtime.self_repair.repair_orchestrator import FeedbackRepairOrchestrator
 
 _NO_DEFAULT = object()
 

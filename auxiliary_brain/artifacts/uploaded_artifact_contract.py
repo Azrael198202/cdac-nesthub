@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_core.config.paths import PROJECT_ROOT, RUNTIME_DIR
-from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
+from auxiliary_brain.artifacts.artifact_registry import UploadedArtifactRegistry
 
 
 @dataclass

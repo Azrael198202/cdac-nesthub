@@ -10,9 +10,9 @@ import httpx
 
 from ai_core.config.paths import RUNTIME_DOWNLOADS, RUNTIME_GENERATED, RUNTIME_TRACES
 from ai_core.events.event_bus import event_bus
-from ai_core.research.web_research_tool import GenericWebResearchTool
-from ai_core.research.model_candidate_evaluator import ModelCandidateEvaluator
-from ai_core.research.repository_analyzer import GitHubRepositoryAnalyzer
+from auxiliary_brain.research.web_research_tool import GenericWebResearchTool
+from auxiliary_brain.research.model_candidate_evaluator import ModelCandidateEvaluator
+from auxiliary_brain.research.repository_analyzer import GitHubRepositoryAnalyzer
 from ai_core.utils.safe_json import safe_json_dumps
 from ai_core.web_evidence_optimizer import WebEvidenceOptimizer
 

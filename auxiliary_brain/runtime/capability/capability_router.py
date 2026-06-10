@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from ai_core.runtime.capability.execution_mode_selector import ExecutionModeSelector
-from ai_core.runtime.capability.runtime_native_provider import RuntimeNativeProvider
-from ai_core.runtime.capability.structured_provider_router import StructuredProviderRouter
+from auxiliary_brain.runtime.capability.execution_mode_selector import ExecutionModeSelector
+from auxiliary_brain.runtime.capability.runtime_native_provider import RuntimeNativeProvider
+from auxiliary_brain.runtime.capability.structured_provider_router import StructuredProviderRouter
 
 
 class CapabilityRouter:

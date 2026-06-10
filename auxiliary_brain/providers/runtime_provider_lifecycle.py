@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from ai_core.models.model_downloader import RuntimeModelDownloader
-from ai_core.providers.runtime_provider_registry import RuntimeProviderRegistry
+from auxiliary_brain.models.model_downloader import RuntimeModelDownloader
+from auxiliary_brain.providers.runtime_provider_registry import RuntimeProviderRegistry
 
 
 class RuntimeProviderLifecycle:

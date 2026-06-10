@@ -14,7 +14,7 @@ from ai_core.config.paths import RUNTIME_CONFIGS
 from ai_core.secrets.secret_store import SecretStore
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 from ai_core.runtime.modeling.model_provider_autoconfig import ModelProviderAutoConfigurator
-from ai_core.models.model_downloader import RuntimeModelDownloader
+from auxiliary_brain.models.model_downloader import RuntimeModelDownloader
 
 
 @dataclass

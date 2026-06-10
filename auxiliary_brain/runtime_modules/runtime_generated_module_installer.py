@@ -6,8 +6,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ai_core.config.paths import RUNTIME_GENERATED
-from ai_core.modules.module_artifact_validator import RuntimeModuleArtifactValidator
-from ai_core.modules.module_registry import RuntimeModuleRegistry
+from auxiliary_brain.runtime_modules.module_artifact_validator import RuntimeModuleArtifactValidator
+from auxiliary_brain.runtime_modules.module_registry import RuntimeModuleRegistry
 
 
 class RuntimeGeneratedModuleInstaller:

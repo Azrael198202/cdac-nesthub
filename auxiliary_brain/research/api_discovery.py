@@ -8,8 +8,8 @@ from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import RUNTIME_CONFIGS, RUNTIME_GENERATED, RUNTIME_TRACES
 from ai_core.events.event_bus import event_bus
 from ai_core.llm.provider_router import ProviderRouter
-from ai_core.research.web_research_tool import GenericWebResearchTool
-from ai_core.research.endpoint_verifier import EndpointVerifier
+from auxiliary_brain.research.web_research_tool import GenericWebResearchTool
+from auxiliary_brain.research.endpoint_verifier import EndpointVerifier
 from ai_core.execution.answer_sufficiency_evaluator import AnswerSufficiencyEvaluator
 from ai_core.utils.safe_json import safe_json_dumps
 

@@ -14,21 +14,21 @@ from auxiliary_brain.storage import JsonStore
 from auxiliary_brain.studio.command_router import StudioCommandRouter
 from ai_core.runtime.adaptation import FeedbackClassifier, ModelUpgradeController, RerunStrategy
 from ai_core.interaction.natural_conversation import NaturalConversationService
-from ai_core.tools.runtime_registered_tool_service import RuntimeRegisteredToolService
+from auxiliary_brain.runtime_tools.runtime_registered_tool_service import RuntimeRegisteredToolService
 from ai_core.runtime.modeling.model_runtime_preflight import ModelRuntimePreflight
 from auxiliary_brain.parameters.agent_parameter_contract import AgentParameterContractService
-from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
-from ai_core.artifacts.uploaded_artifact_contract import UploadedArtifactContractBuilder
-from ai_core.artifacts.artifact_edit_service import ArtifactEditService
+from auxiliary_brain.artifacts.artifact_registry import UploadedArtifactRegistry
+from auxiliary_brain.artifacts.uploaded_artifact_contract import UploadedArtifactContractBuilder
+from auxiliary_brain.artifacts.artifact_edit_service import ArtifactEditService
 from ai_core.commands import CommandSetService
 from ai_core.capabilities.capability_dispatcher import CapabilityDispatcher
-from ai_core.media import ImageGenerationService, VideoGenerationService
-from ai_core.media.video_generation_setup_wizard import VideoGenerationSetupWizard
+from auxiliary_brain.media import ImageGenerationService, VideoGenerationService
+from auxiliary_brain.media.video_generation_setup_wizard import VideoGenerationSetupWizard
 from ai_core.context.execution_reuse_store import ExecutionReuseStore
 from ai_core.execution.parameter_resolution import ParameterResolutionPipeline, PreflightResolutionContext
 from auxiliary_brain.studio.instruction_workflow_planner import InstructionWorkflowPlanner
 from auxiliary_brain.studio.runtime_semantic_planner import RuntimeSemanticPlanner
-from ai_core.runtime.capability.registered_tool_agent_binder import RegisteredToolAgentBinder
+from auxiliary_brain.runtime.capability.registered_tool_agent_binder import RegisteredToolAgentBinder
 from verification_brain import RuntimeVerificationFoundation
 from presentation_brain import FailureMessageRenderer, PresentationProfileRegistry
 from ai_core.runtime.state import runtime_state_manager
@@ -3453,7 +3453,7 @@ class AgentStudioService:
         """Write operator-visible scheduler observations without affecting execution."""
         payload = {"event": event, "task_name": task_name, **(data or {})}
         try:
-            from ai_core.runtime.observability.runtime_console import emit_console_event
+            from auxiliary_brain.runtime.observability.runtime_console import emit_console_event
             emit_console_event(area="scheduler", event=event, status="info", message=event, data=payload)
         except Exception:
             pass

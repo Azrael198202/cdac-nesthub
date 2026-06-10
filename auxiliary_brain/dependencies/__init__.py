@@ -1,3 +1,3 @@
-from ai_core.dependencies.runtime_dependency_installer import RuntimeDependencyInstaller
+from auxiliary_brain.dependencies.runtime_dependency_installer import RuntimeDependencyInstaller
 
 __all__ = ["RuntimeDependencyInstaller"]

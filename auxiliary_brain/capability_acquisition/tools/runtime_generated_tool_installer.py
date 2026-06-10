@@ -7,10 +7,10 @@ from typing import Any
 
 from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_REGISTRY
 from auxiliary_brain.capability_acquisition.tools.runtime_tool_artifact_validator import RuntimeToolArtifactValidator
-from ai_core.runtime.capability.acquisition_gate import RuntimeCapabilityAcquisitionGate
+from auxiliary_brain.runtime.capability.acquisition_gate import RuntimeCapabilityAcquisitionGate
 from auxiliary_brain.capability_acquisition.registry_manager import RuntimeCapabilityRegistryManager
 from auxiliary_brain.capability_acquisition.trace_logger import CapabilityAcquisitionTraceLogger
-from ai_core.sandbox.verified_sandbox_runtime import VerifiedSandboxRuntime
+from auxiliary_brain.sandbox.verified_sandbox_runtime import VerifiedSandboxRuntime
 
 
 class RuntimeGeneratedToolInstaller:

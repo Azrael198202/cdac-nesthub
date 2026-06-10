@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ai_core.runtime.self_repair.execution_failure_repair import ExecutionFailureRepairClassifier
+from auxiliary_brain.runtime.self_repair.execution_failure_repair import ExecutionFailureRepairClassifier
 from evidence_engine import EvidenceRequest, RuntimeEvidenceCollector
 from memory_brain import MemoryRecord, RuntimeMemoryStore
 from repair_brain.contracts import RepairPlan, RepairRequest

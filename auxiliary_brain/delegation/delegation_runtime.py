@@ -14,10 +14,10 @@ from auxiliary_brain.runtime import new_id
 from auxiliary_brain.delegation.task_mind_graph import TaskMindGraphBuilder
 from ai_core.config.paths import RUNTIME_DOWNLOADS
 from ai_core.knowledge.knowledge_service import KnowledgeService
-from ai_core.media import ImageGenerationService, VideoGenerationService
+from auxiliary_brain.media import ImageGenerationService, VideoGenerationService
 from auxiliary_brain.parameters.agent_parameter_contract import AgentParameterContractService
-from ai_core.tools.runtime_registered_tool_service import RuntimeRegisteredToolService
-from ai_core.runtime.capability.registered_tool_parameter_bridge import RegisteredToolParameterBridge
+from auxiliary_brain.runtime_tools.runtime_registered_tool_service import RuntimeRegisteredToolService
+from auxiliary_brain.runtime.capability.registered_tool_parameter_bridge import RegisteredToolParameterBridge
 
 
 class AgentDelegationRuntime:

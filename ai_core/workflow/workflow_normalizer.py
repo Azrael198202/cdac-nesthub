@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from ai_core.runtime.capability.capability_inference import CapabilityInference
+from auxiliary_brain.runtime.capability.capability_inference import CapabilityInference
 
 
 class WorkflowNormalizer:

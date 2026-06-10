@@ -8,9 +8,9 @@ from typing import Any
 from ai_core.approval.human_approval_gate import HumanApprovalGate
 from ai_core.config.paths import RUNTIME_TRACES
 from ai_core.knowledge.knowledge_service import KnowledgeService
-from ai_core.models.model_benchmark import RuntimeModelBenchmark
-from ai_core.models.model_downloader import RuntimeModelDownloader
-from ai_core.models.model_route_registry import RuntimeModelRouteRegistry
+from auxiliary_brain.models.model_benchmark import RuntimeModelBenchmark
+from auxiliary_brain.models.model_downloader import RuntimeModelDownloader
+from auxiliary_brain.models.model_route_registry import RuntimeModelRouteRegistry
 
 
 @dataclass

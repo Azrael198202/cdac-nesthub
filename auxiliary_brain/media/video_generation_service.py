@@ -16,10 +16,10 @@ from typing import Any
 from uuid import uuid4
 
 from ai_core.config.paths import CONFIGS_DIR, RUNTIME_CONFIGS, RUNTIME_DIR, RUNTIME_DOWNLOADS, RUNTIME_GENERATED
-from ai_core.dependencies import RuntimeDependencyInstaller
-from ai_core.media.image_generation_service import ImageGenerationService
+from auxiliary_brain.dependencies import RuntimeDependencyInstaller
+from auxiliary_brain.media.image_generation_service import ImageGenerationService
 from ai_core.secrets.secret_store import SecretStore
-from ai_core.media.video_generation_setup_wizard import VideoGenerationSetupWizard
+from auxiliary_brain.media.video_generation_setup_wizard import VideoGenerationSetupWizard
 
 
 class VideoGenerationService(ImageGenerationService):

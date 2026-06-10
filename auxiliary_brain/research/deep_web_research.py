@@ -22,7 +22,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     trafilatura = None  # type: ignore
 
-from ai_core.research.web_research_tool import GenericWebResearchTool
+from auxiliary_brain.research.web_research_tool import GenericWebResearchTool
 from ai_core.runtime.evidence import EvidenceBudgetAllocator, CandidateEvidenceRanker, AdaptiveEvidenceReducer
 from ai_core.runtime.browser import BrowserNetworkObserver, StructuredResponseExtractor, EmbeddedStructureExtractor, DomRelationExtractor
 from ai_core.runtime.evidence.temporal_measurement_sequence import TemporalMeasurementSequenceExtractor

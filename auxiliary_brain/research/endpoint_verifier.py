@@ -11,7 +11,7 @@ from typing import Any
 
 from ai_core.config.paths import RUNTIME_TRACES
 from ai_core.utils.safe_json import safe_json_dumps
-from ai_core.research.endpoint_resolver import EndpointResolver
+from auxiliary_brain.research.endpoint_resolver import EndpointResolver
 
 
 @dataclass

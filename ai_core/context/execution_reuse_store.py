@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from ai_core.config.paths import RUNTIME_SESSIONS
 from ai_core.runtime.environment.runtime_command_executor import RuntimeCommandExecutor
-from ai_core.runtime.generated_execution.source_safety import write_bounded_python_copy
+from auxiliary_brain.runtime.generated_execution.source_safety import write_bounded_python_copy
 from ai_core.context.execution_capability import ExecutionCapabilityResolver
 
 

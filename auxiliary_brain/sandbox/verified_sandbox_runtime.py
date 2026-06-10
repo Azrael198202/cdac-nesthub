@@ -12,7 +12,7 @@ from typing import Any
 
 from ai_core.utils.safe_subprocess import run_text
 from ai_core.security.dependency_scanner import DependencyScanner
-from ai_core.tools.sandbox_verifier import SandboxVerifier
+from auxiliary_brain.runtime_tools.sandbox_verifier import SandboxVerifier
 from ai_core.utils.safe_json import make_json_safe, safe_json_dumps
 
 

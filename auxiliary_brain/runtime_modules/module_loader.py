@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from ai_core.modules.module_registry import RuntimeModuleRegistry
+from auxiliary_brain.runtime_modules.module_registry import RuntimeModuleRegistry
 from ai_core.runtime.environment.permission_policy import RuntimePermissionPolicy
 
 

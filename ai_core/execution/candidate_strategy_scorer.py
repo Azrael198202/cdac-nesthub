@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
-from ai_core.research.endpoint_verifier import EndpointVerifier, EndpointCheck
+from auxiliary_brain.research.endpoint_verifier import EndpointVerifier, EndpointCheck
 from ai_core.utils.safe_json import make_json_safe
 
 

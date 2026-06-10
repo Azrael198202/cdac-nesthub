@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from ai_core.config.paths import RUNTIME_DIR
-from ai_core.runtime.observability.runtime_console import emit_console_event
+from auxiliary_brain.runtime.observability.runtime_console import emit_console_event
 from ai_core.runtime.state import runtime_state_manager
 
 

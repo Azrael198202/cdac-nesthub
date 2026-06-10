@@ -7,10 +7,10 @@ from typing import Any
 
 from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_KNOWLEDGE
 from ai_core.events.event_bus import event_bus
-from ai_core.modules.module_artifact_generator import RuntimeModuleArtifactGenerator
-from ai_core.modules.runtime_generated_module_installer import RuntimeGeneratedModuleInstaller
-from ai_core.modules.module_loader import RuntimeModuleLoader
-from ai_core.sandbox.verified_sandbox_runtime import VerifiedSandboxRuntime
+from auxiliary_brain.runtime_modules.module_artifact_generator import RuntimeModuleArtifactGenerator
+from auxiliary_brain.runtime_modules.runtime_generated_module_installer import RuntimeGeneratedModuleInstaller
+from auxiliary_brain.runtime_modules.module_loader import RuntimeModuleLoader
+from auxiliary_brain.sandbox.verified_sandbox_runtime import VerifiedSandboxRuntime
 from ai_core.utils.safe_json import safe_json_dumps
 
 

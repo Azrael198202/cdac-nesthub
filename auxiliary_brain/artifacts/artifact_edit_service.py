@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
+from auxiliary_brain.artifacts.artifact_registry import UploadedArtifactRegistry
 from ai_core.config.paths import PROJECT_ROOT, RUNTIME_DIR
 from ai_core.llm.provider_router import ProviderRouter
 

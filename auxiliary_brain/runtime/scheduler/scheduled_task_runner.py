@@ -185,7 +185,7 @@ class ScheduledTaskRunner:
             with (lifecycle_dir / "scheduled_task_runner.jsonl").open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(event_payload, ensure_ascii=False) + "\n")
             try:
-                from ai_core.runtime.observability.runtime_console import emit_console_event
+                from auxiliary_brain.runtime.observability.runtime_console import emit_console_event
                 event_name = str(payload.get("event") or "scheduler_event")
                 if event_name != "scheduler_tick":
                     emit_console_event(

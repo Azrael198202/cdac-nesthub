@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 import json
 import base64
 
-from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
-from ai_core.artifacts.artifact_edit_service import ArtifactEditService
+from auxiliary_brain.artifacts.artifact_registry import UploadedArtifactRegistry
+from auxiliary_brain.artifacts.artifact_edit_service import ArtifactEditService
 from ai_core.commands import CommandSetService
 
 from ai_core.evolution.approval_learning import ApprovalLearningService
@@ -24,13 +24,13 @@ from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStor
 from ai_core.context.session_memory_store import SessionMemoryStore
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.config.paths import RUNTIME_DOWNLOADS
-from ai_core.tools.runtime_registered_tool_service import RuntimeRegisteredToolService
+from auxiliary_brain.runtime_tools.runtime_registered_tool_service import RuntimeRegisteredToolService
 from ai_core.runtime.approval_policy_store import RuntimeApprovalPolicyStore
 from ai_core.graph.graph_visualization import GraphVisualStateBuilder
-from ai_core.runtime.observability.runtime_console import emit_console_event, list_console_sources, read_console_source
-from ai_core.runtime.observability.model_prompt_registry import ModelPromptRegistry
-from ai_core.runtime.self_repair.repair_orchestrator import FeedbackRepairOrchestrator
-from ai_core.runtime.scheduler import ScheduledTaskRunner
+from auxiliary_brain.runtime.observability.runtime_console import emit_console_event, list_console_sources, read_console_source
+from auxiliary_brain.runtime.observability.model_prompt_registry import ModelPromptRegistry
+from auxiliary_brain.runtime.self_repair.repair_orchestrator import FeedbackRepairOrchestrator
+from auxiliary_brain.runtime.scheduler import ScheduledTaskRunner
 from ai_core.runtime.async_jobs import RuntimeAsyncJobStore
 from ai_core.runtime.state import runtime_state_manager, capability_scoped_state_store
 
@@ -1523,7 +1523,7 @@ async def agent_studio_secret(req: AgentStudioSecretRequest):
 
 async def _apply_video_generation_setup(req: VideoGenerationSetupRequest):
     try:
-        from ai_core.media.video_generation_setup_wizard import VideoGenerationSetupWizard
+        from auxiliary_brain.media.video_generation_setup_wizard import VideoGenerationSetupWizard
         payload = VideoGenerationSetupWizard().apply_inputs(req.provided_inputs or {})
         return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
     except Exception as exc:

@@ -1,4 +1,4 @@
-from ai_core.environment.binary_resolver import BinaryResolver
+from auxiliary_brain.environment.binary_resolver import BinaryResolver
 from ai_core.events.event_bus import event_bus
 from ai_core.llm.provider_command_runner import ProviderCommandRunner
 from ai_core.llm.provider_handlers.base import ProviderUnavailableError

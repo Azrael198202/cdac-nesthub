@@ -12,7 +12,7 @@ from ai_core.workflow.execution_options import (
     method_for_action,
     normalize_action_type,
 )
-from ai_core.artifacts.artifact_registry import UploadedArtifactRegistry
+from auxiliary_brain.artifacts.artifact_registry import UploadedArtifactRegistry
 
 
 class WorkflowContractBuilder:

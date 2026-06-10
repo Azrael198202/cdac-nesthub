@@ -12,7 +12,7 @@ from ai_core.context.session_memory_store import SessionMemoryStore
 from ai_core.context.vector_memory_store import VectorMemoryStore
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.llm.provider_router import ProviderRouter
-from ai_core.research.web_research_tool import GenericWebResearchTool
+from auxiliary_brain.research.web_research_tool import GenericWebResearchTool
 from ai_core.web_evidence_optimizer import WebEvidenceOptimizer
 from auxiliary_brain.capability_acquisition import RuntimeCapabilityGapImplementer
 from ai_core.events.need_capability_event import NeedCapabilityEvent

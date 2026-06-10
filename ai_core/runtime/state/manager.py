@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ai_core.config.paths import RUNTIME_TRACES
-from ai_core.runtime.observability.runtime_console import emit_console_event
+from auxiliary_brain.runtime.observability.runtime_console import emit_console_event
 from .contracts import RuntimeRunState, RuntimeStateEvent, RuntimeStepState, default_runtime_flow, resolve_flow_id, utc_now
 
 

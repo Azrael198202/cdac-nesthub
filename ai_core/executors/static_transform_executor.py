@@ -10,7 +10,7 @@ from ai_core.config.loader import ConfigLoader
 from ai_core.config.paths import PROJECT_ROOT, RUNTIME_DIR
 from ai_core.validation.schema_validator import SchemaValidator
 from ai_core.workflow.execution_options import ACTION_TO_METHOD, ACTION_CONTRACTS, AGENT_ACTION_PROMPT_CONTRACT, normalize_action_type
-from ai_core.artifacts.uploaded_artifact_contract import UploadedArtifactContractBuilder
+from auxiliary_brain.artifacts.uploaded_artifact_contract import UploadedArtifactContractBuilder
 
 
 class StaticTransformExecutor:

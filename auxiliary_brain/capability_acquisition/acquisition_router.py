@@ -15,12 +15,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ai_core.config.paths import PROJECT_ROOT, RUNTIME_GENERATED, RUNTIME_REGISTRY
-from ai_core.runtime.capability.acquisition_gate import RuntimeCapabilityAcquisitionGate
-from ai_core.runtime.capability.runtime_capability_template_store import RuntimeCapabilityTemplateStore
-from ai_core.runtime.self_repair.engine import RuntimeSelfRepairEngine
-from ai_core.runtime.observability.runtime_console import emit_console_event
+from auxiliary_brain.runtime.capability.acquisition_gate import RuntimeCapabilityAcquisitionGate
+from auxiliary_brain.runtime.capability.runtime_capability_template_store import RuntimeCapabilityTemplateStore
+from auxiliary_brain.runtime.self_repair.engine import RuntimeSelfRepairEngine
+from auxiliary_brain.runtime.observability.runtime_console import emit_console_event
 from ai_core.runtime.state import runtime_state_manager, capability_scoped_state_store
-from ai_core.runtime.observability.stage_observer import RuntimeStageObserver
+from auxiliary_brain.runtime.observability.stage_observer import RuntimeStageObserver
 from auxiliary_brain.capability_acquisition.code_generator import RuntimeBlueprintArtifactGenerator
 from auxiliary_brain.capability_acquisition.classification import CapabilityClassifier
 from auxiliary_brain.capability_acquisition.trace_logger import CapabilityAcquisitionTraceLogger

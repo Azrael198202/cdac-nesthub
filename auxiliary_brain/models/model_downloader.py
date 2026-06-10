@@ -12,8 +12,8 @@ from typing import Any
 
 from ai_core.utils.safe_subprocess import run_text
 from ai_core.config.paths import RUNTIME_DOWNLOADS, RUNTIME_EXTERNAL_RUNTIMES
-from ai_core.runtime.external_runtimes.gguf_model_resolver import GGUFModelResolver
-from ai_core.runtime.observability.runtime_console import emit_console_event
+from auxiliary_brain.runtime.external_runtimes.gguf_model_resolver import GGUFModelResolver
+from auxiliary_brain.runtime.observability.runtime_console import emit_console_event
 
 
 @dataclass
