@@ -237,13 +237,13 @@ class EvidenceClaimRanker:
         return sorted(best.values(), key=self._claim_sort_key, reverse=True)[:24]
 
     def _sort_dict_claims(self, claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        def key(item: dict[str, Any]) -> tuple[int, int, tuple[int, ...], float]:
+        def key(item: dict[str, Any]) -> tuple[int, tuple[int, ...], int, float]:
             status = str(item.get("status") or "unspecified")
             status_rank = {"release": 3, "mixed": 2, "unspecified": 1, "pre_release": 0}.get(status, 1)
             normalized = tuple(int(x) for x in (item.get("normalized") or []) if isinstance(x, int))
-            return (status_rank, int(item.get("source_rank") or 0), normalized, float(item.get("confidence") or 0.0))
+            return (status_rank, normalized, int(item.get("source_rank") or 0), float(item.get("confidence") or 0.0))
         return sorted([c for c in claims if isinstance(c, dict)], key=key, reverse=True)
 
-    def _claim_sort_key(self, claim: EvidenceClaim) -> tuple[int, int, tuple[int, ...], float]:
+    def _claim_sort_key(self, claim: EvidenceClaim) -> tuple[int, tuple[int, ...], int, float]:
         status_rank = {"release": 3, "mixed": 2, "unspecified": 1, "pre_release": 0}.get(claim.status, 1)
-        return (status_rank, claim.source_rank, claim.normalized, claim.confidence)
+        return (status_rank, claim.normalized, claim.source_rank, claim.confidence)

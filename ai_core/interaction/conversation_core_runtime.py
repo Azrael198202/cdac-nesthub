@@ -18,6 +18,7 @@ from auxiliary_brain.capability_acquisition import RuntimeCapabilityGapImplement
 from ai_core.events.need_capability_event import NeedCapabilityEvent
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 from ai_core.runtime.state import runtime_state_manager
+from ai_core.runtime.semantic import SourceRelevanceSelector, EvidenceClaimRanker
 
 
 class ConversationCoreRuntime:
@@ -38,6 +39,8 @@ class ConversationCoreRuntime:
         self.web_research = GenericWebResearchTool()
         self.web_evidence_optimizer = WebEvidenceOptimizer()
         self.capability_implementer = RuntimeCapabilityGapImplementer()
+        self.source_relevance_selector = SourceRelevanceSelector()
+        self.evidence_claim_ranker = EvidenceClaimRanker()
 
     async def run(self, message: str, *, latest_task: str | None = None, session_id: str | None = None, runtime_state_run_id: str | None = None) -> dict[str, Any]:
         conversation_trace_id = "conversation_core_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
@@ -1522,9 +1525,18 @@ class ConversationCoreRuntime:
                     "text": " ".join(str(doc.get("text_excerpt") or doc.get("visible_text_excerpt") or doc.get("snippet") or "").split())[:1500],
                 })
 
-        fallback_answer = self._compact_web_evidence_material(user_input, evidence_cards, urls)
-        if not evidence_cards:
-            return fallback_answer
+        relevance = self.source_relevance_selector.select(
+            user_input=user_input,
+            source_cards=evidence_cards,
+            max_sources=5,
+            min_score=0.28,
+        )
+        selected_cards = relevance.get("selected_sources") if isinstance(relevance.get("selected_sources"), list) else []
+        selected_urls = relevance.get("selected_urls") if isinstance(relevance.get("selected_urls"), list) else []
+        if not selected_cards:
+            return self._compact_web_evidence_material(user_input, evidence_cards, urls, relevance=relevance)
+
+        fallback_answer = self._compact_web_evidence_material(user_input, selected_cards, [str(u) for u in selected_urls], relevance=relevance)
 
         schema = {
             "type": "object",
@@ -1553,6 +1565,7 @@ class ConversationCoreRuntime:
                 "summary_first": True,
                 "avoid_raw_excerpts": True,
                 "max_user_visible_sources": 5,
+                "must_use_selected_sources_only": True,
             },
         }
         synthesized = await self._json_stage(
@@ -1563,15 +1576,28 @@ class ConversationCoreRuntime:
             schema,
             fallback={"answer": fallback_answer, "used_source_urls": urls[:5], "confidence": "fallback"},
         )
-        answer = str(synthesized.get("answer") or fallback_answer).strip()
-        if not answer:
+        answer = str(synthesized.get("answer") or "").strip()
+        used_source_urls = [str(u).strip() for u in synthesized.get("used_source_urls", []) if str(u).strip()] if isinstance(synthesized, dict) else []
+        confidence = str(synthesized.get("confidence") or "").casefold() if isinstance(synthesized, dict) else ""
+        allowed_urls = {str(u) for u in selected_urls}
+        used_selected_urls = [u for u in used_source_urls if u in allowed_urls]
+
+        candidate_claims = self.evidence_claim_ranker.extract_from_materials(selected_cards)
+        consistency = self.evidence_claim_ranker.answer_consistent(answer, candidate_claims) if answer else {"passed": False}
+
+        # Hard grounding gate: generated answers may pass only when they cite at
+        # least one selected source, are not marked insufficient, and do not
+        # contradict stronger comparable evidence from the selected sources.
+        generated_grounded = bool(answer and used_selected_urls and confidence not in {"insufficient", "low", "none"} and consistency.get("passed") is True)
+        if not generated_grounded:
             answer = fallback_answer
-        # Keep source visibility even when the model omits URLs.
-        if urls and not any(u in answer for u in urls[:3]):
-            answer = answer.rstrip() + "\n\nSources:\n" + "\n".join(f"- {u}" for u in urls[:5])
+
+        # Keep source visibility bound to selected relevant sources only.
+        if selected_urls and not any(str(u) in answer for u in selected_urls[:3]):
+            answer = answer.rstrip() + "\n\nSources:\n" + "\n".join(f"- {u}" for u in selected_urls[:5])
         return answer.strip()
 
-    def _compact_web_evidence_material(self, user_input: str, evidence_cards: list[dict[str, str]], urls: list[str]) -> str:
+    def _compact_web_evidence_material(self, user_input: str, evidence_cards: list[dict[str, str]], urls: list[str], relevance: dict[str, Any] | None = None) -> str:
         """Fallback material that is readable without model synthesis.
 
         It selects short evidence snippets from generic text fields instead of
@@ -1588,6 +1614,8 @@ class ConversationCoreRuntime:
             scored.append((score, card))
         scored.sort(key=lambda x: x[0], reverse=True)
         lines = ["I found source material, but could not confidently synthesize a final answer automatically.", "", "Most relevant extracted text fields:"]
+        if relevance is not None and relevance.get("passed") is False:
+            lines.insert(1, "No candidate source passed the query relevance gate.")
         kept = 0
         for score, card in scored[:4]:
             text = " ".join(str(card.get("text") or "").split())[:420]
