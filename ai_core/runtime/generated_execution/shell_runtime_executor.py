@@ -1,12 +1,5 @@
-from __future__ import annotations
+"""Compatibility facade for migrated implementation.
 
-from typing import Any
-from ai_core.utils.safe_subprocess import run_text
-
-
-class ShellRuntimeExecutor:
-    """Executes shell commands with timeout and captured output."""
-
-    def run(self, command: list[str], *, timeout_seconds: int = 10, cwd: str | None = None) -> dict[str, Any]:
-        proc = run_text(command, cwd=cwd, capture_output=True, text=True, timeout=timeout_seconds)
-        return {"returncode": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}
+Implementation moved to auxiliary_brain.runtime.generated_execution.shell_runtime_executor.
+"""
+from auxiliary_brain.runtime.generated_execution.shell_runtime_executor import *  # noqa: F401,F403

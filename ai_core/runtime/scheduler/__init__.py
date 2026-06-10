@@ -1,3 +1,6 @@
-from .scheduled_task_runner import ScheduledTaskRunner
+"""Compatibility facade for migrated implementation.
 
-__all__ = ["ScheduledTaskRunner"]
+The implementation for ai_core/runtime/scheduler now lives in auxiliary_brain/runtime/scheduler.
+This facade preserves existing imports while keeping ai_core focused on generic brain/runtime contracts.
+"""
+from auxiliary_brain.runtime.scheduler.__init__ import *  # noqa: F401,F403

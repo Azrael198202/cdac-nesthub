@@ -1,13 +1,6 @@
-from .contracts import FailureReport, RepairAction, RepairPlan, RepairResult
-from .engine import RuntimeSelfRepairEngine
+"""Compatibility facade for migrated implementation.
 
-__all__ = [
-    "FailureReport",
-    "RepairAction",
-    "RepairPlan",
-    "RepairResult",
-    "RuntimeSelfRepairEngine",
-]
-from .repair_orchestrator import FeedbackRepairOrchestrator
-from .execution_failure_repair import ExecutionFailureRepairClassifier
-from .trace_logger import FeedbackRepairTraceLogger
+The implementation for ai_core/runtime/self_repair now lives in auxiliary_brain/runtime/self_repair.
+This facade preserves existing imports while keeping ai_core focused on generic brain/runtime contracts.
+"""
+from auxiliary_brain.runtime.self_repair.__init__ import *  # noqa: F401,F403

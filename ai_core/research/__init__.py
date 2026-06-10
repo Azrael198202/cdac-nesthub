@@ -1,6 +1,6 @@
-"""Generic runtime research/discovery utilities.
+"""Compatibility facade for migrated implementation.
 
-These utilities are domain-neutral. They can search/fetch/read web pages and
-record evidence, but they do not know any specific API, provider, product, or
-business domain.
+The implementation for ai_core/research now lives in auxiliary_brain/research.
+This facade preserves existing imports while keeping ai_core focused on generic brain/runtime contracts.
 """
+from auxiliary_brain.research.__init__ import *  # noqa: F401,F403

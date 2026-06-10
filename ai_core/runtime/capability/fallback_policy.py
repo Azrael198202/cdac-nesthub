@@ -1,17 +1,5 @@
-from __future__ import annotations
+"""Compatibility facade for migrated implementation.
 
-from typing import Any
-
-
-class FallbackPolicy:
-    """Generic fallback decision helper."""
-
-    def allowed(self, attempted_mode: str, next_mode: str, policy: dict[str, Any] | None = None) -> bool:
-        policy = policy or {}
-        blocked = {str(x) for x in policy.get("disabled_execution_modes", []) if str(x).strip()}
-        if next_mode in blocked:
-            return False
-        explicit = policy.get("fallback_modes")
-        if isinstance(explicit, list) and explicit:
-            return next_mode in {str(x) for x in explicit}
-        return True
+Implementation moved to auxiliary_brain.runtime.capability.fallback_policy.
+"""
+from auxiliary_brain.runtime.capability.fallback_policy import *  # noqa: F401,F403

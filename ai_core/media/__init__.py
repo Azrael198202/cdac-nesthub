@@ -1,6 +1,6 @@
-"""Generic media capability services."""
+"""Compatibility facade for migrated implementation.
 
-from ai_core.media.image_generation_service import ImageGenerationService
-from ai_core.media.video_generation_service import VideoGenerationService
-
-__all__ = ["ImageGenerationService", "VideoGenerationService"]
+The implementation for ai_core/media now lives in auxiliary_brain/media.
+This facade preserves existing imports while keeping ai_core focused on generic brain/runtime contracts.
+"""
+from auxiliary_brain.media.__init__ import *  # noqa: F401,F403

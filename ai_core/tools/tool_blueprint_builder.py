@@ -1,5 +1,5 @@
-from __future__ import annotations
+"""Compatibility facade for migrated implementation.
 
-# Compatibility shim: implementation moved to auxiliary_brain.
-# ai_core must not own capability generation, validation, or installation logic.
-from auxiliary_brain.capability_acquisition.tools.tool_blueprint_builder import *  # noqa: F401,F403
+Implementation moved to auxiliary_brain.runtime_tools.tool_blueprint_builder.
+"""
+from auxiliary_brain.runtime_tools.tool_blueprint_builder import *  # noqa: F401,F403
