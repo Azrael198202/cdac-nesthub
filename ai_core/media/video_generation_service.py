@@ -533,7 +533,7 @@ class VideoGenerationService(ImageGenerationService):
             return {"ok": False, "status": "requires_setup", "reason": "git_not_available"}
         repo_dir = target_dir / "workflow_repo"
         if not repo_dir.exists():
-            proc = subprocess.run([git, "clone", "--depth", "1", repo, str(repo_dir)], text=True, capture_output=True, timeout=float(cfg.get("clone_timeout_seconds") or 600))
+            proc = subprocess.run([git, "clone", "--depth", "1", repo, str(repo_dir)], text=True, capture_output=True, timeout=float(cfg.get("clone_timeout_seconds") or 600), encoding="utf-8", errors="replace")
             if proc.returncode != 0:
                 return {"ok": False, "status": "requires_setup", "reason": "workflow_repository_clone_failed", "stderr": proc.stderr[-1000:]}
         pattern = str(cfg.get("repository_file") or os.getenv(str(cfg.get("repository_file_env") or "AI_CORE_VIDEO_WORKFLOW_TEMPLATE_REPOSITORY_FILE"), "") or "**/*.json")
@@ -671,14 +671,14 @@ class VideoGenerationService(ImageGenerationService):
             if not git:
                 return {"ok": False, "status": "requires_setup", "reason": "git_not_available", "name": name}
             try:
-                proc = subprocess.run([git, "clone", "--depth", "1", repo, str(target)], text=True, capture_output=True, timeout=float(item.get("clone_timeout_seconds") or 900))
+                proc = subprocess.run([git, "clone", "--depth", "1", repo, str(target)], text=True, capture_output=True, timeout=float(item.get("clone_timeout_seconds") or 900), encoding="utf-8", errors="replace")
                 if proc.returncode != 0:
                     return {"ok": False, "status": "requires_setup", "reason": "custom_node_clone_failed", "name": name, "stderr": proc.stderr[-1000:]}
                 if bool(item.get("install_requirements", True)):
                     req = target / "requirements.txt"
                     if req.exists():
                         py = self._runtime_python(root=root, runtime=runtime, install=(runtime.get("install") if isinstance(runtime.get("install"), dict) else {}))
-                        pip = subprocess.run([py, "-m", "pip", "install", "-r", str(req)], text=True, capture_output=True, timeout=float(item.get("pip_timeout_seconds") or 1800))
+                        pip = subprocess.run([py, "-m", "pip", "install", "-r", str(req)], text=True, capture_output=True, timeout=float(item.get("pip_timeout_seconds") or 1800), encoding="utf-8", errors="replace")
                         if pip.returncode != 0:
                             return {"ok": False, "status": "requires_setup", "reason": "custom_node_requirements_install_failed", "name": name, "stderr": pip.stderr[-1000:]}
                 ready.append({"name": name, "target": str(target), "status": "installed"})
@@ -699,7 +699,7 @@ class VideoGenerationService(ImageGenerationService):
             package = str(item.get("package") if isinstance(item, dict) else item).strip()
             if not package:
                 continue
-            proc = subprocess.run([py, "-m", "pip", "install", package], text=True, capture_output=True, timeout=float((item.get("timeout_seconds") if isinstance(item, dict) else 1800) or 1800))
+            proc = subprocess.run([py, "-m", "pip", "install", package], text=True, capture_output=True, timeout=float((item.get("timeout_seconds") if isinstance(item, dict) else 1800) or 1800), encoding="utf-8", errors="replace")
             if proc.returncode != 0:
                 return {"ok": False, "status": "requires_setup", "reason": "manifest_python_package_install_failed", "package": package, "stderr": proc.stderr[-1000:]}
             ready.append({"package": package, "status": "installed_or_satisfied"})
@@ -811,7 +811,7 @@ class VideoGenerationService(ImageGenerationService):
         timeout = float(provider.get("timeout_seconds") or options.get("timeout_seconds") or 600)
         env = os.environ.copy()
         env["AI_CORE_VIDEO_PROMPT"] = prompt
-        proc = subprocess.run([str(x) for x in command], input=prompt, text=True, capture_output=True, timeout=timeout, env=env)
+        proc = subprocess.run([str(x) for x in command], input=prompt, text=True, capture_output=True, timeout=timeout, env=env, encoding="utf-8", errors="replace")
         if proc.returncode != 0:
             return {"ok": False, "status": "failed", "stderr": proc.stderr[-1000:]}
         output = (proc.stdout or "").strip()

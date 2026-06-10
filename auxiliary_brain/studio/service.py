@@ -401,6 +401,34 @@ class AgentStudioService:
             }
         return None
 
+    def _task_graph_allows_execution_reuse(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> bool:
+        """Return True only for structurally safe reusable-asset execution.
+
+        Reuse is a fast path for a single previously verified executable asset.
+        A saved graph with multiple participants or registered runtime tools must
+        be executed through the delegation graph every time, because reusing an
+        old asset can skip downstream nodes and silently bypass side effects.
+        This check is structural and does not depend on business names.
+        """
+        if not isinstance(task_graph, dict):
+            return False
+        tasks = [item for item in (task_graph.get("tasks") or []) if isinstance(item, dict)]
+        selected_ids = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
+        if len(tasks) > 1 or len(selected_ids) > 1 or len(participants or []) > 1:
+            return False
+        for participant in participants or []:
+            profile = participant.get("capability_profile") if isinstance(participant, dict) and isinstance(participant.get("capability_profile"), dict) else {}
+            if str(profile.get("capability_type") or "") == "runtime_registered_tool":
+                return False
+        for step in tasks:
+            profile = step.get("capability_profile") if isinstance(step.get("capability_profile"), dict) else {}
+            if str(profile.get("capability_type") or "") == "runtime_registered_tool":
+                return False
+            deps = step.get("depends_on") or step.get("dependencies") or []
+            if isinstance(deps, list) and deps:
+                return False
+        return True
+
     def _should_bypass_stale_reuse_asset(
         self,
         asset: dict[str, Any] | None,
@@ -2051,7 +2079,10 @@ class AgentStudioService:
             result = run_payload
         else:
             reuse_response = None
-            if not payload_only_execution:
+            if (
+                not payload_only_execution
+                and self._task_graph_allows_execution_reuse(task_graph, participants)
+            ):
                 reuse_response = await self._try_reused_task_execution(task_name, task_graph, participants, runtime_parameters)
             if reuse_response is not None:
                 return reuse_response
@@ -2691,13 +2722,11 @@ class AgentStudioService:
             trusted = False
         if not trusted:
             return False
-        runtime_parameters.setdefault("approval_confirmed", True)
-        for alias in self._participant_display_aliases(participant):
-            runtime_parameters.setdefault(f"{alias}.approval_confirmed", True)
-            runtime_parameters.setdefault(f"{alias}_approval_confirmed", True)
-        scoped = participant.setdefault("runtime_parameters", {})
-        if isinstance(scoped, dict):
-            scoped.setdefault("approval_confirmed", True)
+        # Do not inject approval_confirmed into runtime parameters.
+        # This method is only a preflight filter: when the persisted tool policy
+        # is auto-approved, the approval field should disappear from the missing
+        # input form, while the executor later passes the approval state as
+        # execution metadata rather than as tool input.
         return True
 
     def _filter_auto_confirmed_approval_fields(self, *, fields: list[dict[str, Any]], participants: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> list[dict[str, Any]]:

@@ -124,7 +124,7 @@ class RuntimeProviderInvoker:
         if not isinstance(command, list) or not command:
             raise RuntimeError("invoke.command must be a non-empty string array")
         timeout = float(invoke.get("timeout_seconds") or provider.get("timeout_seconds") or 300)
-        proc = subprocess.run(command, input=json.dumps(input_data, ensure_ascii=False), text=True, capture_output=True, timeout=timeout)
+        proc = subprocess.run(command, input=json.dumps(input_data, ensure_ascii=False), text=True, capture_output=True, timeout=timeout, encoding="utf-8", errors="replace")
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr[-2000:] or f"command failed with returncode={proc.returncode}")
         parsed = self._try_json(proc.stdout)

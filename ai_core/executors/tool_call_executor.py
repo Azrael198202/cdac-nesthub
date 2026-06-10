@@ -2187,6 +2187,8 @@ class ToolCallExecutor:
                 cwd=str(cwd),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=300,
             )
             importlib.invalidate_caches()
@@ -2264,6 +2266,8 @@ class ToolCallExecutor:
                 cwd=str(executable_path.parent),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
             )
 
@@ -5191,6 +5195,8 @@ class ToolCallExecutor:
                 [sys.executable, "-c", code],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
                 check=False,
             )

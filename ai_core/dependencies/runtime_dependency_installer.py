@@ -116,6 +116,8 @@ class RuntimeDependencyInstaller:
             command,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=max(120, int(getattr(self.policy, "command_timeout_seconds", 900) or 900)),
             check=False,
         )

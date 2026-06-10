@@ -122,6 +122,17 @@ class RuntimeRegisteredToolService:
                 "configuration_status": missing,
                 "tool": self._public_tool_summary(spec),
             }
+        input_schema = spec.get("input_schema") if isinstance(spec.get("input_schema"), dict) else {}
+        connection_schema = spec.get("connection_schema") if isinstance(spec.get("connection_schema"), dict) else {}
+        secret_schema = spec.get("secret_schema") if isinstance(spec.get("secret_schema"), dict) else {}
+
+        raw_runtime_input = input_data if isinstance(input_data, dict) else {"value": input_data}
+        runtime_input, execution_controls = self._split_execution_controls_from_payload(raw_runtime_input, input_schema=input_schema)
+        if not approval_confirmed and self._truthy_execution_control(execution_controls, "approval_confirmed"):
+            approval_confirmed = True
+        if not remember_approval and self._truthy_execution_control(execution_controls, "remember_approval"):
+            remember_approval = True
+
         approval = spec.get("approval_policy") if isinstance(spec.get("approval_policy"), dict) else {}
         approval_required = self._approval_required(spec, approval)
         approval_settings = self.approval_policy_store.get_tool_policy(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id)
@@ -134,20 +145,19 @@ class RuntimeRegisteredToolService:
                 "error": {"code": "human_confirmation_required", "message": "This runtime-generated capability requires confirmation before execution."},
                 "approval_policy": approval,
                 "approval_settings": approval_settings,
-                "preview": self._approval_preview(input_data),
+                "preview": self._approval_preview(runtime_input),
                 "tool": self._public_tool_summary(spec),
             }
         if approval_confirmed:
             self.approval_policy_store.record_confirmation(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id, remember=remember_approval)
-        input_schema = spec.get("input_schema") if isinstance(spec.get("input_schema"), dict) else {}
-        connection_schema = spec.get("connection_schema") if isinstance(spec.get("connection_schema"), dict) else {}
-        secret_schema = spec.get("secret_schema") if isinstance(spec.get("secret_schema"), dict) else {}
 
-        runtime_input = input_data if isinstance(input_data, dict) else {"value": input_data}
         runtime_input = self._coerce_by_schema(runtime_input, input_schema)
         runtime_input = self._apply_runtime_invocation_defaults(spec=spec, payload=runtime_input, approval_confirmed=approval_confirmed)
+        runtime_input, _ = self._split_execution_controls_from_payload(runtime_input, input_schema=input_schema)
         runtime_input = self._apply_schema_invocation_defaults(payload=runtime_input, schema=input_schema)
+        runtime_input, _ = self._split_execution_controls_from_payload(runtime_input, input_schema=input_schema)
         runtime_input = self._coerce_by_schema(runtime_input, input_schema)
+        runtime_input = self._project_payload_to_schema(runtime_input, input_schema)
 
         input_validation = self.runner.schema_validator.validate_input(input_schema, runtime_input)
         if not input_validation.get("valid"):
@@ -400,6 +410,74 @@ class RuntimeRegisteredToolService:
         if text in {"false", "0", "no", "n", "off"}:
             return False
         return value
+
+
+    _EXECUTION_CONTROL_NAMES = {
+        "approval_confirmed",
+        "remember_approval",
+        "confirm",
+        "confirmed",
+        "approval",
+        "approved",
+    }
+
+    def _control_tail(self, key: Any) -> str:
+        return str(key or "").strip().rsplit(".", 1)[-1].replace("-", "_").casefold()
+
+    def _schema_property_names(self, schema: dict[str, Any] | None) -> set[str]:
+        props = schema.get("properties") if isinstance(schema, dict) and isinstance(schema.get("properties"), dict) else {}
+        names: set[str] = set()
+        for name in props.keys():
+            text = str(name or "").strip()
+            if text:
+                names.add(text)
+                names.add(text.replace("-", "_").casefold())
+        return names
+
+    def _schema_declares_property(self, key: Any, schema: dict[str, Any] | None) -> bool:
+        tail = self._control_tail(key)
+        return str(key or "") in self._schema_property_names(schema) or tail in self._schema_property_names(schema)
+
+    def _split_execution_controls_from_payload(self, payload: Any, *, input_schema: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Separate execution controls from capability business input.
+
+        This is schema-driven and capability-agnostic. Approval controls may be
+        submitted by UI/preflight/resume flows, but they are consumed by the
+        executor approval layer. They are kept out of the tool payload unless the
+        tool's own declared input schema explicitly contains that field.
+        """
+        data = dict(payload) if isinstance(payload, dict) else {"value": payload}
+        tool_input: dict[str, Any] = {}
+        controls: dict[str, Any] = {}
+        for key, value in data.items():
+            tail = self._control_tail(key)
+            if tail in self._EXECUTION_CONTROL_NAMES and not self._schema_declares_property(key, input_schema):
+                controls[tail] = value
+            else:
+                tool_input[key] = value
+        return tool_input, controls
+
+    def _truthy_execution_control(self, controls: dict[str, Any], name: str) -> bool:
+        value = controls.get(name)
+        if value is None:
+            return False
+        parsed = self._parse_bool(value)
+        return bool(parsed)
+
+    def _project_payload_to_schema(self, payload: Any, schema: dict[str, Any] | None) -> dict[str, Any]:
+        """Project payload to the declared object schema when strict.
+
+        Generated capabilities are invoked through their registry contract. If a
+        schema declares object properties and does not allow additional
+        properties, only declared fields are passed to the tool implementation.
+        """
+        data = dict(payload) if isinstance(payload, dict) else {"value": payload}
+        if not isinstance(schema, dict) or schema.get("type") != "object":
+            return data
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        if schema.get("additionalProperties") is False:
+            return {k: v for k, v in data.items() if k in props}
+        return data
 
     def _apply_runtime_invocation_defaults(self, *, spec: dict[str, Any], payload: Any, approval_confirmed: bool) -> dict[str, Any]:
         """Apply registry-declared invocation defaults before execution.

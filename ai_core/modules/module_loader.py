@@ -77,6 +77,8 @@ class RuntimeModuleLoader:
             [sys.executable, "-m", "pip", "install", package],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=max(120, int(getattr(self.policy, "command_timeout_seconds", 120) or 120)),
             check=False,
         )

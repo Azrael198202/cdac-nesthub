@@ -543,7 +543,7 @@ class ImageGenerationService:
         if python_path.exists():
             return {"ok": True, "python": str(python_path), "venv": True}
         root.mkdir(parents=True, exist_ok=True)
-        create = subprocess.run([sys.executable, "-m", "venv", str(python_path.parents[1])], text=True, capture_output=True, timeout=float(install.get("venv_timeout_seconds") or 600))
+        create = subprocess.run([sys.executable, "-m", "venv", str(python_path.parents[1])], text=True, capture_output=True, timeout=float(install.get("venv_timeout_seconds") or 600), encoding="utf-8", errors="replace")
         if create.returncode != 0:
             return {"ok": False, "status": "requires_setup", "reason": "runtime_venv_create_failed", "stderr": create.stderr[-1000:], "root": str(root)}
         return {"ok": True, "python": str(python_path), "venv": True}
@@ -588,7 +588,7 @@ class ImageGenerationService:
         cmd = [str(py), "-c", script]
         self._log_comfy_bootstrap_event("preflight_start", {"command": cmd, "root": str(root), "log_path": str(log_path), "timeout_seconds": timeout})
         try:
-            completed = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)
+            completed = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout, encoding="utf-8", errors="replace")
         except subprocess.TimeoutExpired as exc:
             text = "STDOUT:\n" + (exc.stdout or "") + "\nSTDERR:\n" + (exc.stderr or "")
             self._append_text_log(log_path, text)
@@ -690,13 +690,13 @@ class ImageGenerationService:
         install_cmd = [str(py), "-m", "pip", "install", *packages, "--index-url", index_url]
         self._log_comfy_bootstrap_event("torch_repair_start", {"root": str(root), "profile": profile, "index_url": index_url, "packages": packages, "log_path": str(log_path), "preflight_reason": preflight.get("reason")})
         try:
-            uninstall = subprocess.run(uninstall_cmd, text=True, capture_output=True, timeout=min(timeout, 1200))
+            uninstall = subprocess.run(uninstall_cmd, text=True, capture_output=True, timeout=min(timeout, 1200), encoding="utf-8", errors="replace")
             self._append_text_log(log_path, "UNINSTALL COMMAND:\n" + " ".join(uninstall_cmd) + "\nSTDOUT:\n" + (uninstall.stdout or "") + "\nSTDERR:\n" + (uninstall.stderr or ""))
         except Exception as exc:
             self._append_text_log(log_path, "UNINSTALL EXCEPTION:\n" + traceback.format_exc())
             self._log_comfy_bootstrap_event("torch_repair_uninstall_exception", {"error_type": exc.__class__.__name__, "error": str(exc)[-2000:], "log_path": str(log_path)})
         try:
-            installed = subprocess.run(install_cmd, text=True, capture_output=True, timeout=timeout)
+            installed = subprocess.run(install_cmd, text=True, capture_output=True, timeout=timeout, encoding="utf-8", errors="replace")
         except Exception as exc:
             result = {"ok": False, "status": "requires_setup", "reason": "torch_repair_exception", "error_type": exc.__class__.__name__, "error": str(exc)[-2000:], "root": str(root), "log_path": str(log_path)}
             self._append_text_log(log_path, "INSTALL EXCEPTION:\n" + traceback.format_exc())
@@ -733,7 +733,7 @@ class ImageGenerationService:
             cmd = [git, "clone", "--depth", "1", repo, str(root)]
             self._log_comfy_bootstrap_event("git_clone_start", {"command": cmd, "root": str(root), "log_path": str(clone_log)})
             try:
-                clone = subprocess.run(cmd, text=True, capture_output=True, timeout=float(install.get("clone_timeout_seconds") or 1800))
+                clone = subprocess.run(cmd, text=True, capture_output=True, timeout=float(install.get("clone_timeout_seconds") or 1800), encoding="utf-8", errors="replace")
             except Exception as exc:
                 result = {
                     "ok": False,
@@ -769,7 +769,7 @@ class ImageGenerationService:
                 cmd = [str(py["python"]), "-m", "pip", "install", "-r", str(req)]
                 self._log_comfy_bootstrap_event("pip_install_start", {"command": cmd, "root": str(root), "log_path": str(pip_log)})
                 try:
-                    pip = subprocess.run(cmd, text=True, capture_output=True, timeout=float(install.get("pip_timeout_seconds") or 3600))
+                    pip = subprocess.run(cmd, text=True, capture_output=True, timeout=float(install.get("pip_timeout_seconds") or 3600), encoding="utf-8", errors="replace")
                 except Exception as exc:
                     result = {"ok": False, "status": "requires_setup", "reason": "runtime_dependency_install_exception", "error_type": exc.__class__.__name__, "error": str(exc)[-2000:], "root": str(root), "log_path": str(pip_log)}
                     self._append_text_log(pip_log, traceback.format_exc())
@@ -1048,7 +1048,7 @@ class ImageGenerationService:
         timeout = float(provider.get("timeout_seconds") or options.get("timeout_seconds") or 180)
         env = os.environ.copy()
         env["AI_CORE_IMAGE_PROMPT"] = prompt
-        proc = subprocess.run([str(x) for x in command], input=prompt, text=True, capture_output=True, timeout=timeout, env=env)
+        proc = subprocess.run([str(x) for x in command], input=prompt, text=True, capture_output=True, timeout=timeout, env=env, encoding="utf-8", errors="replace")
         if proc.returncode != 0:
             return {"ok": False, "status": "failed", "stderr": proc.stderr[-1000:]}
         output = (proc.stdout or "").strip()

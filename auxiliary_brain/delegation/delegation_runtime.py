@@ -2217,25 +2217,49 @@ class AgentDelegationRuntime:
         if changed:
             self.parameter_contract_service.apply_values(participant, scoped)
 
-    def _separate_registered_tool_approval_controls(self, *, input_data: dict[str, Any], missing: list[Any], approval_confirmed: bool) -> tuple[dict[str, Any], list[Any]]:
-        """Keep approval controls out of ordinary runtime tool input collection.
+    _REGISTERED_TOOL_EXECUTION_CONTROL_NAMES = {"approval_confirmed", "remember_approval", "confirm", "confirmed", "approval", "approved"}
 
-        approval_confirmed / remember_approval are execution-control fields.
-        They must be governed by the persistent runtime approval policy store
-        instead of being treated as user business input.  When the policy is
-        auto-approved, inject approval_confirmed into the executable payload so
-        legacy generated tools that declared the field still pass schema checks.
+    def _execution_control_tail(self, key: Any) -> str:
+        return str(key or "").strip().rsplit(".", 1)[-1].replace("-", "_").casefold()
+
+    def _separate_registered_tool_approval_controls(self, *, input_data: dict[str, Any], missing: list[Any], approval_confirmed: bool) -> tuple[dict[str, Any], list[Any]]:
+        """Handle approval controls before ordinary input collection.
+
+        Approval controls are not business parameters. If a tool/profile is
+        already auto-approved by policy, approval fields are removed from the
+        missing-input list. Otherwise they stay missing so the runtime can ask for
+        confirmation. Submitted control values remain available in
+        runtime_parameters and are forwarded to the registered tool executor as
+        execution-control arguments, not as capability business input.
         """
         cleaned_input = dict(input_data or {})
         cleaned_missing: list[Any] = []
         for item in missing or []:
-            tail = str(item or "").strip().rsplit(".", 1)[-1].replace("-", "_").casefold()
-            if tail in {"approval_confirmed", "remember_approval", "confirm", "confirmed", "approval", "approved"}:
+            tail = self._execution_control_tail(item)
+            if tail in self._REGISTERED_TOOL_EXECUTION_CONTROL_NAMES and approval_confirmed:
                 continue
             cleaned_missing.append(item)
-        if approval_confirmed:
-            cleaned_input.setdefault("approval_confirmed", True)
         return cleaned_input, cleaned_missing
+
+    def _registered_tool_business_input(self, *, input_data: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
+        """Return schema/projected business input for runtime tool execution.
+
+        The bridge may carry approval controls alongside business values. This
+        method keeps the executable tool payload aligned with the registered
+        schema without using capability-specific names.
+        """
+        profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+        input_schema = profile.get("input_schema") if isinstance(profile.get("input_schema"), dict) else {}
+        props = input_schema.get("properties") if isinstance(input_schema.get("properties"), dict) else {}
+        additional_allowed = input_schema.get("additionalProperties", True) is not False
+        out: dict[str, Any] = {}
+        for key, value in dict(input_data or {}).items():
+            tail = self._execution_control_tail(key)
+            if tail in self._REGISTERED_TOOL_EXECUTION_CONTROL_NAMES and key not in props:
+                continue
+            if additional_allowed or key in props:
+                out[key] = value
+        return out
 
     async def _execute_registered_tool_capability(self, *, participant: dict[str, Any], task_name: str, completed_results: list[Any] | None = None, dependency_plan: dict[str, Any] | None = None) -> AgentExecutionResult | None:
         profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
@@ -2258,11 +2282,6 @@ class AgentDelegationRuntime:
         policy_auto_approved = self._approval_trusted(participant=participant, tool_id=tool_id, profile_id=profile_id)
         if policy_auto_approved:
             values = dict(values)
-            values.setdefault("approval_confirmed", True)
-            runtime_parameters = participant.get("runtime_parameters") if isinstance(participant.get("runtime_parameters"), dict) else {}
-            runtime_parameters = dict(runtime_parameters)
-            runtime_parameters.setdefault("approval_confirmed", True)
-            participant["runtime_parameters"] = runtime_parameters
         bridge_result = self.registered_tool_parameter_bridge.build_invocation(participant=participant, provided_values=values)
         input_data = bridge_result.get("input_data") if isinstance(bridge_result.get("input_data"), dict) else {}
         missing = bridge_result.get("missing") if isinstance(bridge_result.get("missing"), list) else []
@@ -2306,7 +2325,8 @@ class AgentDelegationRuntime:
                     missing_inputs=fields,
                     origin="auxiliary_brain",
                 )
-        unresolved_templates = self._collect_unresolved_task_templates(input_data)
+        executable_input_data = self._registered_tool_business_input(input_data=input_data, participant=participant)
+        unresolved_templates = self._collect_unresolved_task_templates(executable_input_data)
         if unresolved_templates:
             return AgentExecutionResult(
                 participant_id=self._participant_identity(participant),
@@ -2320,7 +2340,7 @@ class AgentDelegationRuntime:
                     "capability_type": "runtime_registered_tool",
                     "tool_id": tool_id,
                     "unresolved_templates": unresolved_templates,
-                    "input_keys": sorted(input_data.keys()),
+                    "input_keys": sorted(executable_input_data.keys()),
                 },
                 origin="auxiliary_brain",
             )
@@ -2331,10 +2351,11 @@ class AgentDelegationRuntime:
             approval_confirmed = True
         result = self.registered_tool_service.execute_tool(
             tool_id=tool_id,
-            input_data=input_data,
+            input_data=executable_input_data,
             run_id=new_id("registered_tool_run"),
             profile_id=profile_id,
             approval_confirmed=approval_confirmed,
+            remember_approval=bool(values.get("remember_approval")),
         )
         status = str(result.get("status") or "").strip()
         if status == "requires_configuration":

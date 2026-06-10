@@ -1168,6 +1168,8 @@ class RuntimeCapabilityGapImplementer:
                     cwd=str(cwd),
                     env=self._clean_subprocess_env(pythonpath=pythonpath),
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     timeout=timeout,
@@ -1199,6 +1201,8 @@ class RuntimeCapabilityGapImplementer:
             proc = subprocess.run(
                 [sys.executable, "-m", "pip", "install", package_name],
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=120,
