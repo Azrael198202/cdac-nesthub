@@ -6,7 +6,7 @@ from typing import Any
 from ai_core.llm.provider_router import ProviderRouter
 from ai_core.presentation.result_sanitizer import ResultSanitizer
 from ai_core.presentation.structured_fact_normalizer import StructuredFactNormalizer
-from ai_core.runtime.semantic import SynthesisGuard
+from ai_core.runtime.semantic import SynthesisGuard, EvidenceClaimRanker
 
 
 class FinalAnswerSynthesizer:
@@ -52,6 +52,7 @@ class FinalAnswerSynthesizer:
         self.normalizer = StructuredFactNormalizer()
         self.router = ProviderRouter()
         self.guard = SynthesisGuard()
+        self.claim_ranker = EvidenceClaimRanker()
 
     async def synthesize(
         self,
@@ -63,21 +64,25 @@ class FinalAnswerSynthesizer:
         trust_summary: dict[str, Any],
     ) -> dict[str, Any]:
         sanitized = self.sanitizer.sanitize_materials(materials)
+        evidence_claims = self.claim_ranker.extract_from_materials(sanitized)
         direct_answer = self._direct_generated_answer_material(sanitized)
-        if direct_answer:
+        direct_consistency = self.claim_ranker.answer_consistent(direct_answer, evidence_claims) if direct_answer else {"passed": True}
+        if direct_answer and direct_consistency.get("passed") is True:
             return {
                 "answer": direct_answer,
-                "result_material": [{"source": "answer_material", "status": "success", "content": {"answer": direct_answer}}],
+                "result_material": [{"source": "answer_material", "status": "success", "content": {"answer": direct_answer, "evidence_claims": evidence_claims[:8]}}],
                 "synthesis": {
                     "source": "direct_answer_material",
                     "raw_source_material_returned": False,
                     "normalized_facts_only": False,
                     "verified_facts_only": False,
-                    "reason": "The locked workflow selected model/content generation, so generated answer material is the final deliverable.",
+                    "answer_evidence_consistency": direct_consistency,
+                    "reason": "The locked workflow selected model/content generation and the generated answer is consistent with comparable evidence claims.",
                 },
             }
         facts = self.guard.filter(self.normalizer.normalize(materials=sanitized, state=state))
-        deterministic = self._deterministic_summary(facts=facts, sanitized=sanitized, trust_summary=trust_summary)
+        facts = self.claim_ranker.filter_verified_facts(facts, evidence_claims)
+        deterministic = self._deterministic_summary(facts=facts, sanitized=sanitized, trust_summary=trust_summary, evidence_claims=evidence_claims)
         answer = deterministic
 
         if self._model_synthesis_enabled(state, facts):
@@ -88,9 +93,14 @@ class FinalAnswerSynthesizer:
                 facts=facts,
                 trust_summary=trust_summary,
             )
-            if generated:
+            generated_consistency = self.claim_ranker.answer_consistent(generated, evidence_claims) if generated else {"passed": False}
+            if generated and generated_consistency.get("passed") is True:
                 answer = generated
 
+        final_consistency = self.claim_ranker.answer_consistent(answer, evidence_claims)
+        if final_consistency.get("passed") is not True:
+            answer = deterministic
+            final_consistency = self.claim_ranker.answer_consistent(answer, evidence_claims)
         answer = self._assert_no_debug_material_in_final_answer(answer, fallback=deterministic)
         return {
             "answer": answer,
@@ -100,6 +110,8 @@ class FinalAnswerSynthesizer:
                 "raw_source_material_returned": False,
                 "normalized_facts_only": True,
                 "verified_facts_only": True,
+                "evidence_claim_count": len(evidence_claims),
+                "answer_evidence_consistency": final_consistency,
             },
         }
 
@@ -207,7 +219,18 @@ class FinalAnswerSynthesizer:
             return ""
         return ""
 
-    def _deterministic_summary(self, *, facts: list[dict[str, Any]], sanitized: list[dict[str, Any]], trust_summary: dict[str, Any]) -> str:
+    def _deterministic_summary(self, *, facts: list[dict[str, Any]], sanitized: list[dict[str, Any]], trust_summary: dict[str, Any], evidence_claims: list[dict[str, Any]] | None = None) -> str:
+        evidence_claims = evidence_claims or []
+        best_claim = self.claim_ranker.best_claim(evidence_claims)
+        if best_claim:
+            best_line = self._best_claim_line(best_claim)
+            sources = self._claim_sources(evidence_claims)
+            lines = ["I found the strongest evidence-backed claim:", f"- {best_line}"]
+            if sources:
+                lines.append("Source:")
+                lines.append(f"- {sources[0]}")
+            return "\n".join(lines).strip()
+
         if facts:
             aligned_records = [f for f in facts if f.get("kind") == "aligned_record"]
             statements = [f for f in facts if f.get("kind") == "supporting_statement"]
@@ -284,6 +307,25 @@ class FinalAnswerSynthesizer:
             return "I could not produce a verified answer from the available result material."
         return "The runtime completed, but no user-facing answer material was available."
 
+
+
+    def _best_claim_line(self, claim: dict[str, Any]) -> str:
+        value = str(claim.get("value") or "").strip()
+        status = str(claim.get("status") or "").strip()
+        context = self._clean_sentence(str(claim.get("context") or ""))
+        if context:
+            return context
+        if status and status != "unspecified":
+            return f"{value} ({status})"
+        return value or "verified claim"
+
+    def _claim_sources(self, claims: list[dict[str, Any]]) -> list[str]:
+        sources: list[str] = []
+        for claim in claims:
+            src = str(claim.get("source_url") or "")
+            if src.startswith("http") and src not in sources:
+                sources.append(src)
+        return sources
 
     def _source_report_from_materials(self, sanitized: list[dict[str, Any]]) -> str:
         sources: list[dict[str, Any]] = []
