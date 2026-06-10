@@ -243,6 +243,7 @@ class ConversationCoreRuntime:
                 "capability_gap_detected": {"type": "boolean"},
                 "capability_gap_reason": {"type": "string"},
                 "reason": {"type": "string"},
+                "web_search_decision": {"type": "object"},
             },
             "additionalProperties": True,
         }
@@ -251,7 +252,10 @@ class ConversationCoreRuntime:
             "system": (
                 "Recognize the user's interaction intent using generic labels only. "
                 "Choose whether the message can be answered directly or requires an external runtime action. "
-                "Set requires_external_information=true when the answer depends on outside, changing, source-backed, or explicitly requested online material. "
+                "First judge whether the user needs web search or other external source material. "
+                "Set requires_external_information=true only when the answer cannot be responsibly answered from the current conversation, local knowledge, or uploaded/runtime context and needs outside source-backed material. "
+                "Do not set requires_external_information merely because a generic freshness/source word appears; use the whole request meaning. "
+                "When external material is needed, include web_search_decision={needs_web_search, reason, search_strategy, evidence_required, source_requirements}. "
                 "Set capability_gap_detected=true only when the user explicitly asks to create, acquire, implement, register, install, integrate, configure, or fix a runtime capability/tool/module, and external implementation knowledge should be collected first. "
                 "Do not treat greetings, language preference changes, assistant capability questions, or simple conversation as capability gaps. "
                 "Use generic signal names only, such as freshness_required, external_source_required, evidence_required, local_context_insufficient, verification_required, and capability_gap_resolution. "
@@ -260,19 +264,31 @@ class ConversationCoreRuntime:
         }
         external_signals = self._external_information_signals(text)
         capability_gap = self._generic_capability_gap_signal(text)
-        requires_external = bool(external_signals or capability_gap)
+        # Fallback is conservative: deterministic lexical signals are recorded as
+        # observations, but ordinary web search is not forced unless the LLM
+        # decision is unavailable and the request explicitly asks for external
+        # lookup/source use. Capability acquisition remains a separate structural
+        # runtime-extension path.
+        fallback_requires_external = bool(capability_gap or "external_source_required" in external_signals or "external_source_required" in external_signals)
         fallback = {
-            "intent_type": "capability_gap_resolution" if capability_gap else "direct_response",
-            "confidence": 0.5,
-            "response_mode": "external_solution_guidance" if capability_gap else "direct_answer",
-            "needs_external_execution": requires_external,
-            "requires_external_information": requires_external,
-            "required_capabilities": ["web_retrieval"] if requires_external else [],
+            "intent_type": "capability_gap_resolution" if capability_gap else ("external_information_request" if fallback_requires_external else "direct_response"),
+            "confidence": 0.45,
+            "response_mode": "external_solution_guidance" if capability_gap else ("source_grounded_answer" if fallback_requires_external else "direct_answer"),
+            "needs_external_execution": fallback_requires_external,
+            "requires_external_information": fallback_requires_external,
+            "required_capabilities": ["web_retrieval"] if fallback_requires_external else [],
             "source_policy": {
-                "requires_source_material": requires_external,
-                "min_sources": 2 if requires_external else 0,
-                "external_access": "required" if requires_external else "not_required",
+                "requires_source_material": fallback_requires_external,
+                "min_sources": 1 if fallback_requires_external else 0,
+                "external_access": "required" if fallback_requires_external else "not_required",
                 "trusted_sources_preferred": bool(capability_gap),
+                "verification_required": bool(fallback_requires_external),
+            },
+            "web_search_decision": {
+                "needs_web_search": bool(fallback_requires_external and not capability_gap),
+                "reason": "fallback_explicit_external_lookup_signal" if fallback_requires_external else "fallback_no_external_lookup_required",
+                "search_strategy": "search_engine" if fallback_requires_external else "none",
+                "evidence_required": bool(fallback_requires_external),
             },
             "external_information_signals": external_signals + (["capability_gap_resolution"] if capability_gap else []),
             "capability_gap_detected": capability_gap,
@@ -302,8 +318,10 @@ class ConversationCoreRuntime:
             result["required_capabilities"] = []
             result["source_policy"] = {"requires_source_material": False, "external_access": "not_required", "min_sources": 0}
             result["reason"] = "capability_gap_rejected_without_runtime_extension_signal"
-        requires_external = bool(external_signals or capability_gap or result.get("requires_external_information"))
-        if requires_external:
+        decision = result.get("web_search_decision") if isinstance(result.get("web_search_decision"), dict) else {}
+        llm_requires_external = bool(result.get("requires_external_information") or result.get("needs_external_execution") or decision.get("needs_web_search"))
+        requires_external = bool(capability_gap or llm_requires_external)
+        if not capability_gap and llm_requires_external:
             result["requires_external_information"] = True
             result["needs_external_execution"] = True
             caps = result.get("required_capabilities") if isinstance(result.get("required_capabilities"), list) else []
@@ -312,11 +330,17 @@ class ConversationCoreRuntime:
             result["required_capabilities"] = caps
             policy = result.get("source_policy") if isinstance(result.get("source_policy"), dict) else {}
             policy.setdefault("requires_source_material", True)
-            policy.setdefault("min_sources", 2)
+            policy.setdefault("min_sources", 1)
             policy.setdefault("external_access", "required")
-            if capability_gap:
-                policy.setdefault("trusted_sources_preferred", True)
+            policy.setdefault("verification_required", True)
             result["source_policy"] = policy
+            decision.setdefault("needs_web_search", True)
+            decision.setdefault("search_strategy", "search_engine")
+            decision.setdefault("evidence_required", True)
+            result["web_search_decision"] = decision
+        elif capability_gap:
+            result["requires_external_information"] = bool(result.get("requires_external_information"))
+            result["needs_external_execution"] = True
         merged_signals = result.get("external_information_signals") if isinstance(result.get("external_information_signals"), list) else []
         for signal in external_signals + (["capability_gap_resolution"] if capability_gap else []):
             if signal not in merged_signals:
@@ -542,7 +566,7 @@ class ConversationCoreRuntime:
             "system": (
                 "Create a minimal generic workflow for answering the user's message. "
                 "The workflow is for ordinary conversation, not participant/task delegation. "
-                "If intent.requires_external_information is true, lock execution_method=web_search and capability=web_retrieval in the planned step. "
+                "If intent.web_search_decision.needs_web_search is true or intent.requires_external_information is true, lock execution_method=web_search and capability=web_retrieval in the planned step. "
                 "If intent.capability_gap_detected is true, plan a generic resolve_capability_gap step before any implementation step; do not silently execute untrusted external code. "
                 "Do not use domain-specific routing rules. Return only valid JSON matching the schema."
             ),
@@ -585,7 +609,8 @@ class ConversationCoreRuntime:
             schema,
             fallback=fallback,
         )
-        if intent.get("requires_external_information") or intent.get("needs_external_execution"):
+        intent_web_decision = intent.get("web_search_decision") if isinstance(intent.get("web_search_decision"), dict) else {}
+        if intent.get("requires_external_information") or intent.get("needs_external_execution") or intent_web_decision.get("needs_web_search"):
             steps = plan.get("planned_steps") if isinstance(plan.get("planned_steps"), list) else []
             if not steps:
                 steps = fallback["planned_steps"]
@@ -745,7 +770,23 @@ class ConversationCoreRuntime:
                 doc = await self.web_research.fetch(url=url, max_chars=8000)
                 if isinstance(doc, dict) and doc.get("status") == "success":
                     fetched.append(doc)
-            material = await self._web_answer_material(text, search, fetched, run_id)
+            verification_policy = selected.get("source_policy") if isinstance(selected.get("source_policy"), dict) else {}
+            min_sources = int(verification_policy.get("min_sources") or 1)
+            web_verification = self._verify_web_evidence(text, search, fetched, min_sources=min_sources)
+            if web_verification.get("passed"):
+                material = await self._web_answer_material(text, search, fetched, run_id)
+            else:
+                material = self._external_retrieval_failure_material({
+                    "query": query,
+                    "search_query_used": search_query,
+                    "search_status": search.get("status"),
+                    "source_count": len(evidence_items),
+                    "fetched_count": len(fetched),
+                    "urls": [str(x.get("url") or "") for x in evidence_items if isinstance(x, dict) and x.get("url")],
+                    "attempts": search.get("attempts") if isinstance(search.get("attempts"), list) else [],
+                    "verification": web_verification,
+                    "failure_reason": "web_evidence_verification_failed",
+                })
             optimized = self.web_evidence_optimizer.optimize(
                 user_input=text,
                 capability=str(selected.get("capability") or ""),
@@ -765,6 +806,10 @@ class ConversationCoreRuntime:
                 "results": evidence_items,
                 "fetched_documents": fetched,
                 "optimized_evidence": optimized,
+                "verification": web_verification,
+                "verification_status": web_verification.get("status"),
+                "search_strategy": "direct_url" if re.search(r"https?://", query) else "search_engine",
+                "search_provider_config": search.get("provider_config") if isinstance(search.get("provider_config"), dict) else {},
                 "attempts": search.get("attempts") if isinstance(search.get("attempts"), list) else [],
                 "need_capability_event": plan.get("need_capability_event") if isinstance(plan.get("need_capability_event"), dict) else {},
             }
@@ -808,13 +853,13 @@ class ConversationCoreRuntime:
             runtime_registered = False
             if implementation and isinstance(implementation.get("runtime_implementation"), dict):
                 runtime_registered = implementation["runtime_implementation"].get("status") == "registered"
-            completed = bool(evidence_items) or runtime_registered
+            completed = bool(runtime_registered) or (bool(evidence_items) and (capability_gap or bool(evidence.get("verification", {}).get("passed"))))
             return {
-                "status": "completed" if completed else "blocked_no_external_material",
+                "status": "completed" if completed else "blocked_no_verified_web_evidence",
                 "execution_mode": "capability_gap_resolution" if capability_gap else "web_search",
                 "capability": "web_retrieval",
                 "answer_material": material,
-                "external_evidence_used": bool(evidence_items),
+                "external_evidence_used": bool(evidence_items) and bool(capability_gap or evidence.get("verification", {}).get("passed")),
                 "policy_backed_runtime_registration": bool(runtime_registered and not evidence_items),
                 "capability_gap_resolution": capability_gap,
                 "capability_implementation": implementation,
@@ -857,6 +902,15 @@ class ConversationCoreRuntime:
         # misleading missing-configuration block. Runtime values are collected by
         # Agent Studio schema forms after registration.
         if bool(execution.get("capability_gap_resolution")):
+            return {
+                "status": "completed",
+                "final_answer": material,
+                "message": material,
+                "user_facing": True,
+            }
+        evidence = execution.get("evidence") if isinstance(execution.get("evidence"), dict) else {}
+        evidence_verification = evidence.get("verification") if isinstance(evidence.get("verification"), dict) else {}
+        if str(execution.get("execution_mode") or "") == "web_search" and not evidence_verification.get("passed"):
             return {
                 "status": "completed",
                 "final_answer": material,
@@ -1092,7 +1146,8 @@ class ConversationCoreRuntime:
         capability_impl = execution.get("capability_implementation") if isinstance(execution.get("capability_implementation"), dict) else {}
         if isinstance(capability_impl, dict):
             runtime_impl = capability_impl.get("runtime_implementation") if isinstance(capability_impl.get("runtime_implementation"), dict) else None
-        passed = bool(execution.get("answer_material")) and (not expects_web or bool(urls))
+        evidence_verification = evidence.get("verification") if isinstance(evidence.get("verification"), dict) else {}
+        passed = bool(execution.get("answer_material")) and (not expects_web or (bool(urls) and bool(evidence_verification.get("passed"))))
         if runtime_impl and runtime_impl.get("status") in {
             "sandbox_failed",
             "not_registered",
@@ -1120,6 +1175,60 @@ class ConversationCoreRuntime:
             "runtime_implementation_status": runtime_impl.get("status") if runtime_impl else "not_applicable",
             "runtime_capability_registered": bool((runtime_impl or {}).get("registration")),
             "safe_implementation_policy": "external_code_not_executed_without_validation" if execution.get("capability_gap_resolution") else "not_applicable",
+        }
+
+    def _verify_web_evidence(self, user_input: str, search: dict[str, Any], fetched: list[dict[str, Any]], *, min_sources: int = 1) -> dict[str, Any]:
+        """Generic evidence verification for web retrieval.
+
+        This does not know concrete business domains. It checks whether web
+        retrieval actually produced fetched source text and whether that text is
+        meaningfully related to the user's request terms. The final synthesis
+        layer may only answer source-required requests when this contract passes.
+        """
+        results = search.get("results") if isinstance(search.get("results"), list) else []
+        fetched_docs = [d for d in fetched if isinstance(d, dict) and d.get("status") == "success"]
+        terms = self._query_terms(user_input)
+        required = [t for t in terms if len(t) >= 3][:12]
+        evidence_text = " ".join(
+            str(x.get("title") or "") + " " + str(x.get("snippet") or "")
+            for x in results if isinstance(x, dict)
+        ) + " " + " ".join(
+            str(d.get("title") or "") + " " + str(d.get("text_excerpt") or d.get("visible_text_excerpt") or "")
+            for d in fetched_docs
+        )
+        folded = evidence_text.casefold()
+        matched = [term for term in required if term.casefold() in folded]
+        has_factual_material = bool(re.search(r"\d|°|%|[A-Za-z]{3,}|[\u3040-\u30ff\u3400-\u9fff]{2,}", evidence_text))
+        source_urls = []
+        for item in results:
+            if isinstance(item, dict) and item.get("url"):
+                url = str(item.get("url") or "").strip()
+                if url and url not in source_urls:
+                    source_urls.append(url)
+        fetched_urls = []
+        for item in fetched_docs:
+            url = str(item.get("url") or "").strip()
+            if url and url not in fetched_urls:
+                fetched_urls.append(url)
+        enough_sources = len(fetched_urls) >= max(1, int(min_sources or 1))
+        # For short queries, at least one matched key term is enough. For longer
+        # queries require a small ratio, but never a domain-specific pattern.
+        required_match_count = 1 if len(required) <= 3 else min(3, max(1, len(required) // 3))
+        term_coverage_passed = len(matched) >= required_match_count if required else bool(fetched_docs)
+        passed = bool(enough_sources and term_coverage_passed and has_factual_material)
+        return {
+            "status": "passed" if passed else "failed",
+            "passed": passed,
+            "min_sources": max(1, int(min_sources or 1)),
+            "candidate_source_count": len(source_urls),
+            "fetched_source_count": len(fetched_urls),
+            "matched_terms": matched,
+            "required_terms_sample": required,
+            "term_coverage_passed": bool(term_coverage_passed),
+            "has_factual_material": bool(has_factual_material),
+            "source_urls": source_urls,
+            "fetched_urls": fetched_urls,
+            "reason": "verified_source_text_matches_request" if passed else "insufficient_verified_source_text_for_request",
         }
 
     async def _web_answer_material(self, user_input: str, search: dict[str, Any], fetched: list[dict[str, Any]], run_id: str) -> str:
@@ -1323,7 +1432,7 @@ class ConversationCoreRuntime:
         if re.search(r"https?://", value):
             signals.append("external_source_required")
         marker_groups = {
-            "freshness_required": (" latest ", " current ", " recent ", " today ", " now ", " stable ", " version ", "最新", "現在", "最近", "今日", "今", "版本", "当前"),
+            "freshness_required": (" latest ", " newest ", " current ", " recent ", " today ", " now ", " stable ", " version ", "最新", "現在", "最近", "今日", "今", "版本", "当前"),
             "external_source_required": (" search ", " look up ", " lookup ", " web ", " internet ", " browse ", "検索", "調べ", "搜索", "检索", "查询", "网页"),
             "evidence_required": (" official ", " source ", " url ", " citation ", " reference ", " documentation ", " docs ", "公式", "出典", "引用", "参照", "官方", "来源", "网址", "文档"),
             "verification_required": (" verify ", " check ", " confirm ", " compare ", " validate ", "確認", "検証", "比較", "核实", "确认", "验证", "比较"),

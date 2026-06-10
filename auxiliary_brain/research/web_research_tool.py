@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
@@ -45,70 +46,203 @@ class GenericWebResearchTool:
     async def search(self, *, query: str, max_results: int = 5, timeout_seconds: float = 20.0) -> dict[str, Any]:
         """Best-effort generic web search with structured evidence output.
 
-        This method is deliberately provider-neutral from the runtime point of
-        view.  It can use multiple no-key public discovery pages, normalizes the
-        heterogeneous HTML into the same result contract, and records each
-        attempt so verification can explain whether web retrieval really ran.
+        URL discovery is explicit and provider-backed. The default provider is a
+        no-key DuckDuckGo HTML search page. Optional API providers can be enabled
+        through environment variables without changing ai_core logic:
+        - AI_CORE_WEB_SEARCH_PROVIDER=duckduckgo_html|bing_api|google_custom_search|auto
+        - BING_SEARCH_ENDPOINT and BING_SEARCH_API_KEY for Bing Web Search
+        - GOOGLE_CSE_ID and GOOGLE_API_KEY for Google Custom Search JSON API
+        The returned contract always includes provider_config, attempts,
+        candidate URLs, and normalized results for downstream verification.
         """
         query = str(query or "").strip()
         if not query:
-            return self._record("search", {"status": "error", "error": "query is required", "results": [], "attempts": []})
+            return self._record("search", {"status": "error", "error": "query is required", "results": [], "attempts": [], "provider_config": self._provider_config([])})
 
         direct_url = query if self._safe_http_url(query) else ""
         if direct_url:
             return self._record("search", {
                 "status": "success",
                 "query": query,
+                "search_strategy": "direct_url",
                 "search_url": direct_url,
+                "provider_config": self._provider_config([{"provider": "direct_url", "kind": "direct"}]),
                 "results": [asdict(WebResearchResult(status="success", query=query, url=direct_url, title=direct_url, fetched_at=self._now()))],
-                "attempts": [{"provider": "direct_url", "status": "success", "url": direct_url}],
+                "attempts": [{"provider": "direct_url", "kind": "direct", "status": "success", "url": direct_url}],
             })
 
-        providers = self._search_provider_urls(query)
+        providers = self._search_provider_specs(query)
         results: list[dict[str, Any]] = []
         attempts: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
         headers = self._http_headers()
         per_attempt_timeout = max(3.0, float(timeout_seconds) / max(len(providers), 1))
         async with httpx.AsyncClient(timeout=per_attempt_timeout, follow_redirects=True, headers=headers) as client:
-            for provider_name, url in providers:
+            for spec in providers:
+                provider_name = str(spec.get("provider") or "search_provider")
+                url = str(spec.get("url") or "")
+                kind = str(spec.get("kind") or "html")
                 try:
-                    response = await client.get(url)
+                    req_headers = dict(headers)
+                    req_headers.update(spec.get("headers") if isinstance(spec.get("headers"), dict) else {})
+                    response = await client.get(url, headers=req_headers)
                     response.raise_for_status()
-                    extracted = self._extract_search_results(
-                        html_text=response.text or "",
-                        query=query,
-                        response_status=response.status_code,
-                        max_results=max_results,
-                    )
+                    if kind == "bing_json":
+                        extracted = self._extract_bing_json_results(response.json(), query=query, response_status=response.status_code, max_results=max_results)
+                    elif kind == "google_json":
+                        extracted = self._extract_google_json_results(response.json(), query=query, response_status=response.status_code, max_results=max_results)
+                    else:
+                        extracted = self._extract_search_results(
+                            html_text=response.text or "",
+                            query=query,
+                            response_status=response.status_code,
+                            max_results=max_results,
+                        )
                     kept = 0
                     for item in extracted:
                         item_url = str(item.get("url") or "").strip()
                         if not item_url or item_url in seen_urls or not self._safe_http_url(item_url):
                             continue
                         seen_urls.add(item_url)
+                        item["discovered_by"] = provider_name
                         results.append(item)
                         kept += 1
                         if len(results) >= max_results:
                             break
-                    attempts.append({"provider": provider_name, "status": "success", "url": url, "kept_results": kept, "response_status": response.status_code})
+                    attempts.append({"provider": provider_name, "kind": kind, "status": "success", "url": url, "kept_results": kept, "response_status": response.status_code})
                     if len(results) >= max_results:
                         break
                 except Exception as exc:
-                    attempts.append({"provider": provider_name, "status": "error", "url": url, "error": str(exc)})
+                    attempts.append({"provider": provider_name, "kind": kind, "status": "error", "url": url, "error": str(exc)})
 
         status = "success" if results else "error"
-        payload: dict[str, Any] = {"status": status, "query": query, "search_url": providers[0][1], "results": results, "attempts": attempts}
+        payload: dict[str, Any] = {
+            "status": status,
+            "query": query,
+            "search_strategy": "search_engine",
+            "search_url": str(providers[0].get("url") or "") if providers else "",
+            "provider_config": self._provider_config(providers),
+            "results": results,
+            "attempts": attempts,
+        }
         if not results:
             payload["error"] = "no search results collected"
         return self._record("search", payload)
 
-    def _search_provider_urls(self, query: str) -> list[tuple[str, str]]:
+    def _search_provider_specs(self, query: str) -> list[dict[str, Any]]:
+        """Return configured search-engine providers.
+
+        This is generic infrastructure, not business routing. DuckDuckGo HTML is
+        the default no-key provider. Bing and Google are available only when the
+        required environment configuration exists.
+        """
         encoded = quote_plus(query)
-        return [
-            ("primary_html_search", "https://duckduckgo.com/html/?q=" + encoded),
-            ("secondary_html_search", "https://html.duckduckgo.com/html/?q=" + encoded),
-        ]
+        requested = str(os.getenv("AI_CORE_WEB_SEARCH_PROVIDER") or "auto").strip().lower()
+        providers: list[dict[str, Any]] = []
+
+        def add_duckduckgo() -> None:
+            providers.extend([
+                {"provider": "duckduckgo_html", "kind": "html", "url": "https://duckduckgo.com/html/?q=" + encoded, "requires_key": False},
+                {"provider": "duckduckgo_html_fallback", "kind": "html", "url": "https://html.duckduckgo.com/html/?q=" + encoded, "requires_key": False},
+            ])
+
+        def add_bing() -> None:
+            endpoint = str(os.getenv("BING_SEARCH_ENDPOINT") or "").rstrip("/")
+            key = str(os.getenv("BING_SEARCH_API_KEY") or "")
+            if endpoint and key:
+                providers.append({
+                    "provider": "bing_api",
+                    "kind": "bing_json",
+                    "url": endpoint + "/v7.0/search?q=" + encoded,
+                    "headers": {"Ocp-Apim-Subscription-Key": key},
+                    "requires_key": True,
+                })
+
+        def add_google() -> None:
+            cse_id = str(os.getenv("GOOGLE_CSE_ID") or "")
+            api_key = str(os.getenv("GOOGLE_API_KEY") or "")
+            if cse_id and api_key:
+                providers.append({
+                    "provider": "google_custom_search",
+                    "kind": "google_json",
+                    "url": "https://www.googleapis.com/customsearch/v1?key=" + quote_plus(api_key) + "&cx=" + quote_plus(cse_id) + "&q=" + encoded,
+                    "requires_key": True,
+                })
+
+        if requested in {"bing", "bing_api"}:
+            add_bing()
+        elif requested in {"google", "google_custom_search", "google_cse"}:
+            add_google()
+        elif requested in {"duckduckgo", "duckduckgo_html", "ddg"}:
+            add_duckduckgo()
+        else:
+            add_bing()
+            add_google()
+            add_duckduckgo()
+        if not providers:
+            add_duckduckgo()
+        return providers
+
+    def _provider_config(self, providers: list[dict[str, Any]]) -> dict[str, Any]:
+        names = []
+        for spec in providers:
+            name = str(spec.get("provider") or "").strip()
+            if name and name not in names:
+                names.append(name)
+        return {
+            "configured_provider": str(os.getenv("AI_CORE_WEB_SEARCH_PROVIDER") or "auto"),
+            "active_provider_order": names,
+            "default_provider": "duckduckgo_html",
+            "optional_providers": {
+                "bing_api": bool(os.getenv("BING_SEARCH_ENDPOINT") and os.getenv("BING_SEARCH_API_KEY")),
+                "google_custom_search": bool(os.getenv("GOOGLE_CSE_ID") and os.getenv("GOOGLE_API_KEY")),
+            },
+            "url_discovery_method": "search_engine_or_direct_url",
+        }
+
+    def _extract_bing_json_results(self, payload: dict[str, Any], *, query: str, response_status: int, max_results: int) -> list[dict[str, Any]]:
+        items = ((payload or {}).get("webPages") or {}).get("value") if isinstance(payload, dict) else []
+        output: list[dict[str, Any]] = []
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            if not self._safe_http_url(url):
+                continue
+            output.append(asdict(WebResearchResult(
+                status="success",
+                query=query,
+                url=url,
+                title=self._clean(str(item.get("name") or url))[:300],
+                snippet=self._clean(str(item.get("snippet") or ""))[:600],
+                response_status=response_status,
+                fetched_at=self._now(),
+            )))
+            if len(output) >= max_results * 2:
+                break
+        return output
+
+    def _extract_google_json_results(self, payload: dict[str, Any], *, query: str, response_status: int, max_results: int) -> list[dict[str, Any]]:
+        items = (payload or {}).get("items") if isinstance(payload, dict) else []
+        output: list[dict[str, Any]] = []
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("link") or "").strip()
+            if not self._safe_http_url(url):
+                continue
+            output.append(asdict(WebResearchResult(
+                status="success",
+                query=query,
+                url=url,
+                title=self._clean(str(item.get("title") or url))[:300],
+                snippet=self._clean(str(item.get("snippet") or ""))[:600],
+                response_status=response_status,
+                fetched_at=self._now(),
+            )))
+            if len(output) >= max_results * 2:
+                break
+        return output
 
     def _extract_search_results(self, *, html_text: str, query: str, response_status: int, max_results: int) -> list[dict[str, Any]]:
         soup = BeautifulSoup(html_text or "", "html.parser")
