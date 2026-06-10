@@ -40,10 +40,10 @@ class EvidenceClaimRanker:
     VERSION_PATTERN = re.compile(r"(?<![A-Za-z0-9])v?(\d+(?:\.\d+){0,3})(?![A-Za-z0-9])", re.IGNORECASE)
     STATUS_PATTERN = re.compile(
         r"\b(stable|current|latest|general\s+availability|ga|release|released|production|"
-        r"beta|alpha|preview|rc|candidate|development|devel|snapshot|nightly|deprecated|legacy)\b",
+        r"beta|alpha|preview|rc|candidate|development|devel|snapshot|nightly|deprecated|legacy|testing|experimental|bugs?|issues?)\b",
         re.IGNORECASE,
     )
-    NEGATIVE_STATUS = {"beta", "alpha", "preview", "rc", "candidate", "development", "devel", "snapshot", "nightly"}
+    NEGATIVE_STATUS = {"beta", "alpha", "preview", "rc", "candidate", "development", "devel", "snapshot", "nightly", "testing", "experimental", "bug", "bugs", "issue", "issues"}
     POSITIVE_STATUS = {"stable", "current", "latest", "general availability", "ga", "release", "released", "production"}
     LOW_VALUE_CONTEXT = re.compile(r"\b(status|http|error|port|height|width|css|px|ms|kb|mb|gb)\b", re.IGNORECASE)
 

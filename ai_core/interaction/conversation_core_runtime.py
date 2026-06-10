@@ -19,6 +19,7 @@ from ai_core.events.need_capability_event import NeedCapabilityEvent
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 from ai_core.runtime.state import runtime_state_manager
 from ai_core.runtime.semantic import SourceRelevanceSelector, EvidenceClaimRanker
+from ai_core.runtime.reasoning import EvidenceNormalizationLayer, ClaimResolutionLayer, AnswerPlanningLayer
 
 
 class ConversationCoreRuntime:
@@ -41,6 +42,9 @@ class ConversationCoreRuntime:
         self.capability_implementer = RuntimeCapabilityGapImplementer()
         self.source_relevance_selector = SourceRelevanceSelector()
         self.evidence_claim_ranker = EvidenceClaimRanker()
+        self.evidence_normalizer = EvidenceNormalizationLayer()
+        self.claim_resolver = ClaimResolutionLayer()
+        self.answer_planner = AnswerPlanningLayer()
 
     async def run(self, message: str, *, latest_task: str | None = None, session_id: str | None = None, runtime_state_run_id: str | None = None) -> dict[str, Any]:
         conversation_trace_id = "conversation_core_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
@@ -1534,9 +1538,15 @@ class ConversationCoreRuntime:
         selected_cards = relevance.get("selected_sources") if isinstance(relevance.get("selected_sources"), list) else []
         selected_urls = relevance.get("selected_urls") if isinstance(relevance.get("selected_urls"), list) else []
         if not selected_cards:
-            return self._compact_web_evidence_material(user_input, evidence_cards, urls, relevance=relevance)
+            normalized = self.evidence_normalizer.normalize(user_input=user_input, source_cards=evidence_cards)
+            resolved = self.claim_resolver.resolve(user_input=user_input, normalized_evidence=normalized)
+            plan = self.answer_planner.plan(user_input=user_input, resolved_claims=resolved)
+            return self.answer_planner.render(plan)
 
-        fallback_answer = self._compact_web_evidence_material(user_input, selected_cards, [str(u) for u in selected_urls], relevance=relevance)
+        normalized = self.evidence_normalizer.normalize(user_input=user_input, source_cards=selected_cards)
+        resolved = self.claim_resolver.resolve(user_input=user_input, normalized_evidence=normalized)
+        plan = self.answer_planner.plan(user_input=user_input, resolved_claims=resolved)
+        fallback_answer = self.answer_planner.render(plan)
 
         schema = {
             "type": "object",
@@ -1559,8 +1569,8 @@ class ConversationCoreRuntime:
         }
         payload = {
             "user_message": user_input,
-            "retrieved_source_text_fields": evidence_cards[:8],
-            "source_urls": urls[:8],
+            "retrieved_source_text_fields": selected_cards[:8],
+            "source_urls": selected_urls[:8],
             "output_style": {
                 "summary_first": True,
                 "avoid_raw_excerpts": True,
@@ -1574,7 +1584,7 @@ class ConversationCoreRuntime:
             prompt,
             json.dumps(payload, ensure_ascii=False),
             schema,
-            fallback={"answer": fallback_answer, "used_source_urls": urls[:5], "confidence": "fallback"},
+            fallback={"answer": fallback_answer, "used_source_urls": selected_urls[:5], "confidence": "fallback"},
         )
         answer = str(synthesized.get("answer") or "").strip()
         used_source_urls = [str(u).strip() for u in synthesized.get("used_source_urls", []) if str(u).strip()] if isinstance(synthesized, dict) else []
@@ -1588,7 +1598,8 @@ class ConversationCoreRuntime:
         # Hard grounding gate: generated answers may pass only when they cite at
         # least one selected source, are not marked insufficient, and do not
         # contradict stronger comparable evidence from the selected sources.
-        generated_grounded = bool(answer and used_selected_urls and confidence not in {"insufficient", "low", "none"} and consistency.get("passed") is True)
+        plan_ready = isinstance(plan, dict) and plan.get("status") == "ready"
+        generated_grounded = bool(plan_ready and answer and used_selected_urls and confidence not in {"insufficient", "low", "none"} and consistency.get("passed") is True)
         if not generated_grounded:
             answer = fallback_answer
 

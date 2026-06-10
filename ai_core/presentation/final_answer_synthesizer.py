@@ -7,6 +7,7 @@ from ai_core.llm.provider_router import ProviderRouter
 from ai_core.presentation.result_sanitizer import ResultSanitizer
 from ai_core.presentation.structured_fact_normalizer import StructuredFactNormalizer
 from ai_core.runtime.semantic import SynthesisGuard, EvidenceClaimRanker
+from ai_core.runtime.reasoning import EvidenceNormalizationLayer, ClaimResolutionLayer, AnswerPlanningLayer
 
 
 class FinalAnswerSynthesizer:
@@ -53,6 +54,9 @@ class FinalAnswerSynthesizer:
         self.router = ProviderRouter()
         self.guard = SynthesisGuard()
         self.claim_ranker = EvidenceClaimRanker()
+        self.evidence_normalizer = EvidenceNormalizationLayer()
+        self.claim_resolver = ClaimResolutionLayer()
+        self.answer_planner = AnswerPlanningLayer()
 
     async def synthesize(
         self,
@@ -64,10 +68,14 @@ class FinalAnswerSynthesizer:
         trust_summary: dict[str, Any],
     ) -> dict[str, Any]:
         sanitized = self.sanitizer.sanitize_materials(materials)
-        evidence_claims = self.claim_ranker.extract_from_materials(sanitized)
+        normalized_evidence = self.evidence_normalizer.normalize(user_input=self._original_input(state), materials=sanitized)
+        resolved_claims = self.claim_resolver.resolve(user_input=self._original_input(state), normalized_evidence=normalized_evidence)
+        answer_plan = self.answer_planner.plan(user_input=self._original_input(state), resolved_claims=resolved_claims, language=self._language(state))
+        planned_answer = self.answer_planner.render(answer_plan)
+        evidence_claims = resolved_claims.get("comparable_claims") or self.claim_ranker.extract_from_materials(sanitized)
         direct_answer = self._direct_generated_answer_material(sanitized)
         direct_consistency = self.claim_ranker.answer_consistent(direct_answer, evidence_claims) if direct_answer else {"passed": True}
-        if direct_answer and direct_consistency.get("passed") is True:
+        if direct_answer and answer_plan.get("status") == "ready" and direct_consistency.get("passed") is True:
             return {
                 "answer": direct_answer,
                 "result_material": [{"source": "answer_material", "status": "success", "content": {"answer": direct_answer, "evidence_claims": evidence_claims[:8]}}],
@@ -82,7 +90,7 @@ class FinalAnswerSynthesizer:
             }
         facts = self.guard.filter(self.normalizer.normalize(materials=sanitized, state=state))
         facts = self.claim_ranker.filter_verified_facts(facts, evidence_claims)
-        deterministic = self._deterministic_summary(facts=facts, sanitized=sanitized, trust_summary=trust_summary, evidence_claims=evidence_claims)
+        deterministic = planned_answer if answer_plan.get("status") in {"ready", "insufficient"} else self._deterministic_summary(facts=facts, sanitized=sanitized, trust_summary=trust_summary, evidence_claims=evidence_claims)
         answer = deterministic
 
         if self._model_synthesis_enabled(state, facts):
@@ -104,7 +112,7 @@ class FinalAnswerSynthesizer:
         answer = self._assert_no_debug_material_in_final_answer(answer, fallback=deterministic)
         return {
             "answer": answer,
-            "result_material": [{"source": "normalized_fact_pipeline", "status": "success", "content": {"normalized_facts": facts}}],
+            "result_material": [{"source": "normalized_fact_pipeline", "status": "success", "content": {"normalized_facts": facts, "normalized_evidence": normalized_evidence, "resolved_claims": resolved_claims, "answer_plan": answer_plan}}],
             "synthesis": {
                 "source": "model_or_rule_synthesis" if answer != deterministic else "rule_synthesis",
                 "raw_source_material_returned": False,
