@@ -28,6 +28,7 @@ from ai_core.tools.runtime_registered_tool_service import RuntimeRegisteredToolS
 from ai_core.runtime.approval_policy_store import RuntimeApprovalPolicyStore
 from ai_core.graph.graph_visualization import GraphVisualStateBuilder
 from ai_core.runtime.observability.runtime_console import emit_console_event, list_console_sources, read_console_source
+from ai_core.runtime.observability.model_prompt_registry import ModelPromptRegistry
 from ai_core.runtime.self_repair.repair_orchestrator import FeedbackRepairOrchestrator
 from ai_core.runtime.scheduler import ScheduledTaskRunner
 from ai_core.runtime.async_jobs import RuntimeAsyncJobStore
@@ -50,6 +51,7 @@ approval_policy_store = RuntimeApprovalPolicyStore()
 feedback_repair_orchestrator = FeedbackRepairOrchestrator()
 scheduled_task_runner = ScheduledTaskRunner()
 async_job_store = RuntimeAsyncJobStore()
+model_prompt_registry = ModelPromptRegistry()
 
 @app.on_event("startup")
 async def _runtime_state_restart_cleanup():
@@ -522,6 +524,35 @@ async def home():
 
 
 
+
+
+
+@app.get("/model-prompt-studio")
+@app.get("/model_prompt_studio")
+async def model_prompt_studio_page():
+    html = open("apps/web/model_prompt_studio.html", "r", encoding="utf-8").read()
+    return HTMLResponse(html, headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache", "Expires": "0"})
+
+
+@app.get("/api/model-prompt-studio/state")
+async def model_prompt_studio_state():
+    return JSONResponse(model_prompt_registry.state())
+
+
+class ModelPromptUpdateRequest(BaseModel):
+    location: str
+    model: str | None = None
+    provider: str | None = None
+    system_prompt: str | None = None
+    user_prompt: str | None = None
+    prompt_id: str | None = None
+    adapter_id: str | None = None
+
+
+@app.post("/api/model-prompt-studio/update")
+async def model_prompt_studio_update(req: ModelPromptUpdateRequest):
+    payload = model_prompt_registry.update(req.dict())
+    return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
 
 @app.get("/settings")
 async def runtime_settings_home():

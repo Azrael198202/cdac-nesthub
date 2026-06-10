@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Model & Prompt Studio</title>
+<style>
+:root{color-scheme:dark;--bg:#0f172a;--panel:#111827;--card:#1f2937;--line:#334155;--text:#e5e7eb;--muted:#93c5fd;--accent:#0ea5e9}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif;font-size:14px;height:100vh;overflow:hidden}header{height:70px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:12px 18px;background:#0b1220}h1{font-size:18px;margin:0}.sub{font-size:12px;color:#a5b4fc;margin-top:4px}.btn{border:1px solid var(--line);background:#334155;color:#fff;border-radius:10px;padding:9px 12px;font-weight:700;cursor:pointer;text-decoration:none}.btn.primary{background:#0369a1;border-color:#38bdf8}.btn:disabled{opacity:.6;cursor:not-allowed}main{display:grid;grid-template-columns:34fr 66fr;gap:10px;height:calc(100vh - 70px);padding:10px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;min-height:0;display:flex;flex-direction:column;overflow:hidden}.panel h2{font-size:14px;margin:0;padding:12px 14px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:8px}.scroll{overflow:auto;padding:12px;min-height:0;flex:1}.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.input{background:#020617;border:1px solid var(--line);color:var(--text);border-radius:10px;padding:9px;width:100%}.select{background:#020617;border:1px solid var(--line);color:var(--text);border-radius:10px;padding:9px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px;cursor:pointer}.card.active{border-color:#38bdf8;background:#16243a}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.small{font-size:12px;color:#bfdbfe}.muted{font-size:12px;color:#94a3b8}.pill{display:inline-block;border:1px solid #0e7490;border-radius:999px;padding:2px 7px;color:#bae6fd;font-size:12px;margin:2px 4px 0 0}.field{margin:10px 0}.field label{display:block;color:#bfdbfe;font-weight:800;font-size:12px;margin-bottom:5px}.area{width:100%;min-height:180px;background:#020617;color:#e5e7eb;border:1px solid var(--line);border-radius:12px;padding:10px;font-family:ui-monospace,Consolas,monospace;resize:vertical}.area.large{min-height:340px;max-height:54vh;overflow:auto}.split{display:grid;grid-template-columns:1fr 1fr;gap:10px}.live{height:100%;display:grid;grid-template-rows:minmax(0,1fr) minmax(240px,46fr);gap:10px}.event{background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px;cursor:pointer}.event.active{border-color:#22c55e}.status{border:1px solid var(--line);border-radius:999px;padding:6px 10px;color:#bae6fd;background:#020617}.empty{color:#94a3b8;padding:14px}.kbd{font-family:ui-monospace,Consolas,monospace;color:#e0f2fe}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+</style>
+</head>
+<body>
+<header>
+  <div><h1>Model & Prompt Studio</h1><div class="sub">Display and adjust model/prompt usage by location, layer, workflow, and graph.</div></div>
+  <div class="toolbar"><span id="status" class="status">loading</span><a class="btn" href="/agent-studio">Agent Studio</a><button class="btn primary" onclick="loadState()">Refresh</button></div>
+</header>
+<main>
+  <section class="panel">
+    <h2><span>Model / Prompt Map</span><span id="count" class="small"></span></h2>
+    <div class="scroll">
+      <div class="toolbar" style="margin-bottom:10px"><input id="filter" class="input" placeholder="Filter by layer / workflow / graph / location" oninput="renderList()" /><select id="groupMode" class="select" onchange="renderList()"><option value="layer">Group: layer</option><option value="workflow">Group: workflow</option><option value="graph">Group: graph</option></select></div>
+      <div id="list"><div class="empty">Loading...</div></div>
+    </div>
+  </section>
+  <section class="panel">
+    <h2><span>Runtime Dynamic View</span><span class="small">async polling</span></h2>
+    <div class="scroll live">
+      <div>
+        <div class="row" style="justify-content:space-between;margin-bottom:8px"><b>Live model/prompt events</b><button id="pollBtn" class="btn" onclick="togglePolling()">Pause</button></div>
+        <div id="events"><div class="empty">No runtime LLM trace yet.</div></div>
+      </div>
+      <div>
+        <div class="row" style="justify-content:space-between"><b>Selected prompt content</b><span id="selectedMeta" class="small"></span></div>
+        <div class="split">
+          <div class="field"><label>System prompt</label><textarea id="systemPrompt" class="area large" spellcheck="false"></textarea></div>
+          <div class="field"><label>User / rendered prompt</label><textarea id="userPrompt" class="area large" spellcheck="false"></textarea></div>
+        </div>
+        <div class="grid2">
+          <div class="field"><label>Model</label><input id="model" class="input" /></div>
+          <div class="field"><label>Provider</label><input id="provider" class="input" /></div>
+        </div>
+        <div class="row"><button class="btn primary" onclick="saveSelected()">Save override</button><span class="muted">Overrides are stored outside ai_core under runtime/configs.</span></div>
+      </div>
+    </div>
+  </section>
+</main>
+<script>
+let state={effective:[],live_events:[]};let selected=null;let poll=true;let timer=null;
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function setStatus(t){document.getElementById('status').textContent=t;}
+async function loadState(){try{setStatus('loading');const r=await fetch('/api/model-prompt-studio/state',{cache:'no-store'});state=await r.json();setStatus('ready');renderList();renderEvents();if(!selected && state.effective?.length){selectItem(state.effective[0].location)}}catch(e){setStatus('error');}}
+function filteredItems(){const f=(document.getElementById('filter').value||'').toLowerCase();return (state.effective||[]).filter(x=>!f||JSON.stringify(x).toLowerCase().includes(f));}
+function renderList(){const items=filteredItems();document.getElementById('count').textContent=items.length;const mode=document.getElementById('groupMode').value;const groups={};items.forEach(x=>{const k=x[mode]||'unknown';(groups[k]=groups[k]||[]).push(x)});let html='';Object.keys(groups).sort().forEach(g=>{html+=`<div class="small" style="margin:12px 0 6px;font-weight:800">${esc(mode)}: ${esc(g)}</div>`;groups[g].forEach(x=>{html+=`<div class="card ${selected&&selected.location===x.location?'active':''}" onclick='selectItem(${JSON.stringify(x.location)})'><div class="row" style="justify-content:space-between"><b>${esc(x.location)}</b><span class="pill">${esc(x.layer||'runtime')}</span></div><div class="muted">workflow=<span class="kbd">${esc(x.workflow||'')}</span></div><div class="muted">graph=<span class="kbd">${esc(x.graph||'')}</span></div><div class="small">model=${esc(x.model||'(default)')} · provider=${esc(x.provider||'(default)')}</div>${x.override?'<span class="pill">override</span>':''}</div>`})});document.getElementById('list').innerHTML=html||'<div class="empty">No model/prompt entries.</div>';}
+function selectItem(loc){const item=(state.effective||[]).find(x=>x.location===loc)||(state.live_events||[]).find(x=>x.location===loc||x.node_id===loc);if(!item)return;selected=item;document.getElementById('systemPrompt').value=item.system_prompt||'';document.getElementById('userPrompt').value=item.user_prompt||'';document.getElementById('model').value=item.model||'';document.getElementById('provider').value=item.provider||'';document.getElementById('selectedMeta').textContent=`${item.layer||'runtime'} / ${item.workflow||''} / ${item.graph||''}`;renderList();renderEvents();}
+function renderEvents(){const evs=state.live_events||[];let html='';evs.slice(0,80).forEach(ev=>{const loc=ev.location||ev.node_id||'unknown';html+=`<div class="event ${selected&&(selected.trace_path===ev.trace_path||selected.location===loc)?'active':''}" onclick='selectEvent(${JSON.stringify(ev.trace_path||loc)})'><div class="row" style="justify-content:space-between"><b>${esc(loc)}</b><span class="pill">${esc(ev.phase||'event')}</span></div><div class="muted">run=${esc(ev.run_id||'')} · layer=${esc(ev.layer||'runtime')}</div><div class="small">model=${esc(ev.model||'(not recorded)')} · provider=${esc(ev.provider||'(not recorded)')}</div></div>`});document.getElementById('events').innerHTML=html||'<div class="empty">No runtime LLM trace yet.</div>';}
+function selectEvent(key){const ev=(state.live_events||[]).find(x=>x.trace_path===key||x.location===key||x.node_id===key);if(!ev)return;selected=ev;document.getElementById('systemPrompt').value=ev.system_prompt||'';document.getElementById('userPrompt').value=ev.user_prompt||'';document.getElementById('model').value=ev.model||'';document.getElementById('provider').value=ev.provider||'';document.getElementById('selectedMeta').textContent=`${ev.layer||'runtime'} / ${ev.workflow||''} / ${ev.graph||''}`;renderEvents();}
+async function saveSelected(){if(!selected){alert('Select an entry first.');return;}const body={location:selected.location||selected.node_id,model:document.getElementById('model').value,provider:document.getElementById('provider').value,system_prompt:document.getElementById('systemPrompt').value,user_prompt:document.getElementById('userPrompt').value,prompt_id:selected.prompt_id||'',adapter_id:selected.adapter_id||''};const r=await fetch('/api/model-prompt-studio/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await r.json();if(!r.ok){alert(data.error||'save failed');return;}state.effective=data.effective||state.effective;setStatus('saved');renderList();}
+function togglePolling(){poll=!poll;document.getElementById('pollBtn').textContent=poll?'Pause':'Resume';if(poll)loadState();}
+timer=setInterval(()=>{if(poll)loadState()},2500);loadState();
+</script>
+</body>
+</html>
