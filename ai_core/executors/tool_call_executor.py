@@ -63,6 +63,7 @@ from auxiliary_brain.research.deep_web_research import DeepWebResearchPipeline
 from auxiliary_brain.research.structured_provider_executor import StructuredProviderExecutor
 from ai_core.llm.provider_router import ProviderRouter
 from ai_core.config.paths import PROJECT_ROOT, RUNTIME_GENERATED, RUNTIME_REGISTRY
+from ai_core.runtime.reasoning import ContentAcquisitionLayer, ContentExtractionLayer
 
 
 class ToolCallExecutor:
@@ -119,6 +120,8 @@ class ToolCallExecutor:
         self.execution_method_proposer = ExecutionMethodProposalEngine()
         self.execution_method_resolver = ExecutionMethodResolver()
         self.deep_web_research = DeepWebResearchPipeline()
+        self.content_acquisition = ContentAcquisitionLayer()
+        self.content_extraction = ContentExtractionLayer()
         self.structured_provider_executor = StructuredProviderExecutor()
         self.provider_router = ProviderRouter()
 
@@ -4532,24 +4535,67 @@ class ToolCallExecutor:
                 "trace": data.get("deep_research_trace"),
             },
         })
-        if not data:
+        generic_documents = await self._generic_content_documents(
+            selected_evidence=selected_evidence,
+            timeout_seconds=cost_snapshot.stage_timeout("extraction", 45),
+        )
+        generic_records = self.content_extraction.extract(fetched_documents=generic_documents) if generic_documents else []
+        if not data and not generic_documents:
             return []
-        return [{
-            "source": "deep_web_research_material",
-            "document": {
-                "status": "success",
-                "title": "Deep web research material",
-                "url": "",
-                "text_excerpt": str(data.get("answer_material") or ""),
-                "visible_text_excerpt": str(data.get("answer_material") or ""),
-                "normalized_facts": data.get("normalized_facts") or [],
-                "selected_evidence_blocks": data.get("selected_evidence_blocks") or [],
-                "answer_material_quality": data.get("answer_material_quality") or {},
-                "consensus_evaluation": data.get("consensus_evaluation") or {},
-                "source_summaries": data.get("source_summaries") or [],
-                "deep_research_trace": data.get("deep_research_trace") or {},
-            },
-        }]
+        documents: list[dict[str, Any]] = []
+        if data:
+            documents.append({
+                "source": "deep_web_research_material",
+                "document": {
+                    "status": "success",
+                    "title": "Deep web research material",
+                    "url": "",
+                    "text_excerpt": str(data.get("answer_material") or ""),
+                    "visible_text_excerpt": str(data.get("answer_material") or ""),
+                    "normalized_facts": data.get("normalized_facts") or [],
+                    "selected_evidence_blocks": data.get("selected_evidence_blocks") or [],
+                    "answer_material_quality": data.get("answer_material_quality") or {},
+                    "consensus_evaluation": data.get("consensus_evaluation") or {},
+                    "source_summaries": data.get("source_summaries") or [],
+                    "deep_research_trace": data.get("deep_research_trace") or {},
+                },
+            })
+        for doc in generic_documents:
+            if not isinstance(doc, dict):
+                continue
+            documents.append({
+                "source": "generic_content_acquisition",
+                "document": {
+                    "status": doc.get("status"),
+                    "title": doc.get("title") or doc.get("url") or "Source content",
+                    "url": doc.get("url") or "",
+                    "text_excerpt": doc.get("text_excerpt") or "",
+                    "visible_text_excerpt": doc.get("visible_text_excerpt") or "",
+                    "html_excerpt": doc.get("html_excerpt") or "",
+                    "dom_evidence_text": doc.get("dom_evidence_text") or "",
+                    "dom_evidence_items": doc.get("dom_evidence_items") or [],
+                    "extracted_content_records": generic_records,
+                    "fetched_at": doc.get("fetched_at") or "",
+                },
+            })
+        return documents
+
+    async def _generic_content_documents(
+        self,
+        *,
+        selected_evidence: list[dict[str, Any]],
+        timeout_seconds: float,
+    ) -> list[dict[str, Any]]:
+        try:
+            return await self.content_acquisition.acquire(
+                candidates=selected_evidence,
+                fetcher=self.web_research.fetch,
+                max_pages=5,
+                timeout_seconds=min(max(float(timeout_seconds), 5.0), 30.0),
+                max_chars=12000,
+            )
+        except Exception:
+            return []
 
     def _runtime_known_parameters(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Collect runtime parameters without dropping arrays or normalized objects.

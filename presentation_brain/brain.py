@@ -6,6 +6,7 @@ from presentation_brain.contracts import PresentationRequest, PresentationResult
 from ai_core.presentation.final_answer_synthesizer import FinalAnswerSynthesizer
 from ai_core.presentation.result_material_builder import ResultMaterialBuilder
 from ai_core.presentation.result_presenter import ResultPresenter
+from presentation_brain.link_renderer import LinkRenderer
 
 
 class PresentationBrain:
@@ -27,6 +28,7 @@ class PresentationBrain:
         self.presenter = ResultPresenter()
         self.material_builder = ResultMaterialBuilder()
         self.synthesizer = FinalAnswerSynthesizer()
+        self.link_renderer = LinkRenderer()
 
     async def synthesize(self, request: PresentationRequest) -> PresentationResult:
         synthesis = await self.synthesizer.synthesize(
@@ -39,6 +41,7 @@ class PresentationBrain:
         answer = str(synthesis.get("answer") or "").strip()
         if not answer:
             answer = "Workflow finished, but no verified user-facing answer was produced."
+        answer = self.link_renderer.render(answer, source_titles=self.link_renderer.source_titles_from_materials(request.materials))
         return PresentationResult(
             status="completed",
             final_answer=answer,

@@ -535,8 +535,8 @@ async def model_prompt_studio_page():
 
 
 @app.get("/api/model-prompt-studio/state")
-async def model_prompt_studio_state():
-    return JSONResponse(model_prompt_registry.state())
+async def model_prompt_studio_state(run_id: str | None = None):
+    return JSONResponse(model_prompt_registry.state(run_id=run_id))
 
 
 class ModelPromptUpdateRequest(BaseModel):

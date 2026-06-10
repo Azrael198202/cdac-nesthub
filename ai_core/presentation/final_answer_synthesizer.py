@@ -7,7 +7,7 @@ from ai_core.llm.provider_router import ProviderRouter
 from ai_core.presentation.result_sanitizer import ResultSanitizer
 from ai_core.presentation.structured_fact_normalizer import StructuredFactNormalizer
 from ai_core.runtime.semantic import SynthesisGuard, EvidenceClaimRanker
-from ai_core.runtime.reasoning import EvidenceNormalizationLayer, ClaimResolutionLayer, AnswerPlanningLayer
+from ai_core.runtime.reasoning import EvidenceNormalizationLayer, ClaimResolutionLayer, AnswerPlanningLayer, ContentExtractionLayer, AnswerQualityGate
 
 
 class FinalAnswerSynthesizer:
@@ -57,6 +57,8 @@ class FinalAnswerSynthesizer:
         self.evidence_normalizer = EvidenceNormalizationLayer()
         self.claim_resolver = ClaimResolutionLayer()
         self.answer_planner = AnswerPlanningLayer()
+        self.content_extractor = ContentExtractionLayer()
+        self.quality_gate = AnswerQualityGate()
 
     async def synthesize(
         self,
@@ -68,14 +70,16 @@ class FinalAnswerSynthesizer:
         trust_summary: dict[str, Any],
     ) -> dict[str, Any]:
         sanitized = self.sanitizer.sanitize_materials(materials)
-        normalized_evidence = self.evidence_normalizer.normalize(user_input=self._original_input(state), materials=sanitized)
+        extracted_content = self.content_extractor.extract(fetched_documents=self._fetched_documents_from_materials(sanitized))
+        normalized_evidence = self.evidence_normalizer.normalize(user_input=self._original_input(state), materials=sanitized, source_cards=extracted_content)
         resolved_claims = self.claim_resolver.resolve(user_input=self._original_input(state), normalized_evidence=normalized_evidence)
         answer_plan = self.answer_planner.plan(user_input=self._original_input(state), resolved_claims=resolved_claims, language=self._language(state))
         planned_answer = self.answer_planner.render(answer_plan)
         evidence_claims = resolved_claims.get("comparable_claims") or self.claim_ranker.extract_from_materials(sanitized)
         direct_answer = self._direct_generated_answer_material(sanitized)
         direct_consistency = self.claim_ranker.answer_consistent(direct_answer, evidence_claims) if direct_answer else {"passed": True}
-        if direct_answer and answer_plan.get("status") == "ready" and direct_consistency.get("passed") is True:
+        direct_quality = self.quality_gate.evaluate(answer=direct_answer, answer_plan=answer_plan, resolved_claims=resolved_claims) if direct_answer else {"passed": False}
+        if direct_answer and answer_plan.get("status") == "ready" and direct_consistency.get("passed") is True and direct_quality.get("passed") is True:
             return {
                 "answer": direct_answer,
                 "result_material": [{"source": "answer_material", "status": "success", "content": {"answer": direct_answer, "evidence_claims": evidence_claims[:8]}}],
@@ -106,9 +110,11 @@ class FinalAnswerSynthesizer:
                 answer = generated
 
         final_consistency = self.claim_ranker.answer_consistent(answer, evidence_claims)
-        if final_consistency.get("passed") is not True:
+        final_quality = self.quality_gate.evaluate(answer=answer, answer_plan=answer_plan, resolved_claims=resolved_claims)
+        if final_consistency.get("passed") is not True or final_quality.get("passed") is not True:
             answer = deterministic
             final_consistency = self.claim_ranker.answer_consistent(answer, evidence_claims)
+            final_quality = self.quality_gate.evaluate(answer=answer, answer_plan=answer_plan, resolved_claims=resolved_claims)
         answer = self._assert_no_debug_material_in_final_answer(answer, fallback=deterministic)
         return {
             "answer": answer,
@@ -120,8 +126,27 @@ class FinalAnswerSynthesizer:
                 "verified_facts_only": True,
                 "evidence_claim_count": len(evidence_claims),
                 "answer_evidence_consistency": final_consistency,
+                "answer_quality_gate": final_quality,
             },
         }
+
+
+    def _fetched_documents_from_materials(self, materials: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        docs: list[dict[str, Any]] = []
+        def visit(value: Any) -> None:
+            if isinstance(value, dict):
+                has_page_text = any(isinstance(value.get(k), str) and value.get(k).strip() for k in ("text_excerpt", "visible_text_excerpt", "html_excerpt", "dom_evidence_text"))
+                has_url = any(isinstance(value.get(k), str) and value.get(k).startswith(("http://", "https://")) for k in ("url", "source_url"))
+                if has_page_text or has_url or isinstance(value.get("dom_evidence_items"), list):
+                    docs.append(value)
+                for child in value.values():
+                    if isinstance(child, (dict, list)):
+                        visit(child)
+            elif isinstance(value, list):
+                for item in value[:120]:
+                    visit(item)
+        visit(materials)
+        return docs[:80]
 
 
     def _direct_generated_answer_material(self, sanitized: list[dict[str, Any]]) -> str:

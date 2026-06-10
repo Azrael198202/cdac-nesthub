@@ -21,10 +21,10 @@ class ModelPromptRegistry:
     def __init__(self, *, override_path: Path | None = None) -> None:
         self.override_path = override_path or (RUNTIME_CONFIGS / "model_prompt_overrides.json")
 
-    def state(self) -> dict[str, Any]:
+    def state(self, *, run_id: str | None = None) -> dict[str, Any]:
         defaults = self._discover_defaults()
         overrides = self._read_overrides()
-        live = self._read_live_events(limit=200)
+        live = self._read_live_events(limit=200, run_id=run_id)
         return {
             "ok": True,
             "generated_at": self._now_ms(),
@@ -212,6 +212,17 @@ class ModelPromptRegistry:
             str(event.get("provider") or ""),
         ])
 
+    def _stable_event_id(self, event: dict[str, Any]) -> str:
+        raw = "|".join([
+            str(event.get("run_id") or ""),
+            str(event.get("node_id") or event.get("location") or ""),
+            str(event.get("workflow") or ""),
+            str(event.get("graph") or ""),
+            str(event.get("model") or ""),
+            str(event.get("provider") or ""),
+        ])
+        return raw.replace("\\", "/")
+
     def _merge_live_events(self, events: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
         grouped: dict[str, dict[str, Any]] = {}
         for event in events:
@@ -242,19 +253,23 @@ class ModelPromptRegistry:
         for idx, item in enumerate(grouped.values()):
             phases = item.get("phases") if isinstance(item.get("phases"), list) else []
             item["phase"] = " + ".join(phases) if phases else str(item.get("phase") or "event")
-            item["event_id"] = f"{item.get('run_id','')}:{item.get('node_id') or item.get('location','')}:{idx}"
+            item["event_id"] = self._stable_event_id(item)
             if not item.get("trace_path") and item.get("trace_paths"):
                 item["trace_path"] = item["trace_paths"][0]
             out.append(item)
         out.sort(key=lambda x: int(x.get("timestamp") or 0), reverse=True)
         return out[:limit]
 
-    def _read_live_events(self, *, limit: int) -> list[dict[str, Any]]:
+    def _read_live_events(self, *, limit: int, run_id: str | None = None) -> list[dict[str, Any]]:
         raw_events: list[dict[str, Any]] = []
         root = RUNTIME_TRACES / "llm"
         paths: list[Path] = []
         if root.exists():
-            paths = sorted(root.glob("*/*.json"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)[: max(limit * 4, limit)]
+            scoped_root = root / str(run_id) if run_id else None
+            if scoped_root is not None and scoped_root.exists():
+                paths = sorted(scoped_root.glob("*.json"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)[: max(limit * 4, limit)]
+            else:
+                paths = sorted(root.glob("*/*.json"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)[: max(limit * 4, limit)]
         for path in paths:
             payload = self._read_json(path)
             if not isinstance(payload, dict):
@@ -309,7 +324,7 @@ class ModelPromptRegistry:
                 "trace_path": str(path),
             }
             raw_events.append(event)
-        if len(raw_events) < limit:
+        if len(raw_events) < limit and not run_id:
             raw_events.extend(self._read_model_decision_events(limit=limit-len(raw_events)))
         return self._merge_live_events(raw_events, limit=limit)
 

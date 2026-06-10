@@ -19,7 +19,8 @@ from ai_core.events.need_capability_event import NeedCapabilityEvent
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 from ai_core.runtime.state import runtime_state_manager
 from ai_core.runtime.semantic import SourceRelevanceSelector, EvidenceClaimRanker
-from ai_core.runtime.reasoning import EvidenceNormalizationLayer, ClaimResolutionLayer, AnswerPlanningLayer
+from ai_core.runtime.reasoning import EvidenceNormalizationLayer, ClaimResolutionLayer, AnswerPlanningLayer, ContentExtractionLayer, AnswerQualityGate
+from presentation_brain import PresentationBrain, PresentationRequest
 
 
 class ConversationCoreRuntime:
@@ -45,6 +46,9 @@ class ConversationCoreRuntime:
         self.evidence_normalizer = EvidenceNormalizationLayer()
         self.claim_resolver = ClaimResolutionLayer()
         self.answer_planner = AnswerPlanningLayer()
+        self.content_extractor = ContentExtractionLayer()
+        self.answer_quality_gate = AnswerQualityGate()
+        self.presentation_brain = PresentationBrain()
 
     async def run(self, message: str, *, latest_task: str | None = None, session_id: str | None = None, runtime_state_run_id: str | None = None) -> dict[str, Any]:
         conversation_trace_id = "conversation_core_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
@@ -90,7 +94,7 @@ class ConversationCoreRuntime:
         self._write_stage_trace(run_id, "intent_recognition", "completed", intent)
 
         self._event(state, "context_awareness", "running")
-        context = self._context_awareness(state["input"], intent, state.get("context_window", {}), knowledge_eval)
+        context = self._context_awareness(state["input"], intent, state.get("context_window", {}), knowledge_eval, session_id=active_session_id)
         state["results"]["context_awareness"] = context
         self._event(state, "context_awareness", "completed")
         self._write_stage_trace(run_id, "context_awareness", "completed", context)
@@ -147,6 +151,46 @@ class ConversationCoreRuntime:
             "evaluation_prompt": "Evaluate the response quality. High-quality results may be promoted into reusable local experience.",
             "user_facing": True,
         }
+
+    async def _presentation_render(
+        self,
+        *,
+        run_id: str,
+        original_input: str,
+        answer_material: str,
+        execution: dict[str, Any],
+        verification: dict[str, Any],
+    ) -> str:
+        materials = [{
+            "source": "conversation_execution",
+            "status": execution.get("status"),
+            "answer_material": answer_material,
+            "evidence": execution.get("evidence") if isinstance(execution.get("evidence"), dict) else {},
+        }]
+        try:
+            result = await self.presentation_brain.synthesize(PresentationRequest(
+                run_id=run_id,
+                node_id="conversation_final_presentation",
+                original_input=original_input,
+                state={
+                    "original_input": original_input,
+                    "language": self._guess_language(original_input),
+                    "execution": execution,
+                    "verification": verification,
+                    "runtime": {"presentation_only": True, "model_synthesis_enabled": False},
+                },
+                materials=materials,
+                trust_summary=verification if isinstance(verification, dict) else {},
+                output_policy={"delivery_format": "text"},
+            ))
+            rendered = str(result.final_answer or "").strip()
+            return rendered or str(answer_material or "").strip()
+        except Exception:
+            try:
+                from presentation_brain.link_renderer import LinkRenderer
+                return LinkRenderer().render(str(answer_material or ""))
+            except Exception:
+                return str(answer_material or "")
 
     async def _input_parsing(self, text: str, run_id: str) -> dict[str, Any]:
         """Deterministic, compact input normalization.
@@ -545,9 +589,10 @@ class ConversationCoreRuntime:
         result["external_information_signals"] = merged
         return result
 
-    def _context_awareness(self, text: str, intent: dict[str, Any], context_window: dict[str, Any] | None = None, knowledge_evaluation: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _context_awareness(self, text: str, intent: dict[str, Any], context_window: dict[str, Any] | None = None, knowledge_evaluation: dict[str, Any] | None = None, *, session_id: str | None = None) -> dict[str, Any]:
         kb = self.knowledge.answer_from_knowledge(text)
-        vector_hits = self.vector_memory.search(text, limit=5, usage_scope="retrieval_context")
+        raw_vector_hits = self.vector_memory.search(text, limit=12, usage_scope="retrieval_context")
+        vector_hits = self._filter_retrieved_context_for_session(raw_vector_hits, session_id=session_id, limit=5)
         knowledge_eval = knowledge_evaluation if isinstance(knowledge_evaluation, dict) else {}
         return {
             "knowledge_available": bool(kb),
@@ -559,9 +604,37 @@ class ConversationCoreRuntime:
                 {"text": str(item.get("text") or "")[:1200], "score": item.get("score"), "metadata": item.get("metadata", {})}
                 for item in vector_hits
             ],
+            "retrieved_context_policy": {
+                "scope": "current_session_only",
+                "session_id": str(session_id or ""),
+                "discarded_cross_session_count": max(0, len(raw_vector_hits) - len(vector_hits)),
+            },
             "upstream_refs": ["input_parsing", "intent_recognition", "knowledge_evaluation"],
             "intent_type": intent.get("intent_type"),
         }
+
+    def _filter_retrieved_context_for_session(self, hits: list[dict[str, Any]], *, session_id: str | None, limit: int = 5) -> list[dict[str, Any]]:
+        """Keep retrieval context isolated to the active session.
+
+        Vector memory is useful for continuing a task, but it must not inject
+        previous independent sessions into a new session. Cross-session reuse
+        should be an explicit workflow decision, not an automatic context side
+        effect.
+        """
+        sid = str(session_id or "").strip()
+        if not sid:
+            return []
+        kept: list[dict[str, Any]] = []
+        for item in hits or []:
+            if not isinstance(item, dict):
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            if str(metadata.get("session_id") or "") != sid:
+                continue
+            kept.append(item)
+            if len(kept) >= max(1, int(limit)):
+                break
+        return kept
 
     def _build_need_capability_payload(
         self,
@@ -1088,12 +1161,20 @@ class ConversationCoreRuntime:
         evidence_verification = evidence.get("verification") if isinstance(evidence.get("verification"), dict) else {}
         if str(execution.get("execution_mode") or "") == "web_search":
             # Source-required web answers are already synthesized from verified
-            # evidence in the execution layer.  Do not run a second open-ended
-            # final synthesis pass that could invent facts or URLs.
+            # evidence in the execution layer. Presentation Brain may only render
+            # the expression layer, such as clickable links; it must not execute
+            # or invent facts.
+            rendered = await self._presentation_render(
+                run_id=run_id,
+                original_input=text,
+                answer_material=material,
+                execution=execution,
+                verification=verification or {},
+            )
             return {
                 "status": "completed",
-                "final_answer": material,
-                "message": material,
+                "final_answer": rendered,
+                "message": rendered,
                 "user_facing": True,
             }
         schema = {
@@ -1528,6 +1609,14 @@ class ConversationCoreRuntime:
                     "url": str(doc.get("url") or "")[:500],
                     "text": " ".join(str(doc.get("text_excerpt") or doc.get("visible_text_excerpt") or doc.get("snippet") or "").split())[:1500],
                 })
+        extracted_records = self.content_extractor.extract(fetched_documents=fetched, max_records=40)
+        for rec in extracted_records[:20]:
+            if isinstance(rec, dict):
+                evidence_cards.append({
+                    "title": str(rec.get("title") or rec.get("source_title") or rec.get("url") or "source")[:240],
+                    "url": str(rec.get("url") or rec.get("source_url") or "")[:500],
+                    "text": " ".join(str(rec.get("text") or "").split())[:1500],
+                })
 
         relevance = self.source_relevance_selector.select(
             user_input=user_input,
@@ -1602,6 +1691,10 @@ class ConversationCoreRuntime:
         generated_grounded = bool(plan_ready and answer and used_selected_urls and confidence not in {"insufficient", "low", "none"} and consistency.get("passed") is True)
         if not generated_grounded:
             answer = fallback_answer
+
+        quality = self.answer_quality_gate.evaluate(answer=answer, answer_plan=plan, resolved_claims=resolved)
+        if quality.get("passed") is not True:
+            answer = self.answer_planner.render(plan)
 
         # Keep source visibility bound to selected relevant sources only.
         if selected_urls and not any(str(u) in answer for u in selected_urls[:3]):

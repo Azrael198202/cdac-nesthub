@@ -17,7 +17,7 @@ class ClaimResolutionLayer:
     NUMBER_WITH_UNIT = re.compile(
         r"(?P<label>[A-Za-z][A-Za-z _/-]{1,32}|[\u3040-\u30ff\u3400-\u9fff]{1,12})?\s*"
         r"(?P<value>-?\d+(?:\.\d+)?)\s*"
-        r"(?P<unit>°\s?[CF]|℃|℉|%|percent|km/h|mph|m/s|hPa|mb|mm|cm|m|km|ft|in)\b",
+        r"(?P<unit>°\s?[CF]|℃|℉|%|percent|km/h|mph|m/s|hPa|mb|mm|cm|m|km|ft|in)(?![A-Za-z0-9])",
         re.IGNORECASE,
     )
     NEGATIVE_CONTEXT = re.compile(
@@ -35,12 +35,13 @@ class ClaimResolutionLayer:
     def resolve(self, *, user_input: str, normalized_evidence: dict[str, Any]) -> dict[str, Any]:
         records = normalized_evidence.get("records") if isinstance(normalized_evidence, dict) else []
         records = [r for r in records if isinstance(r, dict)]
-        comparable_claims = self.claim_ranker.extract_from_materials(records)
+        comparable_claims = self.claim_ranker.extract_from_materials(records) if self._request_needs_comparable_identifier(user_input) else []
         comparable_claims = self._adjust_status_from_context(comparable_claims)
         comparable_claims = self._sort_claims(comparable_claims)
         best = comparable_claims[0] if comparable_claims else None
 
         measurements = self._extract_measurements(records)
+        content_records = self._extract_content_records(records)
         statements = self._extract_supported_statements(records, best_claim=best)
         facts: list[dict[str, Any]] = []
         if best:
@@ -54,15 +55,21 @@ class ClaimResolutionLayer:
                 "supporting_text": best.get("context"),
             })
         facts.extend(measurements[:8])
+        facts.extend(content_records[:8])
         facts.extend(statements[:6])
         return {
             "facts": facts,
             "comparable_claims": comparable_claims,
             "measurements": measurements,
+            "content_records": content_records,
             "statements": statements,
             "source_urls": normalized_evidence.get("source_urls", []) if isinstance(normalized_evidence, dict) else [],
             "passed": bool(facts),
         }
+
+    def _request_needs_comparable_identifier(self, user_input: str) -> bool:
+        text = str(user_input or "").casefold()
+        return bool(re.search(r"\b(version|release|build|revision|edition|stable|current\s+version|latest\s+version)\b", text))
 
     def _adjust_status_from_context(self, claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
         adjusted: list[dict[str, Any]] = []
@@ -110,6 +117,34 @@ class ClaimResolutionLayer:
                 })
                 if len(out) >= 16:
                     return out
+        return out
+
+    def _extract_content_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for record in records:
+            kind = str(record.get("kind") or record.get("source_type") or "")
+            text = " ".join(str(record.get("text") or record.get("value") or "").split())
+            title = " ".join(str(record.get("title") or "").split())
+            if kind != "extracted_content_record" and float(record.get("relevance_score") or 0.0) < 0.5:
+                continue
+            value = title or text
+            if len(value) < 20:
+                continue
+            key = value[:160].casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "kind": "source_supported_content_record",
+                "title": value[:220],
+                "value": text[:900] or value[:900],
+                "source_url": record.get("url") or record.get("source_url"),
+                "time_expression": record.get("time_expression") or "",
+                "confidence": 0.68 + min(float(record.get("relevance_score") or 0.0), 0.25),
+            })
+            if len(out) >= 12:
+                break
         return out
 
     def _extract_supported_statements(self, records: list[dict[str, Any]], *, best_claim: dict[str, Any] | None) -> list[dict[str, Any]]:

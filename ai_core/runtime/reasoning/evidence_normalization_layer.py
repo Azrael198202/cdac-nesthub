@@ -15,6 +15,9 @@ class NormalizedEvidenceRecord:
     source_type: str
     relevance_score: float
     matched_terms: tuple[str, ...]
+    kind: str = ""
+    time_expression: str = ""
+    source_url: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -98,6 +101,9 @@ class EvidenceNormalizationLayer:
                     source_type=str(value.get("source") or value.get("provider") or value.get("source_type") or "source"),
                     relevance_score=float(value.get("relevance_score") or 0.0) if self._is_number(value.get("relevance_score")) else 0.0,
                     matched_terms=tuple(str(x) for x in value.get("matched_terms", []) if str(x).strip()) if isinstance(value.get("matched_terms"), list) else tuple(),
+                    kind=str(value.get("kind") or ""),
+                    time_expression=str(value.get("time_expression") or ""),
+                    source_url=str(value.get("source_url") or ""),
                 ))
             for child in value.values():
                 if isinstance(child, (dict, list)):
@@ -115,6 +121,9 @@ class EvidenceNormalizationLayer:
                 source_type="text",
                 relevance_score=0.0,
                 matched_terms=tuple(),
+                kind="text",
+                time_expression="",
+                source_url=inherited_url,
             ))
         return records
 

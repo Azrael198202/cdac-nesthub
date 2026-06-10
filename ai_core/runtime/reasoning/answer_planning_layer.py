@@ -25,6 +25,7 @@ class AnswerPlanningLayer:
 
         comparable = [f for f in facts if f.get("kind") == "resolved_comparable_identifier"]
         measurements = [f for f in facts if f.get("kind") == "resolved_measurement"]
+        content_records = [f for f in facts if f.get("kind") == "source_supported_content_record"]
         statements = [f for f in facts if f.get("kind") == "source_supported_statement"]
 
         if comparable:
@@ -52,6 +53,15 @@ class AnswerPlanningLayer:
                 "status": "ready",
                 "primary_fact": measurements[0],
                 "measurements": measurements[:6],
+                "source_urls": source_urls[:5],
+                "constraints": ["use_verified_facts_only", "do_not_dump_raw_source_fields"],
+            }
+
+        if content_records:
+            return {
+                "answer_type": "source_content_list",
+                "status": "ready",
+                "items": content_records[:8],
                 "source_urls": source_urls[:5],
                 "constraints": ["use_verified_facts_only", "do_not_dump_raw_source_fields"],
             }
@@ -98,6 +108,21 @@ class AnswerPlanningLayer:
                 unit = str(m.get("unit") or "").strip()
                 if value:
                     lines.append(f"- {label}: {value}{unit}")
+        elif kind == "source_content_list":
+            lines.append("Here is the verified source-backed information I found:")
+            for item in plan.get("items", [])[:5]:
+                if not isinstance(item, dict):
+                    continue
+                title = self._clean(str(item.get("title") or item.get("value") or ""))
+                detail = self._clean(str(item.get("value") or ""))
+                time_expr = self._clean(str(item.get("time_expression") or ""))
+                if not title:
+                    continue
+                lines.append(f"- {title}")
+                if time_expr:
+                    lines.append(f"  Publication time: {time_expr}")
+                if detail and detail != title:
+                    lines.append(f"  Summary: {detail[:360]}")
         elif kind == "supported_statement_summary":
             lines.append("Summary from verified source-supported statements:")
             for bullet in plan.get("bullets", [])[:4]:
