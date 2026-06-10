@@ -2767,6 +2767,30 @@ class AgentStudioService:
             }
         return {"status": "ready", "analysis": resolution_context.to_analysis()}
 
+
+    def _filter_deferred_execution_control_fields(self, fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Defer execution-control prompts until their graph node is reached.
+
+        Pre-execution parameter collection must not pause the whole task graph
+        for a downstream side-effect approval.  If it does, upstream producer
+        steps never run and explicit dataflow placeholders such as
+        ``{{Step1.final_answer}}`` cannot be resolved.  This filter is generic:
+        it only recognizes execution-control fields through the existing
+        delegation runtime approval-control classifier, not through capability
+        names or business terms.
+        """
+        out: list[dict[str, Any]] = []
+        for field in fields or []:
+            if not isinstance(field, dict):
+                continue
+            try:
+                if self.delegation_runtime._is_approval_parameter_field(field):
+                    continue
+            except Exception:
+                pass
+            out.append(field)
+        return out
+
     def _build_preflight_resolution_context(self, task_graph: dict[str, Any], participants: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> PreflightResolutionContext:
         artifact_preflight = self._preflight_uploaded_artifact_parameters(task_graph, participants, runtime_parameters)
         resource_reports: list[dict[str, Any]] = []
@@ -2807,6 +2831,7 @@ class AgentStudioService:
             participants=selected,
             runtime_parameters=runtime_parameters,
         )
+        agent_fields = self._filter_deferred_execution_control_fields(agent_fields)
 
         return self.parameter_resolution_pipeline.build_context(
             runtime_inputs=runtime_parameters,

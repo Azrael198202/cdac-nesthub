@@ -79,19 +79,33 @@ class RuntimeBlueprintArtifactGenerator:
         generation_route: dict[str, Any] = {}
         generation_error = ""
 
+        provided_files_accepted = False
         if self._valid_files(files) and not self._files_look_like_stub(files):
-            files = self._stabilize_standard_library_runtime_files(files, blueprint=blueprint)
-            input_schema = self._reconcile_required_fields_from_source(input_schema, files, scope="input")
-            connection_schema = self._reconcile_required_fields_from_source(connection_schema, files, scope="connection")
-            secret_schema = self._reconcile_required_fields_from_source(secret_schema, files, scope="secrets")
-            input_schema = self._merge_declared_schema(declared_input_schema, input_schema, default_name="input")
-            output_schema = self._merge_declared_schema(declared_output_schema, output_schema, default_name="output")
-            connection_schema = self._merge_declared_schema(declared_connection_schema, connection_schema, default_name="connection")
-            secret_schema = self._merge_declared_schema(declared_secret_schema, secret_schema, default_name="secrets")
-            verification_input = self._verification_input_with_schema_sample(verification_input, input_schema, connection_schema, secret_schema)
-            artifact_kind = "real_runtime_implementation"
-            generation_status = "provided_blueprint_files_used"
-        elif self._should_request_llm_generation(blueprint, identity_contract):
+            candidate_files = self._stabilize_standard_library_runtime_files(files, blueprint=blueprint)
+            contract_violations = self._generated_artifact_contract_violations(
+                {"files": candidate_files},
+                input_schema=declared_input_schema,
+                connection_schema=declared_connection_schema,
+                secret_schema=declared_secret_schema,
+            )
+            if contract_violations:
+                generation_status = "provided_blueprint_files_rejected_by_schema_contract"
+                generation_error = "; ".join(contract_violations[:8])
+                files = []
+            else:
+                files = candidate_files
+                input_schema = self._reconcile_required_fields_from_source(input_schema, files, scope="input")
+                connection_schema = self._reconcile_required_fields_from_source(connection_schema, files, scope="connection")
+                secret_schema = self._reconcile_required_fields_from_source(secret_schema, files, scope="secrets")
+                input_schema = self._merge_declared_schema(declared_input_schema, input_schema, default_name="input")
+                output_schema = self._merge_declared_schema(declared_output_schema, output_schema, default_name="output")
+                connection_schema = self._merge_declared_schema(declared_connection_schema, connection_schema, default_name="connection")
+                secret_schema = self._merge_declared_schema(declared_secret_schema, secret_schema, default_name="secrets")
+                verification_input = self._verification_input_with_schema_sample(verification_input, input_schema, connection_schema, secret_schema)
+                artifact_kind = "real_runtime_implementation"
+                generation_status = "provided_blueprint_files_used"
+                provided_files_accepted = True
+        if not provided_files_accepted and self._should_request_llm_generation(blueprint, identity_contract):
             llm_artifact = self._generate_with_llm(
                 tool_id=tool_id,
                 entrypoint=entrypoint,
@@ -234,6 +248,17 @@ class RuntimeBlueprintArtifactGenerator:
                 record["error"] = "LLM JSON did not contain executable artifact files."
                 attempts.append(record)
                 continue
+            contract_violations = self._generated_artifact_contract_violations(
+                parsed,
+                input_schema=input_schema,
+                connection_schema=connection_schema,
+                secret_schema=secret_schema,
+            )
+            if contract_violations:
+                record["status"] = "schema_contract_violation"
+                record["error"] = "; ".join(contract_violations[:8])
+                attempts.append(record)
+                continue
             parsed["generation_status"] = "completed"
             parsed["generation_route"] = route
             parsed["generation_attempts"] = attempts + [record]
@@ -325,6 +350,8 @@ class RuntimeBlueprintArtifactGenerator:
             "Use the supplied specification_contract as the source of truth for field types, defaults, required values, formats, patterns, and output bindings. If the contract declares a user-facing format field or a format binding, generated code must implement the conversion or interpretation inside the generated implementation before formatting/parsing. Do not rely on sandbox or validator to repair formats. Do not return a declared format/template string itself as a runtime output value. "
             "When reading optional fields, choose defaults that match the declared JSON schema type. Never call string methods on a value that may be a list, dict, boolean, number, or None. If code needs to split a value, first normalize the value with a generic helper that accepts string, list, tuple, set, None, and scalar values. "
             "For iterable inputs, support both array values and delimiter-separated strings when the contract allows browser/runtime entry to provide either shape. Do not assume a missing optional field is a string or a list unless the contract declares that type. "
+            "Field requiredness is controlled only by each JSON schema required array in the supplied specification_contract. A field declared in properties is not required unless it is also listed in required. Do not use broad truthiness gates such as all([...]) or if not value to reject optional fields. Optional empty strings, empty lists, None, or absent fields must not cause a missing-required failure. When a side effect needs at least one of several optional alternatives, validate that generic group condition separately and report the actual group requirement without rewriting schema requiredness. "
+            "Generated tests must include at least one live-path structural call with test_mode disabled and every optional input/connection/secret field omitted or empty, while external side effects are safely mocked or bypassed, to prove optional fields are not hard-required. "
             "Return only a JSON object; no markdown, no prose."
         )
         user = "Generate the runtime artifact from this contract:\n" + json.dumps(contract, ensure_ascii=False, indent=2, default=str)
@@ -364,6 +391,161 @@ class RuntimeBlueprintArtifactGenerator:
         if "def " not in text or "return" not in text:
             return False
         return True
+
+    def _generated_artifact_contract_violations(
+        self,
+        artifact: dict[str, Any],
+        *,
+        input_schema: dict[str, Any],
+        connection_schema: dict[str, Any],
+        secret_schema: dict[str, Any],
+    ) -> list[str]:
+        """Reject generated code that makes optional interface fields mandatory.
+
+        The runtime acquisition layer must not repair a bad generated tool after
+        registration.  It must prevent contract drift before the artifact is
+        accepted.  This guard is intentionally capability-neutral: field names
+        are opaque; only JSON Schema required arrays and Python AST usage are
+        compared.
+        """
+        if not isinstance(artifact, dict):
+            return ["artifact is not an object"]
+        files = artifact.get("files")
+        if not isinstance(files, list):
+            return ["artifact.files is not a list"]
+        source = "\n".join(
+            str(item.get("content") or "")
+            for item in files
+            if isinstance(item, dict) and str(item.get("path") or "").endswith(".py") and not self._is_test_path(str(item.get("path") or ""))
+        )
+        if not source.strip():
+            return ["artifact has no runtime Python source"]
+        violations: list[str] = []
+        for scope, schema in (("input", input_schema), ("connection", connection_schema), ("secrets", secret_schema)):
+            violations.extend(self._optional_field_hard_requirement_violations(source, schema=schema, scope=scope))
+        return violations
+
+    def _optional_field_hard_requirement_violations(self, source: str, *, schema: dict[str, Any], scope: str) -> list[str]:
+        if not isinstance(schema, dict):
+            return []
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        if not props:
+            return []
+        required = {str(x) for x in schema.get("required", []) if isinstance(x, str)} if isinstance(schema.get("required"), list) else set()
+        optional_fields = {str(k) for k in props.keys()} - required
+        if not optional_fields:
+            return []
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return [f"{scope}: generated source is not parseable for contract validation"]
+        aliases = self._scope_aliases_from_source(source, scope=scope)
+        variable_to_optional_field: dict[str, str] = {}
+        variable_to_required_field: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            value = node.value
+            targets: list[ast.AST] = []
+            if isinstance(node, ast.Assign):
+                targets = list(node.targets)
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            field, safe_optional = self._field_read_from_scope(value, scope=scope, aliases=aliases, declared=set(str(k) for k in props.keys()))
+            if not field:
+                continue
+            for target in targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                if field in optional_fields and safe_optional:
+                    variable_to_optional_field[target.id] = field
+                elif field in required:
+                    variable_to_required_field[target.id] = field
+        violations: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            checked = self._truthiness_checked_names(node.test)
+            for name in sorted(checked):
+                field = variable_to_optional_field.get(name)
+                if field:
+                    violations.append(f"{scope}.{field} is optional in schema but runtime source rejects empty or missing values through truthiness validation")
+            direct_fields = self._truthiness_checked_optional_fields(node.test, scope=scope, aliases=aliases, optional_fields=optional_fields)
+            for field in sorted(direct_fields):
+                violations.append(f"{scope}.{field} is optional in schema but runtime source directly rejects empty or missing values")
+        return sorted(set(violations))
+
+    def _field_read_from_scope(self, node: ast.AST, *, scope: str, aliases: set[str], declared: set[str]) -> tuple[str | None, bool]:
+        """Return (field_name, safe_optional_read).
+
+        safe_optional_read is True for mapping.get(...).  Direct subscript reads
+        are not optional reads and therefore are not treated as optional aliases.
+        """
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get" and node.args:
+            field = self._constant_node_value(node.args[0])
+            if field in declared:
+                base = node.func.value
+                if isinstance(base, ast.Name) and base.id in aliases:
+                    return field, True
+                if self._is_payload_scope_subscript(base, scope=scope):
+                    return field, True
+        if isinstance(node, ast.Subscript):
+            field = self._constant_subscript_key(node.slice)
+            if field in declared:
+                base = node.value
+                if isinstance(base, ast.Name) and base.id in aliases:
+                    return field, False
+                if self._is_payload_scope_subscript(base, scope=scope):
+                    return field, False
+        return None, False
+
+    def _truthiness_checked_names(self, node: ast.AST) -> set[str]:
+        names: set[str] = set()
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            names.update(self._names_inside_truthy_expression(node.operand))
+        elif isinstance(node, ast.BoolOp):
+            for value in node.values:
+                names.update(self._truthiness_checked_names(value))
+        return names
+
+    def _names_inside_truthy_expression(self, node: ast.AST) -> set[str]:
+        names: set[str] = set()
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            for elt in node.elts:
+                names.update(self._names_inside_truthy_expression(elt))
+        elif isinstance(node, ast.Call):
+            for arg in node.args:
+                names.update(self._names_inside_truthy_expression(arg))
+        elif isinstance(node, ast.BoolOp):
+            for value in node.values:
+                names.update(self._names_inside_truthy_expression(value))
+        elif isinstance(node, ast.Compare):
+            names.update(self._names_inside_truthy_expression(node.left))
+            for comp in node.comparators:
+                names.update(self._names_inside_truthy_expression(comp))
+        elif isinstance(node, ast.UnaryOp):
+            names.update(self._names_inside_truthy_expression(node.operand))
+        return names
+
+    def _truthiness_checked_optional_fields(self, node: ast.AST, *, scope: str, aliases: set[str], optional_fields: set[str]) -> set[str]:
+        fields: set[str] = set()
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            fields.update(self._optional_fields_inside_truthy_expression(node.operand, scope=scope, aliases=aliases, optional_fields=optional_fields))
+        elif isinstance(node, ast.BoolOp):
+            for value in node.values:
+                fields.update(self._truthiness_checked_optional_fields(value, scope=scope, aliases=aliases, optional_fields=optional_fields))
+        return fields
+
+    def _optional_fields_inside_truthy_expression(self, node: ast.AST, *, scope: str, aliases: set[str], optional_fields: set[str]) -> set[str]:
+        fields: set[str] = set()
+        field, safe_optional = self._field_read_from_scope(node, scope=scope, aliases=aliases, declared=optional_fields)
+        if field and safe_optional:
+            fields.add(field)
+        for child in ast.iter_child_nodes(node):
+            fields.update(self._optional_fields_inside_truthy_expression(child, scope=scope, aliases=aliases, optional_fields=optional_fields))
+        return fields
 
     def _generated_tests_have_defined_names(self, files: list[dict[str, Any]]) -> bool:
         for item in files:
@@ -825,14 +1007,25 @@ class RuntimeBlueprintArtifactGenerator:
             return aliases
         for node in ast.walk(tree):
             if isinstance(node, ast.Assign):
-                if self._is_payload_scope_subscript(node.value, scope=scope):
+                if self._expression_contains_payload_scope(node.value, scope=scope):
                     for target in node.targets:
                         if isinstance(target, ast.Name):
                             aliases.add(target.id)
             elif isinstance(node, ast.AnnAssign):
-                if self._is_payload_scope_subscript(node.value, scope=scope) and isinstance(node.target, ast.Name):
+                if self._expression_contains_payload_scope(node.value, scope=scope) and isinstance(node.target, ast.Name):
                     aliases.add(node.target.id)
         return aliases
+
+    def _expression_contains_payload_scope(self, node: ast.AST, *, scope: str) -> bool:
+        if self._is_payload_scope_subscript(node, scope=scope):
+            return True
+        if self._is_payload_scope_get_call(node, scope=scope):
+            return True
+        if isinstance(node, ast.IfExp):
+            return self._expression_contains_payload_scope(node.body, scope=scope) or self._expression_contains_payload_scope(node.orelse, scope=scope)
+        if isinstance(node, ast.BoolOp):
+            return any(self._expression_contains_payload_scope(value, scope=scope) for value in node.values)
+        return False
 
     def _is_payload_scope_subscript(self, node: ast.AST, *, scope: str) -> bool:
         if not isinstance(node, ast.Subscript):
@@ -840,6 +1033,18 @@ class RuntimeBlueprintArtifactGenerator:
         if self._constant_subscript_key(node.slice) != scope:
             return False
         return isinstance(node.value, ast.Name) and node.value.id == "payload"
+
+    def _is_payload_scope_get_call(self, node: ast.AST, *, scope: str) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr != "get":
+            return False
+        if not isinstance(func.value, ast.Name) or func.value.id != "payload":
+            return False
+        if not node.args:
+            return False
+        return self._constant_node_value(node.args[0]) == scope
 
     def _constant_subscript_key(self, node: ast.AST) -> str | None:
         return self._constant_node_value(node)

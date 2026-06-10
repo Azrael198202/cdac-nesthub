@@ -150,6 +150,9 @@ class PrimaryBrainDelegationClient:
                 final_answer=final_answer,
                 workflow_results={"dataflow_step": {"status": "failed", "final_answer": final_answer, "execution_mode": "missing_upstream_guard"}},
             )
+        if not upstream and not declared_dependencies:
+            return await self._execute_primary_runtime_for_standalone_step(request, progress_callback=progress_callback, core_run_id=core_run_id)
+
         projection = self._project_single_upstream_result_if_possible(request.participant_instruction, upstream)
         if projection is not None:
             status = "completed" if self._answer_has_result_material(projection) else "failed"
@@ -228,6 +231,47 @@ class PrimaryBrainDelegationClient:
             workflow_results={"dataflow_step": {"status": status, "final_answer": final_answer, "execution_mode": execution_mode}},
         )
 
+
+
+    async def _execute_primary_runtime_for_standalone_step(
+        self,
+        request: AgentExecutionRequest,
+        *,
+        progress_callback: Callable[[dict[str, Any]], Any] | None = None,
+        core_run_id: str | None = None,
+    ) -> AgentExecutionResult:
+        """Run standalone generated steps through the primary runtime.
+
+        A generated step with no upstream input is not a transformation; it is a
+        normal user-facing objective.  Sending it to the lean synthesis shortcut
+        causes time-sensitive/source-backed requests to be answered from model
+        memory.  The primary runtime owns search/tool selection, verification,
+        and presentation, so standalone steps are delegated there generically.
+        """
+        if progress_callback and core_run_id:
+            progress_callback({"type": "NODE_EXECUTING", "run_id": core_run_id, "node_id": "primary_runtime_standalone_step"})
+        result = await self.execute_agent_request(request, progress_callback=progress_callback)
+        workflow_results = dict(result.workflow_results or {})
+        workflow_results.setdefault("dataflow_step", {
+            "status": result.status,
+            "final_answer": result.final_answer,
+            "execution_mode": "primary_runtime_standalone_step",
+            "core_run_id": result.core_run_id,
+        })
+        if progress_callback and core_run_id:
+            progress_callback({"type": "NODE_RESULT", "run_id": core_run_id, "node_id": "primary_runtime_standalone_step"})
+            progress_callback({"type": "RUN_COMPLETED", "run_id": core_run_id})
+        return AgentExecutionResult(
+            participant_id=request.participant_id,
+            participant_name=request.participant_name,
+            core_run_id=result.core_run_id,
+            status=result.status,
+            final_answer=result.final_answer,
+            workflow_results=workflow_results,
+            pending_action=result.pending_action,
+            missing_inputs=result.missing_inputs,
+            origin=result.origin,
+        )
 
     def _recover_public_answer_from_invalid_json(self, exc: LLMJSONParseError) -> str:
         raw = str(getattr(exc, "raw_content", "") or getattr(exc, "candidate", "") or "").strip()
