@@ -25,6 +25,14 @@ class SearchQueryPlanner:
 
     def plan(self, *, user_input: str, capability: str = "", objective: str = "", known: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         known = known if isinstance(known, dict) else {}
+        # Generic web retrieval is different from capability-acquisition research:
+        # preserve the user's core query instead of replacing it with generic
+        # implementation/documentation words.  This prevents searches such as
+        # "web retrieval official documentation reference" for ordinary
+        # source-backed questions.
+        if str(capability or "").casefold() in {"web_retrieval", "web_search", "external_information"}:
+            return self._plan_general_web_query(user_input=user_input, objective=objective)
+
         identity = self._identity_text(capability=capability, objective=objective, user_input=user_input, known=known)
         if not identity:
             identity = self._compact_terms(user_input or objective or capability)
@@ -48,6 +56,52 @@ class SearchQueryPlanner:
         if not out:
             out.append(PlannedQuery(query=self._clip(user_input or "runtime capability documentation"), purpose="general", priority=9))
         return [q.__dict__ for q in out[:6]]
+
+
+    def _plan_general_web_query(self, *, user_input: str, objective: str = "") -> list[dict[str, Any]]:
+        base = self._compact_general_query(user_input or objective)
+        if not base:
+            base = self._compact_terms(user_input or objective or "external information")
+        lower = str(user_input or objective or "").casefold()
+        suffixes: list[tuple[str, str, int]] = []
+        if any(token in lower for token in ["official", "source", "sources", "citation", "cite", "verified", "verify"]):
+            suffixes.append(("official_sources", "official source", 1))
+        if any(token in lower for token in ["latest", "newest", "current", "up-to-date", "recent"]):
+            suffixes.append(("freshness", "latest", 2))
+        suffixes.append(("general", "", 9))
+        out: list[PlannedQuery] = []
+        seen: set[str] = set()
+        for purpose, suffix, priority in suffixes:
+            query = self._clip(" ".join(x for x in [base, suffix] if x))
+            if query and query not in seen:
+                seen.add(query)
+                out.append(PlannedQuery(query=query, purpose=purpose, priority=priority))
+        return [q.__dict__ for q in out[:4]]
+
+    def _compact_general_query(self, text: str) -> str:
+        text = str(text or "")
+        text = re.sub(r"https?://\S+", " ", text)
+        text = re.sub(r"[`*_#>\[\]{}()?!]+", " ", text)
+        tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9_+./:-]{1,60}|[\u3040-\u30ff\u3400-\u9fff]{2,}", text)
+        stop = {
+            "please", "provide", "show", "tell", "give", "search", "find", "look", "lookup",
+            "what", "which", "who", "when", "where", "why", "how", "is", "are", "was", "were",
+            "the", "and", "or", "with", "from", "this", "that", "about", "for", "of", "to", "in",
+            "sources", "source", "official", "citation", "citations", "reference", "references",
+        }
+        kept: list[str] = []
+        for token in tokens:
+            clean = token.strip(" .,:;\"'`")
+            if not clean:
+                continue
+            low = clean.casefold()
+            if low in stop or len(clean) < 2:
+                continue
+            if clean not in kept:
+                kept.append(clean)
+            if len(kept) >= 10:
+                break
+        return " ".join(kept).strip()
 
     def _identity_text(self, *, capability: str, objective: str, user_input: str, known: dict[str, Any]) -> str:
         candidates: list[str] = []

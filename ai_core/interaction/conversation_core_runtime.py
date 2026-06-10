@@ -937,8 +937,13 @@ class ConversationCoreRuntime:
             verification_policy = selected.get("source_policy") if isinstance(selected.get("source_policy"), dict) else {}
             min_sources = int(verification_policy.get("min_sources") or 1)
             web_verification = self._verify_web_evidence(text, search, fetched, min_sources=min_sources)
+            verified_urls = set(web_verification.get("verified_urls") if isinstance(web_verification.get("verified_urls"), list) else [])
+            verified_results = [x for x in evidence_items if isinstance(x, dict) and str(x.get("url") or "") in verified_urls]
+            verified_fetched = [x for x in fetched if isinstance(x, dict) and str(x.get("url") or "") in verified_urls]
+            verified_search = dict(search)
+            verified_search["results"] = verified_results
             if web_verification.get("passed"):
-                material = await self._web_answer_material(text, search, fetched, run_id)
+                material = await self._web_answer_material(text, verified_search, verified_fetched, run_id)
             else:
                 material = self._external_retrieval_failure_material({
                     "query": query,
@@ -1074,7 +1079,10 @@ class ConversationCoreRuntime:
             }
         evidence = execution.get("evidence") if isinstance(execution.get("evidence"), dict) else {}
         evidence_verification = evidence.get("verification") if isinstance(evidence.get("verification"), dict) else {}
-        if str(execution.get("execution_mode") or "") == "web_search" and not evidence_verification.get("passed"):
+        if str(execution.get("execution_mode") or "") == "web_search":
+            # Source-required web answers are already synthesized from verified
+            # evidence in the execution layer.  Do not run a second open-ended
+            # final synthesis pass that could invent facts or URLs.
             return {
                 "status": "completed",
                 "final_answer": material,
@@ -1344,56 +1352,142 @@ class ConversationCoreRuntime:
     def _verify_web_evidence(self, user_input: str, search: dict[str, Any], fetched: list[dict[str, Any]], *, min_sources: int = 1) -> dict[str, Any]:
         """Generic evidence verification for web retrieval.
 
-        This does not know concrete business domains. It checks whether web
-        retrieval actually produced fetched source text and whether that text is
-        meaningfully related to the user's request terms. The final synthesis
-        layer may only answer source-required requests when this contract passes.
+        The verifier is domain-neutral but strict: a web answer may proceed only
+        when fetched source text is relevant to the user's concrete request.  It
+        requires distinctive request anchors (proper nouns, product/library
+        names, place names, codes, or long technical tokens) to appear in the
+        source text when such anchors exist.  This prevents unrelated search
+        hits from passing merely because they contain generic words such as
+        "latest", "version", "official", or "source".
         """
         results = search.get("results") if isinstance(search.get("results"), list) else []
         fetched_docs = [d for d in fetched if isinstance(d, dict) and d.get("status") == "success"]
         terms = self._query_terms(user_input)
-        required = [t for t in terms if len(t) >= 3][:12]
-        evidence_text = " ".join(
-            str(x.get("title") or "") + " " + str(x.get("snippet") or "")
-            for x in results if isinstance(x, dict)
-        ) + " " + " ".join(
-            str(d.get("title") or "") + " " + str(d.get("text_excerpt") or d.get("visible_text_excerpt") or "")
-            for d in fetched_docs
-        )
-        folded = evidence_text.casefold()
-        matched = [term for term in required if term.casefold() in folded]
-        has_factual_material = bool(re.search(r"\d|°|%|[A-Za-z]{3,}|[\u3040-\u30ff\u3400-\u9fff]{2,}", evidence_text))
-        source_urls = []
+        anchors = self._evidence_anchor_terms(user_input)
+        meta_terms = self._evidence_meta_terms(user_input)
+
+        by_url: dict[str, dict[str, Any]] = {}
         for item in results:
             if isinstance(item, dict) and item.get("url"):
-                url = str(item.get("url") or "").strip()
-                if url and url not in source_urls:
-                    source_urls.append(url)
-        fetched_urls = []
-        for item in fetched_docs:
-            url = str(item.get("url") or "").strip()
-            if url and url not in fetched_urls:
-                fetched_urls.append(url)
-        enough_sources = len(fetched_urls) >= max(1, int(min_sources or 1))
-        # For short queries, at least one matched key term is enough. For longer
-        # queries require a small ratio, but never a domain-specific pattern.
-        required_match_count = 1 if len(required) <= 3 else min(3, max(1, len(required) // 3))
-        term_coverage_passed = len(matched) >= required_match_count if required else bool(fetched_docs)
-        passed = bool(enough_sources and term_coverage_passed and has_factual_material)
+                by_url.setdefault(str(item.get("url")), {}).update({
+                    "url": str(item.get("url") or ""),
+                    "title": str(item.get("title") or ""),
+                    "snippet": str(item.get("snippet") or ""),
+                })
+        for doc in fetched_docs:
+            url = str(doc.get("url") or "").strip()
+            if not url:
+                continue
+            current = by_url.setdefault(url, {"url": url})
+            current.update({
+                "title": str(doc.get("title") or current.get("title") or ""),
+                "text": " ".join(str(x or "") for x in [
+                    current.get("snippet"),
+                    doc.get("text_excerpt"),
+                    doc.get("visible_text_excerpt"),
+                    doc.get("dom_evidence_text"),
+                ]),
+                "fetched": True,
+            })
+
+        verified_sources: list[dict[str, Any]] = []
+        rejected_sources: list[dict[str, Any]] = []
+        for url, item in by_url.items():
+            text = " ".join(str(x or "") for x in [item.get("title"), item.get("snippet"), item.get("text")])
+            folded = text.casefold()
+            matched_anchors = [a for a in anchors if a.casefold() in folded]
+            matched_terms = [t for t in terms if t.casefold() in folded]
+            matched_meta = [t for t in meta_terms if t.casefold() in folded]
+            has_fetched_text = bool(item.get("fetched")) and len(str(item.get("text") or "").strip()) >= 80
+            has_factual_material = bool(re.search(r"\d|°|%|[A-Za-z]{3,}|[\u3040-\u30ff\u3400-\u9fff]{2,}", text))
+            anchor_required = bool(anchors)
+            anchor_passed = bool(matched_anchors) if anchor_required else bool(matched_terms)
+            # Require at least one non-anchor/meta term when possible, but keep
+            # short entity-only questions workable.
+            non_anchor_terms = [t for t in terms if t not in anchors and t not in meta_terms]
+            term_passed = bool(set(matched_terms).intersection(non_anchor_terms)) if non_anchor_terms else bool(matched_terms or matched_anchors)
+            passed_source = bool(has_fetched_text and has_factual_material and anchor_passed and term_passed)
+            record = {
+                "url": url,
+                "title": str(item.get("title") or "")[:300],
+                "matched_anchors": matched_anchors,
+                "matched_terms": matched_terms[:12],
+                "matched_meta_terms": matched_meta[:12],
+                "has_fetched_text": has_fetched_text,
+                "has_factual_material": has_factual_material,
+            }
+            if passed_source:
+                verified_sources.append(record)
+            else:
+                rejected_sources.append({**record, "reason": "source_text_not_relevant_to_request_anchors"})
+
+        required_count = max(1, int(min_sources or 1))
+        passed = len(verified_sources) >= required_count
         return {
             "status": "passed" if passed else "failed",
             "passed": passed,
-            "min_sources": max(1, int(min_sources or 1)),
-            "candidate_source_count": len(source_urls),
-            "fetched_source_count": len(fetched_urls),
-            "matched_terms": matched,
-            "required_terms_sample": required,
-            "term_coverage_passed": bool(term_coverage_passed),
-            "has_factual_material": bool(has_factual_material),
-            "source_urls": source_urls,
-            "fetched_urls": fetched_urls,
-            "reason": "verified_source_text_matches_request" if passed else "insufficient_verified_source_text_for_request",
+            "min_sources": required_count,
+            "candidate_source_count": len([x for x in results if isinstance(x, dict) and x.get("url")]),
+            "fetched_source_count": len(fetched_docs),
+            "verified_source_count": len(verified_sources),
+            "verified_sources": verified_sources,
+            "verified_urls": [x["url"] for x in verified_sources],
+            "rejected_sources_sample": rejected_sources[:5],
+            "anchor_terms": anchors,
+            "query_terms_sample": terms,
+            "meta_terms": meta_terms,
+            "reason": "verified_fetched_source_text_matches_request_anchors" if passed else "no_verified_fetched_source_text_matched_request_anchors",
         }
+
+    def _evidence_anchor_terms(self, text: str) -> list[str]:
+        """Extract distinctive request anchors without domain-specific rules."""
+        raw = str(text or "")
+        tokens = re.findall(r"[A-Za-z][A-Za-z0-9_+.#/-]{2,}|[A-Z]{2,}|[\u3040-\u30ff\u3400-\u9fff]{2,}", raw)
+        stop = {
+            "what", "which", "when", "where", "who", "why", "how", "the", "and", "for", "with", "from", "that", "this",
+            "latest", "newest", "current", "recent", "version", "versions", "official", "source", "sources", "provide",
+            "search", "find", "information", "today", "tomorrow", "city", "date",
+        }
+        anchors: list[str] = []
+        for token in tokens:
+            clean = token.strip(" .,:;()[]{}<>\"'`")
+            if not clean or clean.casefold() in stop:
+                continue
+            # Prefer distinctive tokens: mixed case, all caps, contains digits or
+            # separators, non-Latin terms, or long uncommon words.
+            distinctive = (
+                bool(re.search(r"[A-Z].*[a-z]|[a-z].*[A-Z]", clean))
+                or clean.isupper()
+                or bool(re.search(r"[0-9_+.#/-]", clean))
+                or bool(re.search(r"[\u3040-\u30ff\u3400-\u9fff]", clean))
+                or len(clean) >= 6
+            )
+            if distinctive and clean not in anchors:
+                anchors.append(clean)
+            if len(anchors) >= 8:
+                break
+        if not anchors:
+            # Fall back to the longest content terms when no obvious named
+            # entity exists.  This remains generic and avoids business keywords.
+            candidates = [t for t in self._query_terms(raw) if t.casefold() not in stop]
+            for term in sorted(candidates, key=len, reverse=True):
+                if term not in anchors:
+                    anchors.append(term)
+                if len(anchors) >= 3:
+                    break
+        return anchors
+
+    def _evidence_meta_terms(self, text: str) -> list[str]:
+        raw_terms = re.findall(r"[A-Za-z0-9_\-]+", str(text or "").casefold())
+        meta_vocab = {
+            "latest", "newest", "current", "recent", "version", "versions", "official", "source", "sources",
+            "citation", "citations", "reference", "references", "verify", "verified", "update", "updated",
+        }
+        out: list[str] = []
+        for term in raw_terms:
+            if term in meta_vocab and term not in out:
+                out.append(term)
+        return out
 
     async def _web_answer_material(self, user_input: str, search: dict[str, Any], fetched: list[dict[str, Any]], run_id: str) -> str:
         """Create concise user-facing material from web evidence.
