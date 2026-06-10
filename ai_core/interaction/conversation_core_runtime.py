@@ -73,8 +73,17 @@ class ConversationCoreRuntime:
         self._event(state, "intent_recognition", "completed")
         self._write_stage_trace(run_id, "intent_recognition", "completed", intent)
 
+        self._event(state, "knowledge_evaluation", "running")
+        knowledge_eval = await self._knowledge_evaluation(state["input"], parsed, intent, run_id)
+        intent = self._apply_knowledge_evaluation_to_intent(intent, knowledge_eval)
+        state["results"]["knowledge_evaluation"] = knowledge_eval
+        state["results"]["intent_recognition"] = intent
+        self._event(state, "knowledge_evaluation", "completed")
+        self._write_stage_trace(run_id, "knowledge_evaluation", "completed", knowledge_eval)
+        self._write_stage_trace(run_id, "intent_recognition", "completed", intent)
+
         self._event(state, "context_awareness", "running")
-        context = self._context_awareness(state["input"], intent, state.get("context_window", {}))
+        context = self._context_awareness(state["input"], intent, state.get("context_window", {}), knowledge_eval)
         state["results"]["context_awareness"] = context
         self._event(state, "context_awareness", "completed")
         self._write_stage_trace(run_id, "context_awareness", "completed", context)
@@ -376,19 +385,174 @@ class ConversationCoreRuntime:
             }
         return result
 
-    def _context_awareness(self, text: str, intent: dict[str, Any], context_window: dict[str, Any] | None = None) -> dict[str, Any]:
+
+    async def _knowledge_evaluation(self, text: str, parsed: dict[str, Any], intent: dict[str, Any], run_id: str) -> dict[str, Any]:
+        """Generic knowledge confidence and verification gate.
+
+        This layer does not know domains or providers. It asks whether the
+        response can be responsibly produced from already available material, or
+        whether source-backed external evidence is required before answering.
+        """
+        direct_guard = self._direct_conversation_signal(text)
+        if direct_guard:
+            return {
+                "can_answer_from_current_material": True,
+                "confidence": 0.9,
+                "requires_verification": False,
+                "requires_external_information": False,
+                "needs_web_search": False,
+                "search_strategy": "none",
+                "evidence_required": False,
+                "source_requirements": {},
+                "reason": direct_guard,
+                "external_information_signals": [],
+                "_executor_type": "deterministic",
+                "_node_id": "conversation_knowledge_evaluation",
+            }
+        external_signals = self._external_information_signals(text)
+        source_or_verification_requested = any(sig in external_signals for sig in ("external_source_required", "evidence_required", "verification_required"))
+        freshness_observed = "freshness_required" in external_signals
+        schema = {
+            "type": "object",
+            "required": [
+                "can_answer_from_current_material",
+                "confidence",
+                "requires_verification",
+                "requires_external_information",
+                "needs_web_search",
+                "search_strategy",
+                "evidence_required",
+                "reason",
+            ],
+            "properties": {
+                "can_answer_from_current_material": {"type": "boolean"},
+                "confidence": {"type": "number"},
+                "requires_verification": {"type": "boolean"},
+                "requires_external_information": {"type": "boolean"},
+                "needs_web_search": {"type": "boolean"},
+                "search_strategy": {"type": "string"},
+                "evidence_required": {"type": "boolean"},
+                "source_requirements": {"type": "object"},
+                "reason": {"type": "string"},
+                "external_information_signals": {"type": "array", "items": {"type": "string"}},
+            },
+            "additionalProperties": True,
+        }
+        prompt = {
+            "id": "conversation_knowledge_evaluation",
+            "system": (
+                "Evaluate whether the assistant can responsibly answer from current conversation, local model knowledge, uploaded/runtime context, and stable general knowledge. "
+                "Do not answer the user. Return only a routing/evidence decision as JSON. "
+                "If the user explicitly asks for sources, official sources, citations, URLs, verification, checking, browsing, searching, or up-to-date/current/latest material that cannot be guaranteed from current material, set requires_external_information=true and needs_web_search=true. "
+                "A freshness/source signal is an observation, not an automatic decision; use the whole request and the ability to verify. "
+                "If the answer requires source-backed evidence, set evidence_required=true and search_strategy=search_engine unless the user supplied a direct URL. "
+                "Use generic terms only; do not use domain-specific routing rules. Return only valid JSON matching the schema."
+            ),
+        }
+        fallback_external = bool(source_or_verification_requested or (freshness_observed and not bool(intent.get("confidence", 0) and float(intent.get("confidence") or 0) >= 0.85)))
+        fallback = {
+            "can_answer_from_current_material": not fallback_external,
+            "confidence": 0.55 if fallback_external else 0.75,
+            "requires_verification": bool(source_or_verification_requested or freshness_observed),
+            "requires_external_information": fallback_external,
+            "needs_web_search": fallback_external,
+            "search_strategy": "direct_url" if re.search(r"https?://", str(text or ""), flags=re.I) else ("search_engine" if fallback_external else "none"),
+            "evidence_required": fallback_external,
+            "source_requirements": {
+                "required": fallback_external,
+                "min_verified_sources": 1 if fallback_external else 0,
+                "preferred_source_types": ["official", "high_reputation", "general_web"] if fallback_external else [],
+            },
+            "reason": "fallback_source_or_verification_requirement" if fallback_external else "fallback_current_material_sufficient",
+            "external_information_signals": external_signals,
+        }
+        result = await self._json_stage(
+            run_id,
+            "conversation_knowledge_evaluation",
+            prompt,
+            json.dumps({"parsed": parsed, "intent": intent, "user_message": text, "external_information_signals": external_signals}, ensure_ascii=False),
+            schema,
+            fallback=fallback,
+        )
+        if not isinstance(result.get("external_information_signals"), list):
+            result["external_information_signals"] = external_signals
+        else:
+            for sig in external_signals:
+                if sig not in result["external_information_signals"]:
+                    result["external_information_signals"].append(sig)
+        # Explicit source/verification requirements are a hard evidence contract.
+        # The LLM may still mark current material sufficient; ai_core must not let
+        # final_synthesis fabricate source-backed answers without retrieved evidence.
+        if source_or_verification_requested and not self._direct_conversation_signal(text):
+            result["requires_verification"] = True
+            result["requires_external_information"] = True
+            result["needs_web_search"] = True
+            result["evidence_required"] = True
+            result["search_strategy"] = "direct_url" if re.search(r"https?://", str(text or ""), flags=re.I) else "search_engine"
+            result["can_answer_from_current_material"] = False
+            source_requirements = result.get("source_requirements") if isinstance(result.get("source_requirements"), dict) else {}
+            source_requirements.setdefault("required", True)
+            source_requirements.setdefault("min_verified_sources", 1)
+            result["source_requirements"] = source_requirements
+        return result
+
+    def _apply_knowledge_evaluation_to_intent(self, intent: dict[str, Any], knowledge_eval: dict[str, Any]) -> dict[str, Any]:
+        result = dict(intent or {})
+        if not isinstance(knowledge_eval, dict):
+            return result
+        capability_gap = bool(result.get("capability_gap_detected"))
+        needs_web = bool(knowledge_eval.get("needs_web_search") or knowledge_eval.get("requires_external_information"))
+        evidence_required = bool(knowledge_eval.get("evidence_required") or knowledge_eval.get("requires_verification"))
+        if needs_web and not capability_gap:
+            result["requires_external_information"] = True
+            result["needs_external_execution"] = True
+            result["response_mode"] = "source_grounded_answer"
+            caps = result.get("required_capabilities") if isinstance(result.get("required_capabilities"), list) else []
+            if "web_retrieval" not in caps:
+                caps.append("web_retrieval")
+            result["required_capabilities"] = caps
+            policy = result.get("source_policy") if isinstance(result.get("source_policy"), dict) else {}
+            policy["requires_source_material"] = True
+            policy["external_access"] = "required"
+            policy["verification_required"] = True
+            policy["min_sources"] = max(1, int(policy.get("min_sources") or 0))
+            source_req = knowledge_eval.get("source_requirements") if isinstance(knowledge_eval.get("source_requirements"), dict) else {}
+            if source_req.get("min_verified_sources"):
+                try:
+                    policy["min_sources"] = max(policy["min_sources"], int(source_req.get("min_verified_sources") or 1))
+                except Exception:
+                    pass
+            result["source_policy"] = policy
+            decision = result.get("web_search_decision") if isinstance(result.get("web_search_decision"), dict) else {}
+            decision["needs_web_search"] = True
+            decision["reason"] = knowledge_eval.get("reason") or decision.get("reason") or "knowledge_evaluation_requires_external_evidence"
+            decision["search_strategy"] = knowledge_eval.get("search_strategy") or decision.get("search_strategy") or "search_engine"
+            decision["evidence_required"] = evidence_required
+            decision["source_requirements"] = source_req
+            result["web_search_decision"] = decision
+        result["knowledge_evaluation"] = knowledge_eval
+        merged = result.get("external_information_signals") if isinstance(result.get("external_information_signals"), list) else []
+        for sig in knowledge_eval.get("external_information_signals", []) if isinstance(knowledge_eval.get("external_information_signals"), list) else []:
+            if sig not in merged:
+                merged.append(sig)
+        result["external_information_signals"] = merged
+        return result
+
+    def _context_awareness(self, text: str, intent: dict[str, Any], context_window: dict[str, Any] | None = None, knowledge_evaluation: dict[str, Any] | None = None) -> dict[str, Any]:
         kb = self.knowledge.answer_from_knowledge(text)
         vector_hits = self.vector_memory.search(text, limit=5, usage_scope="retrieval_context")
+        knowledge_eval = knowledge_evaluation if isinstance(knowledge_evaluation, dict) else {}
         return {
             "knowledge_available": bool(kb),
             "knowledge_answer": kb if kb else None,
             "knowledge_status": self.knowledge.status(),
+            "knowledge_evaluation": knowledge_eval,
             "session_context": context_window or {},
             "retrieved_context": [
                 {"text": str(item.get("text") or "")[:1200], "score": item.get("score"), "metadata": item.get("metadata", {})}
                 for item in vector_hits
             ],
-            "upstream_refs": ["input_parsing", "intent_recognition"],
+            "upstream_refs": ["input_parsing", "intent_recognition", "knowledge_evaluation"],
             "intent_type": intent.get("intent_type"),
         }
 
@@ -1541,6 +1705,7 @@ class ConversationCoreRuntime:
         defaults = {
             "conversation_input_parsing": {"timeout_seconds": 3.0, "max_prompt_tokens": 180, "max_prompt_chars": 900, "max_schema_chars": 500, "num_predict": 96, "num_ctx": 768},
             "conversation_intent_recognition": {"timeout_seconds": 8.0, "max_prompt_tokens": 320, "max_prompt_chars": 1400, "max_schema_chars": 900, "num_predict": 160, "num_ctx": 1024},
+            "conversation_knowledge_evaluation": {"timeout_seconds": 8.0, "max_prompt_tokens": 340, "max_prompt_chars": 1500, "max_schema_chars": 900, "num_predict": 180, "num_ctx": 1024},
             "conversation_workflow_planning": {"timeout_seconds": 12.0, "max_prompt_tokens": 420, "max_prompt_chars": 1600, "max_schema_chars": 1000, "num_predict": 220, "num_ctx": 1536},
             "conversation_execution_response": {"timeout_seconds": 15.0, "max_prompt_tokens": 520, "max_prompt_chars": 2200, "max_schema_chars": 800, "num_predict": 320, "num_ctx": 2048},
             "conversation_output": {"timeout_seconds": 8.0, "max_prompt_tokens": 360, "max_prompt_chars": 1600, "max_schema_chars": 600, "num_predict": 220, "num_ctx": 1536},
@@ -1575,7 +1740,7 @@ class ConversationCoreRuntime:
                 "context_summary": self._compact_value(obj.get("context_summary") if isinstance(obj, dict) else {}, max_depth=1, max_items=6),
                 "user_message_excerpt": str((obj or {}).get("user_message") if isinstance(obj, dict) else "")[:700],
             }
-        elif node in {"conversation_intent_recognition", "conversation_execution_response", "conversation_output"}:
+        elif node in {"conversation_intent_recognition", "conversation_knowledge_evaluation", "conversation_execution_response", "conversation_output"}:
             compact = self._compact_value(obj, max_depth=2, max_items=10)
         else:
             compact = self._compact_value(obj, max_depth=1, max_items=8)
