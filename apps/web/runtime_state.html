@@ -56,6 +56,21 @@
 </main>
 <script>
 let runs=[], selectedRunId='', source=null, cursor=0, autoScroll=true, mode='timeline', currentRun=null, eventCache=[];
+
+function setStableHTML(id, html, opts={}){
+  const el=document.getElementById(id);
+  if(!el)return;
+  const next=String(html||'');
+  if(el.dataset.htmlSig===next)return;
+  const keepScroll=opts.keepScroll!==false;
+  const stickBottom=opts.stickBottom===true && autoScroll;
+  const top=el.scrollTop;
+  const nearBottom=(el.scrollHeight-el.scrollTop-el.clientHeight)<80;
+  el.innerHTML=next;
+  el.dataset.htmlSig=next;
+  if(stickBottom && nearBottom) el.scrollTop=el.scrollHeight;
+  else if(keepScroll) el.scrollTop=top;
+}
 function cls(s){return String(s||'').replace(/[^a-zA-Z0-9_-]/g,'_')}
 function displayStatus(s){const v=String(s||'not_started'); return v==='created'?'not_started':v}
 function statusHtml(s){const v=displayStatus(s); return `<span class="pill ${cls(v)}">${v}</span>`}
@@ -65,12 +80,12 @@ function normalizedProgress(status, progress){const st=displayStatus(status); if
 function progressText(v,s){const n=normalizedProgress(s,v); return `<span class="pct">${n}%</span>`}
 function shortTime(v){if(!v)return ''; try{return new Date(v).toLocaleTimeString()}catch(e){return String(v).slice(11,19)}}
 async function loadRuns(){const res=await fetch('/api/runtime-state/runs?limit=100',{cache:'no-store'}); const data=await res.json(); runs=data.runs||[]; const ids=new Set(runs.map(r=>r.run_id)); if(selectedRunId && !ids.has(selectedRunId)){selectedRunId=''; currentRun=null;} renderRuns(); if(!selectedRunId){const url=new URL(location.href); const rid=url.searchParams.get('run_id'); if(rid && ids.has(rid)) selectRun(rid); else if(runs[0]) selectRun(runs[0].run_id); else document.getElementById('summary').textContent='No runtime state runs yet.'}}
-function renderRuns(){const f=(document.getElementById('runFilter').value||'').toLowerCase(); document.getElementById('runs').innerHTML=runs.filter(r=>!f||JSON.stringify(r).toLowerCase().includes(f)).map(r=>`<div class="run ${r.run_id===selectedRunId?'active':''}" onclick="selectRun('${r.run_id}')"><div>${statusHtml(r.status)} <span class="id">${r.run_id}</span></div><div class="meta">${escapeHtml(r.title||'')}</div><div class="meta">progress=${normalizedProgress(r.status,r.progress||0)}% · events=${r.event_count||0} · ${shortTime(r.updated_at)}</div></div>`).join('') || '<div class="run"><span class="small">No runs yet</span></div>'}
+function renderRuns(){const f=(document.getElementById('runFilter').value||'').toLowerCase(); setStableHTML('runs', runs.filter(r=>!f||JSON.stringify(r).toLowerCase().includes(f)).map(r=>`<div class="run ${r.run_id===selectedRunId?'active':''}" onclick="selectRun('${r.run_id}')"><div>${statusHtml(r.status)} <span class="id">${r.run_id}</span></div><div class="meta">${escapeHtml(r.title||'')}</div><div class="meta">progress=${normalizedProgress(r.status,r.progress||0)}% · events=${r.event_count||0} · ${shortTime(r.updated_at)}</div></div>`).join('') || '<div class="run"><span class="small">No runs yet</span></div>')}
 async function selectRun(id){selectedRunId=id; cursor=0; eventCache=[]; renderRuns(); document.getElementById('events').innerHTML=''; await loadRun(); restartStream(); history.replaceState(null,'',`/runtime-state?run_id=${encodeURIComponent(id)}`)}
 async function loadRun(){if(!selectedRunId)return; const res=await fetch(`/api/runtime-state/runs/${encodeURIComponent(selectedRunId)}`,{cache:'no-store'}); const data=await res.json(); if(!data.ok){currentRun=null; const missing=selectedRunId; selectedRunId=''; if(source){source.close(); source=null;} document.getElementById('summary').textContent=`Run ${missing} is no longer available. Select another run from the list.`; document.getElementById('flow').innerHTML=''; document.getElementById('events').innerHTML=''; renderRuns(); return;} currentRun=data.run; renderSummary(); renderFlow(); if(mode==='timeline') renderTimeline();}
 function currentPhaseName(r){const steps=r.steps||[]; const runDone=['completed','failed','cancelled','interrupted'].includes(displayStatus(r.status)); const active=!runDone?steps.find(x=>x.step_id===r.active_step_id):null; if(active)return (active.name||active.step_id)+' / '+displayStatus(active.status); const last=steps.slice().reverse().find(x=>x.status&&x.status!=='created'&&x.status!=='pending'); return last?((last.name||last.step_id)+' / '+displayStatus(last.status)):'waiting for first event'}
 function elapsedText(r){try{const a=new Date(r.started_at||r.created_at).getTime(); const b=new Date(r.ended_at||r.updated_at||Date.now()).getTime(); if(!a||!b)return ''; return Math.max(0,Math.round((b-a)/1000))+'s';}catch(e){return ''}}
-function renderSummary(){const r=currentRun; document.getElementById('summary').innerHTML=`<div class="row"><b>${escapeHtml(r.title||r.run_id)}</b>${statusIcon(r.status)}${statusHtml(r.status)}${progressText(r.progress||0,r.status)}<span>run_id=${r.run_id}</span><span>current=${escapeHtml(currentPhaseName(r))}</span><span>events=${r.event_count||0}</span><span>elapsed=${elapsedText(r)}</span></div><div class="bar"><span style="width:${normalizedProgress(r.status,r.progress||0)}%"></span></div><div class="small">${escapeHtml(r.summary||'')}</div>`}
+function renderSummary(){const r=currentRun; setStableHTML('summary', `<div class="row"><b>${escapeHtml(r.title||r.run_id)}</b>${statusIcon(r.status)}${statusHtml(r.status)}${progressText(r.progress||0,r.status)}<span>run_id=${r.run_id}</span><span>current=${escapeHtml(currentPhaseName(r))}</span><span>events=${r.event_count||0}</span><span>elapsed=${elapsedText(r)}</span></div><div class="bar"><span style="width:${normalizedProgress(r.status,r.progress||0)}%"></span></div><div class="small">${escapeHtml(r.summary||'')}</div>`, {keepScroll:false})}
 function renderFlow(){
   const r=currentRun||{};
   const runDone=['completed','failed','cancelled','interrupted'].includes(displayStatus(r.status));
@@ -82,13 +97,14 @@ function renderFlow(){
     return x;
   });
   const eventsByFlow=groupEventsByFlow();
-  document.getElementById('flow').innerHTML=flow.map((n,i)=>{
+  const flowHtml=flow.map((n,i)=>{
     const status=n.status||'not_started';
     const items=(eventsByFlow[n.flow_id]||[]).slice(-6);
     const io=ioBlock(n);
     const pct=normalizedProgress(status,n.progress||0);
     return `<div class="flow-node"><div class="dot ${cls(status)}">${isActiveStatus(status)?statusIcon(status):i+1}</div><div class="card ${n.active?'active':''}"><div class="card-head"><div class="card-head-left"><div class="title">${escapeHtml(n.title||n.flow_id)}</div><div class="small">${escapeHtml(n.owner||'')} · ${escapeHtml(n.flow_id||'')}</div></div><div class="status-line">${statusIcon(status)}${statusHtml(status)}${progressText(pct,status)}</div></div><div class="desc">${escapeHtml(n.description||'')}</div><div class="bar" style="margin:0 11px 10px"><span style="width:${pct}%"></span></div><div class="kv"><div class="k">Input</div><div class="v">${escapeHtml(summarize(n.input)||n.expected_input||'-')}</div><div class="k">Output</div><div class="v">${escapeHtml(summarize(n.output)||n.expected_output||'-')}</div><div class="k">Method</div><div class="v">${escapeHtml(n.method||'-')}</div><div class="k">Tool</div><div class="v">${escapeHtml(n.tool||'-')}</div><div class="k">Current</div><div class="v">${escapeHtml(n.last_message||'-')}</div><div class="k">Next</div><div class="v">${escapeHtml(n.next_action||'-')}</div></div>${io}${items.length?`<div class="node-actions">${items.map(actionHtml).join('')}</div>`:''}</div></div>`
-  }).join('')
+  }).join('');
+  setStableHTML('flow', flowHtml);
 }
 function ioBlock(n){const detail={trace:n.trace,evidence:n.evidence,error:n.error}; const compact=Object.fromEntries(Object.entries(detail).filter(([k,v])=>v&&(!(Array.isArray(v))||v.length)&&(!(typeof v==='object'&&!Array.isArray(v))||Object.keys(v).length))); return Object.keys(compact).length?`<div class="json" style="margin:0 11px 10px">${escapeHtml(JSON.stringify(compact,null,2))}</div>`:''}
 function actionHtml(e){return `<div class="action"><div class="line1"><span class="small">#${e.sequence}</span><span class="lvl ${e.level}">${e.level}</span>${statusIcon(e.status)}${statusHtml(e.status)}${progressText(e.progress||0,e.status)}<span class="kind">${e.kind}</span><span class="small">${shortTime(e.ts)}</span></div><div class="msg">${escapeHtml(e.title||'')} — ${escapeHtml(e.message||'')}</div><div class="small">step=${escapeHtml(e.step_id||'')} · method=${escapeHtml(e.method||'-')} · tool=${escapeHtml(e.tool||'-')}</div></div>`}
@@ -110,12 +126,18 @@ function displayEvents(){
   }
   return filtered;
 }
-function renderTimeline(){document.getElementById('events').innerHTML=displayEvents().slice(-200).map(e=>`<div class="event"><div class="ts">#${e.sequence}<br>${shortTime(e.ts)}</div><div class="lvl ${e.level}">${e.level}<br>${statusIcon(e.status)}${statusHtml(e.status)}${progressText(e.progress||0,e.status)}</div><div class="kind">${e.kind}<br><span class="small">${e.flow_id||guessFlow(e)}</span></div><div class="msg"><b>${escapeHtml(e.title||'')}</b><br>${escapeHtml(e.message||'')}<div class="small">step=${escapeHtml(e.step_id||'')} · method=${escapeHtml(e.method||'-')} · tool=${escapeHtml(e.tool||'-')}</div>${detailHtml(e)}</div></div>`).join('')}
+function renderTimeline(){setStableHTML('events', displayEvents().slice(-200).map(e=>`<div class="event"><div class="ts">#${e.sequence}<br>${shortTime(e.ts)}</div><div class="lvl ${e.level}">${e.level}<br>${statusIcon(e.status)}${statusHtml(e.status)}${progressText(e.progress||0,e.status)}</div><div class="kind">${e.kind}<br><span class="small">${e.flow_id||guessFlow(e)}</span></div><div class="msg"><b>${escapeHtml(e.title||'')}</b><br>${escapeHtml(e.message||'')}<div class="small">step=${escapeHtml(e.step_id||'')} · method=${escapeHtml(e.method||'-')} · tool=${escapeHtml(e.tool||'-')}</div>${detailHtml(e)}</div></div>`).join(''), {stickBottom:true})}
 function renderCli(){const box=document.getElementById('events'); box.innerHTML=''; displayEvents().slice(-300).forEach(e=>appendCliEvent(e)); if(autoScroll) box.scrollTop=box.scrollHeight}
 function appendCliEvent(e){const detail=detailHtml(e); const row=document.createElement('div'); row.className='event'; row.innerHTML=`<div class="ts">#${e.sequence}<br>${shortTime(e.ts)}</div><div class="lvl ${e.level}">${e.level}<br>${statusIcon(e.status)}${statusHtml(e.status)}${progressText(e.progress||0,e.status)}</div><div class="kind">${e.kind}<br><span class="small">${e.step_id||''}</span></div><div class="msg"><b>${escapeHtml(e.title||'')}</b><br>${escapeHtml(e.message||'')}${detail}</div>`; const box=document.getElementById('events'); box.appendChild(row); if(box.children.length>1000) box.removeChild(box.firstChild); if(autoScroll) box.scrollTop=box.scrollHeight}
+let flowRenderQueued=false;
+function scheduleFlowRender(){
+  if(!currentRun || flowRenderQueued)return;
+  flowRenderQueued=true;
+  requestAnimationFrame(()=>{flowRenderQueued=false; renderFlow();});
+}
 function detailHtml(e){const extra={input:e.input,output:e.output,error:e.error,trace:e.trace,evidence:e.evidence,next_action:e.next_action,metadata:e.metadata}; const compact=Object.fromEntries(Object.entries(extra).filter(([k,v])=>v!==null&&v!==''&&!(Array.isArray(v)&&!v.length)&&!(typeof v==='object'&&v&&!Array.isArray(v)&&!Object.keys(v).length))); return Object.keys(compact).length?`<div class="json">${escapeHtml(JSON.stringify(compact,null,2))}</div>`:''}
 function restartStream(){if(source){source.close(); source=null} cursor=0; eventCache=[]; document.getElementById('events').innerHTML=''; startStream();}
-function startStream(){if(!selectedRunId)return; const min=document.getElementById('level').value; source=new EventSource(`/api/runtime-state/runs/${encodeURIComponent(selectedRunId)}/stream?after_sequence=${cursor}&min_level=${encodeURIComponent(min)}`); document.getElementById('streamState').textContent='stream: connected'; source.onmessage=(ev)=>{try{const e=JSON.parse(ev.data); cursor=Math.max(cursor,Number(e.sequence||0)); eventCache.push(e); if(eventCache.length>1000) eventCache=eventCache.slice(-1000); if(mode==='cli') renderCli(); else renderTimeline(); if(currentRun) renderFlow(); if(cursor%4===0) loadRun();}catch(err){console.error(err)}}; source.onerror=()=>{document.getElementById('streamState').textContent='stream: reconnecting'}}
+function startStream(){if(!selectedRunId)return; const min=document.getElementById('level').value; source=new EventSource(`/api/runtime-state/runs/${encodeURIComponent(selectedRunId)}/stream?after_sequence=${cursor}&min_level=${encodeURIComponent(min)}`); document.getElementById('streamState').textContent='stream: connected'; source.onmessage=(ev)=>{try{const e=JSON.parse(ev.data); cursor=Math.max(cursor,Number(e.sequence||0)); eventCache.push(e); if(eventCache.length>1000) eventCache=eventCache.slice(-1000); if(mode==='cli') renderCli(); else renderTimeline(); scheduleFlowRender(); if(cursor%6===0) loadRun();}catch(err){console.error(err)}}; source.onerror=()=>{document.getElementById('streamState').textContent='stream: reconnecting'}}
 function setMode(m){mode=m; document.getElementById('tabTimeline').classList.toggle('active',m==='timeline'); document.getElementById('tabCli').classList.toggle('active',m==='cli'); document.getElementById('events').innerHTML=''; if(m==='timeline') renderTimeline(); else renderCli()}
 function clearEvents(){document.getElementById('events').innerHTML=''; if(mode==='timeline') eventCache=[]}
 function toggleAuto(){autoScroll=!autoScroll; document.getElementById('autoBtn').textContent='Auto-scroll: '+(autoScroll?'ON':'OFF')}

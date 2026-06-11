@@ -136,72 +136,73 @@ class RuntimeBlueprintArtifactGenerator:
                 artifact_kind = "real_runtime_implementation"
                 generation_status = "provided_blueprint_files_used"
                 provided_files_accepted = True
-        if not provided_files_accepted and self._should_request_llm_generation(blueprint, identity_contract):
-            llm_artifact = self._generate_with_llm(
-                tool_id=tool_id,
-                entrypoint=entrypoint,
-                blueprint=blueprint,
-                identity_contract=identity_contract,
-                input_schema=input_schema,
-                output_schema=output_schema,
-                connection_schema=connection_schema,
-                secret_schema=secret_schema,
-                verification_input=verification_input,
-                specification_contract=specification_contract,
-            )
-            generation_status = str(llm_artifact.get("generation_status") or "failed")
-            generation_route = llm_artifact.get("generation_route") if isinstance(llm_artifact.get("generation_route"), dict) else {}
-            generation_error = str(llm_artifact.get("generation_error") or "")
-            if self._valid_generated_artifact(llm_artifact):
-                files = llm_artifact["files"]
-                input_schema = self._merge_declared_schema(declared_input_schema, llm_artifact.get("input_schema") if isinstance(llm_artifact.get("input_schema"), dict) else input_schema, default_name="input")
-                output_schema = self._merge_declared_schema(declared_output_schema, llm_artifact.get("output_schema") if isinstance(llm_artifact.get("output_schema"), dict) else output_schema, default_name="output")
-                connection_schema = self._merge_declared_schema(declared_connection_schema, self._closed_schema(llm_artifact.get("connection_schema")), default_name="connection")
-                secret_schema = self._merge_declared_schema(declared_secret_schema, self._closed_schema(llm_artifact.get("secret_schema")), default_name="secrets")
-                verification_input = llm_artifact.get("verification_input") if isinstance(llm_artifact.get("verification_input"), dict) else self._generic_verification_input(input_schema, connection_schema, secret_schema)
-                verification_input = self._verification_input_with_schema_sample(verification_input, input_schema, connection_schema, secret_schema)
-                verification_expectations = llm_artifact.get("verification_expectations") if isinstance(llm_artifact.get("verification_expectations"), dict) else verification_expectations
-                boundary = self.schema_boundary.normalize(
-                    input_schema=input_schema,
-                    connection_schema=connection_schema,
-                    secret_schema=secret_schema,
-                    verification_input=verification_input,
-                )
-                input_schema = boundary["input_schema"]
-                connection_schema = boundary["connection_schema"]
-                secret_schema = boundary["secret_schema"]
-                verification_input = self._verification_input_with_schema_sample(boundary["verification_input"], input_schema, connection_schema, secret_schema)
-                specification_contract = self.contract_compiler.compile(
-                    blueprint={**blueprint, **llm_artifact},
+        if not provided_files_accepted:
+            if self._should_request_llm_generation(blueprint, identity_contract):
+                llm_artifact = self._generate_with_llm(
+                    tool_id=tool_id,
+                    entrypoint=entrypoint,
+                    blueprint=blueprint,
+                    identity_contract=identity_contract,
                     input_schema=input_schema,
                     output_schema=output_schema,
                     connection_schema=connection_schema,
                     secret_schema=secret_schema,
                     verification_input=verification_input,
-                    verification_expectations=verification_expectations,
+                    specification_contract=specification_contract,
                 )
-                files = self._stabilize_standard_library_runtime_files(files, blueprint=blueprint)
-                input_schema = self._reconcile_required_fields_from_source(input_schema, files, scope="input")
-                connection_schema = self._reconcile_required_fields_from_source(connection_schema, files, scope="connection")
-                secret_schema = self._reconcile_required_fields_from_source(secret_schema, files, scope="secrets")
-                boundary = self.schema_boundary.normalize(
-                    input_schema=input_schema,
-                    connection_schema=connection_schema,
-                    secret_schema=secret_schema,
-                    verification_input=verification_input,
-                )
-                input_schema = boundary["input_schema"]
-                connection_schema = boundary["connection_schema"]
-                secret_schema = boundary["secret_schema"]
-                verification_input = self._verification_input_with_schema_sample(boundary["verification_input"], input_schema, connection_schema, secret_schema)
-                dependencies = self._merge_dependencies(dependencies, self._normalized_dependencies(llm_artifact.get("dependencies")))
-                dependencies = self._drop_stdlib_dependencies(dependencies)
-                capability_contract = self._capability_contract(tool_id=tool_id, blueprint={**blueprint, **llm_artifact})
-                artifact_kind = "real_runtime_implementation"
+                generation_status = str(llm_artifact.get("generation_status") or "failed")
+                generation_route = llm_artifact.get("generation_route") if isinstance(llm_artifact.get("generation_route"), dict) else {}
+                generation_error = str(llm_artifact.get("generation_error") or "")
+                if self._valid_generated_artifact(llm_artifact):
+                    files = llm_artifact["files"]
+                    input_schema = self._merge_declared_schema(declared_input_schema, llm_artifact.get("input_schema") if isinstance(llm_artifact.get("input_schema"), dict) else input_schema, default_name="input")
+                    output_schema = self._merge_declared_schema(declared_output_schema, llm_artifact.get("output_schema") if isinstance(llm_artifact.get("output_schema"), dict) else output_schema, default_name="output")
+                    connection_schema = self._merge_declared_schema(declared_connection_schema, self._closed_schema(llm_artifact.get("connection_schema")), default_name="connection")
+                    secret_schema = self._merge_declared_schema(declared_secret_schema, self._closed_schema(llm_artifact.get("secret_schema")), default_name="secrets")
+                    verification_input = llm_artifact.get("verification_input") if isinstance(llm_artifact.get("verification_input"), dict) else self._generic_verification_input(input_schema, connection_schema, secret_schema)
+                    verification_input = self._verification_input_with_schema_sample(verification_input, input_schema, connection_schema, secret_schema)
+                    verification_expectations = llm_artifact.get("verification_expectations") if isinstance(llm_artifact.get("verification_expectations"), dict) else verification_expectations
+                    boundary = self.schema_boundary.normalize(
+                        input_schema=input_schema,
+                        connection_schema=connection_schema,
+                        secret_schema=secret_schema,
+                        verification_input=verification_input,
+                    )
+                    input_schema = boundary["input_schema"]
+                    connection_schema = boundary["connection_schema"]
+                    secret_schema = boundary["secret_schema"]
+                    verification_input = self._verification_input_with_schema_sample(boundary["verification_input"], input_schema, connection_schema, secret_schema)
+                    specification_contract = self.contract_compiler.compile(
+                        blueprint={**blueprint, **llm_artifact},
+                        input_schema=input_schema,
+                        output_schema=output_schema,
+                        connection_schema=connection_schema,
+                        secret_schema=secret_schema,
+                        verification_input=verification_input,
+                        verification_expectations=verification_expectations,
+                    )
+                    files = self._stabilize_standard_library_runtime_files(files, blueprint=blueprint)
+                    input_schema = self._reconcile_required_fields_from_source(input_schema, files, scope="input")
+                    connection_schema = self._reconcile_required_fields_from_source(connection_schema, files, scope="connection")
+                    secret_schema = self._reconcile_required_fields_from_source(secret_schema, files, scope="secrets")
+                    boundary = self.schema_boundary.normalize(
+                        input_schema=input_schema,
+                        connection_schema=connection_schema,
+                        secret_schema=secret_schema,
+                        verification_input=verification_input,
+                    )
+                    input_schema = boundary["input_schema"]
+                    connection_schema = boundary["connection_schema"]
+                    secret_schema = boundary["secret_schema"]
+                    verification_input = self._verification_input_with_schema_sample(boundary["verification_input"], input_schema, connection_schema, secret_schema)
+                    dependencies = self._merge_dependencies(dependencies, self._normalized_dependencies(llm_artifact.get("dependencies")))
+                    dependencies = self._drop_stdlib_dependencies(dependencies)
+                    capability_contract = self._capability_contract(tool_id=tool_id, blueprint={**blueprint, **llm_artifact})
+                    artifact_kind = "real_runtime_implementation"
+                else:
+                    files = self._neutral_files(tool_id=tool_id, entrypoint=entrypoint, reason=generation_error or generation_status)
             else:
-                files = self._neutral_files(tool_id=tool_id, entrypoint=entrypoint, reason=generation_error or generation_status)
-        else:
-            files = self._neutral_files(tool_id=tool_id, entrypoint=entrypoint, reason="llm_generation_not_allowed_by_policy")
+                files = self._neutral_files(tool_id=tool_id, entrypoint=entrypoint, reason="llm_generation_not_allowed_by_policy")
 
         final_boundary = self.schema_boundary.normalize(
             input_schema=input_schema,
@@ -813,20 +814,65 @@ class RuntimeBlueprintArtifactGenerator:
         return kept
 
     def _stabilize_standard_library_runtime_files(self, files: list[dict[str, Any]], *, blueprint: dict[str, Any]) -> list[dict[str, Any]]:
-        """Return generated files without capability-specific rewriting.
+        """Normalize generated files to the generic runtime entrypoint contract.
 
-        The generator must not infer, replace, or patch artifacts using
-        domain keywords. Runtime safety requirements are provided by the
-        blueprint, verification input, approval policy, and sandbox executor.
+        This does not patch domain behavior. It only enforces the framework
+        contract that the manifest entrypoint is callable as run(payload). If a
+        generator produced a helper-style callable, the wrapper delegates to the
+        existing callable using generic payload sections.
         """
         out: list[dict[str, Any]] = []
+        entrypoint = blueprint.get("entrypoint") if isinstance(blueprint.get("entrypoint"), dict) else {}
+        module_name = str(entrypoint.get("module") or "tool.py")
+        function_name = str(entrypoint.get("function") or "run")
         for item in files:
             if isinstance(item, dict):
                 cloned = dict(item)
                 cloned["path"] = str(cloned.get("path") or "")
                 cloned["content"] = str(cloned.get("content") or "")
+                if self._same_module_path(cloned["path"], module_name):
+                    cloned["content"] = self._ensure_payload_entrypoint(cloned["content"], function_name=function_name)
                 out.append(cloned)
         return out
+
+    def _same_module_path(self, path: str, module_name: str) -> bool:
+        left = str(path or "").replace("\\", "/").rsplit("/", 1)[-1]
+        right = str(module_name or "tool.py").replace("\\", "/").rsplit("/", 1)[-1]
+        return left == right
+
+    def _ensure_payload_entrypoint(self, source: str, *, function_name: str = "run") -> str:
+        try:
+            tree = ast.parse(source or "")
+        except SyntaxError:
+            return source
+        functions = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        if any(fn.name == function_name and len(list(fn.args.posonlyargs) + list(fn.args.args)) == 1 for fn in functions):
+            return source
+        candidates = [fn for fn in functions if not fn.name.startswith("_") and fn.name != function_name]
+        if not candidates:
+            return source
+        target = candidates[0]
+        args = list(target.args.posonlyargs) + list(target.args.args)
+        if len(args) == 1:
+            call = "return _generated_delegate(payload)"
+        elif len(args) == 3:
+            call = "return _generated_delegate(input_values, connection_values, secret_values)"
+        else:
+            return source
+        wrapper = """
+
+# Generic runtime entrypoint adapter inserted by the capability generator.
+# It preserves the generated implementation and only adapts the framework
+# payload envelope to the callable declared by the manifest.
+def {function_name}(payload=None):
+    payload = payload if isinstance(payload, dict) else {{}}
+    input_values = payload.get("input") if isinstance(payload.get("input"), dict) else payload
+    connection_values = payload.get("connection") if isinstance(payload.get("connection"), dict) else {{}}
+    secret_values = payload.get("secrets") if isinstance(payload.get("secrets"), dict) else {{}}
+    _generated_delegate = {target_name}
+    {call}
+""".format(function_name=function_name, target_name=target.name, call=call)
+        return (source or "").rstrip() + wrapper + "\n"
 
     def _approval_policy_or_default(self, value: Any, *, runtime_execution_policy: dict[str, Any] | None = None) -> dict[str, Any]:
         runtime_execution_policy = runtime_execution_policy if isinstance(runtime_execution_policy, dict) else {}

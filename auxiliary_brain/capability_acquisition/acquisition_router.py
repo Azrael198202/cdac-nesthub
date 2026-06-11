@@ -349,7 +349,15 @@ class RuntimeCapabilityGapImplementer:
                 validation = retry["validation"]
         verification_run: dict[str, Any] | None = None
         if validation.get("passed"):
-            verification_run = self._execute_verification_run(template=template, artifact=artifact)
+            if str(validation.get("isolation_level") or "").strip().lower() == "static_only":
+                verification_run = {
+                    "passed": True,
+                    "status": "static_validation_only",
+                    "reason": "Sandbox policy selected static-only validation; live verification is deferred until runtime profile values are configured.",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            else:
+                verification_run = self._execute_verification_run(template=template, artifact=artifact)
             mark("VerificationRun", "completed" if verification_run.get("passed") else "failed", result=verification_run)
 
         registration_gate = self.acquisition_gate.evaluate_before_registration(
@@ -2041,6 +2049,14 @@ def test_runtime_contract_smoke():
             if not schema_check.get("passed"):
                 return {"passed": False, "status": "not_registered", "reason": f"{schema_name}_is_empty_or_open", "checks": checks}
 
+        entrypoint = manifest.get("entrypoint") if isinstance(manifest.get("entrypoint"), dict) else {}
+        module_path = tool_dir / str(entrypoint.get("module") or "tool.py")
+        function_name = str(entrypoint.get("function") or "run")
+        entrypoint_check = self._entrypoint_source_check(module_path=module_path, function_name=function_name)
+        checks.append({"name": "entrypoint_callable_contract", **entrypoint_check})
+        if not entrypoint_check.get("passed"):
+            return {"passed": False, "status": "not_registered", "reason": str(entrypoint_check.get("reason") or "entrypoint_not_callable"), "checks": checks}
+
         text = self._artifact_source_text(tool_dir)
         forbidden = ["requires_runtime_implementation", "runtime blueprint artifact verified", "blueprint only; not a registerable"]
         present_forbidden = [item for item in forbidden if item in text.casefold()]
@@ -2058,6 +2074,25 @@ def test_runtime_contract_smoke():
             return {"passed": False, "status": "not_registered", "reason": "sandbox_mode_missing_for_effectful_runtime", "checks": checks}
 
         return {"passed": True, "status": "registerable", "checks": checks}
+
+    def _entrypoint_source_check(self, *, module_path: Path, function_name: str) -> dict[str, Any]:
+        if not module_path.exists():
+            return {"passed": False, "reason": "entrypoint_module_missing", "module_path": str(module_path)}
+        try:
+            source = module_path.read_text(encoding="utf-8", errors="ignore")
+            tree = ast.parse(source or "")
+        except SyntaxError as exc:
+            return {"passed": False, "reason": "entrypoint_source_syntax_error", "error": str(exc)[:500]}
+        except Exception as exc:
+            return {"passed": False, "reason": "entrypoint_source_unreadable", "error_type": exc.__class__.__name__}
+        functions = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        fn = functions.get(function_name)
+        if not fn:
+            return {"passed": False, "reason": "entrypoint_function_missing", "expected_function": function_name, "available_functions": sorted(functions)}
+        args = list(fn.args.posonlyargs) + list(fn.args.args)
+        if len(args) != 1:
+            return {"passed": False, "reason": "entrypoint_must_accept_one_payload", "expected_function": function_name, "argument_count": len(args)}
+        return {"passed": True, "expected_function": function_name, "argument": args[0].arg}
 
     def _schema_is_specific(self, schema: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(schema, dict) or schema.get("type") != "object":

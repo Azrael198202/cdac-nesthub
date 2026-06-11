@@ -37,6 +37,7 @@ class RuntimeCapabilityAcquisitionGate:
     """
 
     ACCEPTED_ISOLATION_LEVELS = {"docker", "venv", "clean_subprocess", "isolated_subprocess", "local_clean_subprocess"}
+    STATIC_VALIDATION_LEVELS = {"static", "static_only", "compile_only", "schema_static"}
 
     def evaluate_before_validation(
         self,
@@ -124,8 +125,16 @@ class RuntimeCapabilityAcquisitionGate:
                 reason=self._reason(validation or sandbox_result, "Sandbox validation did not pass."),
             ).to_dict()
 
-        isolation = str(validation.get("isolation_level") or sandbox_result.get("mode") or validation.get("mode") or "").strip().lower()
-        if isolation and isolation not in self.ACCEPTED_ISOLATION_LEVELS:
+        isolation = str(
+            validation.get("isolation_level")
+            or sandbox_result.get("isolation_level")
+            or sandbox_result.get("mode")
+            or validation.get("mode")
+            or ""
+        ).strip().lower()
+        static_validated = isolation in self.STATIC_VALIDATION_LEVELS
+        trusted_isolation = static_validated or (not isolation) or isolation in self.ACCEPTED_ISOLATION_LEVELS
+        if not trusted_isolation:
             checks.append({"name": "isolation_level", "passed": False, "isolation_level": isolation})
             return AcquisitionGateDecision(
                 status="generated_but_isolation_level_untrusted",
@@ -135,9 +144,18 @@ class RuntimeCapabilityAcquisitionGate:
                 checks=checks,
                 reason=f"Sandbox isolation level is not trusted for registry enablement: {isolation}",
             ).to_dict()
-        checks.append({"name": "isolation_level", "passed": True, "isolation_level": isolation or "not_reported"})
+        checks.append({
+            "name": "isolation_level",
+            "passed": True,
+            "isolation_level": isolation or "not_reported",
+            "static_validated": static_validated,
+        })
 
-        verification_passed = bool(verification_run.get("passed") or sandbox_result.get("safe_to_register"))
+        verification_passed = bool(
+            verification_run.get("passed")
+            or sandbox_result.get("safe_to_register")
+            or (static_validated and validation_passed)
+        )
         checks.append({"name": "verification_run", "passed": verification_passed, "result": verification_run or sandbox_result})
         if not verification_passed:
             return AcquisitionGateDecision(

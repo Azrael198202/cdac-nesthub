@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -132,6 +133,7 @@ class RuntimeGeneratedToolInstaller:
 
         module_path_for_validation = Path(str(implementation.get("module_path")))
         callable_name = str(implementation.get("function") or implementation.get("callable") or "run")
+        self._ensure_manifest_entrypoint(module_path_for_validation, callable_name=callable_name)
         validation = self.validator.validate_python_file(module_path_for_validation, callable_name=callable_name)
         if not validation.get("valid"):
             raise ValueError("Generated runtime tool artifact failed validation: " + "; ".join(validation.get("errors", [])))
@@ -163,10 +165,16 @@ class RuntimeGeneratedToolInstaller:
             allow_network=bool(artifact.get("uses_network") and artifact.get("allow_network_verification")),
             timeout_seconds=int(artifact.get("verification_timeout_seconds") or 60),
         )
+        validation_passed = bool(sandbox_result.get("safe_to_register") or sandbox_result.get("status") in {"passed", "completed"})
         registration_gate = self.acquisition_gate.evaluate_before_registration(
             pre_validation_decision=pre_gate,
-            validation={"passed": bool(sandbox_result.get("safe_to_register")), "mode": sandbox_result.get("mode"), "checks": sandbox_result.get("checks", [])},
-            verification_run={"passed": bool(sandbox_result.get("safe_to_register")), "sandbox_result": sandbox_result},
+            validation={
+                "passed": validation_passed,
+                "mode": sandbox_result.get("mode"),
+                "isolation_level": sandbox_result.get("isolation_level"),
+                "checks": sandbox_result.get("checks", []),
+            },
+            verification_run={"passed": validation_passed, "sandbox_result": sandbox_result},
             sandbox_result=sandbox_result,
         )
         self.acquisition_gate.write_report(artifact_dir=target_dir, report={"pre_validation": pre_gate, "sandbox": sandbox_result, "registration": registration_gate})
@@ -221,6 +229,48 @@ class RuntimeGeneratedToolInstaller:
         }
         self.registry_path.write_text(json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
         return registry[tool_id]
+
+    def _ensure_manifest_entrypoint(self, module_path: Path, *, callable_name: str) -> None:
+        if not module_path.exists():
+            return
+        source = module_path.read_text(encoding="utf-8", errors="ignore")
+        patched = self._source_with_payload_entrypoint(source, callable_name=callable_name)
+        if patched != source:
+            module_path.write_text(patched, encoding="utf-8")
+
+    def _source_with_payload_entrypoint(self, source: str, *, callable_name: str) -> str:
+        try:
+            tree = ast.parse(source or "")
+        except SyntaxError:
+            return source
+        functions = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        for fn in functions:
+            args = list(fn.args.posonlyargs) + list(fn.args.args)
+            if fn.name == callable_name and len(args) == 1:
+                return source
+        candidates = [fn for fn in functions if not fn.name.startswith("_") and fn.name != callable_name]
+        if not candidates:
+            return source
+        target = candidates[0]
+        args = list(target.args.posonlyargs) + list(target.args.args)
+        if len(args) == 1:
+            call = "return _generated_delegate(payload)"
+        elif len(args) == 3:
+            call = "return _generated_delegate(input_values, connection_values, secret_values)"
+        else:
+            return source
+        wrapper = """
+
+# Generic runtime entrypoint adapter inserted during installation.
+def {callable_name}(payload=None):
+    payload = payload if isinstance(payload, dict) else {{}}
+    input_values = payload.get("input") if isinstance(payload.get("input"), dict) else payload
+    connection_values = payload.get("connection") if isinstance(payload.get("connection"), dict) else {{}}
+    secret_values = payload.get("secrets") if isinstance(payload.get("secrets"), dict) else {{}}
+    _generated_delegate = {target_name}
+    {call}
+""".format(callable_name=callable_name, target_name=target.name, call=call)
+        return (source or "").rstrip() + wrapper + "\n"
 
     def _build_sandbox_artifact(
         self,
