@@ -32,6 +32,7 @@ from auxiliary_brain.runtime.capability.registered_tool_agent_binder import Regi
 from verification_brain import RuntimeVerificationFoundation
 from presentation_brain import FailureMessageRenderer, PresentationProfileRegistry
 from ai_core.runtime.state import runtime_state_manager
+from auxiliary_brain.task_compiler import TaskGraphCompiler, CompiledTaskLoader
 
 
 class AgentStudioService:
@@ -58,6 +59,8 @@ class AgentStudioService:
         self.registered_tool_service = RuntimeRegisteredToolService()
         self.registered_tool_agent_binder = RegisteredToolAgentBinder()
         self.verification_foundation = RuntimeVerificationFoundation()
+        self.task_graph_compiler = TaskGraphCompiler()
+        self.compiled_task_loader = CompiledTaskLoader()
         self.failure_message_renderer = FailureMessageRenderer()
         self.direct_capability_dispatcher = CapabilityDispatcher(handlers={
             "image_generation": self._handle_direct_image_generation,
@@ -1342,6 +1345,27 @@ class AgentStudioService:
             "final_synthesis_owner": "ai_core",
         }
         payload.update(self._next_task_revision_metadata(task_name, instruction))
+        compile_result = self.task_graph_compiler.compile_validate_save(payload)
+        if compile_result.get("status") != "completed":
+            validation_report = compile_result.get("validation_report") if isinstance(compile_result.get("validation_report"), dict) else {}
+            self._update_community()
+            return {
+                "action": "create_task_graph",
+                "origin": "auxiliary_brain",
+                "status": "failed",
+                "failure_class": "compiled_task_validation_failed",
+                "graph_id": graph_id,
+                "task_name": task_name,
+                "message": "Task compile failed",
+                "final_answer": "Task compile failed",
+                "validation_report": validation_report,
+            }
+        payload["compiled_task"] = {
+            "task_id": (compile_result.get("compiled_task") or {}).get("task_id"),
+            "path": compile_result.get("compiled_task_path"),
+            "validation_report": compile_result.get("validation_report"),
+            "execution_mode": "execute_compiled_task",
+        }
         self._write_task_revision_asset(payload)
         path = self.store.write_json(f"generated/tasks/{task_name}.json", payload)
         if isinstance(schedule_policy, dict) and schedule_policy.get("enabled"):
@@ -1999,7 +2023,8 @@ class AgentStudioService:
                 "status": "blocked",
                 "message": "A task name is required.",
             }
-        task_graph = self.store.read_json(f"generated/tasks/{task_name}.json")
+        compiled_loaded = self.compiled_task_loader.as_task_graph(str(task_name))
+        task_graph = compiled_loaded or self.store.read_json(f"generated/tasks/{task_name}.json")
         if not task_graph:
             return {
                 "action": "execute_task_graph",
@@ -2007,6 +2032,21 @@ class AgentStudioService:
                 "status": "not_found",
                 "task_name": task_name,
             }
+        if not compiled_loaded:
+            compile_result = self.task_graph_compiler.compile_validate_save(task_graph)
+            if compile_result.get("status") != "completed":
+                return {
+                    "action": "execute_task_graph",
+                    "origin": "auxiliary_brain",
+                    "status": "blocked",
+                    "task_name": task_name,
+                    "message": "Task compile failed",
+                    "final_answer": "Task compile failed",
+                    "validation_report": compile_result.get("validation_report"),
+                }
+            compiled_loaded = self.compiled_task_loader.as_task_graph(str(task_name))
+            if compiled_loaded:
+                task_graph = compiled_loaded
         execution_type = self._task_execution_type(task_graph)
         schedule_policy = self._task_schedule_policy(task_graph)
         runtime_state_manager.emit(run_id=state_run_id, step_id="task.load", level="developer", kind="validation", status="completed", title="Task graph loaded", message="Task graph loaded from runtime storage.", output={"task_name": task_name, "task_count": len(task_graph.get("tasks") or []) if isinstance(task_graph, dict) else 0, "execution_type": execution_type, "schedule_state": schedule_policy.get("state")}, progress=100)

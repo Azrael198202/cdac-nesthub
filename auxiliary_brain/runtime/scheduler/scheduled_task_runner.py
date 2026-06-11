@@ -65,7 +65,7 @@ class ScheduledTaskRunner:
     async def run_once(self, executor: Callable[..., Awaitable[dict[str, Any]]]) -> list[dict[str, Any]]:
         now = datetime.now(timezone.utc)
         executed: list[dict[str, Any]] = []
-        for path in sorted(self.tasks_dir.glob("*.json")):
+        for path in self._task_record_paths():
             task_graph = self._read(path)
             if not isinstance(task_graph, dict):
                 continue
@@ -111,6 +111,12 @@ class ScheduledTaskRunner:
                 self._write(path, task_graph)
                 self._trace({"event": "next_run_at_updated", "task_name": task_name, "next_run_at": policy.get("next_run_at"), "last_run_at": policy.get("last_run_at")})
         return executed
+
+    def _task_record_paths(self) -> list[Path]:
+        compiled_sources = list(self.tasks_dir.glob("*/source_task_graph.json"))
+        compiled_ids = {path.parent.name for path in compiled_sources}
+        legacy = [path for path in self.tasks_dir.glob("*.json") if path.stem not in compiled_ids]
+        return sorted(legacy + compiled_sources)
 
 
     async def _call_executor(self, executor: Callable[..., Awaitable[dict[str, Any]]], task_name: str, task_graph: dict[str, Any]) -> dict[str, Any]:

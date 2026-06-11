@@ -250,15 +250,23 @@ class GraphVisualStateBuilder:
                 })
         bindings = node.get("workflow_bindings") if isinstance(node.get("workflow_bindings"), list) else []
         source_contract = node.get("source_contract") if isinstance(node.get("source_contract"), dict) else {}
+        execution_contract = node.get("execution_contract") if isinstance(node.get("execution_contract"), dict) else {}
+        prompt_profile = node.get("prompt_profile")
+        exportable_outputs = node.get("exportable_outputs") if isinstance(node.get("exportable_outputs"), list) else []
+        dependencies = self._as_list(node.get("dependencies")) or self._as_list(node.get("depends_on")) or self._as_list(input_contract.get("bound_from_upstream"))
         return {
             "instruction": instruction[:2000],
             "source_step_id": str(node.get("source_step_id") or ""),
-            "depends_on": self._as_list(node.get("depends_on")) or self._as_list(input_contract.get("bound_from_upstream")),
+            "prompt_profile": prompt_profile,
+            "execution_contract": execution_contract,
+            "dependencies": dependencies,
+            "depends_on": dependencies,
             "source_contract": source_contract,
             "input_contract": input_contract,
             "output_contract": output_contract,
             "parameters": params[:40],
-            "bindings": bindings[:40],
+            "bindings": (node.get("bindings") if isinstance(node.get("bindings"), list) else bindings)[:40],
+            "exportable_outputs": exportable_outputs,
         }
 
 

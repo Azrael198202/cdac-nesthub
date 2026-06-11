@@ -479,7 +479,7 @@ class AgentParameterContractService:
                 if normalized not in seen:
                     seen.append(normalized)
             values["date"] = seen
-        # Generic location phrase pattern such as "for Fukuoka" or "in Tokyo".
+        # Generic location phrase pattern such as a preposition followed by a proper noun.
         loc_match = re.search(r"\b(?:for|in|at)\s+([A-Z][A-Za-z\- ]+?)(?:\s+(?:today|tomorrow|yesterday|tonight|next\b)|[。.!?,]|$)", text)
         if loc_match:
             candidate = loc_match.group(1).strip()

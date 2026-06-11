@@ -87,7 +87,10 @@ def _scheduler_config_enabled() -> bool:
 def _has_enabled_scheduled_task() -> bool:
     tasks_dir = Path("runtime") / "generated" / "tasks"
     try:
-        for path in tasks_dir.glob("*.json"):
+        compiled_sources = list(tasks_dir.glob("*/source_task_graph.json"))
+        compiled_ids = {path.parent.name for path in compiled_sources}
+        candidate_paths = [path for path in tasks_dir.glob("*.json") if path.stem not in compiled_ids] + compiled_sources
+        for path in candidate_paths:
             try:
                 graph = json.loads(path.read_text(encoding="utf-8"))
             except Exception:
