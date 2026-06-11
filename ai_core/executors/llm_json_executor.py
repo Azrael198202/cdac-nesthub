@@ -883,7 +883,18 @@ class LLMJsonExecutor:
             if value is True:
                 return True
         text_values: list[str] = []
-        for key in ("required_source_level", "semantic_category", "intent_family", "execution_method", "selected_execution_method"):
+        for key in (
+            "required_source_level",
+            "semantic_category",
+            "intent_family",
+            "execution_method",
+            "selected_execution_method",
+            "objective",
+            "original_input",
+            "normalized_input",
+            "message",
+            "INPUT",
+        ):
             value = container.get(key)
             if isinstance(value, str):
                 text_values.append(value)
@@ -913,7 +924,17 @@ class LLMJsonExecutor:
             "api call",
             "source material",
         )
-        return any(marker in normalized for marker in external_markers)
+        if any(marker in normalized for marker in external_markers):
+            return True
+
+        # Do not infer source requirements from free text here.  This executor
+        # is a generic JSON executor and must not contain task/domain/freshness
+        # vocabularies.  A decomposed step may only be repaired from
+        # human-interaction/no-op to an external-material action when an upstream
+        # structured contract explicitly declares that external/source material
+        # is required.  Otherwise the primary runtime keeps the planned action
+        # and later stages can ask for missing inputs or fail with a clear reason.
+        return False
 
     def _steps_from_execution_plan_action(self, *, result: dict, state: dict) -> list[dict]:
         execution_plan = result.get("execution_plan") if isinstance(result.get("execution_plan"), dict) else {}
