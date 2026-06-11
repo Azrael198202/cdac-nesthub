@@ -95,7 +95,16 @@ class FinalAnswerSynthesizer:
             }
         facts = self.guard.filter(self.normalizer.normalize(materials=sanitized, state=state))
         facts = self.claim_ranker.filter_verified_facts(facts, evidence_claims)
-        deterministic = planned_answer if answer_plan.get("status") in {"ready", "insufficient"} else self._deterministic_summary(facts=facts, sanitized=sanitized, trust_summary=trust_summary, evidence_claims=evidence_claims)
+        if answer_plan.get("status") == "ready":
+            deterministic = planned_answer
+        elif answer_plan.get("status") == "insufficient":
+            # Do not export a generic insufficient-evidence sentence when the
+            # execution layer has already collected public source-card material.
+            # Presentation may use title/snippet/url/time-like fields as a
+            # source-backed fallback without inventing facts.
+            deterministic = self._source_card_answer_from_materials(sanitized, state=state) or planned_answer
+        else:
+            deterministic = self._deterministic_summary(facts=facts, sanitized=sanitized, trust_summary=trust_summary, evidence_claims=evidence_claims)
         answer = deterministic
 
         if self._model_synthesis_enabled(state, facts):
@@ -114,6 +123,13 @@ class FinalAnswerSynthesizer:
         final_quality = self.quality_gate.evaluate(answer=answer, answer_plan=answer_plan, resolved_claims=resolved_claims)
         if final_consistency.get("passed") is not True or final_quality.get("passed") is not True:
             answer = deterministic
+            # If deterministic is still the generic insufficient response, try a
+            # source-card fallback before returning material that would be
+            # useless to downstream workflow steps such as message bodies.
+            if answer_plan.get("status") == "insufficient":
+                card_answer = self._source_card_answer_from_materials(sanitized, state=state)
+                if card_answer:
+                    answer = card_answer
             final_consistency = self.claim_ranker.answer_consistent(answer, evidence_claims)
             final_quality = self.quality_gate.evaluate(answer=answer, answer_plan=answer_plan, resolved_claims=resolved_claims)
         answer = self._assert_no_debug_material_in_final_answer(answer, fallback=deterministic)

@@ -1616,6 +1616,23 @@ class ConversationCoreRuntime:
                     "title": str(rec.get("title") or rec.get("source_title") or rec.get("url") or "source")[:240],
                     "url": str(rec.get("url") or rec.get("source_url") or "")[:500],
                     "text": " ".join(str(rec.get("text") or "").split())[:1500],
+                    "time_expression": str(rec.get("time_expression") or "")[:120],
+                })
+        # Page body extraction is best-effort.  Some public pages expose only
+        # result-card material to the runtime (title/snippet/url/time-like text).
+        # Preserve those cards as source-bound candidate records so the answer
+        # planner can still create a grounded summary instead of returning an
+        # insufficient-evidence sentence.  This is generic: it only uses public
+        # result-card fields and does not depend on a domain or source name.
+        card_records = self.content_extractor.extract_from_search_results(results, max_records=40)
+        for rec in card_records[:20]:
+            if isinstance(rec, dict):
+                evidence_cards.append({
+                    "title": str(rec.get("title") or rec.get("source_title") or rec.get("url") or "source")[:240],
+                    "url": str(rec.get("url") or rec.get("source_url") or "")[:500],
+                    "text": " ".join(str(rec.get("text") or "").split())[:1500],
+                    "time_expression": str(rec.get("time_expression") or "")[:120],
+                    "relevance_score": rec.get("relevance_score"),
                 })
 
         relevance = self.source_relevance_selector.select(
@@ -1630,7 +1647,12 @@ class ConversationCoreRuntime:
             normalized = self.evidence_normalizer.normalize(user_input=user_input, source_cards=evidence_cards)
             resolved = self.claim_resolver.resolve(user_input=user_input, normalized_evidence=normalized)
             plan = self.answer_planner.plan(user_input=user_input, resolved_claims=resolved)
-            return self.answer_planner.render(plan)
+            fallback = self.answer_planner.render(plan)
+            if plan.get("status") == "insufficient":
+                card_answer = self._source_card_answer_from_cards(user_input=user_input, cards=evidence_cards, urls=urls)
+                if card_answer:
+                    return card_answer
+            return fallback
 
         normalized = self.evidence_normalizer.normalize(user_input=user_input, source_cards=selected_cards)
         resolved = self.claim_resolver.resolve(user_input=user_input, normalized_evidence=normalized)
@@ -1695,11 +1717,81 @@ class ConversationCoreRuntime:
         quality = self.answer_quality_gate.evaluate(answer=answer, answer_plan=plan, resolved_claims=resolved)
         if quality.get("passed") is not True:
             answer = self.answer_planner.render(plan)
+            if plan.get("status") == "insufficient":
+                card_answer = self._source_card_answer_from_cards(user_input=user_input, cards=selected_cards or evidence_cards, urls=selected_urls or urls)
+                if card_answer:
+                    answer = card_answer
 
         # Keep source visibility bound to selected relevant sources only.
         if selected_urls and not any(str(u) in answer for u in selected_urls[:3]):
             answer = answer.rstrip() + "\n\nSources:\n" + "\n".join(f"- {u}" for u in selected_urls[:5])
         return answer.strip()
+
+    def _source_card_answer_from_cards(self, *, user_input: str, cards: list[dict[str, Any]], urls: list[str]) -> str:
+        """Render a grounded answer from public source cards when page bodies are unavailable.
+
+        This method is a last-mile presentation fallback for source retrieval.
+        It does not perform a new search and it does not infer facts beyond the
+        title/snippet/url/time fields already collected by the execution layer.
+        """
+        selected: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        def clean(value: Any, limit: int = 700) -> str:
+            text = " ".join(str(value or "").split())
+            if len(text) > limit:
+                text = text[: limit - 3].rsplit(" ", 1)[0] + "..."
+            return text.strip()
+
+        for card in cards or []:
+            if not isinstance(card, dict):
+                continue
+            title = clean(card.get("title") or card.get("name") or card.get("source_title"), 240)
+            text = clean(card.get("text") or card.get("snippet") or card.get("summary") or card.get("description"), 700)
+            url = clean(card.get("url") or card.get("source_url") or card.get("link"), 500)
+            time_expr = clean(card.get("time_expression") or card.get("published_at") or card.get("publication_time") or card.get("date") or card.get("time"), 120)
+            if not title and not text:
+                continue
+            key = (url or title or text[:120]).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append({"title": title or text[:160], "summary": text or title, "url": url, "time": time_expr})
+            if len(selected) >= max(1, min(self._requested_item_count_from_text(user_input) or 5, 10)):
+                break
+        if not selected:
+            return ""
+        lines = ["I found the following source-backed information:"]
+        for index, item in enumerate(selected, 1):
+            lines.append(f"{index}. {item['title']}")
+            if item.get("summary") and item["summary"] != item["title"]:
+                lines.append(f"   Brief summary: {item['summary']}")
+            if item.get("url"):
+                lines.append(f"   Source: {item['url']}")
+            if item.get("time"):
+                lines.append(f"   Publication time: {item['time']}")
+        visible_urls = []
+        for item in selected:
+            url = item.get("url") or ""
+            if url.startswith(("http://", "https://")) and url not in visible_urls:
+                visible_urls.append(url)
+        for url in urls or []:
+            if isinstance(url, str) and url.startswith(("http://", "https://")) and url not in visible_urls:
+                visible_urls.append(url)
+        if visible_urls:
+            lines.append("Sources:")
+            lines.extend(f"- {url}" for url in visible_urls[:5])
+        return "\n".join(lines).strip()
+
+    def _requested_item_count_from_text(self, text: str) -> int:
+        match = re.search(r"\b(\d{1,2})\b", str(text or ""))
+        if not match:
+            return 0
+        try:
+            value = int(match.group(1))
+        except Exception:
+            return 0
+        return value if 0 < value <= 20 else 0
 
     def _compact_web_evidence_material(self, user_input: str, evidence_cards: list[dict[str, str]], urls: list[str], relevance: dict[str, Any] | None = None) -> str:
         """Fallback material that is readable without model synthesis.

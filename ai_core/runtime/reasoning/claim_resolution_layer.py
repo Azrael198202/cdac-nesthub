@@ -128,7 +128,7 @@ class ClaimResolutionLayer:
             title = " ".join(str(record.get("title") or "").split())
             if kind != "extracted_content_record" and float(record.get("relevance_score") or 0.0) < 0.5:
                 continue
-            value = title or text
+            value = title if len(title) >= 20 else text
             if len(value) < 20:
                 continue
             key = value[:160].casefold()
