@@ -151,6 +151,35 @@ class AgentDelegationRuntime:
                 completed_results=agent_results,
                 dependency_plan=dependency_plan,
             )
+            capability_result = await self._try_execute_generated_capability(
+                participant=participant,
+                completed_results=agent_results,
+                dependency_plan=dependency_plan,
+                task_name=task_name,
+            )
+            if capability_result is not None:
+                result = capability_result
+                result_payload = self._sanitize_result_payload(result.__dict__)
+                agent_results.append(result)
+                run_payload["agent_results"].append(result_payload)
+                self._record_progress(
+                    run_payload,
+                    f"participant_{index + 1}_complete",
+                    f"Participant finished: {participant_name}",
+                    "completed" if result.status == "completed" else result.status,
+                )
+                if result.status in {"requires_key", "requires_input", "paused"}:
+                    run_payload.update({
+                        "status": result.status,
+                        "current_stage": "waiting_for_required_input",
+                        "pending_action": result.pending_action,
+                        "missing_inputs": result.missing_inputs or [],
+                        "completed_at": self._now(),
+                    })
+                    self._record_progress(run_payload, "waiting_input", "Waiting for required input", "waiting")
+                    self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+                    return run_payload
+                continue
             request = AgentExecutionRequest(
                 participant_id=str(participant.get("participant_id") or participant.get("id")),
                 participant_name=participant_name,
@@ -1199,6 +1228,35 @@ class AgentDelegationRuntime:
                 completed_results=agent_results,
                 dependency_plan=dependency_plan,
             )
+            capability_result = await self._try_execute_generated_capability(
+                participant=participant,
+                completed_results=agent_results,
+                dependency_plan=dependency_plan,
+                task_name=task_name,
+            )
+            if capability_result is not None:
+                result = capability_result
+                result_payload = self._sanitize_result_payload(result.__dict__)
+                agent_results.append(result)
+                run_payload["agent_results"].append(result_payload)
+                self._record_progress(
+                    run_payload,
+                    f"participant_{index + 1}_complete",
+                    f"Participant finished: {participant_name}",
+                    "completed" if result.status == "completed" else result.status,
+                )
+                if result.status in {"requires_key", "requires_input", "paused"}:
+                    run_payload.update({
+                        "status": result.status,
+                        "current_stage": "waiting_for_required_input",
+                        "pending_action": result.pending_action,
+                        "missing_inputs": result.missing_inputs or [],
+                        "completed_at": self._now(),
+                    })
+                    self._record_progress(run_payload, "waiting_input", "Waiting for required input", "waiting")
+                    self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+                    return run_payload
+                continue
             request = AgentExecutionRequest(
                 participant_id=participant_id,
                 participant_name=participant_name,

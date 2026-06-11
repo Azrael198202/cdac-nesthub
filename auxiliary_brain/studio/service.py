@@ -1196,7 +1196,7 @@ class AgentStudioService:
             instruction=instruction,
         )
         artifact_refs = self._resolve_uploaded_artifacts_for_instruction(instruction, uploaded_artifacts)
-        explicit_runtime_parameters = self._extract_runtime_parameters_from_instruction(instruction)
+        explicit_runtime_parameters = self._extract_top_level_runtime_parameters_from_instruction(instruction)
         schedule_policy = self._extract_schedule_policy_from_instruction(instruction)
         mentioned_participants = self._participants_mentioned_in_message(instruction, participants)
         if len(mentioned_participants) == 1:
@@ -2049,7 +2049,7 @@ class AgentStudioService:
             runtime_parameters.update(task_graph.get("runtime_parameters") or {})
         runtime_parameters.update(self._extract_step_scoped_runtime_parameters_from_tasks(task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []))
         runtime_parameters.update(self._extract_named_parameter_blocks_from_instruction(str(task_graph.get("instruction") or ""), participants))
-        runtime_parameters.update(self._extract_runtime_parameters_from_instruction(instruction or ""))
+        runtime_parameters.update(self._extract_top_level_runtime_parameters_from_instruction(instruction or ""))
         runtime_parameters.update(self._structural_source_runtime_context(task_graph=task_graph, instruction=instruction))
         if isinstance(provided_inputs, dict):
             runtime_parameters.update({
@@ -2442,6 +2442,36 @@ class AgentStudioService:
 
 
 
+    def _extract_top_level_runtime_parameters_from_instruction(self, instruction: str) -> dict[str, Any]:
+        """Extract only task-level runtime parameters.
+
+        A composite workflow may contain scoped parameter blocks inside numbered
+        steps. Those values belong to the step/participant that owns the block,
+        not to every step in the run.  This method removes explicit step
+        fragments before using the generic assignment parser, so downstream
+        parameters cannot pollute an upstream step that is sent back to ai_core
+        as an independent request.
+        """
+        text = str(instruction or "")
+        if not text.strip():
+            return {}
+        redacted = self._remove_numbered_step_bodies(text)
+        return self._extract_runtime_parameters_from_instruction(redacted)
+
+    def _remove_numbered_step_bodies(self, instruction: str) -> str:
+        """Keep preamble text and remove explicit numbered step bodies.
+
+        This is syntax-only decomposition.  It intentionally knows nothing
+        about business domains or capability names; it only recognizes generic
+        numbered step labels.
+        """
+        text = str(instruction or "")
+        pattern = re.compile(r"(?is)(?:^|[\r\n]+)\s*(?:step\s*\d+|\d+)\s*[:：.)-]\s*")
+        match = pattern.search(text)
+        if not match:
+            return text
+        return text[: match.start()].strip()
+
     def _extract_runtime_parameters_from_instruction(self, instruction: str) -> dict[str, Any]:
         """Extract explicit task-run parameters from user-authored text.
 
@@ -2541,9 +2571,11 @@ class AgentStudioService:
                     conflicts.add(key)
                 else:
                     unscoped_seen[key] = value
-        for key, value in unscoped_seen.items():
-            if key not in conflicts:
-                out.setdefault(key, value)
+        # Do not write unscoped fallbacks for values discovered inside step
+        # fragments.  In a composite workflow those values are scoped to the
+        # step/participant that owns the fragment.  A global fallback would be
+        # injected into unrelated upstream steps when they are executed through
+        # ai_core and can corrupt intent recognition/planning.
         return out
 
 
