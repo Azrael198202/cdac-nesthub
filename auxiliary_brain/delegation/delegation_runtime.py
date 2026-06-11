@@ -1660,12 +1660,114 @@ class AgentDelegationRuntime:
         terminal = [result for result in agent_results if str(getattr(result, "participant_id", "") or "") not in outgoing]
         return terminal or agent_results
 
+    def _parameter_alias_token(self, value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().casefold()).strip("_")
+
+    def _participant_parameter_aliases(self, participant: dict[str, Any]) -> set[str]:
+        aliases: set[str] = set()
+        for value in (
+            self._participant_identity(participant),
+            self._participant_name(participant),
+            participant.get("agent_name"),
+            participant.get("display_name"),
+            participant.get("participant_display_name"),
+            participant.get("name"),
+            participant.get("id"),
+            participant.get("participant_id"),
+        ):
+            raw = str(value or "").strip()
+            if not raw:
+                continue
+            aliases.add(raw.casefold())
+            token = self._parameter_alias_token(raw)
+            if token:
+                aliases.add(token)
+        return aliases
+
+    def _participant_parameter_field_names(self, participant: dict[str, Any]) -> set[str]:
+        fields: set[str] = set()
+        contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}
+        for item in contract.get("parameters") or []:
+            if isinstance(item, dict) and str(item.get("name") or "").strip():
+                fields.add(str(item.get("name")).strip())
+        profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+        for container in (profile, profile.get("tool_summary") if isinstance(profile.get("tool_summary"), dict) else {}):
+            schema = container.get("input_schema") if isinstance(container.get("input_schema"), dict) else {}
+            props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+            for name in props:
+                if str(name).strip():
+                    fields.add(str(name).strip())
+        return fields
+
+    def _scoped_runtime_parameters_from_values(self, participant: dict[str, Any], runtime_parameters: dict[str, Any]) -> dict[str, Any]:
+        """Return only values that belong to this participant.
+
+        A task-level parameter map may contain values for many steps.  Passing
+        the whole map into each ai_core step pollutes intent recognition and can
+        make an upstream information-gathering step look like a downstream tool
+        call.  This helper keeps explicit participant-scoped values and, for
+        executable participants with a declared input contract, compatible
+        unscoped field names.  It is generic: aliases and schema fields come
+        from the participant object, not from any business domain.
+        """
+        if not isinstance(runtime_parameters, dict):
+            return {}
+        aliases = self._participant_parameter_aliases(participant)
+        field_names = self._participant_parameter_field_names(participant)
+        field_tokens = {self._parameter_alias_token(x) for x in field_names}
+        out: dict[str, Any] = {}
+        for key, value in runtime_parameters.items():
+            if value in (None, "", [], {}):
+                continue
+            text_key = str(key or "").strip()
+            if not text_key:
+                continue
+            if text_key.startswith("_"):
+                # Coordination metadata is not a step parameter.  It may be kept
+                # at the run level but must not be rendered into ai_core prompts.
+                continue
+            lower = text_key.casefold()
+            token = self._parameter_alias_token(text_key)
+            matched = False
+            if "." in text_key:
+                prefix, tail = text_key.rsplit(".", 1)
+                if prefix.casefold() in aliases or self._parameter_alias_token(prefix) in aliases:
+                    out[str(tail).strip()] = copy.deepcopy(value)
+                    matched = True
+            if matched:
+                continue
+            for alias in aliases:
+                if not alias:
+                    continue
+                dotted = alias + "."
+                underscored = alias + "_"
+                if lower.startswith(dotted):
+                    out[text_key[len(dotted):]] = copy.deepcopy(value)
+                    matched = True
+                    break
+                if token.startswith(underscored):
+                    tail_token = token[len(underscored):]
+                    # Preserve declared field spelling when possible.
+                    field = next((name for name in field_names if self._parameter_alias_token(name) == tail_token), tail_token)
+                    out[field] = copy.deepcopy(value)
+                    matched = True
+                    break
+            if matched:
+                continue
+            # Unscoped values are safe only when this participant declares that
+            # exact runtime input field.  A semantic/source step has no such
+            # executable input contract, so downstream values cannot leak into it.
+            if field_names and (text_key in field_names or token in field_tokens):
+                field = next((name for name in field_names if name == text_key or self._parameter_alias_token(name) == token), text_key)
+                out[field] = copy.deepcopy(value)
+        return out
+
     def _merged_runtime_parameters(self, task_graph: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
         values: dict[str, Any] = {}
         if isinstance(task_graph.get("runtime_parameters"), dict):
-            values.update(task_graph.get("runtime_parameters") or {})
+            values.update(self._scoped_runtime_parameters_from_values(participant, task_graph.get("runtime_parameters") or {}))
         if isinstance(participant.get("runtime_parameters"), dict):
-            values.update(participant.get("runtime_parameters") or {})
+            values.update(self._scoped_runtime_parameters_from_values(participant, participant.get("runtime_parameters") or {}))
         return values
 
     def _compact_parameter_contract(self, contract: Any) -> dict[str, Any]:
@@ -1701,12 +1803,16 @@ class AgentDelegationRuntime:
         for participant in participants:
             if not isinstance(participant, dict):
                 continue
-            scoped = participant.setdefault("runtime_parameters", {})
-            if isinstance(scoped, dict):
-                for key, value in runtime_parameters.items():
-                    if value not in (None, "", [], {}) and key not in scoped:
-                        scoped[key] = copy.deepcopy(value)
-            self.parameter_contract_service.apply_values(participant, runtime_parameters)
+            scoped_values = self._scoped_runtime_parameters_from_values(participant, runtime_parameters)
+            if scoped_values:
+                scoped = participant.setdefault("runtime_parameters", {})
+                if isinstance(scoped, dict):
+                    for key, value in scoped_values.items():
+                        if value not in (None, "", [], {}) and key not in scoped:
+                            scoped[key] = copy.deepcopy(value)
+                self.parameter_contract_service.apply_values(participant, scoped_values)
+            else:
+                self.parameter_contract_service.apply_values(participant, {})
 
     def _collect_missing_agent_parameter_fields(self, participants: list[dict[str, Any]], dependency_plan: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         fields: list[dict[str, Any]] = []

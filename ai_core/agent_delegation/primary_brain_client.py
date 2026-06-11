@@ -305,6 +305,13 @@ class PrimaryBrainDelegationClient:
         state.setdefault("runtime_options", {})["delegation_mode"] = True
         state.setdefault("runtime_options", {})["auto_approve_reviews"] = True
         state.setdefault("runtime_options", {})["standalone_dataflow_source_step"] = True
+        state.setdefault("runtime_options", {})["isolated_delegated_step_context"] = True
+        # A decomposed workflow step is a fresh primary-runtime request.  The
+        # user session can still contain the parent task conversation, but that
+        # rolling summary is coordination context and must not be injected into
+        # the step's intent recognition/planning.  Peer material is passed
+        # explicitly through shared_context when the dependency graph requires it.
+        state["context_window"] = {"rolling_summary": "", "recent_turns": [], "open_items": [], "boundary": {}}
         if progress_callback:
             self.runtime.add_event_listener(runtime_run_id, progress_callback)
         try:
