@@ -1561,6 +1561,37 @@ class AgentDelegationRuntime:
                 plan["edges"].append({"from": dep_id, "to": pid, "reason": "declared_or_clear_result_reference"})
         return plan
 
+
+    def _step_source_contract(self, participant: dict[str, Any]) -> dict[str, Any]:
+        """Return a structural source-material contract for one decomposed step.
+
+        This is syntax/contract based and domain-neutral.  It does not inspect
+        the task topic.  When a step explicitly asks for provenance-like output
+        fields, the primary runtime should obtain source material instead of
+        treating the step as a pure prompt or a missing-information request.
+        """
+        fragment = str(participant.get("source_instruction_fragment") or participant.get("execution_objective") or participant.get("instruction") or "")
+        requested_fields: list[str] = []
+        for raw in fragment.splitlines():
+            line = raw.strip()
+            if not line.startswith(("-", "*")):
+                continue
+            field = line.lstrip("-* ").strip().strip(":：").casefold()
+            if field:
+                requested_fields.append(field)
+        normalized = {re.sub(r"[^a-z0-9]+", "_", item).strip("_") for item in requested_fields}
+        provenance_fields = {
+            "source", "sources", "reference", "references", "citation", "citations",
+            "url", "link", "links", "published_at", "publication_time", "time", "date",
+        }
+        requires_source_material = bool(normalized & provenance_fields)
+        return {
+            "contract_type": "step_source_material_contract",
+            "requires_source_material": requires_source_material,
+            "requested_output_fields": requested_fields,
+            "reason": "requested_output_provenance_fields" if requires_source_material else "not_declared",
+        }
+
     def _build_participant_shared_context(
         self,
         *,
@@ -1599,6 +1630,7 @@ class AgentDelegationRuntime:
                     "resolution_key": "artifact_id_or_filename",
                     "preferred_action_type": "use_uploaded_file",
                 },
+                "source_contract": self._step_source_contract(participant),
             }
             peer_results = self._peer_results_for_participant(participant, completed_results, dependency_plan)
             if peer_results:

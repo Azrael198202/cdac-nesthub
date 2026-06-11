@@ -1227,6 +1227,7 @@ class AgentStudioService:
             workflow_plan.tasks,
             workflow_plan.selected_participants,
         )
+        workflow_tasks = self._attach_step_source_contracts(workflow_tasks)
         explicit_runtime_parameters.update(
             self._extract_named_parameter_blocks_from_instruction(instruction, workflow_plan.selected_participants)
         )
@@ -2446,6 +2447,43 @@ class AgentStudioService:
         return "One-shot task execution is paused for runtime interaction. This is not a schedule pause."
 
 
+
+
+    def _step_source_contract_from_fragment(self, fragment: Any) -> dict[str, Any]:
+        """Build a structural source-material contract from a step fragment.
+
+        The contract is topic-neutral. It only marks a step as needing source
+        material when the step explicitly requests provenance-like output
+        fields in its own instruction.
+        """
+        text = str(fragment or "")
+        requested_fields: list[str] = []
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line.startswith(("-", "*")):
+                continue
+            field = line.lstrip("-* ").strip().strip(":：").casefold()
+            if field:
+                requested_fields.append(field)
+        normalized = {re.sub(r"[^a-z0-9]+", "_", item).strip("_") for item in requested_fields}
+        provenance_fields = {
+            "source", "sources", "reference", "references", "citation", "citations",
+            "url", "link", "links", "published_at", "publication_time", "time", "date",
+        }
+        requires_source_material = bool(normalized & provenance_fields)
+        return {
+            "contract_type": "step_source_material_contract",
+            "requires_source_material": requires_source_material,
+            "requested_output_fields": requested_fields,
+            "reason": "requested_output_provenance_fields" if requires_source_material else "not_declared",
+        }
+
+    def _attach_step_source_contracts(self, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        for task in tasks or []:
+            if not isinstance(task, dict):
+                continue
+            task["source_contract"] = self._step_source_contract_from_fragment(task.get("source_instruction_fragment") or task.get("objective") or task.get("instruction"))
+        return tasks
 
     def _build_workflow_variable_contract(self, *, tasks: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> dict[str, Any]:
         """Create an explicit dataflow binding contract for the task graph.

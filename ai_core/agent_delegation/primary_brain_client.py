@@ -305,6 +305,9 @@ class PrimaryBrainDelegationClient:
         state.setdefault("runtime_options", {})["delegation_mode"] = True
         state.setdefault("runtime_options", {})["auto_approve_reviews"] = True
         state.setdefault("runtime_options", {})["standalone_dataflow_source_step"] = True
+        source_contract = request.shared_context.get("source_contract") if isinstance(request.shared_context, dict) else {}
+        if isinstance(source_contract, dict) and source_contract:
+            state.setdefault("runtime_options", {})["standalone_source_contract"] = source_contract
         state.setdefault("runtime_options", {})["isolated_delegated_step_context"] = True
         # A decomposed workflow step is a fresh primary-runtime request.  The
         # user session can still contain the parent task conversation, but that

@@ -854,7 +854,11 @@ class LLMJsonExecutor:
 
     def _requires_external_material(self, *, state: dict, containers: list[dict], step: dict) -> bool:
         results = state.get("results") if isinstance(state.get("results"), dict) else {}
+        runtime_options = state.get("runtime_options") if isinstance(state.get("runtime_options"), dict) else {}
         candidates: list[Any] = [step, *containers]
+        source_contract = runtime_options.get("standalone_source_contract") if isinstance(runtime_options.get("standalone_source_contract"), dict) else {}
+        if source_contract:
+            candidates.append(source_contract)
         for key in ("knowledge_evaluation", "intent_recognition", "context_awareness", "workflow_planning", "agent_action_planning", "execution_preparation"):
             value = results.get(key)
             if isinstance(value, dict):
@@ -868,6 +872,7 @@ class LLMJsonExecutor:
             ("evidence_required",),
             ("source_policy", "requires_source_material"),
             ("source_policy", "requires_live_evidence"),
+            ("requires_source_material",),
             ("knowledge_evaluation", "requires_external_information"),
             ("knowledge_evaluation", "needs_web_search"),
             ("knowledge_evaluation", "evidence_required"),
