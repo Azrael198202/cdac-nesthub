@@ -1618,6 +1618,8 @@ class AgentDelegationRuntime:
                 "participant_count": len(selected),
                 "relationship": participant_plan.get("relationship") or own_node.get("relation") or "independent",
                 "depends_on": participant_plan.get("depends_on") or own_node.get("depends_on") or [],
+                "workflow_step_type": self._participant_workflow_step_type(participant, task_graph),
+                "source_step_id": participant.get("source_step_id") or own_node.get("source_step_id"),
                 "agent_parameters": {
                     "values": self._merged_runtime_parameters(task_graph, participant),
                     "missing": [] if self._uses_uploaded_artifact_runtime_for_task(participant, task_graph) else self.parameter_contract_service.missing_parameters(participant),
@@ -1642,6 +1644,8 @@ class AgentDelegationRuntime:
             "participant_count": len(selected),
             "relationship": participant_plan.get("relationship") or own_node.get("relation") or "independent",
             "depends_on": participant_plan.get("depends_on") or own_node.get("depends_on") or [],
+            "workflow_step_type": self._participant_workflow_step_type(participant, task_graph),
+            "source_step_id": participant.get("source_step_id") or own_node.get("source_step_id"),
             "participant_dependency_policy": {
                 "default_relationship": "independent",
                 "peer_results_are_injected_only_for_declared_dependencies": True,
@@ -1797,11 +1801,31 @@ class AgentDelegationRuntime:
         policy = str(participant.get("execution_policy") or "").strip().casefold()
         if policy in {"runtime_registered_tool", "registered_runtime_tool", "runtime_tool"}:
             return True
-        contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}
-        params = contract.get("parameters") if isinstance(contract.get("parameters"), list) else []
-        return any(isinstance(item, dict) and str(item.get("name") or item.get("field") or item.get("key") or "").strip() for item in params)
+        return False
+
+    def _participant_workflow_step_type(self, participant: dict[str, Any], task_graph: dict[str, Any] | None = None) -> str:
+        if not isinstance(participant, dict):
+            return ""
+        value = str(participant.get("workflow_step_type") or participant.get("step_type") or "").strip()
+        if value:
+            return value
+        pid = self._participant_identity(participant)
+        if isinstance(task_graph, dict):
+            for task in task_graph.get("tasks") or []:
+                if isinstance(task, dict) and str(task.get("participant_id") or "") == pid:
+                    return str(task.get("step_type") or task.get("workflow_step_type") or "").strip()
+        return ""
+
+    def _participant_is_decomposed_source_step(self, participant: dict[str, Any], task_graph: dict[str, Any] | None = None) -> bool:
+        return self._participant_workflow_step_type(participant, task_graph) == "semantic_intermediate_step"
 
     def _merged_runtime_parameters(self, task_graph: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
+        if self._participant_is_decomposed_source_step(participant, task_graph):
+            # Decomposed source steps are executed as clean user requests by
+            # ai_core. Runtime parameters belong to concrete executable
+            # participants/capabilities and must not be injected into these
+            # source-step prompts.
+            return {}
         values: dict[str, Any] = {}
         if isinstance(task_graph.get("runtime_parameters"), dict):
             values.update(self._scoped_runtime_parameters_from_values(participant, task_graph.get("runtime_parameters") or {}))
@@ -3308,17 +3332,23 @@ class AgentDelegationRuntime:
 
 
     async def _execute_intermediate_step_with_progress(self, request, progress_callback):
+        """Execute a generated workflow step as an isolated primary-runtime request.
+
+        Generated/intermediate steps are not participants with durable runtime
+        inputs.  They are decomposed user requests.  Therefore this path must
+        never fall back to the generic AGENT_REQUEST envelope, because that
+        envelope can carry task-level coordination values into ai_core and
+        corrupt the step's intent/planning.
+        """
         try:
-            return await self.primary_client.execute_intermediate_step(
+            return await self.primary_client.execute_workflow_step_request(
                 request,
                 progress_callback=progress_callback,
             )
-        except AttributeError:
-            return await self._execute_agent_request_with_progress(request, progress_callback)
         except TypeError as exc:
             if "progress_callback" not in str(exc):
                 raise
-            return await self.primary_client.execute_intermediate_step(request)
+            return await self.primary_client.execute_workflow_step_request(request)
 
     async def _execute_agent_request_with_progress(self, request, progress_callback):
         try:

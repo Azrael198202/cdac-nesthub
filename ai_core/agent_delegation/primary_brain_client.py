@@ -1145,18 +1145,29 @@ class PrimaryBrainDelegationClient:
     def _build_agent_message(self, request: AgentExecutionRequest) -> str:
         import json
 
+        context = request.shared_context or {}
+        if isinstance(context, dict) and str(context.get("workflow_step_type") or "") == "semantic_intermediate_step":
+            # Defensive boundary: generated workflow steps must be submitted as
+            # clean user requests even if an older caller accidentally routes them
+            # through execute_agent_request.  This prevents task-level runtime
+            # parameters and unresolved workflow templates from contaminating the
+            # step's ai_core planning.
+            return self._standalone_step_message(request)
+
         # Agent execution must be local to the participant.  Task-level routing
         # data, graph metadata, and policy envelopes belong to the auxiliary
         # coordinator and final synthesis, not to each participant LLM stage.
         # Keeping this payload small prevents local JSON models from copying
         # unrelated task text into workflow or execution prompts.
-        context = request.shared_context or {}
         local_context = {}
         if isinstance(context, dict):
             for key in ("relationship", "depends_on", "agent_parameters", "available_peer_results"):
                 value = context.get(key)
                 if value not in (None, "", [], {}):
-                    local_context[key] = value
+                    if key == "agent_parameters" and self._contains_unresolved_workflow_template(value):
+                        value = self._remove_unresolved_parameter_values(value)
+                    if value not in (None, "", [], {}):
+                        local_context[key] = value
         payload = {
             "participant_name": request.participant_name,
             "objective": (request.participant_instruction or "").strip(),
@@ -1164,6 +1175,27 @@ class PrimaryBrainDelegationClient:
         if local_context:
             payload["context"] = local_context
         return "AGENT_REQUEST=" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def _contains_unresolved_workflow_template(self, value: Any) -> bool:
+        if isinstance(value, str):
+            return "{{" in value and "}}" in value
+        if isinstance(value, dict):
+            return any(self._contains_unresolved_workflow_template(v) for v in value.values())
+        if isinstance(value, list):
+            return any(self._contains_unresolved_workflow_template(v) for v in value)
+        return False
+
+    def _remove_unresolved_parameter_values(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            cleaned = {}
+            for key, item in value.items():
+                if self._contains_unresolved_workflow_template(item):
+                    continue
+                cleaned[key] = self._remove_unresolved_parameter_values(item)
+            return cleaned
+        if isinstance(value, list):
+            return [self._remove_unresolved_parameter_values(item) for item in value if not self._contains_unresolved_workflow_template(item)]
+        return value
 
     def _usable_agent_results(self, agent_results: list[AgentExecutionResult]) -> list[AgentExecutionResult]:
         blocked_statuses = {"requires_key", "requires_input", "paused"}
