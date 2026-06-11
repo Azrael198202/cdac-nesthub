@@ -2149,7 +2149,7 @@ class AgentDelegationRuntime:
         This method is now a compatibility wrapper around the generic
         WorkflowOutputResolver.  It intentionally supports arbitrary upstream
         step aliases and field names declared by the workflow, instead of a
-        fixed ``Step1`` convention.
+        fixed numbered-step convention.
         """
         deps = set(self._participant_dependency_ids(participant, dependency_plan))
         return self.workflow_output_resolver.build_reference_map(
@@ -3581,19 +3581,26 @@ class AgentDelegationRuntime:
 
     def _select_participants(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         declared_ids = {str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()}
-        if declared_ids:
+        task_participant_ids = {
+            str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
+            for task in (task_graph.get("tasks") or [])
+            if isinstance(task, dict) and str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
+        }
+        execution_ids = declared_ids | task_participant_ids
+        if execution_ids:
             selected = [
                 participant
                 for participant in (participants or [])
-                if str(participant.get("participant_id") or participant.get("id") or "").strip() in declared_ids
+                if str(participant.get("participant_id") or participant.get("id") or "").strip() in execution_ids
             ]
             found_ids = {str(participant.get("participant_id") or participant.get("id") or "").strip() for participant in selected}
-            missing_ids = declared_ids - found_ids
+            missing_ids = execution_ids - found_ids
             if missing_ids:
                 selected.extend(self._participants_from_task_graph(task_graph, missing_ids))
-            # A task graph with selected ids must never fall back to unrelated
-            # durable participants.  Missing generated steps are rebuilt from
-            # the task graph, otherwise execution stays empty and fails cleanly.
+            # A task graph with explicit execution ids must never fall back to
+            # unrelated durable participants.  Generated steps are part of the
+            # graph contract even when they were not selected from the durable
+            # catalog, so they are rebuilt from task records when needed.
             return self._dedupe_participants_for_execution(selected)
         if not participants:
             return []

@@ -984,6 +984,36 @@ class AgentStudioService:
         }
 
 
+    def _workflow_execution_participant_ids(self, workflow_plan: Any) -> list[str]:
+        """Return every participant that belongs to the saved execution graph.
+
+        A composite graph may contain durable participants and generated step
+        participants.  Execution selection must include both sets; otherwise an
+        upstream generated producer is absent at runtime and downstream template
+        bindings cannot resolve.  This is graph-contract based only: it reads the
+        workflow plan and task records, not capability names or domain words.
+        """
+        ordered: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: Any) -> None:
+            pid = str(value or "").strip()
+            if pid and pid not in seen:
+                seen.add(pid)
+                ordered.append(pid)
+
+        for participant in getattr(workflow_plan, "selected_participants", []) or []:
+            if isinstance(participant, dict):
+                add(participant.get("participant_id") or participant.get("id"))
+        for participant in getattr(workflow_plan, "generated_participants", []) or []:
+            if isinstance(participant, dict):
+                add(participant.get("participant_id") or participant.get("id"))
+        for task in getattr(workflow_plan, "tasks", []) or []:
+            if isinstance(task, dict):
+                add(task.get("participant_id") or task.get("participant") or task.get("agent_id"))
+        return ordered
+
+
     def _hydrate_task_step_bindings_from_participants(self, tasks: list[dict[str, Any]], participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Copy durable participant binding metadata into task steps.
 
@@ -1222,10 +1252,10 @@ class AgentStudioService:
         # agent catalog and the UI starts showing false agents such as
         # "Call X Agent. Parameters...". Generated participants are only
         # runtime graph assets after the task graph is accepted.
-        selected_ids = [p.get("participant_id") for p in workflow_plan.selected_participants]
+        selected_ids = self._workflow_execution_participant_ids(workflow_plan)
         workflow_tasks = self._hydrate_task_step_bindings_from_participants(
             workflow_plan.tasks,
-            workflow_plan.selected_participants,
+            workflow_plan.selected_participants + workflow_plan.generated_participants,
         )
         explicit_runtime_parameters.update(
             self._extract_named_parameter_blocks_from_instruction(instruction, workflow_plan.selected_participants)
@@ -2680,11 +2710,10 @@ class AgentStudioService:
                 if prefix:
                     out[f"{prefix}.{key}"] = value
                     out[f"{prefix}_{key}"] = value
-            # Plain key is safe only when it is not already bound differently.
-            if key not in out:
-                out[key] = value
-            elif out.get(key) == value:
-                out[key] = value
+            # Values extracted from an addressed parameter block remain scoped
+            # to the addressed participant.  Do not emit a plain key fallback:
+            # composite graphs can contain generated upstream steps whose primary
+            # runtime request must not receive downstream tool inputs.
 
 
     def _field_participant_id(self, field: dict[str, Any]) -> str:
@@ -2806,7 +2835,7 @@ class AgentStudioService:
         Pre-execution parameter collection must not pause the whole task graph
         for a downstream side-effect approval.  If it does, upstream producer
         steps never run and explicit dataflow placeholders such as
-        ``{{Step1.final_answer}}`` cannot be resolved.  This filter is generic:
+        a workflow-output template cannot be resolved.  This filter is generic:
         it only recognizes execution-control fields through the existing
         delegation runtime approval-control classifier, not through capability
         names or business terms.
