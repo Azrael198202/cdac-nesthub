@@ -807,6 +807,114 @@ class LLMJsonExecutor:
     def _method_from_action_type(self, action_type: str) -> str:
         return self.FIXED_EXECUTION_ACTIONS.get(str(action_type or ""), "content_generation")
 
+    def _repair_source_step_action(self, *, state: dict, selected_action: str, containers: list[dict], step: dict | None = None) -> str:
+        """Repair unsafe placeholder actions for standalone source steps.
+
+        This is a generic boundary guard for delegation source steps. It does
+        not infer a business domain or generate an answer. It only prevents an
+        already-complete source step from being locked to human interaction when
+        upstream contracts say the step needs external/evidence material, or to
+        no-op when the step still needs to produce public material.
+        """
+        action = self._action_type_from_text(selected_action)
+        if not self._is_standalone_source_step(state):
+            return action
+        if self._has_blocking_missing_information(containers):
+            return action
+        current_method = self._method_from_action_type(action) if action else ""
+        if self._requires_external_material(state=state, containers=containers, step=step or {}):
+            if action in {"", "ask_user", "no_op", "compose_static_response", "llm_generate"} or current_method in {"", "human_interaction", "no_op", "static_response", "content_generation"}:
+                return "web_query"
+            return action
+        if action in {"", "ask_user", "no_op"} or current_method in {"", "human_interaction", "no_op"}:
+            return "llm_generate"
+        return action
+
+    def _is_standalone_source_step(self, state: dict) -> bool:
+        options = state.get("runtime_options") if isinstance(state.get("runtime_options"), dict) else {}
+        return bool(options.get("standalone_dataflow_source_step"))
+
+    def _has_blocking_missing_information(self, containers: list[dict]) -> bool:
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            for key in ("missing_information", "blocking_missing_information", "missing_inputs", "missing_fields"):
+                value = container.get(key)
+                if isinstance(value, list) and value:
+                    return True
+                if isinstance(value, dict) and any(v not in (None, "", [], {}) for v in value.values()):
+                    return True
+            params = container.get("parameters") if isinstance(container.get("parameters"), dict) else {}
+            missing_required = params.get("missing_required")
+            if isinstance(missing_required, list) and missing_required:
+                return True
+            if isinstance(missing_required, dict) and any(v not in (None, "", [], {}) for v in missing_required.values()):
+                return True
+        return False
+
+    def _requires_external_material(self, *, state: dict, containers: list[dict], step: dict) -> bool:
+        results = state.get("results") if isinstance(state.get("results"), dict) else {}
+        candidates: list[Any] = [step, *containers]
+        for key in ("knowledge_evaluation", "intent_recognition", "context_awareness", "workflow_planning", "agent_action_planning", "execution_preparation"):
+            value = results.get(key)
+            if isinstance(value, dict):
+                candidates.append(value)
+        return any(self._container_requires_external_material(item) for item in candidates if isinstance(item, dict))
+
+    def _container_requires_external_material(self, container: dict) -> bool:
+        bool_paths = (
+            ("requires_external_information",),
+            ("needs_web_search",),
+            ("evidence_required",),
+            ("source_policy", "requires_source_material"),
+            ("source_policy", "requires_live_evidence"),
+            ("knowledge_evaluation", "requires_external_information"),
+            ("knowledge_evaluation", "needs_web_search"),
+            ("knowledge_evaluation", "evidence_required"),
+            ("execution_decision", "requires_external_access"),
+        )
+        for path in bool_paths:
+            value: Any = container
+            for part in path:
+                if not isinstance(value, dict):
+                    value = None
+                    break
+                value = value.get(part)
+            if value is True:
+                return True
+        text_values: list[str] = []
+        for key in ("required_source_level", "semantic_category", "intent_family", "execution_method", "selected_execution_method"):
+            value = container.get(key)
+            if isinstance(value, str):
+                text_values.append(value)
+        intent_contract = container.get("intent_contract_ref") if isinstance(container.get("intent_contract_ref"), dict) else {}
+        for key in ("intent_family", "required_source_level", "semantic_category"):
+            value = intent_contract.get(key)
+            if isinstance(value, str):
+                text_values.append(value)
+        decision = self._execution_decision_from_plan(container)
+        for item in [decision, *(decision.get("ranked_options") if isinstance(decision.get("ranked_options"), list) else [])]:
+            if isinstance(item, dict):
+                if item.get("requires_external_access") is True:
+                    return True
+                for key in ("execution_method", "resource_kind", "reason", "preparation_contract"):
+                    value = item.get(key)
+                    if isinstance(value, str):
+                        text_values.append(value)
+        normalized = " ".join(text_values).replace("_", " ").casefold()
+        external_markers = (
+            "external content",
+            "external information",
+            "external observation",
+            "live evidence",
+            "web search",
+            "web collection",
+            "web query",
+            "api call",
+            "source material",
+        )
+        return any(marker in normalized for marker in external_markers)
+
     def _steps_from_execution_plan_action(self, *, result: dict, state: dict) -> list[dict]:
         execution_plan = result.get("execution_plan") if isinstance(result.get("execution_plan"), dict) else {}
         action = execution_plan.get("action") or result.get("action")
@@ -890,6 +998,12 @@ class LLMJsonExecutor:
         # execution action. This keeps workflow_planning as the single place
         # where the fixed action options are ranked and selected.
         selected_action = self._selected_action_type(intent, clean_context, requirement_payload, parsed) or "ask_user"
+        selected_action = self._repair_source_step_action(
+            state=state,
+            selected_action=selected_action,
+            containers=[intent, clean_context, requirement_payload, parsed, results.get("knowledge_evaluation") if isinstance(results.get("knowledge_evaluation"), dict) else {}],
+            step={},
+        )
         decision_source = self._execution_decision_from_plan(intent) or self._execution_decision_from_plan(clean_context) or {}
         raw_ranked = decision_source.get("ranked_options") if isinstance(decision_source.get("ranked_options"), list) else []
         ranked_options = []
@@ -949,6 +1063,7 @@ class LLMJsonExecutor:
         out["parameters"] = params
         out.setdefault("required_capability", self._generic_capability_from_state(state))
         action_type = self._selected_action_type(out)
+        action_type = self._repair_source_step_action(state=state, selected_action=action_type, containers=[out], step=out)
         if not action_type:
             out["execution_ready"] = False
             out.setdefault("missing_fields", [])

@@ -40,6 +40,10 @@ class WorkflowOutputResolver:
         "completed without a user-facing final answer",
         "intermediate node data was intentionally not exposed",
         "no user-facing final answer",
+        "workflow initialized",
+        "initializing workflow",
+        "the workflow is blocked",
+        "please review the blocked step details",
     )
 
     def normalize_key(self, value: Any) -> str:
@@ -57,9 +61,21 @@ class WorkflowOutputResolver:
             if not text:
                 return False
             lowered = text.casefold()
+            if lowered in {"initializing", "pending", "planning", "planning_active", "ready_for_planning", "completed", "failed", "success"}:
+                return False
             if "{{" in text or "}}" in text:
                 return False
             if any(marker in lowered for marker in self._PLACEHOLDER_MARKERS):
+                return False
+            internal_labels = {
+                "input_parsing", "intent_recognition", "requirement_completion",
+                "context_awareness", "workflow_planning", "agent_action_planning",
+                "execution_preparation", "pre_execution_validation", "execution",
+                "result_verification", "feedback_repair", "final_synthesis",
+                "dataflow_step", "runtime_error", "tool_execution",
+            }
+            normalized_label = re.sub(r"[^a-z0-9_]+", "_", lowered).strip("_")
+            if normalized_label in internal_labels:
                 return False
             return True
         return True
@@ -100,20 +116,53 @@ class WorkflowOutputResolver:
         return {k: v for k, v in fields.items() if self.is_public_material(v)}
 
     def _collect_public_fields(self, node: Any, out: dict[str, Any], prefix: str = "") -> None:
+        """Collect only terminal/public output fields.
+
+        This traversal is deliberately conservative.  It may walk through the
+        result tree to find terminal containers, but it only exports values from
+        nodes that are explicitly public/exportable or whose path is a terminal
+        output path.  Internal pipeline stages, lifecycle labels, planning nodes,
+        and generic status strings never become workflow variables.
+        """
         if isinstance(node, dict):
+            status = str(node.get("status") or node.get("execution_status") or node.get("_status") or "").strip().casefold()
+            if status in {"initializing", "pending", "planning", "planning_active", "ready_for_planning", "blocked", "failed", "error"}:
+                # A failed/non-terminal container can still have nested terminal
+                # child objects in some persistence formats, so do not return
+                # before walking children.  Only this exact node is ineligible.
+                node_exportable = False
+            else:
+                node_exportable = True
+            if node.get("blocked_steps") or node.get("missing_inputs") or node.get("pending_action"):
+                node_exportable = False
+            explicit_public = bool(node.get("exportable") or node.get("user_facing") or node.get("public") or node.get("public_output"))
+            terminal_path = self._is_terminal_public_path(prefix)
+            can_export_here = node_exportable and (explicit_public or terminal_path)
             for key, value in node.items():
                 key_text = str(key)
                 path = f"{prefix}.{key_text}" if prefix else key_text
-                if key_text in self._PUBLIC_FIELD_NAMES and self.is_public_material(value):
+                if can_export_here and key_text in self._PUBLIC_FIELD_NAMES and self.is_public_material(value):
                     out.setdefault(key_text, value)
                     out.setdefault(path, value)
-                if isinstance(value, dict):
+                if isinstance(value, (dict, list)):
                     self._collect_public_fields(value, out, path)
+        elif isinstance(node, list):
+            for index, item in enumerate(node[:50]):
+                child_path = f"{prefix}[{index}]" if prefix else f"[{index}]"
+                self._collect_public_fields(item, out, child_path)
         elif isinstance(node, str) and prefix and self.is_public_material(node):
             tail = prefix.rsplit(".", 1)[-1]
-            if tail in self._PUBLIC_FIELD_NAMES:
+            if tail in self._PUBLIC_FIELD_NAMES and self._is_terminal_public_path(prefix):
                 out.setdefault(tail, node)
                 out.setdefault(prefix, node)
+
+    def _is_terminal_public_path(self, path: str) -> bool:
+        lowered = str(path or "").casefold()
+        # Match path segments, not arbitrary substrings, so an internal key that
+        # happens to contain a word such as "output_schema" is not exportable.
+        segments = [seg for seg in re.split(r"[.\[\]/]+", lowered) if seg]
+        terminal_markers = {"final_synthesis", "conversation_output", "output", "synthesis", "final", "dataflow_step", "delivery"}
+        return any(seg in terminal_markers for seg in segments)
 
     def build_reference_map(
         self,

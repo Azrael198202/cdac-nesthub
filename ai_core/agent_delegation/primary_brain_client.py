@@ -118,6 +118,19 @@ class PrimaryBrainDelegationClient:
 
 
 
+    async def execute_workflow_step_request(self, request: AgentExecutionRequest, progress_callback: Callable[[dict[str, Any]], Any] | None = None) -> AgentExecutionResult:
+        """Execute one decomposed workflow step through the full primary runtime.
+
+        The auxiliary brain owns graph decomposition and scheduling only.  It
+        must not decide whether a step is a search, tool call, LLM answer, or
+        runtime capability execution.  This entrypoint submits the step as a
+        clean user-facing request so the primary runtime can run its normal
+        input parsing, intent recognition, planning, execution, verification,
+        and final synthesis pipeline.
+        """
+        return await self._execute_plain_primary_runtime_step(request, progress_callback=progress_callback)
+
+
     async def execute_intermediate_step(self, request: AgentExecutionRequest, progress_callback: Callable[[dict[str, Any]], Any] | None = None) -> AgentExecutionResult:
         """Execute a generated dataflow step with the smallest safe prompt.
 
@@ -240,23 +253,31 @@ class PrimaryBrainDelegationClient:
         progress_callback: Callable[[dict[str, Any]], Any] | None = None,
         core_run_id: str | None = None,
     ) -> AgentExecutionResult:
-        """Run standalone generated steps through the primary runtime.
+        """Run a standalone workflow step as a normal primary-runtime request.
 
-        A generated step with no upstream input is not a transformation; it is a
-        normal user-facing objective.  Sending it to the lean synthesis shortcut
-        causes time-sensitive/source-backed requests to be answered from model
-        memory.  The primary runtime owns search/tool selection, verification,
-        and presentation, so standalone steps are delegated there generically.
+        A standalone generated step has no upstream material to transform; it is
+        simply a user-facing objective in the larger task graph.  Wrapping that
+        objective in an internal ``AGENT_REQUEST=...`` envelope can make the
+        primary runtime treat the step as coordination metadata instead of a
+        real request, which then produces no exportable output for downstream
+        steps.  This path therefore submits the clean objective text directly to
+        the primary runtime while preserving delegation-mode progress and result
+        extraction.
+
+        The method is domain-neutral: it does not inspect the objective content
+        or select a capability.  It only chooses the correct boundary between
+        the auxiliary coordinator and the primary runtime for a source step.
         """
         if progress_callback and core_run_id:
             progress_callback({"type": "NODE_EXECUTING", "run_id": core_run_id, "node_id": "primary_runtime_standalone_step"})
-        result = await self.execute_agent_request(request, progress_callback=progress_callback)
+        result = await self._execute_plain_primary_runtime_step(request, progress_callback=progress_callback)
         workflow_results = dict(result.workflow_results or {})
         workflow_results.setdefault("dataflow_step", {
             "status": result.status,
             "final_answer": result.final_answer,
             "execution_mode": "primary_runtime_standalone_step",
             "core_run_id": result.core_run_id,
+            "exportable": self._answer_has_result_material(result.final_answer),
         })
         if progress_callback and core_run_id:
             progress_callback({"type": "NODE_RESULT", "run_id": core_run_id, "node_id": "primary_runtime_standalone_step"})
@@ -272,6 +293,156 @@ class PrimaryBrainDelegationClient:
             missing_inputs=result.missing_inputs,
             origin=result.origin,
         )
+
+    async def _execute_plain_primary_runtime_step(
+        self,
+        request: AgentExecutionRequest,
+        progress_callback: Callable[[dict[str, Any]], Any] | None = None,
+    ) -> AgentExecutionResult:
+        """Execute a step objective without an internal delegation envelope."""
+        message = self._standalone_step_message(request)
+        runtime_run_id, state = await self.runtime.prepare(message)
+        state.setdefault("runtime_options", {})["delegation_mode"] = True
+        state.setdefault("runtime_options", {})["auto_approve_reviews"] = True
+        state.setdefault("runtime_options", {})["standalone_dataflow_source_step"] = True
+        if progress_callback:
+            self.runtime.add_event_listener(runtime_run_id, progress_callback)
+        try:
+            await self._run_runtime_with_timeout(runtime_run_id, state, self.runtime.run_prepared(state))
+        except Exception as exc:
+            state["status"] = "failed"
+            state["error"] = str(exc)
+            state.setdefault("results", {})["runtime_error"] = {
+                "status": "failed",
+                "message": str(exc),
+                "core_run_id": runtime_run_id,
+            }
+        finally:
+            if progress_callback:
+                self.runtime.remove_event_listener(runtime_run_id, progress_callback)
+        results = state.get("results", {}) if isinstance(state.get("results"), dict) else {}
+        final_answer = self._extract_final_answer(state)
+        final_answer = self._extract_exportable_answer_from_results(results, fallback=final_answer)
+        status = self._extract_status(state)
+        if self._answer_has_result_material(final_answer):
+            status = "completed"
+        elif status in {"completed", "success", "succeeded", "ok"}:
+            status = "failed"
+        pending_action = state.get("pending_action") if isinstance(state, dict) else None
+        return AgentExecutionResult(
+            participant_id=request.participant_id,
+            participant_name=request.participant_name,
+            core_run_id=runtime_run_id,
+            status=status,
+            final_answer=final_answer,
+            workflow_results=results,
+            pending_action=pending_action if isinstance(pending_action, dict) else None,
+            missing_inputs=self._extract_missing_inputs(state),
+        )
+
+    def _standalone_step_message(self, request: AgentExecutionRequest) -> str:
+        objective = str(request.participant_instruction or "").strip() or str(request.task_instruction or "").strip()
+        context = request.shared_context if isinstance(request.shared_context, dict) else {}
+        parts = [objective] if objective else []
+
+        parameters = {}
+        agent_parameters = context.get("agent_parameters") if isinstance(context.get("agent_parameters"), dict) else {}
+        values = agent_parameters.get("values") if isinstance(agent_parameters.get("values"), dict) else {}
+        for key, value in values.items():
+            if value in (None, "", [], {}):
+                continue
+            parameters[str(key)] = value
+        if parameters:
+            lines = ["Parameters:"]
+            for key, value in parameters.items():
+                if isinstance(value, (dict, list)):
+                    rendered = json.dumps(value, ensure_ascii=False)
+                else:
+                    rendered = str(value)
+                lines.append(f"- {key}: {rendered}")
+            parts.append("\n".join(lines))
+
+        peer_results = context.get("available_peer_results") if isinstance(context.get("available_peer_results"), list) else []
+        rendered_peers = []
+        for item in peer_results[:10]:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("final_answer") or item.get("answer") or item.get("summary") or item.get("result")
+            if isinstance(text, str) and self._answer_has_result_material(text):
+                label = str(item.get("participant_name") or item.get("participant_id") or "upstream")
+                rendered_peers.append(f"- {label}: {text.strip()}")
+        if rendered_peers:
+            parts.append("Available upstream results:\n" + "\n".join(rendered_peers))
+
+        return "\n\n".join(part for part in parts if part).strip()
+
+    def _extract_exportable_answer_from_results(self, results: dict[str, Any], fallback: str = "") -> str:
+        """Find a public terminal answer produced by the primary runtime.
+
+        This intentionally avoids scanning arbitrary node values.  Pipeline node
+        names, early parsing messages, planning summaries, and blocked workflow
+        diagnostics are internal material and must never become downstream step
+        output.  Only terminal/public containers may export text.
+        """
+        if self._answer_has_result_material(fallback):
+            return str(fallback or "").strip()
+        if not isinstance(results, dict):
+            return ""
+
+        candidates: list[tuple[str, Any]] = []
+        terminal_nodes = ("final_synthesis", "conversation_output", "output", "synthesis", "dataflow_step")
+        for node_key in terminal_nodes:
+            node = results.get(node_key)
+            if not isinstance(node, dict):
+                continue
+            if not self._node_can_export_public_material(node, node_key):
+                continue
+            for field in ("final_answer", "answer", "answer_material", "generated_content", "final_content", "content", "text", "result", "message"):
+                if field in node:
+                    candidates.append((f"{node_key}.{field}", node.get(field)))
+
+        execution_node = results.get("execution")
+        if isinstance(execution_node, dict) and self._node_can_export_public_material(execution_node, "execution"):
+            for field in ("answer_material", "final_answer", "answer", "generated_content"):
+                if field in execution_node:
+                    candidates.append((f"execution.{field}", execution_node.get(field)))
+
+        for _, value in candidates:
+            text = self._public_scalar(value)
+            if self._answer_has_result_material(text):
+                return text.strip()
+        return ""
+
+    def _node_can_export_public_material(self, node: dict[str, Any], node_key: str = "") -> bool:
+        status = str(node.get("status") or node.get("execution_status") or node.get("_status") or "").strip().casefold()
+        if status in {"blocked", "failed", "error", "pending", "initializing", "planning", "planning_active", "ready_for_planning"}:
+            return False
+        if node.get("blocked_steps") or node.get("missing_inputs") or node.get("pending_action"):
+            return False
+        if node_key == "dataflow_step":
+            exportable = node.get("exportable")
+            if exportable is False:
+                return False
+            return status in {"completed", "success", "succeeded", "ok", ""}
+        if node.get("exportable") or node.get("user_facing") or node.get("public") or node.get("public_output"):
+            return True
+        return node_key in {"final_synthesis", "conversation_output", "output", "synthesis"} and status in {"completed", "success", "succeeded", "ok", ""}
+
+    def _public_scalar(self, value: Any) -> str:
+        if isinstance(value, str):
+            return self._normalize_public_step_answer(value)
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+        if isinstance(value, list):
+            parts = [self._public_scalar(item) for item in value]
+            return "\n".join([p for p in parts if self._answer_has_result_material(p)]).strip()
+        if isinstance(value, dict):
+            for key in ("final_answer", "answer", "answer_material", "generated_content", "final_content", "content", "text", "result", "message"):
+                if key in value:
+                    text = self._public_scalar(value.get(key))
+                    if self._answer_has_result_material(text):
+                        return text
+        return ""
 
     def _recover_public_answer_from_invalid_json(self, exc: LLMJSONParseError) -> str:
         raw = str(getattr(exc, "raw_content", "") or getattr(exc, "candidate", "") or "").strip()
@@ -1120,8 +1291,36 @@ class PrimaryBrainDelegationClient:
             "locked fixed execution options",
             "workflow is blocked and did not execute",
             "please review the blocked step details",
+            "workflow initialized",
+            "initializing workflow",
+            "status: initializing",
+            "the workflow is blocked",
         ]
         if any(fragment in lower for fragment in placeholder_fragments):
+            return False
+
+        internal_labels = {
+            "input_parsing",
+            "intent_recognition",
+            "requirement_completion",
+            "context_awareness",
+            "workflow_planning",
+            "agent_action_planning",
+            "execution_preparation",
+            "pre_execution_validation",
+            "execution",
+            "result_verification",
+            "feedback_repair",
+            "final_synthesis",
+            "dataflow_step",
+            "runtime_error",
+            "tool_execution",
+        }
+        normalized_label = re.sub(r"[^a-z0-9_]+", "_", lower).strip("_")
+        if normalized_label in internal_labels:
+            return False
+
+        if lower in {"initializing", "pending", "planning", "planning_active", "ready_for_planning", "completed", "failed", "success"}:
             return False
 
         meaningful_lines = []

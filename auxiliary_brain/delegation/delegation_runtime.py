@@ -151,6 +151,52 @@ class AgentDelegationRuntime:
                 completed_results=agent_results,
                 dependency_plan=dependency_plan,
             )
+            request = AgentExecutionRequest(
+                participant_id=str(participant.get("participant_id") or participant.get("id")),
+                participant_name=participant_name,
+                participant_instruction=str(participant.get("execution_objective") or participant.get("instruction") or participant.get("description") or ""),
+                task_name=task_name,
+                task_instruction=task_instruction,
+                community_id=community_id,
+                shared_context=self._build_participant_shared_context(
+                    task_graph=task_graph,
+                    selected=selected,
+                    participant=participant,
+                    completed_results=agent_results,
+                    dependency_plan=dependency_plan,
+                    task_mind_graph=task_mind_graph,
+                    for_input_parsing=True,
+                ),
+            )
+            result = await self._execute_workflow_step_through_ai_core_with_progress(
+                request,
+                self._build_primary_runtime_progress_bridge(
+                    run_payload,
+                    participant_index=index + 1,
+                    participant_name=participant_name,
+                ),
+            )
+            result_payload = self._sanitize_result_payload(result.__dict__)
+            agent_results.append(result)
+            run_payload["agent_results"].append(result_payload)
+            self._record_progress(
+                run_payload,
+                f"participant_{index + 1}_complete",
+                f"Participant finished: {participant_name}",
+                "completed" if result.status == "completed" else result.status,
+            )
+            if result.status in {"requires_key", "requires_input", "paused"}:
+                run_payload.update({
+                    "status": result.status,
+                    "current_stage": "waiting_for_required_input",
+                    "pending_action": result.pending_action,
+                    "missing_inputs": result.missing_inputs or [],
+                    "completed_at": self._now(),
+                })
+                self._record_progress(run_payload, "waiting_input", "Waiting for required input", "waiting")
+                self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+                return run_payload
+            continue
             capability_result = await self._try_execute_generated_capability(
                 participant=participant,
                 completed_results=agent_results,
@@ -835,15 +881,15 @@ class AgentDelegationRuntime:
         return any(ch.isalpha() or ch.isdigit() for ch in text)
 
     def _result_has_usable_material(self, result: Any) -> bool:
-        """Return True when a result has material that can safely feed downstream nodes.
+        """Return True when a result can safely feed downstream nodes.
 
-        Primary-runtime verification may mark a participant as failed when the
-        overall answer did not meet every verification criterion, while still
-        returning concrete final material.  Dataflow dependencies should not be
-        blocked merely because the upstream terminal status is non-completed
-        when usable result material is present.  This method is intentionally
-        generic: it checks structural result fields only and never inspects
-        participant names or domain-specific content.
+        The availability decision must use the same public-output contract as
+        variable binding.  Earlier versions scanned arbitrary nested stage
+        values, so internal node labels could become downstream payload; later
+        strict guards blocked those labels but also missed legitimate terminal
+        answers stored under primary-runtime final nodes.  This method delegates
+        to WorkflowOutputResolver so dependency gating and template binding see
+        the same exportable material map.
         """
         if result is None:
             return False
@@ -855,23 +901,11 @@ class AgentDelegationRuntime:
             gate = workflow_results.get("dependency_gate")
             if isinstance(gate, dict) and str(gate.get("reason") or "") == "required_upstream_result_unavailable":
                 return False
-            verified = workflow_results.get("verified_result_material")
-            if verified not in (None, "", [], {}) and self._is_public_dependency_material(verified):
+        fields = self.workflow_output_resolver.extract_public_fields(result)
+        for value in fields.values():
+            if self._is_public_dependency_material(value):
                 return True
-            for key in ("final_content", "final_answer", "answer", "result", "content", "text", "output", "material"):
-                value = workflow_results.get(key)
-                if value not in (None, "", [], {}) and self._is_public_dependency_material(value):
-                    return True
-            # Primary-runtime results often store node outputs under nested
-            # workflow stage names.  Use the already generic extractor as a last
-            # structural check.
-            for value in workflow_results.values():
-                if isinstance(value, dict):
-                    for key in ("final_answer", "final_content", "answer", "result", "content", "text", "output"):
-                        nested = value.get(key)
-                        if nested not in (None, "", [], {}) and self._is_public_dependency_material(nested):
-                            return True
-        return self._is_public_dependency_material(getattr(result, "final_answer", "") or "")
+        return False
 
     def _dependency_result_is_available(self, result: Any) -> bool:
         if result is None:
@@ -1165,6 +1199,47 @@ class AgentDelegationRuntime:
                 completed_results=agent_results,
                 dependency_plan=dependency_plan,
             )
+            request = AgentExecutionRequest(
+                participant_id=participant_id,
+                participant_name=participant_name,
+                participant_instruction=str(participant.get("execution_objective") or participant.get("instruction") or participant.get("description") or ""),
+                task_name=task_name,
+                task_instruction=task_instruction,
+                community_id=community_id,
+                shared_context=self._build_participant_shared_context(
+                    task_graph=task_graph,
+                    selected=selected,
+                    participant=participant,
+                    completed_results=agent_results,
+                    dependency_plan=dependency_plan,
+                    task_mind_graph=task_mind_graph,
+                    for_input_parsing=True,
+                ),
+            )
+            result = await self._execute_workflow_step_through_ai_core_with_progress(
+                request,
+                self._build_primary_runtime_progress_bridge(
+                    run_payload,
+                    participant_index=index + 1,
+                    participant_name=participant_name,
+                ),
+            )
+            payload = self._sanitize_result_payload(result.__dict__)
+            existing_results.append(payload)
+            agent_results.append(result)
+            self._record_progress(run_payload, f"participant_{index + 1}_complete", f"Participant finished: {participant_name}", "completed" if result.status == "completed" else result.status)
+            if result.status in {"requires_key", "requires_input", "paused"}:
+                run_payload.update({
+                    "status": result.status,
+                    "current_stage": "waiting_for_required_input",
+                    "pending_action": result.pending_action,
+                    "missing_inputs": result.missing_inputs or [],
+                })
+                run_payload["agent_results"] = existing_results
+                self._record_progress(run_payload, "waiting_input", "Waiting for required input", "waiting")
+                self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+                return run_payload
+            continue
             capability_result = await self._try_execute_generated_capability(
                 participant=participant,
                 completed_results=agent_results,
@@ -1827,22 +1902,23 @@ class AgentDelegationRuntime:
         return str(field.get("name") or field.get("field") or field.get("key") or "").strip()
 
     def _extract_primary_material_from_result(self, result: Any) -> str:
-        workflow_results = getattr(result, "workflow_results", None) if result is not None else None
-        answer = str(getattr(result, "final_answer", "") or "").strip()
-        if self._is_public_dependency_material(answer):
-            return answer
-        if isinstance(workflow_results, dict):
-            for key in ("final_answer", "answer", "final_content", "content", "text", "output", "material", "result"):
-                value = workflow_results.get(key)
-                if isinstance(value, str) and self._is_public_dependency_material(value):
-                    return value.strip()
-            for node in workflow_results.values():
-                if not isinstance(node, dict):
-                    continue
-                for key in ("final_answer", "answer", "answer_material", "final_content", "content", "text", "output", "material", "result", "message"):
-                    value = node.get(key)
-                    if isinstance(value, str) and self._is_public_dependency_material(value):
-                        return value.strip()
+        """Extract the primary public material for a completed upstream result.
+
+        This is intentionally aligned with WorkflowOutputResolver.  It never
+        falls back to pipeline stage names or arbitrary status strings; if no
+        terminal/public output exists, it returns an empty string so downstream
+        side-effecting nodes are blocked instead of receiving internal text.
+        """
+        if result is None:
+            return ""
+        fields = self.workflow_output_resolver.extract_public_fields(result)
+        for key in ("final_answer", "answer", "result", "text", "content", "material", "output"):
+            value = fields.get(key)
+            if self._is_public_dependency_material(value):
+                return str(value).strip()
+        for value in fields.values():
+            if self._is_public_dependency_material(value):
+                return str(value).strip()
         return ""
 
     def _resolve_task_variable_placeholders_for_participant(
@@ -1853,34 +1929,51 @@ class AgentDelegationRuntime:
         dependency_plan: dict[str, Any],
         task_graph: dict[str, Any] | None = None,
     ) -> None:
-        """Resolve task dataflow placeholders in participant runtime values.
+        """Resolve explicit workflow-output placeholders in participant state.
 
-        This is a generic task-variable resolver.  It does not decide what a
-        capability does.  It only replaces explicit template references such as
-        ``{{Step1.final_answer}}`` or ``{{Participant Name.final_answer}}`` with
-        verified material already produced by completed upstream participants.
-        If a value has no template reference, it is left untouched.
+        The resolver is generic: it does not know what any capability does.  It
+        only replaces explicit references such as ``{{Step N.field}}`` with
+        exportable output from an already completed upstream step.  Because
+        parameter bridges may later rebuild input values from parameter-contract
+        field containers, this method resolves all common value-bearing slots in
+        those field containers, not only ``runtime_parameters``.
         """
         if not isinstance(participant, dict) or not completed_results:
             return
-        values = dict(participant.get("runtime_parameters") or {}) if isinstance(participant.get("runtime_parameters"), dict) else {}
-        contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}
-        params = contract.get("parameters") if isinstance(contract.get("parameters"), list) else []
-        refs = self._task_variable_reference_map(completed_results=completed_results, dependency_plan=dependency_plan, participant=participant, task_graph=task_graph)
+        refs = self._task_variable_reference_map(
+            completed_results=completed_results,
+            dependency_plan=dependency_plan,
+            participant=participant,
+            task_graph=task_graph,
+        )
         if not refs:
             return
         changed = False
-        resolved_values = self._resolve_task_variable_templates(values, refs)
-        if resolved_values != values:
-            values = resolved_values if isinstance(resolved_values, dict) else values
+        values = dict(participant.get("runtime_parameters") or {}) if isinstance(participant.get("runtime_parameters"), dict) else {}
+        resolved_values = self.workflow_output_resolver.resolve(values, refs)
+        if isinstance(resolved_values.value, dict) and resolved_values.value != values:
+            values = resolved_values.value
+            participant["runtime_parameters"] = values
             changed = True
+
+        contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}
+        params = contract.get("parameters") if isinstance(contract.get("parameters"), list) else []
+        value_slots = ("value", "values", "default", "default_value", "example", "examples", "resolved_value", "runtime_value")
         for param in params:
             if not isinstance(param, dict):
                 continue
-            if "values" in param:
-                new_param_values = self._resolve_task_variable_templates(param.get("values"), refs)
-                if new_param_values != param.get("values"):
-                    param["values"] = new_param_values
+            for slot in value_slots:
+                if slot not in param:
+                    continue
+                resolved = self.workflow_output_resolver.resolve(param.get(slot), refs, f"parameter.{slot}")
+                if resolved.value != param.get(slot):
+                    param[slot] = resolved.value
+                    changed = True
+            name = self._field_name(param)
+            if name and name in values:
+                param_values = param.get("values") if isinstance(param.get("values"), list) else []
+                if param.get("value") in (None, "", [], {}) and not param_values:
+                    param["value"] = values.get(name)
                     changed = True
         if changed:
             participant["runtime_parameters"] = values
@@ -2190,6 +2283,53 @@ class AgentDelegationRuntime:
                 out[key] = value
         return out
 
+    def _resolve_executable_input_templates(
+        self,
+        *,
+        input_data: dict[str, Any],
+        participant: dict[str, Any],
+        completed_results: list[Any],
+        dependency_plan: dict[str, Any],
+        task_graph: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+        """Resolve templates at the final executable-input boundary.
+
+        Earlier phases normalize participant state.  The parameter bridge can
+        still rebuild executable input from schema/contract containers, so the
+        last safe point before side effects must resolve explicit templates
+        again.  The first pass honors declared dependency scope.  If unresolved
+        placeholders remain, a second pass allows explicit step aliases from all
+        completed results; this fixes stale or missing dependency metadata while
+        still requiring a user-declared ``{{...}}`` reference.
+        """
+        if not isinstance(input_data, dict):
+            return {}, [], []
+        scoped_refs = self._task_variable_reference_map(
+            completed_results=completed_results,
+            dependency_plan=dependency_plan,
+            participant=participant,
+            task_graph=task_graph,
+        )
+        first = self.workflow_output_resolver.resolve(input_data, scoped_refs, "input") if scoped_refs else None
+        resolved_value = first.value if first is not None and isinstance(first.value, dict) else dict(input_data)
+        unresolved = list(first.unresolved) if first is not None else self._collect_unresolved_task_templates(resolved_value)
+        debug: list[dict[str, Any]] = []
+        if first is not None and first.changed:
+            debug.append({"scope": "declared_dependencies", "changed": True, "unresolved_count": len(unresolved)})
+        if unresolved:
+            all_refs = self.workflow_output_resolver.build_reference_map(
+                completed_results=completed_results or [],
+                dependency_ids=set(),
+                task_graph=task_graph,
+            )
+            if all_refs:
+                second = self.workflow_output_resolver.resolve(resolved_value, all_refs, "input")
+                if isinstance(second.value, dict):
+                    resolved_value = second.value
+                    unresolved = list(second.unresolved)
+                    debug.append({"scope": "explicit_step_aliases", "changed": bool(second.changed), "unresolved_count": len(unresolved)})
+        return resolved_value, unresolved, debug
+
     async def _execute_registered_tool_capability(self, *, participant: dict[str, Any], task_name: str, completed_results: list[Any] | None = None, dependency_plan: dict[str, Any] | None = None) -> AgentExecutionResult | None:
         profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
         tool_id = str(profile.get("tool_id") or "").strip()
@@ -2255,20 +2395,27 @@ class AgentDelegationRuntime:
                     origin="auxiliary_brain",
                 )
         executable_input_data = self._registered_tool_business_input(input_data=input_data, participant=participant)
-        unresolved_templates = self._collect_unresolved_task_templates(executable_input_data)
+        executable_input_data, unresolved_templates, binding_debug = self._resolve_executable_input_templates(
+            input_data=executable_input_data,
+            participant=participant,
+            completed_results=completed_results or [],
+            dependency_plan=dependency_plan or {},
+            task_graph=task_graph_for_templates,
+        )
         if unresolved_templates:
             return AgentExecutionResult(
                 participant_id=self._participant_identity(participant),
                 participant_name=self._participant_name(participant),
                 core_run_id=new_id("registered_tool_unresolved_template"),
                 status="failed",
-                final_answer="Registered capability input still contains unresolved task template references.",
+                final_answer="Registered capability input still contains unresolved workflow output references.",
                 workflow_results={
                     "status": "failed",
                     "failure_class": "template_resolution_problem",
                     "capability_type": "runtime_registered_tool",
                     "tool_id": tool_id,
                     "unresolved_templates": unresolved_templates,
+                    "binding_debug": binding_debug,
                     "input_keys": sorted(executable_input_data.keys()),
                 },
                 origin="auxiliary_brain",
@@ -2934,6 +3081,27 @@ class AgentDelegationRuntime:
             if str(task.get("participant_id") or "") == pid and str(task.get("step_type") or "") == "semantic_intermediate_step":
                 return True
         return False
+
+
+    async def _execute_workflow_step_through_ai_core_with_progress(self, request, progress_callback):
+        """Submit a decomposed workflow step back to ai_core.
+
+        The auxiliary brain must not infer the execution method for a step.
+        It supplies the clean step objective plus already-resolved public
+        dependency material; ai_core performs its normal full pipeline and
+        returns a public StepResult.
+        """
+        try:
+            return await self.primary_client.execute_workflow_step_request(
+                request,
+                progress_callback=progress_callback,
+            )
+        except AttributeError:
+            return await self._execute_agent_request_with_progress(request, progress_callback)
+        except TypeError as exc:
+            if "progress_callback" not in str(exc):
+                raise
+            return await self.primary_client.execute_workflow_step_request(request)
 
 
     async def _execute_intermediate_step_with_progress(self, request, progress_callback):
