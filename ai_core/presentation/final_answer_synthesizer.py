@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from ai_core.llm.provider_router import ProviderRouter
@@ -331,6 +332,10 @@ class FinalAnswerSynthesizer:
             if answer:
                 return answer
 
+        source_card_answer = self._source_card_answer_from_materials(sanitized, state=state)
+        if source_card_answer:
+            return source_card_answer
+
         source_report = self._source_report_from_materials(sanitized)
         if source_report:
             return source_report
@@ -359,6 +364,95 @@ class FinalAnswerSynthesizer:
             if src.startswith("http") and src not in sources:
                 sources.append(src)
         return sources
+
+    def _source_card_answer_from_materials(self, sanitized: list[dict[str, Any]], *, state: dict[str, Any]) -> str:
+        """Build a user-facing answer from public source cards when pages lack body text.
+
+        This is a presentation fallback, not a new search.  It uses only generic
+        public source-card fields already produced by the execution layer: title,
+        snippet/description/summary, URL/source URL, and time-like metadata.
+        """
+        cards = self._collect_source_cards(sanitized)
+        if not cards:
+            return ""
+        limit = self._requested_item_count(state) or min(5, len(cards))
+        selected = cards[: max(1, min(limit, 10))]
+        lines = ["I found the following source-backed items:"]
+        for idx, item in enumerate(selected, start=1):
+            title = item.get("title") or "Untitled item"
+            summary = item.get("summary") or "No summary text was available from the collected source card."
+            source = item.get("source") or item.get("url") or "Source unavailable"
+            time_value = item.get("time") or "Publication time not available in the collected material"
+            lines.append(f"{idx}. {title}")
+            lines.append(f"   Brief summary: {summary}")
+            lines.append(f"   Source: {source}")
+            lines.append(f"   Publication time: {time_value}")
+        return "\n".join(lines).strip()
+
+    def _collect_source_cards(self, materials: list[dict[str, Any]]) -> list[dict[str, str]]:
+        cards: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        def clean(value: Any, max_chars: int = 500) -> str:
+            text = " ".join(str(value or "").split())
+            if len(text) > max_chars:
+                text = text[: max_chars - 3].rsplit(" ", 1)[0] + "..."
+            return text.strip()
+
+        def time_like(item: dict[str, Any], text: str) -> str:
+            for key in ("published_at", "publication_time", "time", "date", "datetime", "time_expression"):
+                value = clean(item.get(key), 120)
+                if value:
+                    return value
+            match = re.search(r"(\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b|\b\d{1,2}:\d{2}\b|\b\d{1,2}\s*(?:AM|PM)\b|\b\d{1,2}\s*(?:minutes?|hours?|days?)\s+ago\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}\b)", text, flags=re.IGNORECASE)
+            return match.group(0) if match else ""
+
+        def add_from_dict(item: dict[str, Any]) -> None:
+            url = clean(item.get("url") or item.get("source_url") or item.get("link"), 300)
+            title = clean(item.get("title") or item.get("source_title") or item.get("name"), 220)
+            summary = clean(item.get("snippet") or item.get("description") or item.get("summary") or item.get("text") or item.get("text_excerpt") or item.get("visible_text_excerpt"), 650)
+            if not title and not summary:
+                return
+            key = (url or title or summary[:120]).casefold()
+            if key in seen:
+                return
+            seen.add(key)
+            joined = " ".join(part for part in (title, summary) if part)
+            cards.append({
+                "title": title or self._clean_sentence(summary[:180]),
+                "summary": summary or title,
+                "source": clean(item.get("source") or item.get("host") or item.get("publisher") or url, 300),
+                "url": url,
+                "time": time_like(item, joined),
+            })
+
+        def visit(value: Any) -> None:
+            if len(cards) >= 30:
+                return
+            if isinstance(value, dict):
+                # Add dictionaries that look like public source cards.
+                if any(value.get(k) for k in ("url", "source_url", "link")) and any(value.get(k) for k in ("title", "source_title", "name", "snippet", "description", "summary", "text_excerpt", "visible_text_excerpt", "text")):
+                    add_from_dict(value)
+                for child in value.values():
+                    if isinstance(child, (dict, list)):
+                        visit(child)
+            elif isinstance(value, list):
+                for child in value[:80]:
+                    visit(child)
+
+        visit(materials)
+        return cards
+
+    def _requested_item_count(self, state: dict[str, Any]) -> int:
+        text = self._original_input(state)
+        match = re.search(r"\b(?:provide|give|show|list|return|get|find)?\s*(\d{1,2})\s+(?:of\s+the\s+)?", text, flags=re.IGNORECASE)
+        if not match:
+            return 0
+        try:
+            value = int(match.group(1))
+        except Exception:
+            return 0
+        return value if 0 < value <= 20 else 0
 
     def _source_report_from_materials(self, sanitized: list[dict[str, Any]]) -> str:
         sources: list[dict[str, Any]] = []

@@ -12,6 +12,7 @@ from ai_core.orchestration.workflow_runtime import WorkflowRuntime
 from ai_core.llm.provider_router import ProviderRouter
 from ai_core.llm.provider_handlers.utils import LLMJSONParseError, parse_json_content
 from ai_core.runtime.governance import RuntimeCostPolicy
+from presentation_brain import PresentationBrain, PresentationRequest
 from auxiliary_brain.protocols.runtime_protocol import PrimaryRuntimeRequestEnvelope, PrimaryRuntimeExecutionPolicy
 
 
@@ -61,6 +62,7 @@ class PrimaryBrainDelegationClient:
     def __init__(self, runtime: WorkflowRuntime | None = None) -> None:
         self.runtime = runtime or WorkflowRuntime()
         self.router = ProviderRouter()
+        self.presentation_brain = PresentationBrain()
 
     async def execute_agent_request(self, request: AgentExecutionRequest, progress_callback: Callable[[dict[str, Any]], Any] | None = None) -> AgentExecutionResult:
         message = self._build_agent_message(request)
@@ -334,6 +336,22 @@ class PrimaryBrainDelegationClient:
         final_answer = self._extract_final_answer(state)
         final_answer = self._extract_exportable_answer_from_results(results, fallback=final_answer)
         status = self._extract_status(state)
+        if not self._answer_has_result_material(final_answer):
+            presentation_answer = await self._present_delegated_step_output(
+                run_id=runtime_run_id,
+                request=request,
+                state=state,
+                results=results,
+            )
+            if self._answer_has_result_material(presentation_answer):
+                final_answer = presentation_answer
+                results = dict(results)
+                results["delegated_step_presentation"] = {
+                    "status": "completed",
+                    "final_answer": final_answer,
+                    "exportable": True,
+                    "source": "presentation_brain",
+                }
         if self._answer_has_result_material(final_answer):
             status = "completed"
         elif status in {"completed", "success", "succeeded", "ok"}:
@@ -376,6 +394,63 @@ class PrimaryBrainDelegationClient:
             parts.append("Available upstream results:\n" + "\n".join(rendered_peers))
 
         return "\n\n".join(part for part in parts if part).strip()
+
+
+    async def _present_delegated_step_output(
+        self,
+        *,
+        run_id: str,
+        request: AgentExecutionRequest,
+        state: dict[str, Any],
+        results: dict[str, Any],
+    ) -> str:
+        """Render a delegated text-producing step through Presentation Brain.
+
+        The primary runtime owns execution and verification.  Presentation Brain
+        owns user-facing wording.  A multi-step workflow therefore exports the
+        presentation result, not raw execution/debug material, when a downstream
+        step asks for text such as a final answer or body.
+        """
+        if not isinstance(results, dict) or not results:
+            return ""
+        materials = self._presentation_materials_from_results(results)
+        if not materials:
+            return ""
+        presentation_state = dict(state or {})
+        presentation_state.setdefault("input", {"original_input": request.participant_instruction})
+        try:
+            presented = await self.presentation_brain.synthesize(PresentationRequest(
+                run_id=run_id,
+                node_id="delegated_step_presentation",
+                original_input=str(request.participant_instruction or ""),
+                state=presentation_state,
+                materials=materials,
+                trust_summary={"verified_real_execution": True},
+                output_policy={"delivery_format": "text", "exportable": True},
+            ))
+        except Exception:
+            return ""
+        answer = str(getattr(presented, "final_answer", "") or "").strip()
+        if self._answer_has_result_material(answer):
+            return answer
+        return ""
+
+    def _presentation_materials_from_results(self, results: dict[str, Any]) -> list[dict[str, Any]]:
+        materials: list[dict[str, Any]] = []
+        for node_id, node in (results or {}).items():
+            if not isinstance(node, dict):
+                continue
+            status = str(node.get("status") or node.get("execution_status") or node.get("_status") or "").casefold()
+            if status in {"blocked", "failed", "error", "pending", "initializing", "planning", "planning_active", "ready_for_planning"}:
+                continue
+            material = self.presentation_brain.material_from_execution_step({
+                "step_id": str(node_id),
+                "status": status or "completed",
+                "result": node,
+            })
+            if isinstance(material, dict) and material.get("content") not in (None, {}, [], ""):
+                materials.append(material)
+        return materials
 
     def _extract_exportable_answer_from_results(self, results: dict[str, Any], fallback: str = "") -> str:
         """Find a public terminal answer produced by the primary runtime.
