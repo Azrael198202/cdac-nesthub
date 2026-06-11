@@ -1349,8 +1349,8 @@ def test_runtime_contract_smoke():
             str(repair_blueprint.get("description") or "")
             + "\n\nPrevious generated artifact failed sandbox validation. "
             "Regenerate the runtime files so tests are self-contained, all names are imported or defined, "
-            "the entrypoint output is JSON-serializable, and the verification behavior is asserted by execution. "
-            "The sandbox path must honor the declared generic test-mode flag before any external side effect and must return a successful structured result without remote calls or live credentials."
+            "the entrypoint output is JSON-serializable, and the verification behavior follows the sandbox execution policy. "
+            "If the artifact requires live preset connection values, secrets, credentials, accounts, or external side effects, sandbox validation must remain static-only. If it can be exercised with sandbox-owned local inputs, tests may execute without external effects."
         ).strip()
         repaired_template = self.blueprint_artifact_generator.materialize(repair_blueprint, identity_contract=identity_contract)
         if repaired_template.get("artifact_kind") != "real_runtime_implementation":
@@ -1545,6 +1545,22 @@ def test_runtime_contract_smoke():
                 "reason": str(test_quality.get("status") or "generated_test_static_quality_failed"),
                 "checks": checks,
             }
+
+        sandbox_policy = self._sandbox_validation_execution_policy(tool_dir=tool_dir)
+        checks.append({"name": "sandbox_validation_execution_policy", **sandbox_policy})
+        if sandbox_policy.get("mode") == "static_only":
+            quality = self._artifact_registration_quality_gate(artifact)
+            checks.append({"name": "registration_quality_gate", "passed": bool(quality.get("passed")), "result": quality})
+            if not quality.get("passed"):
+                return {"passed": False, "status": "sandbox_failed", "reason": str(quality.get("reason") or "artifact_quality_gate_failed"), "checks": checks}
+            return {
+                "passed": True,
+                "status": "completed",
+                "checks": checks,
+                "isolation_level": "static_only",
+                "reason": str(sandbox_policy.get("reason") or "external_runtime_requires_live_values"),
+            }
+
         effect_guard = self._effectful_runtime_test_mode_guard(tool_dir=tool_dir)
         checks.append({"name": "effectful_runtime_test_mode_guard", **effect_guard})
         if not effect_guard.get("passed"):
@@ -1598,6 +1614,65 @@ def test_runtime_contract_smoke():
             return True
         except Exception:
             return False
+
+
+    def _sandbox_validation_execution_policy(self, *, tool_dir: Path) -> dict[str, Any]:
+        """Decide whether sandbox may execute the generated artifact.
+
+        The decision is generic and schema driven.  Artifacts that require
+        preset connection profiles, secret material, or other live external
+        values are validated statically in sandbox: syntax, import/name quality,
+        manifest/schema contract, and registration quality.  Sandbox must not
+        force real credentials, SSL handshakes, account logins, or external
+        writes merely to prove code generation.  Artifacts without live external
+        dependencies may still run sandbox-owned smoke/unit tests.
+        """
+        manifest_path = tool_dir / "manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+        except Exception as exc:
+            return {"passed": False, "mode": "unknown", "reason": f"manifest_unreadable:{exc.__class__.__name__}"}
+
+        policy = manifest.get("runtime_execution_policy") if isinstance(manifest.get("runtime_execution_policy"), dict) else {}
+        side_effects = str(policy.get("side_effects") or "").strip().casefold()
+        safe_effects = {"", "none", "pure", "read_only", "read-only"}
+        external_effect = side_effects not in safe_effects
+
+        connection_schema = manifest.get("connection_schema") if isinstance(manifest.get("connection_schema"), dict) else {}
+        secret_schema = manifest.get("secret_schema") if isinstance(manifest.get("secret_schema"), dict) else {}
+        input_schema = manifest.get("input_schema") if isinstance(manifest.get("input_schema"), dict) else {}
+        connection_props = connection_schema.get("properties") if isinstance(connection_schema.get("properties"), dict) else {}
+        secret_props = secret_schema.get("properties") if isinstance(secret_schema.get("properties"), dict) else {}
+        required_inputs = input_schema.get("required") if isinstance(input_schema.get("required"), list) else []
+
+        source = self._artifact_source_text(tool_dir)
+        structural = self._generic_effectful_source_signals(source)
+        external_signals = [item for item in structural if item.get("scope") == "external"]
+        requires_live_values = bool(connection_props or secret_props)
+        requires_runtime_user_values = bool(required_inputs)
+        mode = "static_only" if (external_effect or external_signals) and (requires_live_values or requires_runtime_user_values) else "execute_allowed"
+        reason = "external_runtime_requires_preset_or_user_values" if mode == "static_only" else "sandbox_owned_execution_allowed"
+        return {
+            "passed": True,
+            "mode": mode,
+            "reason": reason,
+            "policy_side_effects": side_effects,
+            "has_connection_schema": bool(connection_props),
+            "has_secret_schema": bool(secret_props),
+            "required_input_count": len(required_inputs),
+            "external_signal_count": len(external_signals),
+        }
+
+    def _artifact_source_text(self, tool_dir: Path) -> str:
+        parts: list[str] = []
+        for path in sorted(tool_dir.glob("*.py")):
+            if path.name.startswith("test_"):
+                continue
+            try:
+                parts.append(path.read_text(encoding="utf-8", errors="ignore"))
+            except Exception:
+                continue
+        return "\n".join(parts)
 
     def _effectful_runtime_test_mode_guard(self, *, tool_dir: Path) -> dict[str, Any]:
         """Require a local test-mode branch for artifacts declared effectful.
