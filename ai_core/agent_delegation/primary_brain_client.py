@@ -348,26 +348,17 @@ class PrimaryBrainDelegationClient:
         )
 
     def _standalone_step_message(self, request: AgentExecutionRequest) -> str:
+        """Build the isolated user request for one decomposed workflow step.
+
+        The auxiliary layer owns task coordination and runtime parameters.  A
+        standalone step sent back into ai_core must contain only its own
+        instruction plus explicit public upstream results.  Runtime input values
+        are excluded here so downstream capability parameters cannot change the
+        upstream step's intent, planning, or source policy.
+        """
         objective = str(request.participant_instruction or "").strip() or str(request.task_instruction or "").strip()
         context = request.shared_context if isinstance(request.shared_context, dict) else {}
         parts = [objective] if objective else []
-
-        parameters = {}
-        agent_parameters = context.get("agent_parameters") if isinstance(context.get("agent_parameters"), dict) else {}
-        values = agent_parameters.get("values") if isinstance(agent_parameters.get("values"), dict) else {}
-        for key, value in values.items():
-            if value in (None, "", [], {}):
-                continue
-            parameters[str(key)] = value
-        if parameters:
-            lines = ["Parameters:"]
-            for key, value in parameters.items():
-                if isinstance(value, (dict, list)):
-                    rendered = json.dumps(value, ensure_ascii=False)
-                else:
-                    rendered = str(value)
-                lines.append(f"- {key}: {rendered}")
-            parts.append("\n".join(lines))
 
         peer_results = context.get("available_peer_results") if isinstance(context.get("available_peer_results"), list) else []
         rendered_peers = []

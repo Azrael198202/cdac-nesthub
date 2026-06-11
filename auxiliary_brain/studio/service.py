@@ -984,36 +984,6 @@ class AgentStudioService:
         }
 
 
-    def _workflow_execution_participant_ids(self, workflow_plan: Any) -> list[str]:
-        """Return every participant that belongs to the saved execution graph.
-
-        A composite graph may contain durable participants and generated step
-        participants.  Execution selection must include both sets; otherwise an
-        upstream generated producer is absent at runtime and downstream template
-        bindings cannot resolve.  This is graph-contract based only: it reads the
-        workflow plan and task records, not capability names or domain words.
-        """
-        ordered: list[str] = []
-        seen: set[str] = set()
-
-        def add(value: Any) -> None:
-            pid = str(value or "").strip()
-            if pid and pid not in seen:
-                seen.add(pid)
-                ordered.append(pid)
-
-        for participant in getattr(workflow_plan, "selected_participants", []) or []:
-            if isinstance(participant, dict):
-                add(participant.get("participant_id") or participant.get("id"))
-        for participant in getattr(workflow_plan, "generated_participants", []) or []:
-            if isinstance(participant, dict):
-                add(participant.get("participant_id") or participant.get("id"))
-        for task in getattr(workflow_plan, "tasks", []) or []:
-            if isinstance(task, dict):
-                add(task.get("participant_id") or task.get("participant") or task.get("agent_id"))
-        return ordered
-
-
     def _hydrate_task_step_bindings_from_participants(self, tasks: list[dict[str, Any]], participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Copy durable participant binding metadata into task steps.
 
@@ -1252,10 +1222,10 @@ class AgentStudioService:
         # agent catalog and the UI starts showing false agents such as
         # "Call X Agent. Parameters...". Generated participants are only
         # runtime graph assets after the task graph is accepted.
-        selected_ids = self._workflow_execution_participant_ids(workflow_plan)
+        selected_ids = [p.get("participant_id") for p in workflow_plan.selected_participants]
         workflow_tasks = self._hydrate_task_step_bindings_from_participants(
             workflow_plan.tasks,
-            workflow_plan.selected_participants + workflow_plan.generated_participants,
+            workflow_plan.selected_participants,
         )
         explicit_runtime_parameters.update(
             self._extract_named_parameter_blocks_from_instruction(instruction, workflow_plan.selected_participants)
@@ -1332,6 +1302,10 @@ class AgentStudioService:
             if pid:
                 self.store.write_json(f"generated/agents/{pid}.json", generated_participant)
 
+        workflow_variable_contract = self._build_workflow_variable_contract(
+            tasks=workflow_tasks,
+            runtime_parameters=explicit_runtime_parameters,
+        )
         schema_contract = {
             "contract_type": "task_runtime_parameter_contract",
             "parameters": [],
@@ -1352,6 +1326,7 @@ class AgentStudioService:
             "uploaded_artifacts": artifact_refs,
             "parameter_contract": schema_contract,
             "runtime_parameters": explicit_runtime_parameters,
+            "workflow_variable_contract": workflow_variable_contract,
             "schedule_policy": schedule_policy,
             "tasks": workflow_tasks,
             "instruction_coverage": workflow_plan.coverage,
@@ -2472,6 +2447,76 @@ class AgentStudioService:
 
 
 
+    def _build_workflow_variable_contract(self, *, tasks: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> dict[str, Any]:
+        """Create an explicit dataflow binding contract for the task graph.
+
+        The task creator converts user-authored ``{{step.field}}`` references
+        into structural binding metadata before execution.  The original string
+        is preserved for compatibility, but graph/runtime viewers and executors
+        can inspect this contract instead of guessing at execution time.  This is
+        syntax-only and domain-neutral.
+        """
+        import re
+        template_re = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
+        step_aliases: dict[str, str] = {}
+        for index, task in enumerate(tasks or [], start=1):
+            if not isinstance(task, dict):
+                continue
+            pid = str(task.get("participant_id") or "").strip()
+            if not pid:
+                continue
+            aliases = {
+                f"step{index}", f"step_{index}", f"step {index}",
+                f"stage{index}", f"stage_{index}", f"stage {index}",
+                str(task.get("source_step_id") or "").strip(),
+                str(task.get("task_id") or "").strip(),
+                pid,
+            }
+            for alias in aliases:
+                norm = self._normalize_workflow_reference(alias)
+                if norm:
+                    step_aliases[norm] = pid
+        bindings: list[dict[str, Any]] = []
+        for key, value in (runtime_parameters or {}).items():
+            if not isinstance(value, str) or "{{" not in value:
+                continue
+            for match in template_re.finditer(value):
+                ref = match.group(1).strip()
+                source_ref, _, field = ref.partition(".")
+                source_pid = step_aliases.get(self._normalize_workflow_reference(source_ref))
+                bindings.append({
+                    "target_path": str(key),
+                    "reference": ref,
+                    "source_step_id": source_pid or "",
+                    "source_alias": source_ref,
+                    "source_field": field or "final_answer",
+                    "binding_type": "workflow_output",
+                    "status": "pending",
+                })
+        for task in tasks or []:
+            if not isinstance(task, dict):
+                continue
+            task_bindings = []
+            pid = str(task.get("participant_id") or "").strip()
+            for item in bindings:
+                target = str(item.get("target_path") or "")
+                if pid and (target.startswith(pid + ".") or target.startswith(pid + "_")):
+                    task_bindings.append(item)
+            if task_bindings:
+                task["workflow_bindings"] = task_bindings
+        return {
+            "contract_type": "workflow_variable_contract",
+            "binding_count": len(bindings),
+            "bindings": bindings,
+        }
+
+    def _normalize_workflow_reference(self, value: Any) -> str:
+        text = str(value or "").strip().casefold()
+        text = re.sub(r"\s+", "", text)
+        text = text.replace("-", "_")
+        text = re.sub(r"_+", "_", text)
+        return text.strip("_")
+
     def _extract_top_level_runtime_parameters_from_instruction(self, instruction: str) -> dict[str, Any]:
         """Extract only task-level runtime parameters.
 
@@ -2711,9 +2756,9 @@ class AgentStudioService:
                     out[f"{prefix}.{key}"] = value
                     out[f"{prefix}_{key}"] = value
             # Values extracted from an addressed parameter block remain scoped
-            # to the addressed participant.  Do not emit a plain key fallback:
-            # composite graphs can contain generated upstream steps whose primary
-            # runtime request must not receive downstream tool inputs.
+            # to that participant.  Do not create plain fallback keys here: in a
+            # composite workflow, unscoped runtime inputs can be injected into
+            # unrelated upstream steps and change their ai_core planning.
 
 
     def _field_participant_id(self, field: dict[str, Any]) -> str:
@@ -2835,7 +2880,7 @@ class AgentStudioService:
         Pre-execution parameter collection must not pause the whole task graph
         for a downstream side-effect approval.  If it does, upstream producer
         steps never run and explicit dataflow placeholders such as
-        a workflow-output template cannot be resolved.  This filter is generic:
+        ``{{Step1.final_answer}}`` cannot be resolved.  This filter is generic:
         it only recognizes execution-control fields through the existing
         delegation runtime approval-control classifier, not through capability
         names or business terms.

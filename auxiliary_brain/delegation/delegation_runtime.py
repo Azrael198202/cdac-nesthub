@@ -1702,29 +1702,24 @@ class AgentDelegationRuntime:
     def _scoped_runtime_parameters_from_values(self, participant: dict[str, Any], runtime_parameters: dict[str, Any]) -> dict[str, Any]:
         """Return only values that belong to this participant.
 
-        A task-level parameter map may contain values for many steps.  Passing
-        the whole map into each ai_core step pollutes intent recognition and can
-        make an upstream information-gathering step look like a downstream tool
-        call.  This helper keeps explicit participant-scoped values and, for
-        executable participants with a declared input contract, compatible
-        unscoped field names.  It is generic: aliases and schema fields come
-        from the participant object, not from any business domain.
+        The task-level parameter map may contain values for many steps.  This
+        method treats unscoped runtime input names as executable input only for
+        participants that are explicitly bound to a runtime capability.  Source
+        or semantic steps receive no unscoped runtime values, so downstream
+        parameters cannot pollute upstream ai_core planning.
         """
         if not isinstance(runtime_parameters, dict):
             return {}
         aliases = self._participant_parameter_aliases(participant)
         field_names = self._participant_parameter_field_names(participant)
         field_tokens = {self._parameter_alias_token(x) for x in field_names}
+        executable = self._participant_has_runtime_capability(participant)
         out: dict[str, Any] = {}
         for key, value in runtime_parameters.items():
             if value in (None, "", [], {}):
                 continue
             text_key = str(key or "").strip()
-            if not text_key:
-                continue
-            if text_key.startswith("_"):
-                # Coordination metadata is not a step parameter.  It may be kept
-                # at the run level but must not be rendered into ai_core prompts.
+            if not text_key or text_key.startswith("_"):
                 continue
             lower = text_key.casefold()
             token = self._parameter_alias_token(text_key)
@@ -1747,20 +1742,32 @@ class AgentDelegationRuntime:
                     break
                 if token.startswith(underscored):
                     tail_token = token[len(underscored):]
-                    # Preserve declared field spelling when possible.
                     field = next((name for name in field_names if self._parameter_alias_token(name) == tail_token), tail_token)
                     out[field] = copy.deepcopy(value)
                     matched = True
                     break
             if matched:
                 continue
-            # Unscoped values are safe only when this participant declares that
-            # exact runtime input field.  A semantic/source step has no such
-            # executable input contract, so downstream values cannot leak into it.
-            if field_names and (text_key in field_names or token in field_tokens):
+            if executable and field_names and (text_key in field_names or token in field_tokens):
                 field = next((name for name in field_names if name == text_key or self._parameter_alias_token(name) == token), text_key)
                 out[field] = copy.deepcopy(value)
         return out
+
+    def _participant_has_runtime_capability(self, participant: dict[str, Any]) -> bool:
+        if not isinstance(participant, dict):
+            return False
+        profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+        if profile:
+            if profile.get("tool_id") or profile.get("capability") or profile.get("capability_type"):
+                return True
+            if isinstance(profile.get("tool_summary"), dict):
+                return True
+        policy = str(participant.get("execution_policy") or "").strip().casefold()
+        if policy in {"runtime_registered_tool", "registered_runtime_tool", "runtime_tool"}:
+            return True
+        contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}
+        params = contract.get("parameters") if isinstance(contract.get("parameters"), list) else []
+        return any(isinstance(item, dict) and str(item.get("name") or item.get("field") or item.get("key") or "").strip() for item in params)
 
     def _merged_runtime_parameters(self, task_graph: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
         values: dict[str, Any] = {}
@@ -2149,7 +2156,7 @@ class AgentDelegationRuntime:
         This method is now a compatibility wrapper around the generic
         WorkflowOutputResolver.  It intentionally supports arbitrary upstream
         step aliases and field names declared by the workflow, instead of a
-        fixed numbered-step convention.
+        fixed ``Step1`` convention.
         """
         deps = set(self._participant_dependency_ids(participant, dependency_plan))
         return self.workflow_output_resolver.build_reference_map(
@@ -3581,26 +3588,19 @@ class AgentDelegationRuntime:
 
     def _select_participants(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
         declared_ids = {str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()}
-        task_participant_ids = {
-            str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
-            for task in (task_graph.get("tasks") or [])
-            if isinstance(task, dict) and str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
-        }
-        execution_ids = declared_ids | task_participant_ids
-        if execution_ids:
+        if declared_ids:
             selected = [
                 participant
                 for participant in (participants or [])
-                if str(participant.get("participant_id") or participant.get("id") or "").strip() in execution_ids
+                if str(participant.get("participant_id") or participant.get("id") or "").strip() in declared_ids
             ]
             found_ids = {str(participant.get("participant_id") or participant.get("id") or "").strip() for participant in selected}
-            missing_ids = execution_ids - found_ids
+            missing_ids = declared_ids - found_ids
             if missing_ids:
                 selected.extend(self._participants_from_task_graph(task_graph, missing_ids))
-            # A task graph with explicit execution ids must never fall back to
-            # unrelated durable participants.  Generated steps are part of the
-            # graph contract even when they were not selected from the durable
-            # catalog, so they are rebuilt from task records when needed.
+            # A task graph with selected ids must never fall back to unrelated
+            # durable participants.  Missing generated steps are rebuilt from
+            # the task graph, otherwise execution stays empty and fails cleanly.
             return self._dedupe_participants_for_execution(selected)
         if not participants:
             return []

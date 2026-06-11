@@ -221,13 +221,42 @@ class GraphVisualStateBuilder:
         node_id = self._node_id(node, index)
         label = self._display_label(node, fallback=node_id)
         kind = str(node.get("node_type") or node.get("kind") or node.get("task_type") or "runtime_node")
+        details = self._node_details(node)
         return {
             "id": node_id,
             "label": label[:120],
             "kind": kind,
             "status": status_by_node.get(node_id, self._normalize_status(node.get("status"))),
             "summary": str(node.get("summary") or node.get("notes") or node.get("description") or "")[:240],
+            "details": details,
             "has_output": bool(node.get("output") or node.get("result") or node.get("artifact_ref")),
+        }
+
+    def _node_details(self, node: dict[str, Any]) -> dict[str, Any]:
+        instruction = str(node.get("source_instruction_fragment") or node.get("instruction") or node.get("execution_objective") or node.get("objective") or "").strip()
+        input_contract = node.get("input_contract") if isinstance(node.get("input_contract"), dict) else {}
+        output_contract = node.get("output_contract") if isinstance(node.get("output_contract"), dict) else {}
+        parameter_contract = node.get("parameter_contract") if isinstance(node.get("parameter_contract"), dict) else {}
+        params = []
+        for item in self._as_list(parameter_contract.get("parameters")):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("field") or "").strip()
+            if name:
+                params.append({
+                    "name": name,
+                    "required": bool(item.get("required") or item.get("runtime_required") or item.get("execution_required")),
+                    "bound": bool(item.get("value") not in (None, "", [], {}) or item.get("values")),
+                })
+        bindings = node.get("workflow_bindings") if isinstance(node.get("workflow_bindings"), list) else []
+        return {
+            "instruction": instruction[:2000],
+            "source_step_id": str(node.get("source_step_id") or ""),
+            "depends_on": self._as_list(node.get("depends_on")) or self._as_list(input_contract.get("bound_from_upstream")),
+            "input_contract": input_contract,
+            "output_contract": output_contract,
+            "parameters": params[:40],
+            "bindings": bindings[:40],
         }
 
 
