@@ -1274,7 +1274,13 @@ class LLMJsonExecutor:
         if not selected_action:
             normalized_intent = intent.get("normalized_intent") if isinstance(intent.get("normalized_intent"), dict) else {}
             selected_action = self._action_type_from_text(normalized_intent.get("action_hint") or normalized_intent.get("preferred_action_type"))
-        selected_action = selected_action or "ask_user"
+        selected_action = selected_action or "llm_generate"
+        selected_action = self._repair_source_step_action(
+            state=state,
+            selected_action=selected_action,
+            containers=[intent, parsed, payload],
+            step={},
+        )
         selected_method = self._method_from_action_type(selected_action)
         step = {
             "step_id": "step_1",

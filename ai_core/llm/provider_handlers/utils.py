@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import re
-from json import JSONDecodeError
 from typing import Any
+from ai_core.llm.json_repair import repair_json_object_text
 
 
 class LLMJSONParseError(ValueError):
@@ -53,8 +53,11 @@ def parse_json_content(content: str) -> dict[str, Any]:
                         return parsed
                 except Exception as repair_exc:
                     last_error = repair_exc
-    msg = str(last_error or "invalid JSON")
-    raise LLMJSONParseError(msg, raw_content=raw, candidate=candidates[0] if candidates else cleaned)
+    structural = repair_json_object_text(raw)
+    if structural.parsed is not None:
+        return structural.parsed
+    msg = structural.error or str(last_error or "invalid JSON")
+    raise LLMJSONParseError(msg, raw_content=raw, candidate=structural.text or (candidates[0] if candidates else cleaned))
 
 
 def _strip_wrappers(text: str) -> str:

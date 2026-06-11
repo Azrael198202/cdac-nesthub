@@ -5,6 +5,8 @@ from ai_core.config.paths import RUNTIME_CONFIGS
 from ai_core.events.event_bus import event_bus
 from ai_core.llm.provider_handler_registry import ProviderHandlerRegistry
 from ai_core.llm.provider_handlers.base import ProviderUnavailableError
+from ai_core.llm.provider_handlers.utils import LLMJSONParseError
+from ai_core.llm.json_repair import repair_json_object_text
 from ai_core.context.prompt_budget_manager import PromptBudgetManager
 from ai_core.llm.model_capability_matcher import ModelCapabilityMatcher
 from ai_core.runtime.modeling import ModelRoutingPlanner, ModelStagePolicy, RuntimeExecutionPolicy
@@ -336,7 +338,8 @@ class ProviderRouter:
                     "trace_path": provider_request_trace,
                 })
 
-                result = await handler.generate_json(
+                result = await self._generate_json_with_repair_retry(
+                    handler=handler,
                     run_id=run_id,
                     node_id=node_id,
                     provider_name=provider_name,
@@ -426,6 +429,83 @@ class ProviderRouter:
             "Check runtime/configs/models/providers.yaml. "
             "Last error: " + str(last_error)
         )
+
+
+    async def _generate_json_with_repair_retry(self, *, handler, run_id: str, node_id: str, provider_name: str, provider: dict, prompt: dict, rendered_user_prompt: str, schema: dict) -> dict:
+        """Call a provider and recover malformed JSON before declaring failure.
+
+        This is a structural JSON lifecycle guard, not domain logic. It first
+        attempts deterministic repair of the raw model text, then performs a
+        single stricter retry with the same provider. If both fail, the original
+        parse error is propagated so upper layers can mark planning_failed
+        instead of silently changing execution semantics.
+        """
+        try:
+            return await handler.generate_json(
+                run_id=run_id,
+                node_id=node_id,
+                provider_name=provider_name,
+                provider=provider,
+                prompt=prompt,
+                rendered_user_prompt=rendered_user_prompt,
+                schema=schema,
+            )
+        except LLMJSONParseError as exc:
+            repaired = repair_json_object_text(exc.raw_content)
+            if repaired.parsed is not None:
+                await event_bus.emit(run_id, {
+                    "type": "LLM_JSON_STRUCTURAL_REPAIRED",
+                    "title": "Malformed JSON structurally repaired",
+                    "message": f"provider={provider_name}; node={node_id}",
+                    "node_id": node_id,
+                    "provider": provider_name,
+                    "attempt_count": len(repaired.attempts),
+                })
+                return repaired.parsed
+
+            retry_limit = int(provider.get("json_repair_retry_count") if provider.get("json_repair_retry_count") is not None else 1)
+            if retry_limit <= 0:
+                raise
+            retry_prompt = (
+                str(rendered_user_prompt or "")
+                + "\n\nThe previous response was not valid JSON. Return exactly one complete JSON object that conforms to the schema. Do not include markdown, comments, or prose. Escape all newlines inside strings."
+            )
+            retry_provider = dict(provider)
+            options = dict(retry_provider.get("options") or {})
+            options.update({"temperature": 0, "think": False})
+            retry_provider["options"] = options
+            retry_provider["think"] = False
+            await event_bus.emit(run_id, {
+                "type": "LLM_JSON_RETRY",
+                "title": "Retrying malformed JSON response",
+                "message": f"provider={provider_name}; node={node_id}",
+                "node_id": node_id,
+                "provider": provider_name,
+                "original_error": str(exc),
+            })
+            try:
+                return await handler.generate_json(
+                    run_id=run_id,
+                    node_id=node_id,
+                    provider_name=provider_name,
+                    provider=retry_provider,
+                    prompt=prompt,
+                    rendered_user_prompt=retry_prompt,
+                    schema=schema,
+                )
+            except LLMJSONParseError as retry_exc:
+                repaired_retry = repair_json_object_text(retry_exc.raw_content)
+                if repaired_retry.parsed is not None:
+                    await event_bus.emit(run_id, {
+                        "type": "LLM_JSON_STRUCTURAL_REPAIRED",
+                        "title": "Retried JSON structurally repaired",
+                        "message": f"provider={provider_name}; node={node_id}",
+                        "node_id": node_id,
+                        "provider": provider_name,
+                        "attempt_count": len(repaired_retry.attempts),
+                    })
+                    return repaired_retry.parsed
+                raise retry_exc
 
     async def _emit_missing_secret_interaction(self, *, run_id: str, node_id: str, provider_name: str, secret_key: str) -> None:
         await event_bus.emit(run_id, {
