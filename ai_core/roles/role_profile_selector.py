@@ -164,7 +164,16 @@ class RoleProfileSelector:
         signals: list[str] = []
         role_id = "general_runtime_agent"
 
-        if self._contains_any(text, ["credential", "secret", "approval", "confirm", "interaction", "human"]):
+        # Contract-level routing has priority over wording-level routing.  A
+        # step can ask for a written summary while also requiring source
+        # material; in that case the planning prompt must remain retrieval-
+        # scoped until evidence has been collected.  This is structural and
+        # domain-neutral: it only checks runtime contracts and execution method
+        # identifiers, not task topics.
+        if self._state_requires_source_material(state):
+            role_id = "information_retrieval_agent"
+            signals.append("source_contract_signal")
+        elif self._contains_any(text, ["credential", "secret", "approval", "confirm", "interaction", "human"]):
             role_id = "human_interaction_agent"
             signals.append("interaction_signal")
         elif self._contains_any(text, ["adapter", "protocol", "endpoint", "authentication", "schema", "integration", "connector"]):
@@ -173,20 +182,53 @@ class RoleProfileSelector:
         elif self._contains_any(text, ["code", "module", "artifact", "sandbox", "generate", "implementation"]):
             role_id = "code_generation_agent"
             signals.append("generation_signal")
+        elif self._contains_any(text, ["query", "lookup", "search", "fetch", "retrieve", "evidence", "source"]):
+            role_id = "information_retrieval_agent"
+            signals.append("retrieval_signal")
         elif self._contains_any(text, ["write", "document", "report", "summary", "presentation", "compose"]):
             role_id = "document_writer_agent"
             signals.append("writing_signal")
         elif self._contains_any(text, ["analyze", "compare", "calculate", "metric", "table", "dataset"]):
             role_id = "data_analysis_agent"
             signals.append("analysis_signal")
-        elif self._contains_any(text, ["query", "lookup", "search", "fetch", "retrieve", "evidence", "source"]):
-            role_id = "information_retrieval_agent"
-            signals.append("retrieval_signal")
         elif node_id and "planning" in str(node_id).lower():
             role_id = "workflow_planning_agent"
             signals.append("planning_node_signal")
 
         return self._profile(role_id, signals or ["default_signal"])
+
+
+    def _state_requires_source_material(self, state: dict[str, Any]) -> bool:
+        """Return true when runtime contracts require sourced material.
+
+        The method intentionally does not look for topical words.  It walks the
+        current state and checks generic source/evidence contract flags and
+        locked execution methods.
+        """
+        def walk(value: Any, depth: int = 0) -> bool:
+            if depth > 8:
+                return False
+            if isinstance(value, dict):
+                if value.get("requires_source_material") is True:
+                    return True
+                if value.get("requires_live_evidence") is True:
+                    return True
+                if value.get("evidence_required") is True:
+                    return True
+                if value.get("needs_web_search") is True:
+                    return True
+                method = str(value.get("execution_method") or value.get("selected_execution_method") or value.get("action_type") or "").strip()
+                if method in {"web_query", "web_search"}:
+                    return True
+                contract_type = str(value.get("contract_type") or "").strip()
+                if "source" in contract_type and value.get("requires_source_material") is not False:
+                    return True
+                return any(walk(v, depth + 1) for v in value.values())
+            if isinstance(value, list):
+                return any(walk(v, depth + 1) for v in value[:80])
+            return False
+
+        return walk(state)
 
     def _profile(self, role_id: str, signals: list[str]) -> RoleProfile:
         if role_id not in self.DEFAULT_POLICIES:

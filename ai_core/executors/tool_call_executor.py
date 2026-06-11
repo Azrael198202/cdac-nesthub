@@ -4540,7 +4540,13 @@ class ToolCallExecutor:
             timeout_seconds=cost_snapshot.stage_timeout("extraction", 45),
         )
         generic_records = self.content_extraction.extract(fetched_documents=generic_documents) if generic_documents else []
-        if not data and not generic_documents:
+        # If a modern page exposes little visible text, preserve the public
+        # search-result material as a last-resort structured source record.
+        # This remains generic: title/snippet/url are source evidence, not a
+        # domain-specific extractor.
+        if not generic_records:
+            generic_records = self.content_extraction.extract_from_search_results(selected_evidence)
+        if not data and not generic_documents and not generic_records:
             return []
         documents: list[dict[str, Any]] = []
         if data:
@@ -4560,6 +4566,8 @@ class ToolCallExecutor:
                     "deep_research_trace": data.get("deep_research_trace") or {},
                 },
             })
+        generic_answer_material = self._answer_material_from_content_records(generic_records)
+        generic_normalized_facts = self._facts_from_content_records(generic_records)
         for doc in generic_documents:
             if not isinstance(doc, dict):
                 continue
@@ -4569,16 +4577,80 @@ class ToolCallExecutor:
                     "status": doc.get("status"),
                     "title": doc.get("title") or doc.get("url") or "Source content",
                     "url": doc.get("url") or "",
-                    "text_excerpt": doc.get("text_excerpt") or "",
+                    "text_excerpt": doc.get("text_excerpt") or generic_answer_material or "",
                     "visible_text_excerpt": doc.get("visible_text_excerpt") or "",
                     "html_excerpt": doc.get("html_excerpt") or "",
                     "dom_evidence_text": doc.get("dom_evidence_text") or "",
                     "dom_evidence_items": doc.get("dom_evidence_items") or [],
                     "extracted_content_records": generic_records,
+                    "normalized_facts": generic_normalized_facts,
+                    "selected_evidence_blocks": generic_records[:8],
+                    "answer_material": generic_answer_material,
+                    "answer_material_quality": {"passed": bool(generic_answer_material and generic_normalized_facts), "score": 0.72, "source": "generic_content_records"},
                     "fetched_at": doc.get("fetched_at") or "",
                 },
             })
+        if generic_records and not generic_documents:
+            documents.append({
+                "source": "generic_search_result_material",
+                "document": {
+                    "status": "success",
+                    "title": "Source material",
+                    "url": str((generic_records[0] or {}).get("url") or "") if isinstance(generic_records[0], dict) else "",
+                    "text_excerpt": generic_answer_material,
+                    "visible_text_excerpt": generic_answer_material,
+                    "extracted_content_records": generic_records,
+                    "normalized_facts": generic_normalized_facts,
+                    "selected_evidence_blocks": generic_records[:8],
+                    "answer_material": generic_answer_material,
+                    "answer_material_quality": {"passed": bool(generic_answer_material and generic_normalized_facts), "score": 0.68, "source": "generic_search_result_material"},
+                },
+            })
         return documents
+
+
+    def _answer_material_from_content_records(self, records: list[dict[str, Any]]) -> str:
+        lines: list[str] = []
+        for index, record in enumerate(records[:10], start=1):
+            if not isinstance(record, dict):
+                continue
+            title = str(record.get("title") or "").strip()
+            text = str(record.get("text") or "").strip()
+            url = str(record.get("url") or record.get("source_url") or "").strip()
+            time_expression = str(record.get("time_expression") or "").strip()
+            parts = []
+            if title:
+                parts.append(title)
+            if text and text != title:
+                parts.append(text)
+            if url:
+                parts.append("Source: " + url)
+            if time_expression:
+                parts.append("Time: " + time_expression)
+            if parts:
+                lines.append(f"{index}. " + "\n".join(parts))
+        return "\n\n".join(lines).strip()
+
+    def _facts_from_content_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        facts: list[dict[str, Any]] = []
+        for index, record in enumerate(records[:24], start=1):
+            if not isinstance(record, dict):
+                continue
+            title = str(record.get("title") or "").strip()
+            text = str(record.get("text") or "").strip()
+            url = str(record.get("url") or record.get("source_url") or "").strip()
+            if not (title or text or url):
+                continue
+            facts.append({
+                "fact_id": f"content_record_{index}",
+                "kind": "source_content_record",
+                "title": title,
+                "summary": text,
+                "source_url": url,
+                "time_expression": str(record.get("time_expression") or ""),
+                "confidence": float(record.get("relevance_score") or 0.5),
+            })
+        return facts
 
     async def _generic_content_documents(
         self,

@@ -48,6 +48,43 @@ class ContentExtractionLayer:
                         return records
         return records
 
+
+    def extract_from_search_results(self, results: list[dict[str, Any]], max_records: int = 40) -> list[dict[str, Any]]:
+        """Convert public search-result cards into source content records.
+
+        This is a fallback when pages cannot be materialized into visible text.
+        It remains provider-neutral and topic-neutral: only title, snippet, URL,
+        and visible time-like expressions are preserved as evidence records.
+        """
+        records: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in results or []:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or item.get("source_url") or item.get("link") or "").strip()
+            title = self._clean(str(item.get("title") or item.get("name") or url or ""))
+            snippet = self._clean(str(item.get("snippet") or item.get("text") or item.get("description") or item.get("summary") or ""))
+            text = self._clean(" ".join(part for part in (title, snippet) if part))
+            if not self._looks_like_content(text):
+                continue
+            record = {
+                "kind": "extracted_content_record",
+                "title": title[:180] or self._compact_title(text, page_title=""),
+                "text": text[:900],
+                "url": url,
+                "source_url": url,
+                "source_title": title,
+                "time_expression": self._first_time(text),
+                "relevance_score": self._content_score(text) + 0.05,
+            }
+            key = self._record_key(record)
+            if key and key not in seen:
+                seen.add(key)
+                records.append(record)
+                if len(records) >= max_records:
+                    break
+        return records
+
     def _records_from_dom_items(self, doc: dict[str, Any], *, base_url: str, page_title: str) -> list[dict[str, Any]]:
         items = doc.get("dom_evidence_items") if isinstance(doc.get("dom_evidence_items"), list) else []
         out: list[dict[str, Any]] = []

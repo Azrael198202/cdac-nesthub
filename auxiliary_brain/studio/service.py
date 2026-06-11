@@ -2452,9 +2452,10 @@ class AgentStudioService:
     def _step_source_contract_from_fragment(self, fragment: Any) -> dict[str, Any]:
         """Build a structural source-material contract from a step fragment.
 
-        The contract is topic-neutral. It only marks a step as needing source
-        material when the step explicitly requests provenance-like output
-        fields in its own instruction.
+        The contract is topic-neutral.  It does not split one instruction into
+        multiple work units just because the instruction contains a requested
+        count.  A requested count is stored as output cardinality metadata for
+        the same step.
         """
         text = str(fragment or "")
         requested_fields: list[str] = []
@@ -2471,11 +2472,51 @@ class AgentStudioService:
             "url", "link", "links", "published_at", "publication_time", "time", "date",
         }
         requires_source_material = bool(normalized & provenance_fields)
+        output_cardinality = self._structural_output_cardinality(text)
         return {
             "contract_type": "step_source_material_contract",
             "requires_source_material": requires_source_material,
             "requested_output_fields": requested_fields,
+            "output_cardinality": output_cardinality,
+            "single_step_multi_item_output": bool(output_cardinality.get("requested_count")),
             "reason": "requested_output_provenance_fields" if requires_source_material else "not_declared",
+        }
+
+    def _structural_output_cardinality(self, text: str) -> dict[str, Any]:
+        """Extract generic item-count requirements without topic vocabulary.
+
+        This is intentionally syntax-only.  It recognizes numerals and simple
+        English number words near generic collection nouns, and preserves that
+        as output metadata.  It never creates extra workflow steps.
+        """
+        raw = str(text or "")
+        lower = raw.casefold()
+        word_numbers = {
+            "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+            "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+        }
+        patterns = [
+            r"(?<![A-Za-z0-9_])(?P<n>\d{1,2})\s+(?:of\s+the\s+)?(?:latest|recent|newest|top|first|last)?\s*(?:items?|entries|records?|results?|stories|summaries|examples|points|rows)\b",
+            r"(?<![A-Za-z0-9_])(?P<n>one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:of\s+the\s+)?(?:latest|recent|newest|top|first|last)?\s*(?:items?|entries|records?|results?|stories|summaries|examples|points|rows)\b",
+        ]
+        requested_count = 0
+        matched = ""
+        for pattern in patterns:
+            match = re.search(pattern, lower, flags=re.I)
+            if not match:
+                continue
+            token = str(match.group("n") or "").casefold()
+            requested_count = int(token) if token.isdigit() else int(word_numbers.get(token, 0) or 0)
+            matched = match.group(0)
+            break
+        if requested_count <= 0:
+            return {"mode": "unspecified"}
+        return {
+            "mode": "exact_requested_count",
+            "requested_count": requested_count,
+            "source": "structural_instruction",
+            "matched_text": matched,
+            "compile_policy": "preserve_as_single_step_output_requirement",
         }
 
     def _attach_step_source_contracts(self, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:

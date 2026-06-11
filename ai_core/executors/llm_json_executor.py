@@ -20,6 +20,7 @@ from ai_core.roles import RoleProfileSelector, PromptPackLoader, RoleScopedConte
 from ai_core.runtime.modeling import ModelStagePolicy
 from ai_core.runtime.governance import RuntimeCostPolicy
 from ai_core.llm.prompt_io_recorder import PromptIORecorder
+from ai_core.llm.operation_prompt_profiles import OperationPromptProfileRouter
 from auxiliary_brain.runtime.observability.stage_observer import RuntimeStageObserver
 
 
@@ -50,6 +51,7 @@ class LLMJsonExecutor:
         self.runtime_cost_policy = RuntimeCostPolicy()
         self.prompt_io_recorder = PromptIORecorder()
         self.stage_observer = RuntimeStageObserver()
+        self.operation_prompt_profiles = OperationPromptProfileRouter()
 
     async def execute(self, workflow_node: dict, node_config: dict, state: dict, capability_result: dict) -> dict:
         run_id = state["run_id"]
@@ -192,11 +194,16 @@ class LLMJsonExecutor:
         })
 
         pack_system_addendum = prompt_pack.get("system_addendum")
-        if pack_system_addendum:
-            prompt = {**prompt, "system": (str(prompt.get("system", "")) + "\n\n" + str(pack_system_addendum)).strip()}
+        operation_profile = self.operation_prompt_profiles.profile_for(node_id=node_id, state=state, adapter=adapter)
+        operation_addendum = self.operation_prompt_profiles.render_addendum(operation_profile)
+        system_addenda = [str(x).strip() for x in (pack_system_addendum, operation_addendum) if str(x or "").strip()]
+        if system_addenda:
+            prompt = {**prompt, "system": (str(prompt.get("system", "")) + "\n\n" + "\n\n".join(system_addenda)).strip()}
 
         runtime_rules = list(prompt.get("runtime_rules", []) or [])
         runtime_rules.extend(prompt_pack.get("runtime_rules", []) or [])
+        operation_rules = operation_profile.get("rules") if isinstance(operation_profile.get("rules"), list) else []
+        runtime_rules.extend(operation_rules)
         if runtime_rules:
             rendered = rendered + "\n\nRole-scoped runtime rules:\n" + "\n".join(f"- {r}" for r in runtime_rules)
 

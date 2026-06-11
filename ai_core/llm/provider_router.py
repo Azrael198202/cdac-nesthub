@@ -1,4 +1,5 @@
 import time
+import json
 from ai_core.config.loader import ConfigLoader
 from ai_core.runtime.modeling.model_provider_autoconfig import ModelProviderAutoConfigurator
 from ai_core.config.paths import RUNTIME_CONFIGS
@@ -14,6 +15,7 @@ from ai_core.runtime.governance import RuntimeCostPolicy
 from ai_core.secrets.secret_store import SecretStore
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 from ai_core.llm.prompt_io_recorder import PromptIORecorder
+from ai_core.model_orchestration import LiteLLMBrainClient
 
 
 class ProviderRouter:
@@ -34,6 +36,7 @@ class ProviderRouter:
         self.runtime_execution_policy = RuntimeExecutionPolicy()
         self.runtime_cost_policy = RuntimeCostPolicy()
         self.prompt_io_recorder = PromptIORecorder()
+        self.litellm_json_escalation = LiteLLMBrainClient()
 
 
     def _canonical_stage_node(self, node_id: str) -> str:
@@ -434,11 +437,16 @@ class ProviderRouter:
     async def _generate_json_with_repair_retry(self, *, handler, run_id: str, node_id: str, provider_name: str, provider: dict, prompt: dict, rendered_user_prompt: str, schema: dict) -> dict:
         """Call a provider and recover malformed JSON before declaring failure.
 
-        This is a structural JSON lifecycle guard, not domain logic. It first
-        attempts deterministic repair of the raw model text, then performs a
-        single stricter retry with the same provider. If both fail, the original
-        parse error is propagated so upper layers can mark planning_failed
-        instead of silently changing execution semantics.
+        The lifecycle is deliberately generic and stage-contract driven:
+        1. call the selected provider;
+        2. structurally repair malformed JSON when raw text is available;
+        3. retry the same provider once with stricter JSON-only options;
+        4. ask the policy-defined LiteLLM escalation route for a stronger JSON
+           response and structurally repair that response as well;
+        5. only then propagate a structured parse failure.
+
+        This code never chooses a task/domain-specific model.  The escalation
+        route is selected from the existing LiteLLM brain model policy.
         """
         try:
             return await handler.generate_json(
@@ -464,48 +472,131 @@ class ProviderRouter:
                 return repaired.parsed
 
             retry_limit = int(provider.get("json_repair_retry_count") if provider.get("json_repair_retry_count") is not None else 1)
-            if retry_limit <= 0:
-                raise
-            retry_prompt = (
-                str(rendered_user_prompt or "")
-                + "\n\nThe previous response was not valid JSON. Return exactly one complete JSON object that conforms to the schema. Do not include markdown, comments, or prose. Escape all newlines inside strings."
+            retry_exc = exc
+            if retry_limit > 0:
+                retry_prompt = self._json_retry_prompt(rendered_user_prompt)
+                retry_provider = self._json_retry_provider(provider)
+                await event_bus.emit(run_id, {
+                    "type": "LLM_JSON_RETRY",
+                    "title": "Retrying malformed JSON response",
+                    "message": f"provider={provider_name}; node={node_id}",
+                    "node_id": node_id,
+                    "provider": provider_name,
+                    "original_error": str(exc),
+                })
+                try:
+                    return await handler.generate_json(
+                        run_id=run_id,
+                        node_id=node_id,
+                        provider_name=provider_name,
+                        provider=retry_provider,
+                        prompt=prompt,
+                        rendered_user_prompt=retry_prompt,
+                        schema=schema,
+                    )
+                except LLMJSONParseError as second_exc:
+                    retry_exc = second_exc
+                    repaired_retry = repair_json_object_text(second_exc.raw_content)
+                    if repaired_retry.parsed is not None:
+                        await event_bus.emit(run_id, {
+                            "type": "LLM_JSON_STRUCTURAL_REPAIRED",
+                            "title": "Retried JSON structurally repaired",
+                            "message": f"provider={provider_name}; node={node_id}",
+                            "node_id": node_id,
+                            "provider": provider_name,
+                            "attempt_count": len(repaired_retry.attempts),
+                        })
+                        return repaired_retry.parsed
+
+            escalated = await self._generate_json_with_litellm_escalation(
+                run_id=run_id,
+                node_id=node_id,
+                provider_name=provider_name,
+                prompt=prompt,
+                rendered_user_prompt=self._json_retry_prompt(rendered_user_prompt),
+                schema=schema,
+                previous_error=str(retry_exc),
             )
-            retry_provider = dict(provider)
-            options = dict(retry_provider.get("options") or {})
-            options.update({"temperature": 0, "think": False})
-            retry_provider["options"] = options
-            retry_provider["think"] = False
+            if escalated is not None:
+                return escalated
+            raise retry_exc
+
+    def _json_retry_provider(self, provider: dict) -> dict:
+        retry_provider = dict(provider or {})
+        options = dict(retry_provider.get("options") or {})
+        options.update({"temperature": 0, "think": False})
+        retry_provider["options"] = options
+        retry_provider["think"] = False
+        return retry_provider
+
+    def _json_retry_prompt(self, rendered_user_prompt: str) -> str:
+        return (
+            str(rendered_user_prompt or "")
+            + "\n\nReturn exactly one complete JSON object that conforms to the provided schema. Do not include markdown, comments, or prose. Escape all newlines inside strings."
+        )
+
+    async def _generate_json_with_litellm_escalation(self, *, run_id: str, node_id: str, provider_name: str, prompt: dict, rendered_user_prompt: str, schema: dict, previous_error: str) -> dict | None:
+        """Use the policy-defined LiteLLM escalation route for JSON recovery.
+
+        The selected provider/model is read from brain_model_policy.yaml through
+        LiteLLMBrainClient.  The router only names a generic repair task type; it
+        does not hard-code a concrete vendor, model, or business scenario.
+        """
+        await event_bus.emit(run_id, {
+            "type": "LLM_JSON_MODEL_ESCALATION",
+            "title": "Escalating malformed JSON recovery",
+            "message": f"node={node_id}; failed_provider={provider_name}",
+            "node_id": node_id,
+            "provider": provider_name,
+            "previous_error": previous_error,
+        })
+        messages = [
+            {
+                "role": "system",
+                "content": str(prompt.get("system") or "Return only valid JSON."),
+            },
+            {
+                "role": "user",
+                "content": rendered_user_prompt + "\n\nSchema:\n" + json.dumps(schema, ensure_ascii=False),
+            },
+        ]
+        result = await self.litellm_json_escalation.complete(
+            brain="repair_brain",
+            task_type="structured_json_repair",
+            complexity="medium",
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=0,
+        )
+        if result.status != "completed":
             await event_bus.emit(run_id, {
-                "type": "LLM_JSON_RETRY",
-                "title": "Retrying malformed JSON response",
-                "message": f"provider={provider_name}; node={node_id}",
+                "type": "LLM_JSON_MODEL_ESCALATION_FAILED",
+                "title": "Escalated JSON recovery failed",
+                "message": result.error or result.status,
                 "node_id": node_id,
-                "provider": provider_name,
-                "original_error": str(exc),
+                "route": result.route,
             })
-            try:
-                return await handler.generate_json(
-                    run_id=run_id,
-                    node_id=node_id,
-                    provider_name=provider_name,
-                    provider=retry_provider,
-                    prompt=prompt,
-                    rendered_user_prompt=retry_prompt,
-                    schema=schema,
-                )
-            except LLMJSONParseError as retry_exc:
-                repaired_retry = repair_json_object_text(retry_exc.raw_content)
-                if repaired_retry.parsed is not None:
-                    await event_bus.emit(run_id, {
-                        "type": "LLM_JSON_STRUCTURAL_REPAIRED",
-                        "title": "Retried JSON structurally repaired",
-                        "message": f"provider={provider_name}; node={node_id}",
-                        "node_id": node_id,
-                        "provider": provider_name,
-                        "attempt_count": len(repaired_retry.attempts),
-                    })
-                    return repaired_retry.parsed
-                raise retry_exc
+            return None
+        repaired = repair_json_object_text(result.content)
+        if repaired.parsed is None:
+            await event_bus.emit(run_id, {
+                "type": "LLM_JSON_MODEL_ESCALATION_FAILED",
+                "title": "Escalated model returned malformed JSON",
+                "message": repaired.error,
+                "node_id": node_id,
+                "route": result.route,
+                "attempt_count": len(repaired.attempts),
+            })
+            return None
+        await event_bus.emit(run_id, {
+            "type": "LLM_JSON_MODEL_ESCALATION_REPAIRED",
+            "title": "Escalated JSON response accepted",
+            "message": f"node={node_id}",
+            "node_id": node_id,
+            "route": result.route,
+            "attempt_count": len(repaired.attempts),
+        })
+        return repaired.parsed
 
     async def _emit_missing_secret_interaction(self, *, run_id: str, node_id: str, provider_name: str, secret_key: str) -> None:
         await event_bus.emit(run_id, {
