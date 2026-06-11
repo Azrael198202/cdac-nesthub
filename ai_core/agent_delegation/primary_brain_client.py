@@ -350,6 +350,8 @@ class PrimaryBrainDelegationClient:
             lowered = text.casefold()
             if any(marker in lowered for marker in diagnostic_markers):
                 continue
+            if not self._answer_has_result_material(text):
+                continue
             compact.append({
                 "name": self._compact_text(item.get("participant_name") or item.get("participant_id") or "input", 80),
                 "text": self._compact_text(text, 1200),
@@ -1290,25 +1292,47 @@ class PrimaryBrainDelegationClient:
     def _extract_final_answer(self, state: dict[str, Any]) -> str:
         results = state.get("results", {}) if isinstance(state, dict) else {}
 
-        # Delivery must use terminal synthesis/output nodes only. Never fall back
-        # to input parsing or early-stage node messages such as "payload
-        # normalized" because those are internal progress messages, not answers.
-        for node_id in ("output", "final_synthesis", "final", "synthesis"):
-            node = results.get(node_id) if isinstance(results, dict) else None
-            if isinstance(node, dict):
-                for key in ("final_answer", "answer", "result", "content", "text"):
-                    value = node.get(key)
-                    if isinstance(value, str) and value.strip() and self._answer_has_result_material(value):
-                        return value.strip()
+        # Public answer extraction must follow the runtime public-output
+        # contract, not the physical storage location.  Some callers persist
+        # primary-runtime nodes under workflow_results or nested result payloads;
+        # if we only inspect results, downstream workflow variables such as
+        # {{Step.final_answer}} can receive the generic no-answer placeholder.
+        # Keep this generic by scanning known public terminal nodes across all
+        # public result containers and rejecting internal/placeholder text.
+        result_containers: list[dict[str, Any]] = []
+        if isinstance(results, dict):
+            result_containers.append(results)
+        workflow_results = state.get("workflow_results") if isinstance(state, dict) else None
+        if isinstance(workflow_results, dict):
+            result_containers.append(workflow_results)
+        nested_result = state.get("result") if isinstance(state, dict) else None
+        if isinstance(nested_result, dict):
+            nested_workflow = nested_result.get("workflow_results")
+            if isinstance(nested_workflow, dict):
+                result_containers.append(nested_workflow)
+            nested_results = nested_result.get("results")
+            if isinstance(nested_results, dict):
+                result_containers.append(nested_results)
 
-        # If the terminal synthesis failed to expose answer_material, extract it
-        # from the execution node's public tool result contract.
-        execution = results.get("execution") if isinstance(results, dict) else None
-        answer_from_execution = self._extract_public_answer_material(execution)
-        if answer_from_execution:
-            return answer_from_execution
+        for container in result_containers:
+            for node_id in ("output", "final_synthesis", "final", "synthesis", "conversation_output"):
+                node = container.get(node_id) if isinstance(container, dict) else None
+                if isinstance(node, dict):
+                    for key in ("final_answer", "answer", "answer_material", "result", "content", "text", "message"):
+                        value = node.get(key)
+                        if isinstance(value, str) and value.strip() and self._answer_has_result_material(value):
+                            return value.strip()
 
-        for key in ["final_answer", "answer", "result"]:
+        # If the terminal synthesis failed to expose answer material, extract it
+        # from public execution contracts.  This is still limited to explicit
+        # public answer keys and will not leak internal prompt/contracts.
+        for container in result_containers:
+            execution = container.get("execution") if isinstance(container, dict) else None
+            answer_from_execution = self._extract_public_answer_material(execution)
+            if answer_from_execution:
+                return answer_from_execution
+
+        for key in ["final_answer", "answer", "result", "message"]:
             value = state.get(key) if isinstance(state, dict) else None
             if isinstance(value, str) and value.strip() and self._answer_has_result_material(value):
                 return str(value).strip()
@@ -1316,13 +1340,14 @@ class PrimaryBrainDelegationClient:
             return str(state.get("error"))
         pending = state.get("pending_action") if isinstance(state, dict) else None
         if pending:
-            return "The primary runtime paused before producing a user-facing final answer."
-        if isinstance(results, dict) and results:
-            report_answer = self._extract_investigation_report_answer(results)
-            if report_answer:
+            return ""
+        for container in result_containers:
+            report_answer = self._extract_investigation_report_answer(container)
+            if report_answer and self._answer_has_result_material(report_answer):
                 return report_answer
-            return "The primary runtime completed without a user-facing final answer. Intermediate node data was intentionally not exposed."
-        return "The primary runtime completed without a user-facing final answer."
+        # No public answer was produced. Return empty so downstream dataflow
+        # gates can stop safely instead of treating a placeholder as payload.
+        return ""
 
     def _extract_public_answer_material(self, value: Any) -> str:
         # Only explicit public answer fields are eligible. Generic content/text

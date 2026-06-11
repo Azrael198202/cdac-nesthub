@@ -12,6 +12,7 @@ from ai_core.agent_delegation import AgentExecutionRequest, AgentExecutionResult
 from auxiliary_brain.storage import JsonStore
 from auxiliary_brain.runtime import new_id
 from auxiliary_brain.delegation.task_mind_graph import TaskMindGraphBuilder
+from auxiliary_brain.delegation.workflow_output_resolver import WorkflowOutputResolver
 from ai_core.config.paths import RUNTIME_DOWNLOADS
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from auxiliary_brain.media import ImageGenerationService, VideoGenerationService
@@ -38,6 +39,7 @@ class AgentDelegationRuntime:
         self.video_generation_service = VideoGenerationService()
         self.registered_tool_service = RuntimeRegisteredToolService()
         self.registered_tool_parameter_bridge = RegisteredToolParameterBridge()
+        self.workflow_output_resolver = WorkflowOutputResolver()
 
     async def execute_task(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
         selected = self._fresh_task_participants(self._select_participants(task_graph, participants))
@@ -812,6 +814,26 @@ class AgentDelegationRuntime:
         }
         self.store.write_json("configs/policies/approval_trust.json", record)
 
+    def _is_public_dependency_material(self, value: Any) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        lowered = text.casefold()
+        blocked_fragments = (
+            "completed without a user-facing final answer",
+            "intermediate node data was intentionally not exposed",
+            "paused before producing a user-facing final answer",
+            "no verified result material",
+            "could not produce a verified answer",
+            "workflow is blocked",
+            "blocked step details",
+            "generated workflow step did not produce",
+            "required upstream results were unavailable",
+        )
+        if any(fragment in lowered for fragment in blocked_fragments):
+            return False
+        return any(ch.isalpha() or ch.isdigit() for ch in text)
+
     def _result_has_usable_material(self, result: Any) -> bool:
         """Return True when a result has material that can safely feed downstream nodes.
 
@@ -834,11 +856,11 @@ class AgentDelegationRuntime:
             if isinstance(gate, dict) and str(gate.get("reason") or "") == "required_upstream_result_unavailable":
                 return False
             verified = workflow_results.get("verified_result_material")
-            if verified not in (None, "", [], {}):
+            if verified not in (None, "", [], {}) and self._is_public_dependency_material(verified):
                 return True
             for key in ("final_content", "final_answer", "answer", "result", "content", "text", "output", "material"):
                 value = workflow_results.get(key)
-                if value not in (None, "", [], {}):
+                if value not in (None, "", [], {}) and self._is_public_dependency_material(value):
                     return True
             # Primary-runtime results often store node outputs under nested
             # workflow stage names.  Use the already generic extractor as a last
@@ -847,16 +869,16 @@ class AgentDelegationRuntime:
                 if isinstance(value, dict):
                     for key in ("final_answer", "final_content", "answer", "result", "content", "text", "output"):
                         nested = value.get(key)
-                        if nested not in (None, "", [], {}):
+                        if nested not in (None, "", [], {}) and self._is_public_dependency_material(nested):
                             return True
-        return bool(str(getattr(result, "final_answer", "") or "").strip())
+        return self._is_public_dependency_material(getattr(result, "final_answer", "") or "")
 
     def _dependency_result_is_available(self, result: Any) -> bool:
         if result is None:
             return False
         status = str(getattr(result, "status", "") or "").strip().lower()
         if status == "completed":
-            return True
+            return self._result_has_usable_material(result)
         return self._result_has_usable_material(result)
 
     def _blocked_dependency_ids(self, *, participant_id: str, completed_results: list[Any], dependency_plan: dict[str, Any]) -> list[str]:
@@ -1806,13 +1828,22 @@ class AgentDelegationRuntime:
 
     def _extract_primary_material_from_result(self, result: Any) -> str:
         workflow_results = getattr(result, "workflow_results", None) if result is not None else None
-        if isinstance(workflow_results, dict):
-            for key in ("final_content", "content", "text", "output", "material"):
-                value = workflow_results.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
         answer = str(getattr(result, "final_answer", "") or "").strip()
-        return answer
+        if self._is_public_dependency_material(answer):
+            return answer
+        if isinstance(workflow_results, dict):
+            for key in ("final_answer", "answer", "final_content", "content", "text", "output", "material", "result"):
+                value = workflow_results.get(key)
+                if isinstance(value, str) and self._is_public_dependency_material(value):
+                    return value.strip()
+            for node in workflow_results.values():
+                if not isinstance(node, dict):
+                    continue
+                for key in ("final_answer", "answer", "answer_material", "final_content", "content", "text", "output", "material", "result", "message"):
+                    value = node.get(key)
+                    if isinstance(value, str) and self._is_public_dependency_material(value):
+                        return value.strip()
+        return ""
 
     def _resolve_task_variable_placeholders_for_participant(
         self,
@@ -1856,155 +1887,53 @@ class AgentDelegationRuntime:
             self.parameter_contract_service.apply_values(participant, values)
 
     def _task_variable_reference_map(self, *, completed_results: list[Any], dependency_plan: dict[str, Any], participant: dict[str, Any], task_graph: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Build public workflow-output references for downstream binding.
+
+        This method is now a compatibility wrapper around the generic
+        WorkflowOutputResolver.  It intentionally supports arbitrary upstream
+        step aliases and field names declared by the workflow, instead of a
+        fixed ``Step1`` convention.
+        """
         deps = set(self._participant_dependency_ids(participant, dependency_plan))
-        ref_map: dict[str, Any] = {}
-        included_index = 0
-        for absolute_index, result in enumerate(completed_results, start=1):
-            if not self._dependency_result_is_available(result):
-                continue
-            result_pid = str(getattr(result, "participant_id", "") or "").strip()
-            result_name = str(getattr(result, "participant_name", "") or "").strip()
-            if deps and result_pid not in deps and result_name not in deps:
-                continue
-            included_index += 1
-            material = self._extract_primary_material_from_result(result)
-            workflow_results = getattr(result, "workflow_results", None) if result is not None else None
-            structured: dict[str, Any] = {}
-            if isinstance(workflow_results, dict):
-                for key in ("final_answer", "answer", "result", "content", "text", "output", "material", "final_content"):
-                    value = workflow_results.get(key)
-                    if value not in (None, "", [], {}):
-                        structured[key] = value
-            if material:
-                structured.setdefault("final_answer", material)
-                structured.setdefault("answer", material)
-                structured.setdefault("text", material)
-                structured.setdefault("result", material)
-            aliases = [
-                f"step{absolute_index}",
-                f"step_{absolute_index}",
-                f"step {absolute_index}",
-                f"stage{absolute_index}",
-                f"stage_{absolute_index}",
-                f"stage {absolute_index}",
-                f"result{absolute_index}",
-                f"result_{absolute_index}",
-                f"result {absolute_index}",
-            ]
-            if included_index != absolute_index:
-                aliases.extend([f"input{included_index}", f"input_{included_index}", f"input {included_index}"])
-            aliases.extend(self._task_step_aliases_for_result(
-                result_pid=result_pid,
-                result_name=result_name,
-                task_graph=task_graph,
-            ))
-            if result_pid:
-                aliases.append(result_pid)
-            if result_name:
-                aliases.extend([result_name, re.sub(r"[^A-Za-z0-9_]+", "_", result_name).strip("_")])
-            for alias in aliases:
-                norm_alias = self._normalize_task_variable_key(alias)
-                if norm_alias:
-                    ref_map[norm_alias] = material
-                    for field_name, field_value in structured.items():
-                        ref_map[self._normalize_task_variable_key(f"{alias}.{field_name}")] = field_value
-        return ref_map
+        return self.workflow_output_resolver.build_reference_map(
+            completed_results=completed_results,
+            dependency_ids=deps,
+            task_graph=task_graph,
+        )
 
     def _task_step_aliases_for_result(self, *, result_pid: str, result_name: str, task_graph: dict[str, Any] | None) -> list[str]:
-        """Return stable workflow-step aliases for a completed result.
-
-        Runtime placeholders may refer to the user's declared step number, not
-        to the compact execution order after controller steps are skipped.  This
-        method maps a result back to the durable task graph's structural step
-        identifiers, for example ``step_3`` and ``Step 3``, without relying on
-        any domain-specific agent or capability names.
-        """
-        if not isinstance(task_graph, dict):
-            return []
-        aliases: list[str] = []
-        tasks = task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []
-        result_keys = {str(result_pid or "").strip(), str(result_name or "").strip()}
-        result_keys = {x for x in result_keys if x}
-        for ordinal, task in enumerate(tasks, start=1):
-            if not isinstance(task, dict):
-                continue
-            task_keys = {
-                str(task.get("participant_id") or "").strip(),
-                str(task.get("participant_display_name") or "").strip(),
-                str(task.get("name") or "").strip(),
-                str(task.get("agent_name") or "").strip(),
-            }
-            task_keys = {x for x in task_keys if x}
-            if result_keys and not (result_keys & task_keys):
-                continue
-            aliases.extend([
-                f"step{ordinal}", f"step_{ordinal}", f"step {ordinal}",
-                f"stage{ordinal}", f"stage_{ordinal}", f"stage {ordinal}",
-            ])
-            source_step_id = str(task.get("source_step_id") or "").strip()
-            if source_step_id:
-                aliases.append(source_step_id)
-                m = re.search(r"(\d+)", source_step_id)
-                if m:
-                    n = m.group(1)
-                    aliases.extend([f"step{n}", f"step_{n}", f"step {n}", f"stage{n}", f"stage_{n}", f"stage {n}"])
-            task_id = str(task.get("task_id") or "").strip()
-            if task_id:
-                aliases.append(task_id)
-        return aliases
+        return self.workflow_output_resolver.aliases_for_result(
+            absolute_index=1,
+            included_index=1,
+            result_pid=result_pid,
+            result_name=result_name,
+            task_graph=task_graph,
+        )
 
     def _resolve_task_variable_templates(self, value: Any, refs: dict[str, Any]) -> Any:
-        if isinstance(value, dict):
-            return {k: self._resolve_task_variable_templates(v, refs) for k, v in value.items()}
-        if isinstance(value, list):
-            return [self._resolve_task_variable_templates(v, refs) for v in value]
-        if not isinstance(value, str) or "{{" not in value or "}}" not in value:
-            return value
-        pattern = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
-        matches = list(pattern.finditer(value))
-        if not matches:
-            return value
-        if len(matches) == 1 and matches[0].span() == (0, len(value)):
-            resolved = refs.get(self._normalize_task_variable_key(matches[0].group(1)))
-            return resolved if resolved not in (None, "", [], {}) else value
-        def replace(match: re.Match[str]) -> str:
-            resolved = refs.get(self._normalize_task_variable_key(match.group(1)))
-            if resolved in (None, "", [], {}):
-                return match.group(0)
-            return self._first_scalar(resolved) or str(resolved)
-        return pattern.sub(replace, value)
+        return self.workflow_output_resolver.resolve(value, refs).value
 
     def _collect_unresolved_task_templates(self, value: Any, path: str = "") -> list[dict[str, Any]]:
-        """Return unresolved ``{{...}}`` task placeholders before side effects.
-
-        This is a generic guardrail for runtime-registered capabilities.  A
-        task may intentionally pass upstream material into a side-effecting
-        tool.  If a template reference could not be resolved, the runtime must
-        fail the participant and let verification_brain classify the error
-        instead of sending literal template text to the external system.
-        """
-        findings: list[dict[str, Any]] = []
+        """Return unresolved ``{{...}}`` task placeholders before side effects."""
         if isinstance(value, dict):
+            findings: list[dict[str, Any]] = []
             for key, item in value.items():
                 child = f"{path}.{key}" if path else str(key)
                 findings.extend(self._collect_unresolved_task_templates(item, child))
             return findings
         if isinstance(value, list):
+            findings = []
             for idx, item in enumerate(value):
                 child = f"{path}[{idx}]" if path else f"[{idx}]"
                 findings.extend(self._collect_unresolved_task_templates(item, child))
             return findings
         if isinstance(value, str) and "{{" in value and "}}" in value:
             refs = [m.group(1).strip() for m in re.finditer(r"\{\{\s*([^{}]+?)\s*\}\}", value)]
-            findings.append({"path": path or "$", "references": refs, "value_preview": value[:240]})
-        return findings
+            return [{"path": path or "$", "references": refs, "value_preview": value[:240]}]
+        return []
 
     def _normalize_task_variable_key(self, value: Any) -> str:
-        text = str(value or "").strip().casefold()
-        text = re.sub(r"\s+", "", text)
-        text = text.replace("-", "_")
-        text = re.sub(r"_+", "_", text)
-        return text.strip("_")
+        return self.workflow_output_resolver.normalize_key(value)
 
     def _dependency_material_text(self, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> str:
         deps = self._participant_dependency_ids(participant, dependency_plan)
