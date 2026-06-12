@@ -16,6 +16,8 @@ class PresentationBridge:
         status = str(verified.get("status") or presentation.get("status") or "completed")
         final_answer = presentation.get("final_answer", verified.get("final_answer", ""))
         exportable_outputs: dict[str, Any] = {}
+        if self._looks_like_failure_message(final_answer):
+            status = "failed" if status == "completed" else status
         if status not in self.failure_statuses:
             exportable_outputs = {
                 key: value
@@ -33,3 +35,20 @@ class PresentationBridge:
             "exportable_outputs": exportable_outputs,
             "failure_message_export_blocked": status in self.failure_statuses,
         }
+
+    def _looks_like_failure_message(self, value: Any) -> bool:
+        if not isinstance(value, str):
+            return False
+        text = value.strip()
+        if not text:
+            return False
+        failure_markers = (
+            "Traceback",
+            "AttributeError",
+            "Exception:",
+            " object has no attribute ",
+            "template_resolution_problem",
+            "{{",
+            "}}",
+        )
+        return any(marker in text for marker in failure_markers)

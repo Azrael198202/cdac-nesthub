@@ -7,6 +7,7 @@ from ai_core.config.paths import PROJECT_ROOT
 from presentation_brain import PresentationBrain, PresentationRequest
 from ai_core.validation.schema_validator import SchemaValidator
 from ai_core.knowledge.knowledge_service import KnowledgeService
+from ai_core.presentation.result_presenter import ResultPresenter
 
 
 class OutputExecutor:
@@ -31,6 +32,7 @@ class OutputExecutor:
         self.loader = ConfigLoader()
         self.validator = SchemaValidator()
         self.presentation_brain = PresentationBrain()
+        self.presenter = ResultPresenter()
         self.knowledge = KnowledgeService()
 
     async def execute(self, workflow_node, node_config, state, capability_result):
@@ -164,6 +166,8 @@ class OutputExecutor:
             "Use upstream input", "Return JSON", "Return valid JSON",
             "prompt_contract", "output_contract", "agent_action_prompt_contract",
             "planner_llm", "executor_llm_generation", "verification phase",
+            "Traceback", "AttributeError", "Exception:", " object has no attribute ",
+            "final_synthesis:", "template_resolution_problem", "{{", "}}",
         )
         return not any(marker in text for marker in blocked_markers)
 

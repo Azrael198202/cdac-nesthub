@@ -1,16 +1,20 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+import json
+
+from .project_paths import ensure_prompt_profiles, tool_registry_path
 
 
 @dataclass(frozen=True)
 class TaskGraphCompileGate:
-    profile_dir: Path = Path("runtime") / "prompt_profiles"
-    registry_path: Path = Path("runtime") / "registry" / "tool_registry.json"
+    profile_dir: Path = field(default_factory=ensure_prompt_profiles)
+    registry_path: Path = field(default_factory=tool_registry_path)
 
     def validate(self, compiled: dict[str, Any]) -> dict[str, Any]:
+        profile_dir = ensure_prompt_profiles(self.profile_dir)
         errors: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = []
         steps = compiled.get("steps") if isinstance(compiled.get("steps"), list) else []
@@ -22,12 +26,16 @@ class TaskGraphCompileGate:
             profile = (step.get("prompt_profile") or {}).get("prompt_profile") if isinstance(step.get("prompt_profile"), dict) else ""
             if not profile:
                 errors.append({"code": "prompt_profile_missing", "step_id": sid})
-            elif not (self.profile_dir / f"{profile}.prompt").exists():
-                errors.append({"code": "prompt_profile_not_found", "step_id": sid, "prompt_profile": profile})
+            elif not (profile_dir / f"{profile}.prompt").exists():
+                errors.append({"code": "prompt_profile_not_found", "step_id": sid, "prompt_profile": profile, "profile_dir": str(profile_dir)})
             owner = (step.get("execution_contract") or {}).get("execution_owner") if isinstance(step.get("execution_contract"), dict) else ""
             if not str(owner or "").strip():
                 errors.append({"code": "execution_owner_missing", "step_id": sid})
             source_contract = step.get("source_contract") if isinstance(step.get("source_contract"), dict) else {}
+            execution_contract = step.get("execution_contract") if isinstance(step.get("execution_contract"), dict) else {}
+            method = str(execution_contract.get("execution_method") or "").strip()
+            if source_contract.get("requires_source_material") is True and method in {"content_generation", "model_generation", "llm_generate", "static_response"}:
+                errors.append({"code": "source_material_step_cannot_use_generation_only_method", "step_id": sid, "execution_method": method})
             order = source_contract.get("material_order") if isinstance(source_contract.get("material_order"), list) else []
             if "blocked" not in order:
                 errors.append({"code": "source_contract_missing_blocked_terminal", "step_id": sid})
@@ -56,13 +64,13 @@ class TaskGraphCompileGate:
             "checked_items": {
                 "step_count": len(steps),
                 "binding_count": len(compiled.get("bindings") if isinstance(compiled.get("bindings"), list) else []),
+                "prompt_profile_dir": str(profile_dir),
             },
         }
 
     def _capability_registered(self, capability_id: str) -> bool:
         try:
-            data = __import__('json').loads(self.registry_path.read_text(encoding='utf-8'))
+            data = json.loads(self.registry_path.read_text(encoding="utf-8"))
         except Exception:
             return False
-        text = __import__('json').dumps(data, ensure_ascii=False)
-        return capability_id in text
+        return capability_id in json.dumps(data, ensure_ascii=False)

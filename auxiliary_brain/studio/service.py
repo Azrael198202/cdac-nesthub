@@ -2536,8 +2536,8 @@ class AgentStudioService:
             "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
         }
         patterns = [
-            r"(?<![A-Za-z0-9_])(?P<n>\d{1,2})\s+(?:of\s+the\s+)?(?:latest|recent|newest|top|first|last)?\s*(?:items?|entries|records?|results?|stories|summaries|examples|points|rows)\b",
-            r"(?<![A-Za-z0-9_])(?P<n>one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:of\s+the\s+)?(?:latest|recent|newest|top|first|last)?\s*(?:items?|entries|records?|results?|stories|summaries|examples|points|rows)\b",
+            r"(?<![A-Za-z0-9_])(?P<n>\d{1,2})\s+(?:of\s+the\s+)?(?:latest|recent|newest|top|first|last)?\s*[^\n.。:：]{0,80}(?:\n|$|[.。:：])",
+            r"(?<![A-Za-z0-9_])(?P<n>one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:of\s+the\s+)?(?:latest|recent|newest|top|first|last)?\s*[^\n.。:：]{0,80}(?:\n|$|[.。:：])",
         ]
         requested_count = 0
         matched = ""

@@ -22,6 +22,7 @@ from ai_core.runtime.governance import RuntimeCostPolicy
 from ai_core.llm.prompt_io_recorder import PromptIORecorder
 from ai_core.llm.operation_prompt_profiles import OperationPromptProfileRouter
 from auxiliary_brain.runtime.observability.stage_observer import RuntimeStageObserver
+from ai_core.context.known_state_classifier import KnownStateClassifier
 
 
 class LLMJsonExecutor:
@@ -824,12 +825,13 @@ class LLMJsonExecutor:
         no-op when the step still needs to produce public material.
         """
         action = self._action_type_from_text(selected_action)
-        if not self._is_standalone_source_step(state):
+        external_required = self._requires_external_material(state=state, containers=containers, step=step or {})
+        if not self._is_standalone_source_step(state) and not external_required:
             return action
         if self._has_blocking_missing_information(containers):
             return action
         current_method = self._method_from_action_type(action) if action else ""
-        if self._requires_external_material(state=state, containers=containers, step=step or {}):
+        if external_required:
             if action in {"", "ask_user", "no_op", "compose_static_response", "llm_generate"} or current_method in {"", "human_interaction", "no_op", "static_response", "content_generation"}:
                 return "web_query"
             return action
@@ -1005,17 +1007,14 @@ class LLMJsonExecutor:
         requirement_payload = requirement_record.get("requirement_record") if isinstance(requirement_record.get("requirement_record"), dict) else requirement_record
         intent = results.get("intent_recognition") if isinstance(results.get("intent_recognition"), dict) else {}
         parsed = results.get("input_parsing") if isinstance(results.get("input_parsing"), dict) else {}
-        known = {}
-        for source in (
-            clean_context.get("known_parameters"),
-            requirement_payload.get("known_parameters"),
-            intent.get("normalized_intent") if isinstance(intent.get("normalized_intent"), dict) else {},
+        classifier = KnownStateClassifier()
+        known = classifier.merge_execution_known(
+            clean_context.get("execution_known") if isinstance(clean_context, dict) else {},
+            clean_context.get("known_parameters") if isinstance(clean_context, dict) else {},
+            requirement_payload.get("execution_known") if isinstance(requirement_payload, dict) else {},
+            requirement_payload.get("known_parameters") if isinstance(requirement_payload, dict) else {},
             parsed.get("parsed_entities") if isinstance(parsed.get("parsed_entities"), dict) else {},
-        ):
-            if isinstance(source, dict):
-                for k, v in source.items():
-                    if v not in (None, "", [], {}):
-                        known[str(k)] = v
+        )
         objective = str(
             clean_context.get("intent_summary")
             or intent.get("intent_summary")
@@ -1065,6 +1064,8 @@ class LLMJsonExecutor:
             "objective": objective,
             "input_from": ["input_parsing", "intent_recognition", "requirement_completion", "context_awareness"],
             "parameters": {"known": known, "missing_required": {}, "optional": {"original_input": str(state.get("input") or slim_user_input)}},
+            "execution_known": known,
+            "semantic_known": {"verified_facts": [], "source_materials": [], "unknowns": ["requires_external_material"]} if selected_method in {"web_search", "api_call"} else {"verified_facts": [], "source_materials": [], "unknowns": []},
             "required_capability": capability,
             "execution_decision": {"selected_action_type": selected_action, "ranked_options": ranked_options, "selection_rules": ["no-key options before key-required options", "free options before paid options", "prepared resources before unprepared resources", "locked workflow before executor fallback"]},
             "execution_method": selected_method,

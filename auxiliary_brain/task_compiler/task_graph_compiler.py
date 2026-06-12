@@ -10,17 +10,19 @@ from .binding_compiler import BindingCompiler
 from .execution_plan_compiler import ExecutionPlanCompiler
 from .step_compiler import StepCompiler
 from .validation_compiler import TaskGraphCompileGate
+from .project_paths import generated_tasks_dir, ensure_prompt_profiles
 
 
 @dataclass
 class TaskGraphCompiler:
-    generated_root: Path = Path("runtime") / "generated" / "tasks"
+    generated_root: Path = field(default_factory=generated_tasks_dir)
     step_compiler: StepCompiler = field(default_factory=StepCompiler)
     binding_compiler: BindingCompiler = field(default_factory=BindingCompiler)
     execution_plan_compiler: ExecutionPlanCompiler = field(default_factory=ExecutionPlanCompiler)
     gate: TaskGraphCompileGate = field(default_factory=TaskGraphCompileGate)
 
     def compile_validate_save(self, task_graph: dict[str, Any]) -> dict[str, Any]:
+        ensure_prompt_profiles()
         compiled = self.compile(task_graph)
         report = self.gate.validate(compiled)
         compiled["validation_report"] = report
@@ -78,7 +80,7 @@ class TaskGraphCompiler:
             step_dir = steps_dir / str(step.get("step_id") or "step")
             step_dir.mkdir(exist_ok=True)
             (step_dir / "instruction.txt").write_text(str(step.get("instruction") or ""), encoding="utf-8")
-            for name in ("prompt_profile", "execution_contract", "source_contract", "presentation_contract", "binding_contract"):
+            for name in ("prompt_profile", "execution_contract", "source_contract", "presentation_contract", "binding_contract", "execution_known", "semantic_known", "task_metadata"):
                 self._write_json(step_dir / f"{name}.json", step.get(name) or {})
         self._write_json(base / "source_task_graph.json", compiled.get("source_task_graph") or {})
         return base

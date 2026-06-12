@@ -13,6 +13,7 @@ from ai_core.workflow.execution_options import (
     normalize_action_type,
 )
 from auxiliary_brain.artifacts.artifact_registry import UploadedArtifactRegistry
+from ai_core.context.known_state_classifier import KnownStateClassifier
 
 
 class WorkflowContractBuilder:
@@ -361,10 +362,12 @@ class WorkflowContractBuilder:
             return "generate_complex_tool"
         if self.referenced_artifacts_for_state(state, ""):
             return "use_uploaded_file"
+        if self.requires_external_material_from_state(state=state, result=result):
+            return "web_query"
         if self.extract_execution_instruction(result):
             return "llm_generate"
-        known = self.collect_known_parameters(state)
-        if known:
+        execution_known = self.collect_known_parameters(state)
+        if execution_known and not self.requires_unverified_semantic_material(state=state, result=result):
             return "llm_generate"
         return "ask_user"
 
@@ -717,6 +720,13 @@ class WorkflowContractBuilder:
         return {"main_graph": {"nodes": nodes, "edges": edges}, "subgraphs": []}
 
     def collect_known_parameters(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Collect only execution-known parameters.
+
+        Descriptive intent metadata and raw user language are excluded here.
+        They may explain the task, but they must not prove that factual content
+        is already known or allow fallback to model-only generation.
+        """
+        classifier = KnownStateClassifier()
         known: dict[str, Any] = {}
         results = state.get("results") if isinstance(state.get("results"), dict) else {}
         candidates = []
@@ -727,17 +737,67 @@ class WorkflowContractBuilder:
                 if isinstance(value.get(key), dict):
                     candidates.append(value[key])
         for record in candidates:
-            for key in ("known_parameters", "parsed_entities", "normalized_intent", "parameters"):
-                value = record.get(key) if isinstance(record, dict) else None
+            if not isinstance(record, dict):
+                continue
+            explicit = record.get("execution_known") if isinstance(record.get("execution_known"), dict) else {}
+            for k, v in explicit.items():
+                if v not in (None, "", [], {}):
+                    known[str(k)] = v
+            for key in ("known_parameters", "parsed_entities", "parameters"):
+                value = record.get(key)
                 if isinstance(value, dict):
                     nested = value.get("known") if isinstance(value.get("known"), dict) else value
-                    for k, v in nested.items():
-                        if v not in (None, "", [], {}):
-                            known[str(k)] = v
+                    known.update(classifier.merge_execution_known(nested))
             clean = record.get("clean_context") if isinstance(record.get("clean_context"), dict) else {}
-            if isinstance(clean.get("known_parameters"), dict):
-                known.update({str(k): v for k, v in clean["known_parameters"].items() if v not in (None, "", [], {})})
+            if isinstance(clean, dict):
+                known.update(classifier.merge_execution_known(clean.get("execution_known"), clean.get("known_parameters")))
         return known
+
+    def requires_external_material_from_state(self, *, state: dict[str, Any], result: dict[str, Any]) -> bool:
+        containers = [result]
+        results = state.get("results") if isinstance(state.get("results"), dict) else {}
+        containers.extend(value for value in results.values() if isinstance(value, dict))
+        runtime_options = state.get("runtime_options") if isinstance(state.get("runtime_options"), dict) else {}
+        source_contract = runtime_options.get("standalone_source_contract") if isinstance(runtime_options.get("standalone_source_contract"), dict) else {}
+        if source_contract:
+            containers.append(source_contract)
+        for container in containers:
+            if self._container_requires_external_material_generic(container):
+                return True
+        return False
+
+    def requires_unverified_semantic_material(self, *, state: dict[str, Any], result: dict[str, Any]) -> bool:
+        if not self.requires_external_material_from_state(state=state, result=result):
+            return False
+        classifier = KnownStateClassifier()
+        results = state.get("results") if isinstance(state.get("results"), dict) else {}
+        semantic_known = classifier.merge_semantic_known(result, *(v for v in results.values() if isinstance(v, dict)))
+        return not classifier.has_verified_semantic_material(semantic_known)
+
+    def _container_requires_external_material_generic(self, container: dict[str, Any]) -> bool:
+        if not isinstance(container, dict):
+            return False
+        bool_paths = (
+            ("requires_external_information",),
+            ("needs_web_search",),
+            ("evidence_required",),
+            ("requires_source_material",),
+            ("source_policy", "requires_source_material"),
+            ("source_policy", "requires_live_evidence"),
+            ("knowledge_evaluation", "requires_external_information"),
+            ("knowledge_evaluation", "needs_web_search"),
+            ("knowledge_evaluation", "evidence_required"),
+        )
+        for path in bool_paths:
+            value: Any = container
+            for part in path:
+                if not isinstance(value, dict):
+                    value = None
+                    break
+                value = value.get(part)
+            if value is True:
+                return True
+        return False
 
     def objective_from_state(self, *, state: dict[str, Any], result: dict[str, Any], slim_user_input: str) -> str:
         results = state.get("results") if isinstance(state.get("results"), dict) else {}
