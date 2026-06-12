@@ -72,14 +72,19 @@ class ScheduledTaskRunner:
             policy = task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {}
             if not bool(policy.get("enabled")):
                 continue
+            if str(policy.get("state") or "active").strip().casefold() not in {"active", "running", "resumed"}:
+                continue
             if str(policy.get("mode") or "") != "recurring":
                 continue
             next_run_at = self._parse_time(policy.get("next_run_at")) or now
             if next_run_at > now:
                 continue
-            task_name = str(task_graph.get("task_name") or path.stem)
-            self._trace({"event": "due_task_found", "task_name": task_name, "next_run_at": next_run_at.isoformat()})
-            self._trace({"event": "scheduled_task_due", "task_name": task_name, "next_run_at": next_run_at.isoformat()})
+            task_name = str(task_graph.get("task_name") or (path.parent.name if path.name == "source_task_graph.json" else path.stem))
+            schedule_instance_id = str(policy.get("schedule_instance_id") or task_graph.get("schedule_instance_id") or f"schedule_{task_name}")
+            policy.setdefault("schedule_instance_id", schedule_instance_id)
+            policy.setdefault("lifecycle_key", schedule_instance_id)
+            self._trace({"event": "due_task_found", "task_name": task_name, "schedule_instance_id": schedule_instance_id, "next_run_at": next_run_at.isoformat()})
+            self._trace({"event": "scheduled_task_due", "task_name": task_name, "schedule_instance_id": schedule_instance_id, "next_run_at": next_run_at.isoformat()})
             try:
                 controller_ids = self._controller_participant_ids(task_graph)
                 payload_ids = self._payload_participant_ids(task_graph, controller_ids)
@@ -88,6 +93,7 @@ class ScheduledTaskRunner:
                     "task_name": task_name,
                     "skipped_controller_participants": controller_ids,
                     "payload_participants": payload_ids,
+                    "schedule_instance_id": schedule_instance_id,
                 })
                 result = await self._call_executor(executor, task_name, task_graph)
                 executed.append({"task_name": task_name, "status": result.get("status"), "run_id": result.get("run_id")})
@@ -96,10 +102,11 @@ class ScheduledTaskRunner:
                     "task_name": task_name,
                     "result_status": result.get("status"),
                     "run_id": result.get("run_id"),
+                    "schedule_instance_id": schedule_instance_id,
                     "missing_inputs": result.get("missing_inputs") or [],
                     "pending_action_kind": ((result.get("pending_action") or {}).get("kind") if isinstance(result.get("pending_action"), dict) else None),
                 })
-                self._trace({"event": "scheduled_task_executed", "task_name": task_name, "result_status": result.get("status"), "run_id": result.get("run_id")})
+                self._trace({"event": "scheduled_task_executed", "task_name": task_name, "schedule_instance_id": schedule_instance_id, "result_status": result.get("status"), "run_id": result.get("run_id")})
             except Exception as exc:
                 executed.append({"task_name": task_name, "status": "failed", "error": str(exc)})
                 self._trace({"event": "scheduled_task_execute_failed", "task_name": task_name, "error_type": exc.__class__.__name__, "error": str(exc)})
@@ -109,7 +116,7 @@ class ScheduledTaskRunner:
                 policy["next_run_at"] = (now + timedelta(seconds=interval)).isoformat()
                 task_graph["schedule_policy"] = policy
                 self._write(path, task_graph)
-                self._trace({"event": "next_run_at_updated", "task_name": task_name, "next_run_at": policy.get("next_run_at"), "last_run_at": policy.get("last_run_at")})
+                self._trace({"event": "next_run_at_updated", "task_name": task_name, "schedule_instance_id": schedule_instance_id, "next_run_at": policy.get("next_run_at"), "last_run_at": policy.get("last_run_at")})
         return executed
 
     def _task_record_paths(self) -> list[Path]:

@@ -68,6 +68,7 @@ class StructuralStepPlanner:
                 step_id = f"declared_step_{len(steps) + 1}"
                 steps.append({
                     "id": step_id,
+                    "declared_step_id": source_step_id,
                     "label": self._participant_name(participant),
                     "objective": fragment.strip() or self._participant_name(participant),
                     "instruction_fragment": fragment.strip(),
@@ -98,6 +99,7 @@ class StructuralStepPlanner:
                 capability_profile = self._capability_profile_from_fragment(fragment, parameter_contract)
                 steps.append({
                     "id": step_id,
+                    "declared_step_id": source_step_id,
                     "label": self._compact_fragment_label(fragment),
                     "objective": fragment.strip(),
                     "instruction_fragment": fragment.strip(),
@@ -120,6 +122,7 @@ class StructuralStepPlanner:
                 capability_profile = self._capability_profile_from_fragment(fragment, parameter_contract)
                 steps.append({
                     "id": step_id,
+                    "declared_step_id": source_step_id,
                     "label": self._compact_fragment_label(fragment),
                     "objective": fragment.strip(),
                     "instruction_fragment": fragment.strip(),
@@ -266,9 +269,18 @@ class StructuralStepPlanner:
         source = str(text or "").strip()
         if not source:
             return []
-        pattern = re.compile(r"(?is)(?:^|[\r\n]+)\s*(step\s*\d+|\d+)\s*[:：.)-]\s*")
+        # Match explicit user step headers in both multiline and pasted single-line instructions.
+        # The look-behind boundary prevents matching template references like
+        # {{Step1.final_answer}}, while still accepting "... enabled: true Step 1:".
+        pattern = re.compile(r"(?is)(?<![\w{])(?:^|[\r\n]+|[.;。]|\s{2,}|\s+)(step\s*\d+|\d+)\s*[:：.)-]\s*")
         matches = list(pattern.finditer(source))
         if len(matches) < 2:
+            # Fallback for common single-line pasted task text where each
+            # header is separated only by one space. Require the literal
+            # word "step" to avoid splitting ordinary numbered prose.
+            pattern = re.compile(r"(?is)(?<![\w{])(step\s*\d+)\s*[:：.)-]\s*")
+            matches = list(pattern.finditer(source))
+        if len(matches) < 1:
             return []
         items: list[dict[str, str]] = []
         for index, match in enumerate(matches):

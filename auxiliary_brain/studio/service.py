@@ -27,6 +27,7 @@ from auxiliary_brain.media.video_generation_setup_wizard import VideoGenerationS
 from ai_core.context.execution_reuse_store import ExecutionReuseStore
 from ai_core.execution.parameter_resolution import ParameterResolutionPipeline, PreflightResolutionContext
 from auxiliary_brain.studio.instruction_workflow_planner import InstructionWorkflowPlanner
+from auxiliary_brain.studio.structural_step_planner import StructuralStepPlanner
 from auxiliary_brain.studio.runtime_semantic_planner import RuntimeSemanticPlanner
 from auxiliary_brain.runtime.capability.registered_tool_agent_binder import RegisteredToolAgentBinder
 from verification_brain import RuntimeVerificationFoundation
@@ -699,23 +700,78 @@ class AgentStudioService:
         runs.sort(key=lambda item: str(item.get("completed_at") or item.get("started_at") or ""), reverse=True)
         return str(runs[0].get("task_name") or "").strip() or None
 
+    def _task_graph_storage_candidates(self, task_name: str | None) -> list[tuple[str, Path]]:
+        """Return durable storage candidates for legacy and compiled task graphs.
+
+        Compiled tasks are stored under generated/tasks/<task_id>/source_task_graph.json
+        while legacy tasks are stored under generated/tasks/<task_id>.json.  Schedule
+        lifecycle operations must address the task instance, not any schedule agent or
+        generated participant, so every lookup goes through this task-name based
+        storage resolver.
+        """
+        candidate = str(task_name or "").strip()
+        root = Path(getattr(self.store, "root", "runtime")) / "generated" / "tasks"
+        out: list[tuple[str, Path]] = []
+        if candidate:
+            out.append((candidate, root / f"{candidate}.json"))
+            out.append((candidate, root / candidate / "source_task_graph.json"))
+        try:
+            for path in root.glob("*.json"):
+                out.append((path.stem, path))
+            for path in root.glob("*/source_task_graph.json"):
+                out.append((path.parent.name, path))
+        except Exception:
+            pass
+        seen: set[str] = set()
+        unique: list[tuple[str, Path]] = []
+        for name, path in out:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append((name, path))
+        return unique
+
+    def _read_task_graph_record(self, task_name: str | None) -> tuple[str | None, dict[str, Any], Path | None]:
+        candidate = str(task_name or "").strip()
+        folded = candidate.casefold()
+        fallback: tuple[str | None, dict[str, Any], Path | None] = (None, {}, None)
+        for storage_name, path in self._task_graph_storage_candidates(candidate):
+            if not path.exists() or not path.is_file():
+                continue
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(loaded, dict):
+                continue
+            declared = str(loaded.get("task_name") or loaded.get("graph_id") or storage_name or "").strip()
+            if not fallback[1]:
+                fallback = (declared or storage_name, loaded, path)
+            if not candidate:
+                continue
+            if candidate == declared or candidate == storage_name:
+                return declared or storage_name, loaded, path
+            if folded and (declared.casefold() == folded or storage_name.casefold() == folded):
+                return declared or storage_name, loaded, path
+            if folded and (declared.casefold().endswith(folded) or storage_name.casefold().endswith(folded)):
+                return declared or storage_name, loaded, path
+        if candidate:
+            return candidate, {}, None
+        return fallback
+
+    def _write_task_graph_record(self, task_name: str, task_graph: dict[str, Any], path: Path | None = None) -> Path:
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(task_graph, ensure_ascii=False, indent=2), encoding="utf-8")
+            return path
+        return self.store.write_json(f"generated/tasks/{task_name}.json", task_graph)
+
     def _resolve_task_name(self, task_name: str | None) -> str | None:
         candidate = str(task_name or "").strip()
-        tasks = self.store.list_json("generated/tasks")
-        names = [str(t.get("task_name") or t.get("graph_id") or "").strip() for t in tasks]
-        names = [n for n in names if n]
-        if candidate in names:
-            return candidate
-        folded = candidate.casefold()
-        for name in names:
-            if name.casefold() == folded:
-                return name
-        # If a parser produced only the suffix of a compact identifier, recover
-        # the latest/known compact task name that ends with that suffix.
-        if candidate:
-            matches = [name for name in names if name.casefold().endswith(folded)]
-            if len(matches) == 1:
-                return matches[0]
+        resolved, graph, _path = self._read_task_graph_record(candidate)
+        if graph and resolved:
+            return resolved
         return candidate or self._latest_task_name()
 
     def _latest_run_for_task(self, task_name: str) -> dict[str, Any] | None:
@@ -755,10 +811,10 @@ class AgentStudioService:
         and records operational timestamps.  It does not know which agents or
         capabilities the task uses.
         """
-        resolved = self._resolve_task_name(task_name) or str(task_name or "").strip()
+        resolved, graph, graph_path = self._read_task_graph_record(task_name)
+        resolved = resolved or str(task_name or "").strip()
         if not resolved:
             return {"ok": False, "status": "failed", "error": {"code": "missing_task_name", "message": "A task name is required."}}
-        graph = self.store.read_json(f"generated/tasks/{resolved}.json")
         if not graph:
             return {"ok": False, "status": "not_found", "task_name": resolved}
         policy = self._task_schedule_policy(graph)
@@ -776,10 +832,13 @@ class AgentStudioService:
         else:
             policy["paused_at"] = now
             policy["state"] = "paused"
+        policy.setdefault("schedule_instance_id", str(graph.get("schedule_instance_id") or f"schedule_{resolved}"))
+        policy["lifecycle_key"] = str(policy.get("schedule_instance_id") or f"schedule_{resolved}")
         graph["schedule_policy"] = policy
+        graph["schedule_instance_id"] = policy.get("schedule_instance_id")
         graph["updated_at"] = now
-        self.store.write_json(f"generated/tasks/{resolved}.json", graph)
-        self._emit_schedule_observation("schedule_resumed" if enabled else "schedule_paused", task_name=resolved, data={"enabled": bool(enabled), "state": policy.get("state")})
+        self._write_task_graph_record(resolved, graph, graph_path)
+        self._emit_schedule_observation("schedule_resumed" if enabled else "schedule_paused", task_name=resolved, data={"enabled": bool(enabled), "state": policy.get("state"), "schedule_instance_id": policy.get("schedule_instance_id")})
         return {"ok": True, "status": "resumed" if enabled else "paused", "task_name": resolved, "schedule_policy": policy}
 
     def pause_task_schedule(self, task_name: str | None) -> dict[str, Any]:
@@ -1226,8 +1285,19 @@ class AgentStudioService:
         # "Call X Agent. Parameters...". Generated participants are only
         # runtime graph assets after the task graph is accepted.
         selected_ids = [p.get("participant_id") for p in workflow_plan.selected_participants]
+        declared_repair = self._ensure_declared_payload_steps_preserved(
+            instruction=instruction,
+            tasks=workflow_plan.tasks,
+            participants=participants,
+            selected_participants=workflow_plan.selected_participants,
+            generated_participants=workflow_plan.generated_participants,
+            graph_id=graph_id,
+        )
+        workflow_tasks = declared_repair["tasks"]
+        workflow_plan.selected_participants = declared_repair["selected_participants"]
+        workflow_plan.generated_participants = declared_repair["generated_participants"]
         workflow_tasks = self._hydrate_task_step_bindings_from_participants(
-            workflow_plan.tasks,
+            workflow_tasks,
             workflow_plan.selected_participants,
         )
         workflow_tasks = self._attach_step_source_contracts(workflow_tasks)
@@ -1262,6 +1332,12 @@ class AgentStudioService:
         workflow_plan.selected_participants = normalized_graph_parts["selected_participants"]
         workflow_plan.generated_participants = normalized_graph_parts["generated_participants"]
         schedule_policy = normalized_graph_parts["schedule_policy"]
+        if isinstance(schedule_policy, dict) and schedule_policy.get("enabled"):
+            schedule_policy = dict(schedule_policy)
+            schedule_instance_id = str(schedule_policy.get("schedule_instance_id") or f"schedule_{task_name}").strip()
+            schedule_policy["schedule_instance_id"] = schedule_instance_id
+            schedule_policy["lifecycle_key"] = schedule_instance_id
+        selected_ids = [p.get("participant_id") for p in workflow_plan.selected_participants if p.get("participant_id")]
 
         static_validation = self._validate_task_graph_static(
             instruction=instruction,
@@ -1345,6 +1421,7 @@ class AgentStudioService:
             "runtime_parameters": explicit_runtime_parameters,
             "workflow_variable_contract": workflow_variable_contract,
             "schedule_policy": schedule_policy,
+            "schedule_instance_id": schedule_policy.get("schedule_instance_id") if isinstance(schedule_policy, dict) else None,
             "tasks": workflow_tasks,
             "instruction_coverage": workflow_plan.coverage,
             "workflow_planning": {
@@ -2652,20 +2729,25 @@ class AgentStudioService:
         for index, task in enumerate(payload_tasks, start=1):
             if not isinstance(task, dict):
                 continue
+            canonical_step_id = str(task.get("source_step_id") or task.get("step_id") or "").strip() or f"step_{index:03d}"
             pid = str(task.get("participant_id") or "").strip()
-            if not pid:
-                continue
             aliases = {
-                f"step{index}", f"step_{index}", f"step {index}",
-                f"stage{index}", f"stage_{index}", f"stage {index}",
+                f"step{index}", f"step_{index}", f"step {index}", f"step_{index:03d}",
+                f"stage{index}", f"stage_{index}", f"stage {index}", f"stage_{index:03d}",
                 str(task.get("source_step_id") or "").strip(),
+                str(task.get("step_id") or "").strip(),
                 str(task.get("task_id") or "").strip(),
-                pid,
+                canonical_step_id,
             }
+            if pid:
+                aliases.add(pid)
             for alias in aliases:
                 norm = self._normalize_workflow_reference(alias)
                 if norm:
-                    step_aliases[norm] = pid
+                    step_aliases[norm] = canonical_step_id
+                canonical_norm = self._normalize_workflow_reference(self._canonical_step_reference(alias))
+                if canonical_norm:
+                    step_aliases[canonical_norm] = canonical_step_id
         bindings: list[dict[str, Any]] = []
         for key, value in (runtime_parameters or {}).items():
             if not isinstance(value, str) or "{{" not in value:
@@ -2673,13 +2755,18 @@ class AgentStudioService:
             for match in template_re.finditer(value):
                 ref = match.group(1).strip()
                 source_ref, _, field = ref.partition(".")
-                source_pid = step_aliases.get(self._normalize_workflow_reference(source_ref))
+                source_step_id = step_aliases.get(self._normalize_workflow_reference(source_ref))
+                source_step_id = source_step_id or step_aliases.get(self._normalize_workflow_reference(self._canonical_step_reference(source_ref)))
+                source_field = field or "final_answer"
+                if source_field == "final_answer":
+                    source_field = "presentation.final_answer"
                 bindings.append({
                     "target_path": str(key),
                     "reference": ref,
-                    "source_step_id": source_pid or "",
+                    "source_step_id": source_step_id or "",
+                    "source_step": source_step_id or "",
                     "source_alias": source_ref,
-                    "source_field": field or "final_answer",
+                    "source_field": source_field,
                     "binding_type": "workflow_output",
                     "status": "pending",
                 })
@@ -2687,10 +2774,13 @@ class AgentStudioService:
             if not isinstance(task, dict):
                 continue
             task_bindings = []
-            pid = str(task.get("participant_id") or "").strip()
+            target_aliases = self._workflow_binding_target_aliases(task)
             for item in bindings:
                 target = str(item.get("target_path") or "")
-                if pid and (target.startswith(pid + ".") or target.startswith(pid + "_")):
+                target_root = re.split(r"[._]", target, maxsplit=1)[0] if target else ""
+                normalized_target_root = self._normalize_workflow_reference(target_root)
+                normalized_target_full = self._normalize_workflow_reference(target)
+                if normalized_target_root in target_aliases or any(normalized_target_full.startswith(alias) for alias in target_aliases):
                     task_bindings.append(item)
             if task_bindings:
                 task["workflow_bindings"] = task_bindings
@@ -2699,6 +2789,24 @@ class AgentStudioService:
             "binding_count": len(bindings),
             "bindings": bindings,
         }
+
+    def _workflow_binding_target_aliases(self, task: dict[str, Any]) -> set[str]:
+        aliases: set[str] = set()
+        for value in (
+            task.get("participant_id"),
+            task.get("participant"),
+            task.get("agent_id"),
+            task.get("participant_display_name"),
+            task.get("display_name"),
+            task.get("name"),
+            task.get("source_step_id"),
+            task.get("step_id"),
+            task.get("task_id"),
+        ):
+            norm = self._normalize_workflow_reference(value)
+            if norm:
+                aliases.add(norm)
+        return aliases
 
     def _normalize_workflow_reference(self, value: Any) -> str:
         text = str(value or "").strip().casefold()
@@ -2731,7 +2839,7 @@ class AgentStudioService:
         numbered step labels.
         """
         text = str(instruction or "")
-        pattern = re.compile(r"(?is)(?:^|[\r\n]+)\s*(?:step\s*\d+|\d+)\s*[:：.)-]\s*")
+        pattern = re.compile(r"(?is)(?<![\w{])(?:^|[\r\n]+|[.;。]|\s{2,}|\s+)(?:step\s*\d+|\d+)\s*[:：.)-]\s*")
         match = pattern.search(text)
         if not match:
             return text
@@ -3533,6 +3641,176 @@ class AgentStudioService:
                 chosen[key] = participant
         return [chosen[k] for k in order if k in chosen]
 
+    def _ensure_declared_payload_steps_preserved(
+        self,
+        *,
+        instruction: str,
+        tasks: list[dict[str, Any]],
+        participants: list[dict[str, Any]],
+        selected_participants: list[dict[str, Any]],
+        generated_participants: list[dict[str, Any]],
+        graph_id: str,
+    ) -> dict[str, Any]:
+        """Preserve all user-declared executable payload steps after planning.
+
+        Semantic planning may focus on explicit participant calls and omit a
+        numbered natural-language step.  The compiler must not renumber the
+        remaining step and bind Step1 to the wrong node.  This pass uses only
+        structural step markers and declared participant references; it does not
+        encode domain words, providers, counts, or concrete business actions.
+        """
+        structural_steps = StructuralStepPlanner().build_steps(str(instruction or ""), participants or [])
+        if not structural_steps:
+            return {
+                "tasks": [dict(t) for t in tasks or [] if isinstance(t, dict)],
+                "selected_participants": [dict(p) for p in selected_participants or [] if isinstance(p, dict)],
+                "generated_participants": [dict(p) for p in generated_participants or [] if isinstance(p, dict)],
+            }
+
+        selected = [dict(p) for p in selected_participants or [] if isinstance(p, dict)]
+        generated = [dict(p) for p in generated_participants or [] if isinstance(p, dict)]
+        existing = [dict(t) for t in tasks or [] if isinstance(t, dict)]
+        existing_by_declared: dict[str, dict[str, Any]] = {}
+        for task in existing:
+            key = self._canonical_step_reference(task.get("source_step_id") or task.get("step_id") or task.get("id"))
+            if key and key not in existing_by_declared:
+                existing_by_declared[key] = task
+
+        ordered: list[dict[str, Any]] = []
+        used_task_ids: set[int] = set()
+        generated_by_source: dict[str, dict[str, Any]] = {}
+        for participant in generated:
+            source_key = self._canonical_step_reference(participant.get("source_step_id"))
+            if source_key:
+                generated_by_source[source_key] = participant
+
+        for structural in structural_steps:
+            source_key = self._canonical_step_reference(structural.get("declared_step_id") or structural.get("id"))
+            if not source_key:
+                continue
+            # Declared executable steps are the source of truth.  A semantic
+            # planner may assign a different participant to the same ordinal or
+            # drop a non-agent payload step.  Re-synthesizing from the declared
+            # structural step prevents Step1 from being remapped to the only
+            # remaining participant step after control-plane normalization.
+            synthesized = self._task_from_structural_step(
+                structural,
+                participants=participants,
+                selected_participants=selected,
+                generated_participants=generated,
+                generated_by_source=generated_by_source,
+                graph_id=graph_id,
+                ordinal=len(ordered) + 1,
+            )
+            if synthesized:
+                ordered.append(synthesized)
+
+        # When the user declares an ordered step list, the declared list is the
+        # complete payload graph.  Extra semantic-planner tasks are discarded
+        # because they may be controller echoes or duplicate participant steps
+        # with shifted ordinals.  This keeps StepN aliases bound to the user's
+        # declared payload steps, not to planner side effects.
+
+        return {
+            "tasks": ordered,
+            "selected_participants": self._dedupe_selected_participants(selected),
+            "generated_participants": self._dedupe_selected_participants(generated),
+        }
+
+    def _task_from_structural_step(
+        self,
+        structural: dict[str, Any],
+        *,
+        participants: list[dict[str, Any]],
+        selected_participants: list[dict[str, Any]],
+        generated_participants: list[dict[str, Any]],
+        generated_by_source: dict[str, dict[str, Any]],
+        graph_id: str,
+        ordinal: int,
+    ) -> dict[str, Any]:
+        source_step_id = str(structural.get("declared_step_id") or structural.get("id") or f"structural_step_{ordinal}").strip()
+        route = structural.get("route") if isinstance(structural.get("route"), dict) else {}
+        route_ref = str(route.get("participant_id") or route.get("participant_name") or structural.get("participant_id") or "").strip()
+        participant = self.instruction_workflow_planner._find_participant(route_ref, participants or []) if route_ref else None
+        depends_on = [self._dependency_ref_value(x) for x in (structural.get("depends_on") or [])]
+        depends_on = [x for x in depends_on if x]
+        if participant:
+            pid = self.instruction_workflow_planner._participant_id(participant)
+            if pid and not any(str(p.get("participant_id") or p.get("id") or "") == pid for p in selected_participants):
+                selected_participants.append(participant)
+            return {
+                "id": str(structural.get("id") or source_step_id),
+                "declared_step_id": source_step_id,
+                "task_id": f"{graph_id}_delegate_{ordinal}",
+                "participant_id": pid,
+                "participant_display_name": self.instruction_workflow_planner._participant_name(participant),
+                "execution_owner": "ai_core",
+                "status": "pending",
+                "step_type": "participant_execution",
+                "depends_on": depends_on,
+                "input_from": depends_on,
+                "source_step_id": source_step_id,
+                "source_instruction_fragment": structural.get("instruction_fragment") or "",
+                "parameter_contract": self.instruction_workflow_planner._generated_parameter_contract_from_step(structural),
+                "capability_profile": (
+                    structural.get("capability_profile")
+                    if isinstance(structural.get("capability_profile"), dict) and structural.get("capability_profile")
+                    else (participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {})
+                ),
+                **self.instruction_workflow_planner._task_contracts_from_step(structural, depends_on),
+            }
+
+        source_key = self._canonical_step_reference(source_step_id)
+        virtual = generated_by_source.get(source_key)
+        if not virtual:
+            virtual_id = new_id("participant")
+            objective = self.instruction_workflow_planner._objective_from_step(structural)
+            parameter_contract = self.instruction_workflow_planner._generated_parameter_contract_from_step(structural)
+            capability_profile = structural.get("capability_profile") if isinstance(structural.get("capability_profile"), dict) else {}
+            virtual = {
+                "participant_id": virtual_id,
+                "name": structural.get("label") or f"Generated Step {ordinal}",
+                "agent_name": structural.get("label") or f"Generated Step {ordinal}",
+                "display_name": structural.get("label") or f"Generated Step {ordinal}",
+                "role_name": structural.get("label") or f"Generated Step {ordinal}",
+                "instruction": objective,
+                "execution_objective": objective,
+                "definition_instruction": structural.get("instruction_fragment") or objective,
+                "parameter_contract": parameter_contract,
+                "capability_profile": capability_profile,
+                "runtime_parameters": {},
+                "missing_information": [],
+                "origin": "auxiliary_brain",
+                "status": "created",
+                "execution_policy": "delegate_to_ai_core",
+                "generated_by": "structural_workflow_repair",
+                "depends_on": depends_on,
+                "input_from": depends_on,
+                "workflow_step_type": "semantic_intermediate_step",
+                "source_step_id": source_step_id,
+                "declared_step_id": source_step_id,
+                "structural_step_id": str(structural.get("id") or ""),
+            }
+            generated_participants.append(virtual)
+            generated_by_source[source_key] = virtual
+        return {
+            "id": str(structural.get("id") or source_step_id),
+            "declared_step_id": source_step_id,
+            "task_id": f"{graph_id}_delegate_{ordinal}",
+            "participant_id": str(virtual.get("participant_id") or ""),
+            "participant_display_name": str(virtual.get("display_name") or virtual.get("name") or "Runtime Step"),
+            "execution_owner": "ai_core",
+            "status": "pending",
+            "step_type": "semantic_intermediate_step",
+            "depends_on": depends_on,
+            "input_from": depends_on,
+            "source_step_id": source_step_id,
+            "source_instruction_fragment": structural.get("instruction_fragment") or "",
+            "parameter_contract": virtual.get("parameter_contract") if isinstance(virtual.get("parameter_contract"), dict) else {},
+            "capability_profile": virtual.get("capability_profile") if isinstance(virtual.get("capability_profile"), dict) else {},
+            **self.instruction_workflow_planner._task_contracts_from_step(structural, depends_on),
+        }
+
     def _participant_reuse_key(self, participant: dict[str, Any]) -> str:
         name = str(participant.get("name") or participant.get("agent_name") or participant.get("display_name") or "").strip().casefold()
         objective = str(participant.get("execution_objective") or participant.get("instruction") or "").strip().casefold()
@@ -3738,6 +4016,8 @@ class AgentStudioService:
             "state": "active",
             "source": "control_step_timing",
             "controller_participant_ids": controller_ids,
+            "schedule_instance_id": "",
+            "lifecycle_key": "",
         }
 
     def _extract_interval_seconds_from_control_steps(
@@ -3871,9 +4151,13 @@ class AgentStudioService:
                 updated_policy["next_run_at"] = now
         elif not updated_policy.get("next_run_at"):
             updated_policy["next_run_at"] = now
+        updated_policy.setdefault("schedule_instance_id", str(updated_graph.get("schedule_instance_id") or f"schedule_{task_name}"))
+        updated_policy["lifecycle_key"] = str(updated_policy.get("schedule_instance_id") or f"schedule_{task_name}")
         updated_graph["schedule_policy"] = updated_policy
+        updated_graph["schedule_instance_id"] = updated_policy.get("schedule_instance_id")
         updated_graph["updated_at"] = now
-        self.store.write_json(f"generated/tasks/{task_name}.json", updated_graph)
+        _resolved_name, _existing_graph, _graph_path = self._read_task_graph_record(task_name)
+        self._write_task_graph_record(str(_resolved_name or task_name), updated_graph, _graph_path)
         self._emit_schedule_observation(
             "schedule_activated",
             task_name=str(task_name),
@@ -3958,6 +4242,8 @@ class AgentStudioService:
                 "next_run_at": self._now(),
                 "created_at": self._now(),
                 "source": "user_declared_execution_policy",
+                "schedule_instance_id": "",
+                "lifecycle_key": "",
             }
         return {"enabled": False, "mode": "unresolved", "source": "user_declared_execution_policy"}
 

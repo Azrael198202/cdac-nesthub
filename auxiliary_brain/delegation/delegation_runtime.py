@@ -1517,6 +1517,66 @@ class AgentDelegationRuntime:
         """
         identities = {self._participant_identity(p): p for p in selected if self._participant_identity(p)}
         name_to_id = {self._participant_name(p).lower(): pid for pid, p in identities.items()}
+        # Build a generic alias map for compiled/decomposed step identifiers.
+        # Dependencies may be declared as step_001, step_1, Step 1, task ids,
+        # participant ids, or participant names.  Runtime dependency checks must
+        # resolve all of them to executable participant ids before execution.
+        dependency_alias_to_pid: dict[str, str] = {}
+
+        def _alias(value: Any) -> str:
+            return self.workflow_output_resolver.normalize_key(value)
+
+        def _add_alias(value: Any, pid_value: str) -> None:
+            key = _alias(value)
+            if key and pid_value:
+                dependency_alias_to_pid.setdefault(key, pid_value)
+
+        for participant_pid, participant in identities.items():
+            _add_alias(participant_pid, participant_pid)
+            _add_alias(self._participant_name(participant), participant_pid)
+            _add_alias(participant.get("source_step_id"), participant_pid)
+            _add_alias(participant.get("declared_step_id"), participant_pid)
+            _add_alias(participant.get("structural_step_id"), participant_pid)
+
+        for ordinal, task in enumerate(task_graph.get("tasks") or [], start=1):
+            if not isinstance(task, dict):
+                continue
+            task_pid = str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
+            if not task_pid:
+                continue
+            aliases = [
+                task_pid,
+                task.get("id"),
+                task.get("task_id"),
+                task.get("step_id"),
+                task.get("source_step_id"),
+                task.get("declared_step_id"),
+                task.get("structural_step_id"),
+                task.get("participant_display_name"),
+                task.get("display_name"),
+                task.get("name"),
+                f"step{ordinal}",
+                f"step_{ordinal}",
+                f"step {ordinal}",
+                f"stage{ordinal}",
+                f"stage_{ordinal}",
+                f"stage {ordinal}",
+            ]
+            for value in aliases:
+                _add_alias(value, task_pid)
+            # Also normalize numeric forms embedded in a step id.  This keeps
+            # step_1, step_001, Step 1 and generated_step_1 interchangeable.
+            for value in aliases:
+                match = re.search(r"(\d+)", str(value or ""))
+                if match:
+                    number = int(match.group(1))
+                    _add_alias(f"step{number}", task_pid)
+                    _add_alias(f"step_{number}", task_pid)
+                    _add_alias(f"step {number}", task_pid)
+                    _add_alias(f"step_{number:03d}", task_pid)
+                    _add_alias(f"stage{number}", task_pid)
+                    _add_alias(f"stage_{number}", task_pid)
+
         plan: dict[str, Any] = {
             "default_relationship": "independent",
             "participants": {},
@@ -1528,24 +1588,34 @@ class AgentDelegationRuntime:
                 continue
             target = str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
             raw_deps = task.get("depends_on") or task.get("requires") or task.get("input_from") or []
+            if isinstance(raw_deps, dict):
+                raw_deps = [raw_deps]
             if isinstance(raw_deps, str):
                 raw_deps = [raw_deps]
-            deps = [str(x).strip() for x in raw_deps if str(x).strip()]
+            deps: list[str] = []
+            for item in raw_deps:
+                raw = item.get("id") if isinstance(item, dict) else item
+                dep = str(raw or "").strip()
+                if dep:
+                    deps.append(dep)
             if target and deps:
                 explicit_by_task.setdefault(target, []).extend(deps)
 
         for pid, participant in identities.items():
             objective = self._participant_objective(participant).lower()
             raw_deps = participant.get("depends_on") or participant.get("requires") or participant.get("input_from") or explicit_by_task.get(pid) or []
+            if isinstance(raw_deps, dict):
+                raw_deps = [raw_deps]
             if isinstance(raw_deps, str):
                 raw_deps = [raw_deps]
             deps: list[str] = []
             for item in raw_deps:
-                dep = str(item).strip()
+                raw = item.get("id") if isinstance(item, dict) else item
+                dep = str(raw or "").strip()
                 if not dep:
                     continue
-                dep_id = dep if dep in identities else name_to_id.get(dep.lower(), dep)
-                if dep_id != pid and dep_id not in deps:
+                dep_id = dependency_alias_to_pid.get(_alias(dep)) or (dep if dep in identities else name_to_id.get(dep.lower(), dep))
+                if dep_id != pid and dep_id in identities and dep_id not in deps:
                     deps.append(dep_id)
             # Dependencies must come from the task graph or participant metadata.
             # Source code must not infer semantic dataflow from vocabulary lists.
@@ -3613,7 +3683,24 @@ class AgentDelegationRuntime:
             out["parameter_contract"] = copy.deepcopy(source_contract)
             out["missing_information"] = copy.deepcopy(source_contract.get("missing_information") or [])
 
-        for key in ("input_contract", "output_contract", "depends_on", "input_from", "workflow_step_type", "source_step_id"):
+        for key in (
+            "input_contract",
+            "output_contract",
+            "depends_on",
+            "input_from",
+            "workflow_step_type",
+            "source_step_id",
+            "step_id",
+            "compiled_step_id",
+            "execution_contract",
+            "source_contract",
+            "presentation_contract",
+            "binding_contract",
+            "execution_known",
+            "semantic_known",
+            "task_metadata",
+            "prompt_profile",
+        ):
             value = source.get(key)
             if value not in (None, "", [], {}) and out.get(key) in (None, "", [], {}):
                 out[key] = copy.deepcopy(value)

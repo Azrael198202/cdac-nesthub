@@ -59,6 +59,8 @@ class BindingCompiler:
         target_field = str(item.get("target_field") or item.get("to_field") or "body").strip()
         if not source_step or not target_step:
             return
+        if source_step == target_step:
+            return
         key = (source_step, source_field, target_step, target_field)
         if key in seen:
             return

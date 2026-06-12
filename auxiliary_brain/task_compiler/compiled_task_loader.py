@@ -60,6 +60,12 @@ class CompiledTaskLoader:
         graph = compiled.get("source_task_graph") if isinstance(compiled.get("source_task_graph"), dict) else {}
         graph = dict(graph)
         graph["tasks"] = self._merge_compiled_contracts(graph.get("tasks"), compiled.get("steps"))
+        # The compiled task directory is the execution authority.  Runtime
+        # execution must not fall back to the old selected-participant list,
+        # because that list may contain schedule controllers and may omit
+        # generated natural-language steps.  Rebuild the payload participant
+        # list from compiled executable tasks only.
+        graph["selected_participant_ids"] = self._payload_participant_ids(graph.get("tasks"))
         graph["compiled_task"] = {
             "task_id": compiled.get("task_id"),
             "base_path": compiled.get("base_path"),
@@ -67,8 +73,28 @@ class CompiledTaskLoader:
             "execution_plan": compiled.get("execution_plan"),
             "bindings": compiled.get("bindings") or [],
             "contracts_applied_to_tasks": True,
+            "selected_participant_ids_rebuilt_from_compiled_steps": True,
         }
         return graph
+
+
+    def _payload_participant_ids(self, tasks: Any) -> list[str]:
+        ids: list[str] = []
+        seen: set[str] = set()
+        for task in tasks if isinstance(tasks, list) else []:
+            if not isinstance(task, dict):
+                continue
+            # Task-level controllers are scheduling policy, not executable
+            # payload steps.  This is contract-driven and does not depend on
+            # any business domain.
+            step_type = str(task.get("step_type") or task.get("workflow_step_type") or "").strip().casefold()
+            if step_type in {"schedule_controller", "scheduled_trigger", "task_controller"}:
+                continue
+            pid = str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
+            if pid and pid not in seen:
+                seen.add(pid)
+                ids.append(pid)
+        return ids
 
     def _merge_compiled_contracts(self, tasks: Any, compiled_steps: Any) -> list[dict[str, Any]]:
         raw_tasks = tasks if isinstance(tasks, list) else []
