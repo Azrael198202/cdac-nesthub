@@ -874,7 +874,51 @@ class LLMJsonExecutor:
                 candidates.append(value)
         return any(self._container_requires_external_material(item) for item in candidates if isinstance(item, dict))
 
+    def _container_requests_provenance_fields(self, container: dict) -> bool:
+        if not isinstance(container, dict):
+            return False
+        provenance_fields = {
+            "source", "sources", "citation", "citations", "reference", "references",
+            "url", "uri", "link", "links", "publisher", "provider",
+            "publication_time", "published_time", "published_at", "publication_date",
+            "timestamp", "retrieved_at", "retrieval_time", "provenance",
+        }
+        field_keys = {
+            "fields", "output_fields", "requested_fields", "required_fields",
+            "requested_output_fields", "presentation_fields", "columns", "schema_fields",
+        }
+        def norm(value):
+            return str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
+        def visit(value, depth=0):
+            if depth > 8:
+                return False
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    key_n = norm(key)
+                    if key_n in field_keys:
+                        if isinstance(item, list):
+                            for entry in item:
+                                if isinstance(entry, dict):
+                                    names = [entry.get(k) for k in ("name", "field", "id", "key", "path")]
+                                    if any(norm(x) in provenance_fields for x in names):
+                                        return True
+                                elif norm(entry) in provenance_fields:
+                                    return True
+                        elif isinstance(item, dict):
+                            if any(norm(k) in provenance_fields for k in item.keys()):
+                                return True
+                    if key_n in provenance_fields and item not in (None, "", [], {}):
+                        return True
+                    if visit(item, depth + 1):
+                        return True
+            elif isinstance(value, list):
+                return any(visit(item, depth + 1) for item in value)
+            return False
+        return visit(container)
+
     def _container_requires_external_material(self, container: dict) -> bool:
+        if self._container_requests_provenance_fields(container):
+            return True
         bool_paths = (
             ("requires_external_information",),
             ("needs_web_search",),

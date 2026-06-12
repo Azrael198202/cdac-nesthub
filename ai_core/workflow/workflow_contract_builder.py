@@ -318,12 +318,18 @@ class WorkflowContractBuilder:
         return False
 
     def _correct_action_for_output_contract(self, *, action_type: str, state: dict[str, Any], result: dict[str, Any], container: dict[str, Any] | None = None) -> str:
-        """Prevent accidental runtime-artifact generation for direct output tasks.
+        """Apply generic execution-contract guards after planner selection.
 
-        The LLM still chooses the action. This guard only enforces the fixed
-        action contract when a reusable runtime artifact was selected without
-        an artifact-shaped request. It does not include business/domain terms.
+        This method is intentionally domain-neutral.  It does not inspect task
+        words such as a topic, product, or industry.  It only enforces the
+        contract boundary between execution-known parameters and semantic-known
+        facts: when the state says external/source material is still required
+        and no verified semantic material exists, model-only generation cannot
+        be selected as the executable action.
         """
+        if self.requires_unverified_semantic_material(state=state, result=container if isinstance(container, dict) else result):
+            if action_type in {"", "llm_generate", "compose_static_response", "no_op", "ask_user"}:
+                return "web_query"
         if action_type not in {"generate_code", "generate_complex_tool"}:
             return action_type
         text = self._joined_request_text(state=state, result=result, container=container)
@@ -337,15 +343,34 @@ class WorkflowContractBuilder:
             if isinstance(value, dict):
                 extracted = self.extract_execution_decision(value)
                 if extracted.get("selected_action_type"):
+                    corrected = self._correct_action_for_output_contract(
+                        action_type=normalize_action_type(extracted.get("selected_action_type")),
+                        state=state,
+                        result=result,
+                        container=value,
+                    )
+                    if corrected != normalize_action_type(extracted.get("selected_action_type")):
+                        ranked = self._ranked_options_with_selected(corrected, "selected by semantic-known/source-material guard")
+                        return {
+                            **extracted,
+                            "selected_action_type": corrected,
+                            "selected_execution_method": method_for_action(corrected),
+                            "ranked_options": ranked,
+                            "selection_guard": "semantic_known_requires_source_material",
+                        }
                     return extracted
         selected = self.default_action_from_structural_context(state=state, result=result)
+        ranked = self._ranked_options_with_selected(selected, "selected by structural fallback after planner did not return one fixed action")
+        return {"selected_action_type": selected, "selected_execution_method": method_for_action(selected), "ranked_options": ranked, "selection_rules": list(SELECTION_RULES), "decision_source": "structural_fallback"}
+
+    def _ranked_options_with_selected(self, selected: str, reason: str) -> list[dict[str, Any]]:
         ranked = []
+        selected = normalize_action_type(selected, "ask_user")
         for i, item in enumerate(fixed_options_for_prompt()):
             priority = 1 if item["action_type"] == selected else i + 2
-            reason = "selected by structural fallback after planner did not return one fixed action"
             ranked.append({**item, "priority": priority, "reason": reason})
         ranked.sort(key=lambda x: int(x["priority"]))
-        return {"selected_action_type": selected, "selected_execution_method": method_for_action(selected), "ranked_options": ranked, "selection_rules": list(SELECTION_RULES), "decision_source": "structural_fallback"}
+        return ranked
 
     def default_action_from_structural_context(self, *, state: dict[str, Any], result: dict[str, Any]) -> str:
         """Choose a safe fixed action using only generic runtime structure.
@@ -774,9 +799,60 @@ class WorkflowContractBuilder:
         semantic_known = classifier.merge_semantic_known(result, *(v for v in results.values() if isinstance(v, dict)))
         return not classifier.has_verified_semantic_material(semantic_known)
 
+    def _container_requests_provenance_fields(self, container: dict[str, Any]) -> bool:
+        """Detect generic provenance-output requirements from structured contracts.
+
+        This does not inspect task/business vocabulary.  It only checks whether
+        a planner/contract explicitly requested fields whose values cannot be
+        safely invented by a model-only executor, such as source references or
+        publication timestamps.
+        """
+        if not isinstance(container, dict):
+            return False
+        provenance_fields = {
+            "source", "sources", "citation", "citations", "reference", "references",
+            "url", "uri", "link", "links", "publisher", "provider",
+            "publication_time", "published_time", "published_at", "publication_date",
+            "timestamp", "retrieved_at", "retrieval_time", "provenance",
+        }
+        field_keys = {
+            "fields", "output_fields", "requested_fields", "required_fields",
+            "requested_output_fields", "presentation_fields", "columns", "schema_fields",
+        }
+        def norm(value: Any) -> str:
+            return str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
+        def visit(value: Any, depth: int = 0) -> bool:
+            if depth > 8:
+                return False
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    key_n = norm(key)
+                    if key_n in field_keys:
+                        if isinstance(item, list):
+                            for entry in item:
+                                if isinstance(entry, dict):
+                                    names = [entry.get(k) for k in ("name", "field", "id", "key", "path")]
+                                    if any(norm(x) in provenance_fields for x in names):
+                                        return True
+                                elif norm(entry) in provenance_fields:
+                                    return True
+                        elif isinstance(item, dict):
+                            if any(norm(k) in provenance_fields for k in item.keys()):
+                                return True
+                    if key_n in provenance_fields and item not in (None, "", [], {}):
+                        return True
+                    if visit(item, depth + 1):
+                        return True
+            elif isinstance(value, list):
+                return any(visit(item, depth + 1) for item in value)
+            return False
+        return visit(container)
+
     def _container_requires_external_material_generic(self, container: dict[str, Any]) -> bool:
         if not isinstance(container, dict):
             return False
+        if self._container_requests_provenance_fields(container):
+            return True
         bool_paths = (
             ("requires_external_information",),
             ("needs_web_search",),

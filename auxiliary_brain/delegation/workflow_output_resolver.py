@@ -161,7 +161,7 @@ class WorkflowOutputResolver:
         # Match path segments, not arbitrary substrings, so an internal key that
         # happens to contain a word such as "output_schema" is not exportable.
         segments = [seg for seg in re.split(r"[.\[\]/]+", lowered) if seg]
-        terminal_markers = {"final_synthesis", "conversation_output", "output", "synthesis", "final", "dataflow_step", "delivery"}
+        terminal_markers = {"final_synthesis", "conversation_output", "output", "synthesis", "final", "dataflow_step", "delivery", "presentation", "presentation_output", "exportable_outputs"}
         return any(seg in terminal_markers for seg in segments)
 
     def build_reference_map(
