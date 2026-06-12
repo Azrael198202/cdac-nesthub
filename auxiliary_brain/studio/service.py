@@ -2450,21 +2450,20 @@ class AgentStudioService:
         if not schedule_enabled and not dispatch_requested:
             return []
         controllers = {str(x).strip() for x in (policy.get("controller_participant_ids") or []) if str(x).strip()}
-        if not controllers:
-            return []
-        selected = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
-        payload = [x for x in selected if x and x not in controllers]
-        if payload:
-            return payload
         tasks = task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []
         derived: list[str] = []
         for item in tasks:
             if not isinstance(item, dict):
                 continue
             pid = str(item.get("participant_id") or "").strip()
-            if pid and pid not in controllers:
+            if pid and pid not in controllers and pid not in derived:
                 derived.append(pid)
-        return derived
+        if derived:
+            return derived
+        if not controllers:
+            return []
+        selected = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
+        return [x for x in selected if x and x not in controllers]
 
     def _task_graph_with_payload_only_participants(self, task_graph: dict[str, Any], payload_ids: list[str]) -> dict[str, Any]:
         payload_set = {str(x).strip() for x in payload_ids if str(x).strip()}

@@ -150,20 +150,28 @@ class ScheduledTaskRunner:
         return [str(x).strip() for x in (policy.get("controller_participant_ids") or []) if str(x).strip()]
 
     def _payload_participant_ids(self, task_graph: dict[str, Any], controller_ids: list[str]) -> list[str]:
-        selected = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
+        """Return payload participant ids from the executable task list first.
+
+        Scheduled graphs may keep a stale selected_participant_ids list from the
+        semantic planning phase.  The durable tasks array is the compiled
+        executable graph, so it must be the source of truth for dispatch.
+        This keeps each scheduled task isolated and prevents a shared timing
+        controller or stale participant selection from dropping generated
+        payload steps.
+        """
         controllers = set(controller_ids)
-        payload = [x for x in selected if x not in controllers]
-        if payload:
-            return payload
         tasks = task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []
         derived: list[str] = []
         for item in tasks:
             if not isinstance(item, dict):
                 continue
             pid = str(item.get("participant_id") or "").strip()
-            if pid and pid not in controllers:
+            if pid and pid not in controllers and pid not in derived:
                 derived.append(pid)
-        return derived
+        if derived:
+            return derived
+        selected = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
+        return [x for x in selected if x not in controllers]
 
     def _read(self, path: Path) -> dict[str, Any] | None:
         try:

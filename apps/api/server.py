@@ -129,16 +129,17 @@ async def _execute_due_task(task_name: str, task_graph: dict[str, Any] | None = 
     task_graph = task_graph if isinstance(task_graph, dict) else {}
     policy = task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {}
     controller_ids = {str(x).strip() for x in (policy.get("controller_participant_ids") or []) if str(x).strip()}
-    selected_ids = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
-    payload_ids = [x for x in selected_ids if x not in controller_ids]
+    tasks = task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []
+    payload_ids: list[str] = []
+    for item in tasks:
+        if not isinstance(item, dict):
+            continue
+        pid = str(item.get("participant_id") or "").strip()
+        if pid and pid not in controller_ids and pid not in payload_ids:
+            payload_ids.append(pid)
     if not payload_ids:
-        tasks = task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []
-        for item in tasks:
-            if not isinstance(item, dict):
-                continue
-            pid = str(item.get("participant_id") or "").strip()
-            if pid and pid not in controller_ids:
-                payload_ids.append(pid)
+        selected_ids = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
+        payload_ids = [x for x in selected_ids if x not in controller_ids]
     dispatch_run_id = f"scheduled_{task_name}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
     return await studio_service.execute_task(
         task_name,
