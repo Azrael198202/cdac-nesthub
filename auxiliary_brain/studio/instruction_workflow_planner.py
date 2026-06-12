@@ -53,7 +53,7 @@ class InstructionWorkflowPlanner:
                 route = step.get("route") if isinstance(step.get("route"), dict) else {}
                 route_ref = str(route.get("participant_id") or route.get("participant_name") or step.get("participant_id") or "").strip()
                 participant = self._find_participant(route_ref, candidates) if route_ref else None
-                depends_on = [aliases.get(str(dep), str(dep)) for dep in (step.get("depends_on") or []) if str(dep).strip() and aliases.get(str(dep), str(dep))]
+                depends_on = self._normalize_dependency_refs(step.get("depends_on"), aliases)
                 if participant:
                     pid = self._participant_id(participant)
                     if not pid:
@@ -139,7 +139,7 @@ class InstructionWorkflowPlanner:
                     route = step.get("route") if isinstance(step.get("route"), dict) else {}
                     route_ref = str(route.get("participant_id") or route.get("participant_name") or step.get("participant_id") or "").strip()
                     participant = self._find_participant(route_ref, candidates) if route_ref else None
-                    depends_on = [aliases.get(str(dep).strip(), str(dep).strip()) for dep in (step.get("depends_on") or []) if str(dep).strip()]
+                    depends_on = self._normalize_dependency_refs(step.get("depends_on"), aliases)
                     if participant:
                         pid = self._participant_id(participant)
                         if not pid:
@@ -251,6 +251,27 @@ class InstructionWorkflowPlanner:
             "semantic_step_count": len(semantic_steps),
         }
         return PlannedWorkflow(selected_participants=selected, generated_participants=generated, tasks=tasks, coverage=coverage)
+
+
+    def _normalize_dependency_refs(self, raw: Any, aliases: dict[str, str]) -> list[str]:
+        out: list[str] = []
+        for item in raw or []:
+            ref = self._dependency_ref_value(item)
+            if not ref:
+                continue
+            mapped = aliases.get(ref) or aliases.get(ref.casefold()) or ref
+            if mapped and mapped not in out:
+                out.append(mapped)
+        return out
+
+    def _dependency_ref_value(self, item: Any) -> str:
+        if isinstance(item, dict):
+            for key in ("id", "step_id", "source_step_id", "participant_id", "name"):
+                value = str(item.get(key) or "").strip()
+                if value:
+                    return value
+            return ""
+        return str(item or "").strip()
 
 
     def _generated_parameter_contract_from_step(self, step: dict[str, Any]) -> dict[str, Any]:

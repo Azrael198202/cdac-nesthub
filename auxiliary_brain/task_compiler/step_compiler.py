@@ -13,11 +13,15 @@ class StepCompiler:
 
     def compile_steps(self, task_graph: dict[str, Any]) -> list[dict[str, Any]]:
         raw_steps = task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []
+        schedule_policy = task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {}
+        controller_ids = {str(x).strip() for x in (schedule_policy.get("controller_participant_ids") or []) if str(x).strip()}
+        payload_steps = [raw for raw in raw_steps if isinstance(raw, dict) and str(raw.get("participant_id") or raw.get("id") or "").strip() not in controller_ids]
         compiled: list[dict[str, Any]] = []
-        for index, raw in enumerate(raw_steps, start=1):
+        for index, raw in enumerate(payload_steps, start=1):
             if not isinstance(raw, dict):
                 continue
-            step_id = str(raw.get("source_step_id") or raw.get("step_id") or f"step_{index:03d}").strip()
+            original_step_id = str(raw.get("source_step_id") or raw.get("step_id") or "").strip()
+            step_id = f"step_{index:03d}" if controller_ids else (original_step_id or f"step_{index:03d}")
             instruction = str(raw.get("source_instruction_fragment") or raw.get("instruction") or raw.get("execution_objective") or raw.get("objective") or "").strip()
             source_contract = self._source_contract(raw, instruction)
             raw_for_profile = {**raw, "source_contract": source_contract}
@@ -32,7 +36,7 @@ class StepCompiler:
                 "step_name": str(raw.get("display_name") or raw.get("participant_display_name") or raw.get("name") or step_id),
                 "participant_id": str(raw.get("participant_id") or raw.get("id") or step_id),
                 "instruction": instruction,
-                "depends_on": [str(x) for x in (raw.get("depends_on") or []) if str(x).strip()],
+                "depends_on": self._normalize_depends_on(raw.get("depends_on")),
                 "prompt_profile": prompt_profile,
                 "execution_contract": execution_contract,
                 "source_contract": source_contract,
@@ -50,9 +54,42 @@ class StepCompiler:
                 "raw_step_ref": {
                     "participant_id": str(raw.get("participant_id") or raw.get("id") or ""),
                     "source_step_id": str(raw.get("source_step_id") or ""),
+                    "original_step_id": original_step_id,
                 },
             })
         return compiled
+
+    def _normalize_depends_on(self, raw: Any) -> list[str]:
+        out: list[str] = []
+        for item in raw or []:
+            value = self._dependency_ref_value(item)
+            if not value:
+                continue
+            canonical = self._normalize_step_ref(value)
+            if canonical and canonical not in out:
+                out.append(canonical)
+        return out
+
+    def _dependency_ref_value(self, item: Any) -> str:
+        if isinstance(item, dict):
+            for key in ("id", "step_id", "source_step_id", "participant_id", "name"):
+                value = str(item.get(key) or "").strip()
+                if value:
+                    return value
+            return ""
+        return str(item or "").strip()
+
+    def _normalize_step_ref(self, value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        match = re.fullmatch(r"(?:step|stage)?\s*_?\s*(\d+)", text, flags=re.I)
+        if match:
+            return f"step_{int(match.group(1)):03d}"
+        match = re.fullmatch(r"step[_-](\d+)", text, flags=re.I)
+        if match:
+            return f"step_{int(match.group(1)):03d}"
+        return text
 
     def _known_state(self, raw: dict[str, Any], source_contract: dict[str, Any], instruction: str) -> dict[str, Any]:
         execution_known: dict[str, Any] = {}

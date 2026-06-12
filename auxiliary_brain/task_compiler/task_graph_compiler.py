@@ -52,6 +52,7 @@ class TaskGraphCompiler:
             "runtime_prompt_guessing": False,
             "binding_template_parsing_enabled": False,
             "execution_mode": "execute_compiled_task",
+            "schedule_policy": task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {"enabled": False, "mode": "none"},
         }
         return {
             "task_id": task_id,

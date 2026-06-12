@@ -1250,6 +1250,19 @@ class AgentStudioService:
                 schedule_policy = dict(schedule_policy)
                 schedule_policy["controller_participant_ids"] = controller_ids
 
+        normalized_graph_parts = self._normalize_scheduled_graph_after_planning(
+            instruction=instruction,
+            tasks=workflow_tasks,
+            selected_participants=workflow_plan.selected_participants,
+            generated_participants=workflow_plan.generated_participants,
+            schedule_policy=schedule_policy,
+            runtime_parameters=explicit_runtime_parameters,
+        )
+        workflow_tasks = normalized_graph_parts["tasks"]
+        workflow_plan.selected_participants = normalized_graph_parts["selected_participants"]
+        workflow_plan.generated_participants = normalized_graph_parts["generated_participants"]
+        schedule_policy = normalized_graph_parts["schedule_policy"]
+
         static_validation = self._validate_task_graph_static(
             instruction=instruction,
             participants=participants,
@@ -1461,27 +1474,27 @@ class AgentStudioService:
                     })
 
         declared_steps = self._extract_declared_step_ids(text)
-        task_step_aliases = {str(t.get("source_step_id") or "").strip().casefold() for t in tasks if isinstance(t, dict) and str(t.get("source_step_id") or "").strip()}
+        task_step_aliases = self._task_step_aliases_for_static_validation(tasks)
+        known_step_refs = declared_steps | task_step_aliases
         for template in self._extract_template_references(text):
             root = str(template.get("root") or "").strip()
             if not root:
                 continue
-            root_norm = root.casefold()
-            step_match = re.fullmatch(r"step\s*_?\s*(\d+)", root_norm, flags=re.I)
-            if step_match:
-                canonical = f"step{step_match.group(1)}".casefold()
-                if canonical not in declared_steps and root_norm not in task_step_aliases:
-                    issues.append({
-                        "level": "create_task_graph",
-                        "check": "template_step_reference_exists",
-                        "passed": False,
-                        "failure_class": "template_reference_not_found",
-                        "message": "A template reference points to a step that is not declared in this task instruction.",
-                        "reference": template.get("raw"),
-                        "root": root,
-                        "declared_steps": sorted(declared_steps),
-                        "suggested_location": ["verification_brain.template_verification", "task_graph_static_validation"],
-                    })
+            canonical = self._canonical_step_reference(root)
+            if canonical.startswith("step_") and canonical not in known_step_refs:
+                issues.append({
+                    "level": "create_task_graph",
+                    "check": "template_step_reference_exists",
+                    "passed": False,
+                    "failure_class": "template_reference_not_found",
+                    "message": "A template reference points to a step that is not declared in this task instruction.",
+                    "reference": template.get("raw"),
+                    "root": root,
+                    "canonical_root": canonical,
+                    "declared_steps": sorted(declared_steps),
+                    "task_step_aliases": sorted(task_step_aliases),
+                    "suggested_location": ["verification_brain.template_verification", "task_graph_static_validation"],
+                })
 
         return {
             "passed": not issues,
@@ -1508,10 +1521,48 @@ class AgentStudioService:
         return refs
 
     def _extract_declared_step_ids(self, text: str) -> set[str]:
+        """Return canonical step ids declared by the user instruction.
+
+        User-authored task text may be pasted as one line or as multiple lines.
+        Static validation must therefore recognize structural step headers both
+        at line starts and after sentence separators, while keeping all forms in
+        one canonical namespace.
+        """
         ids: set[str] = set()
-        for match in re.finditer(r"(?im)^\s*step\s*(\d+)\s*[:.)-]?", str(text or "")):
-            ids.add(f"step{match.group(1)}".casefold())
+        for match in re.finditer(r"(?i)\bstep\s*_?\s*(\d+)\s*[:.)-]", str(text or "")):
+            canonical = self._canonical_step_reference(match.group(1))
+            if canonical:
+                ids.add(canonical)
         return ids
+
+    def _canonical_step_reference(self, value: Any) -> str:
+        text = str(value or "").strip().casefold()
+        if not text:
+            return ""
+        match = re.fullmatch(r"(?:step|stage)?\s*_?\s*(\d+)", text, flags=re.I)
+        if match:
+            return f"step_{int(match.group(1)):03d}"
+        match = re.fullmatch(r"step[_-](\d+)", text, flags=re.I)
+        if match:
+            return f"step_{int(match.group(1)):03d}"
+        return re.sub(r"[^a-z0-9_]+", "_", text).strip("_")
+
+    def _task_step_aliases_for_static_validation(self, tasks: list[dict[str, Any]]) -> set[str]:
+        aliases: set[str] = set()
+        for index, task in enumerate(tasks or [], start=1):
+            if not isinstance(task, dict):
+                continue
+            for value in (
+                index,
+                task.get("source_step_id"),
+                task.get("step_id"),
+                task.get("task_id"),
+                task.get("participant_id"),
+            ):
+                canonical = self._canonical_step_reference(value)
+                if canonical:
+                    aliases.add(canonical)
+        return aliases
 
     def _extract_template_references(self, text: str) -> list[dict[str, Any]]:
         refs: list[dict[str, Any]] = []
@@ -2566,6 +2617,24 @@ class AgentStudioService:
             task["source_contract"] = self._step_source_contract_from_fragment(task.get("source_instruction_fragment") or task.get("objective") or task.get("instruction"))
         return tasks
 
+    def _controller_participant_ids_from_runtime_parameters(self, runtime_parameters: dict[str, Any]) -> set[str]:
+        controllers: set[str] = set()
+        if not isinstance(runtime_parameters, dict):
+            return controllers
+        for key, value in runtime_parameters.items():
+            key_text = str(key or "").strip()
+            if not key_text:
+                continue
+            prefix = key_text.rsplit(".", 1)[0] if "." in key_text else ""
+            field = key_text.rsplit(".", 1)[-1]
+            if prefix and self._is_timing_parameter_key(field):
+                controllers.add(prefix)
+            if isinstance(value, dict):
+                nested_keys = {str(k or "").strip() for k in value.keys()}
+                if any(self._is_timing_parameter_key(k) for k in nested_keys):
+                    controllers.add(key_text)
+        return controllers
+
     def _build_workflow_variable_contract(self, *, tasks: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> dict[str, Any]:
         """Create an explicit dataflow binding contract for the task graph.
 
@@ -2577,8 +2646,10 @@ class AgentStudioService:
         """
         import re
         template_re = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
+        controller_ids = self._controller_participant_ids_from_runtime_parameters(runtime_parameters)
+        payload_tasks = [t for t in (tasks or []) if isinstance(t, dict) and str(t.get("participant_id") or "").strip() not in controller_ids]
         step_aliases: dict[str, str] = {}
-        for index, task in enumerate(tasks or [], start=1):
+        for index, task in enumerate(payload_tasks, start=1):
             if not isinstance(task, dict):
                 continue
             pid = str(task.get("participant_id") or "").strip()
@@ -2612,7 +2683,7 @@ class AgentStudioService:
                     "binding_type": "workflow_output",
                     "status": "pending",
                 })
-        for task in tasks or []:
+        for task in payload_tasks:
             if not isinstance(task, dict):
                 continue
             task_bindings = []
@@ -3471,6 +3542,156 @@ class AgentStudioService:
         return "|".join(part for part in (name, objective, artifact_sig) if part)
 
 
+
+    def _normalize_scheduled_graph_after_planning(
+        self,
+        *,
+        instruction: str,
+        tasks: list[dict[str, Any]],
+        selected_participants: list[dict[str, Any]],
+        generated_participants: list[dict[str, Any]],
+        schedule_policy: dict[str, Any],
+        runtime_parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Normalize a planned graph before validation and compilation.
+
+        A timing controller is task-level metadata, not payload work.  Runtime
+        semantic planning can still return such controller fragments as ordinary
+        steps.  This post-planning pass removes those control-plane steps,
+        flattens dependency records, and reassigns payload-local step aliases so
+        user references such as Step 1 always point to the first executable
+        payload step.
+        """
+        tasks = [dict(t) for t in (tasks or []) if isinstance(t, dict)]
+        selected_participants = [dict(p) for p in (selected_participants or []) if isinstance(p, dict)]
+        generated_participants = [dict(p) for p in (generated_participants or []) if isinstance(p, dict)]
+        policy = dict(schedule_policy or {})
+
+        controller_ids = set(str(x).strip() for x in (policy.get("controller_participant_ids") or []) if str(x).strip())
+        controller_ids.update(self._controller_ids_from_instruction_preamble(instruction, selected_participants + generated_participants))
+        controller_ids.update(self._controller_ids_from_task_timing(tasks, selected_participants + generated_participants, runtime_parameters))
+
+        if controller_ids:
+            policy["controller_participant_ids"] = sorted(controller_ids)
+            policy.setdefault("enabled", True)
+            if not str(policy.get("mode") or "").strip() or str(policy.get("mode") or "").strip() == "none":
+                policy["mode"] = "recurring"
+
+        id_aliases: dict[str, str] = {}
+        payload: list[dict[str, Any]] = []
+        removed_ids: set[str] = set(controller_ids)
+        for raw in tasks:
+            pid = str(raw.get("participant_id") or raw.get("participant") or raw.get("agent_id") or "").strip()
+            source_step_id = str(raw.get("source_step_id") or raw.get("step_id") or raw.get("id") or "").strip()
+            if pid in controller_ids or self._task_declares_timing_control(raw):
+                if pid:
+                    removed_ids.add(pid)
+                if source_step_id:
+                    removed_ids.add(source_step_id)
+                continue
+            payload.append(dict(raw))
+
+        for index, task in enumerate(payload, start=1):
+            canonical = f"step_{index:03d}"
+            old_values = [
+                task.get("source_step_id"), task.get("step_id"), task.get("id"),
+                task.get("participant_id"), task.get("participant"), task.get("agent_id"),
+                index, f"Step{index}", f"Step {index}", f"step_{index}", canonical,
+            ]
+            for value in old_values:
+                text = str(value or "").strip()
+                if text:
+                    id_aliases[text] = canonical
+                    id_aliases[self._normalize_workflow_reference(text)] = canonical
+                    id_aliases[self._canonical_step_reference(text)] = canonical
+            task["source_step_id"] = canonical
+            task["step_id"] = canonical
+
+        for task in payload:
+            task["depends_on"] = self._normalize_dependency_list_for_task(task.get("depends_on"), id_aliases, removed_ids)
+            task["input_from"] = self._normalize_dependency_list_for_task(task.get("input_from") or task.get("depends_on"), id_aliases, removed_ids)
+            task["workflow_bindings"] = self._normalize_task_workflow_bindings(task.get("workflow_bindings"), id_aliases, removed_ids)
+
+        selected_participants = [p for p in selected_participants if str(p.get("participant_id") or p.get("id") or "").strip() not in controller_ids]
+        generated_participants = [p for p in generated_participants if str(p.get("participant_id") or p.get("id") or "").strip() not in controller_ids]
+        return {
+            "tasks": payload,
+            "selected_participants": selected_participants,
+            "generated_participants": generated_participants,
+            "schedule_policy": policy,
+        }
+
+    def _controller_ids_from_instruction_preamble(self, instruction: str, participants: list[dict[str, Any]]) -> set[str]:
+        text = str(instruction or "")
+        first_step = re.search(r"(?i)\bstep\s*_?\s*\d+\s*[:.)-]", text)
+        preamble = text[: first_step.start()] if first_step else text
+        if not self._extract_generic_interval_seconds(preamble) and not any(self._is_timing_parameter_key(k) for k in self._extract_runtime_parameters_from_instruction(preamble).keys()):
+            return set()
+        refs = self._extract_declared_participant_references(preamble)
+        if not refs:
+            return set()
+        name_index = self._static_participant_name_index(participants)
+        out: set[str] = set()
+        for ref in refs:
+            norm = self._static_normalize_name(ref.get("name"))
+            participant = name_index.get(norm)
+            if isinstance(participant, dict):
+                pid = str(participant.get("participant_id") or participant.get("id") or "").strip()
+                if pid:
+                    out.add(pid)
+        return out
+
+    def _controller_ids_from_task_timing(self, tasks: list[dict[str, Any]], participants: list[dict[str, Any]], runtime_parameters: dict[str, Any]) -> set[str]:
+        derived = self._derive_execution_controller_participant_ids(tasks=tasks, participants=participants, runtime_parameters=runtime_parameters)
+        return {str(x).strip() for x in derived if str(x).strip()}
+
+    def _task_declares_timing_control(self, task: dict[str, Any]) -> bool:
+        fragment = "\n".join(str(task.get(k) or "") for k in ("source_instruction_fragment", "instruction", "objective", "execution_objective"))
+        values = self._extract_runtime_parameters_from_instruction(fragment)
+        return bool(self._extract_generic_interval_seconds(fragment) or any(self._is_timing_parameter_key(k) for k in values.keys()))
+
+    def _dependency_ref_value(self, value: Any) -> str:
+        if isinstance(value, dict):
+            for key in ("id", "step_id", "source_step_id", "participant_id", "name"):
+                item = str(value.get(key) or "").strip()
+                if item:
+                    return item
+            return ""
+        return str(value or "").strip()
+
+    def _normalize_dependency_list_for_task(self, raw: Any, aliases: dict[str, str], removed_ids: set[str]) -> list[str]:
+        out: list[str] = []
+        for item in raw or []:
+            ref = self._dependency_ref_value(item)
+            if not ref:
+                continue
+            if ref in removed_ids or self._normalize_workflow_reference(ref) in {self._normalize_workflow_reference(x) for x in removed_ids}:
+                continue
+            canonical = aliases.get(ref) or aliases.get(self._normalize_workflow_reference(ref)) or aliases.get(self._canonical_step_reference(ref)) or self._canonical_step_reference(ref)
+            if canonical and canonical not in out and canonical not in removed_ids:
+                out.append(canonical)
+        return out
+
+    def _normalize_task_workflow_bindings(self, raw: Any, aliases: dict[str, str], removed_ids: set[str]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for item in raw or []:
+            if not isinstance(item, dict):
+                continue
+            binding = dict(item)
+            for key in ("source_step", "source_step_id", "from_step", "source"):
+                if key in binding:
+                    ref = self._dependency_ref_value(binding.get(key))
+                    binding[key] = aliases.get(ref) or aliases.get(self._normalize_workflow_reference(ref)) or aliases.get(self._canonical_step_reference(ref)) or self._canonical_step_reference(ref)
+            for key in ("target_step", "target_step_id", "to_step", "target"):
+                if key in binding:
+                    ref = self._dependency_ref_value(binding.get(key))
+                    binding[key] = aliases.get(ref) or aliases.get(self._normalize_workflow_reference(ref)) or aliases.get(self._canonical_step_reference(ref)) or self._canonical_step_reference(ref)
+            if str(binding.get("source_step") or binding.get("source_step_id") or "") in removed_ids:
+                continue
+            if str(binding.get("target_step") or binding.get("target_step_id") or "") in removed_ids:
+                continue
+            out.append(binding)
+        return out
 
     def _materialize_schedule_policy_from_control_steps(
         self,
