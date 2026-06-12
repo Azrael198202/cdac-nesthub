@@ -9,6 +9,7 @@ from ai_core.presentation.result_sanitizer import ResultSanitizer
 from ai_core.presentation.structured_fact_normalizer import StructuredFactNormalizer
 from ai_core.runtime.semantic import SynthesisGuard, EvidenceClaimRanker
 from ai_core.runtime.reasoning import EvidenceNormalizationLayer, ClaimResolutionLayer, AnswerPlanningLayer, ContentExtractionLayer, AnswerQualityGate
+from ai_core.presentation.source_retrieval_item_composer import SourceRetrievalItemComposer
 
 
 class FinalAnswerSynthesizer:
@@ -60,6 +61,7 @@ class FinalAnswerSynthesizer:
         self.answer_planner = AnswerPlanningLayer()
         self.content_extractor = ContentExtractionLayer()
         self.quality_gate = AnswerQualityGate()
+        self.source_retrieval_composer = SourceRetrievalItemComposer()
 
     async def synthesize(
         self,
@@ -71,6 +73,11 @@ class FinalAnswerSynthesizer:
         trust_summary: dict[str, Any],
     ) -> dict[str, Any]:
         sanitized = self.sanitizer.sanitize_materials(materials)
+        if self.source_retrieval_composer.should_handle(state=state, materials=sanitized):
+            composed = self.source_retrieval_composer.compose(state=state, materials=sanitized)
+            if composed.get("status") == "completed":
+                return composed
+            return composed
         extracted_content = self.content_extractor.extract(fetched_documents=self._fetched_documents_from_materials(sanitized))
         normalized_evidence = self.evidence_normalizer.normalize(user_input=self._original_input(state), materials=sanitized, source_cards=extracted_content)
         resolved_claims = self.claim_resolver.resolve(user_input=self._original_input(state), normalized_evidence=normalized_evidence)

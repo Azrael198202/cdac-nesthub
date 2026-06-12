@@ -53,6 +53,7 @@ from ai_core.execution.answer_sufficiency_evaluator import AnswerSufficiencyEval
 from ai_core.execution.evidence_satisfied_short_circuit import EvidenceSatisfiedShortCircuit
 from auxiliary_brain.runtime.capability.capability_router import CapabilityRouter
 from auxiliary_brain.research.web_research_tool import GenericWebResearchTool
+from ai_core.web_evidence_optimizer import WebEvidenceOptimizer
 from ai_core.context.evidence_noise_reducer import EvidenceNoiseReducer
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.utils.safe_json import make_json_safe
@@ -111,6 +112,7 @@ class ToolCallExecutor:
         self.execution_continuation = ExecutionContinuationCoordinator()
         self.answer_sufficiency = AnswerSufficiencyEvaluator()
         self.web_research = GenericWebResearchTool()
+        self.web_evidence_optimizer = WebEvidenceOptimizer()
         self.evidence_short_circuit = EvidenceSatisfiedShortCircuit()
         self.capability_router = CapabilityRouter()
         self.runtime_cost_policy = RuntimeCostPolicy()
@@ -496,6 +498,14 @@ class ToolCallExecutor:
                     step=step,
                     state=state,
                 )
+                if method_contract.method == "web_search" and not prepared_external_result:
+                    prepared_external_result = await self._execute_prepared_query_web_search(
+                        run_id=run_id,
+                        node_id=node_id,
+                        step_id=step_id,
+                        step=step,
+                        state=state,
+                    )
                 if prepared_external_result:
                     result_obj = prepared_external_result.get("result") if isinstance(prepared_external_result.get("result"), dict) else {}
                     result_obj.setdefault("data", {})["execution_method_contract"] = method_contract.to_dict()
@@ -1462,6 +1472,119 @@ class ToolCallExecutor:
             return str(targets[0]).strip() if targets else ""
         return ""
 
+
+    def _prepared_query_for_step(self, *, state: dict[str, Any], step_id: str, step: dict[str, Any]) -> str:
+        resource = self._prepared_resource_for_step(state=state, step_id=step_id)
+        web = resource.get("web_collection") if isinstance(resource.get("web_collection"), dict) else {}
+        query_contract = web.get("query_contract") if isinstance(web.get("query_contract"), dict) else {}
+        query = str(query_contract.get("query") or "").strip()
+        if query:
+            return query
+        objective = str(step.get("objective") or state.get("input") or "").strip()
+        return " ".join(objective.split())
+
+    async def _execute_prepared_query_web_search(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        step_id: str,
+        step: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Execute a locked query-based web_search contract.
+
+        execution_preparation may approve a generic search query without a
+        pre-selected URL.  This branch performs real search through the generic
+        web research infrastructure, fetches public candidate pages when
+        possible, and returns only source material with provenance.  It does not
+        synthesize facts from model knowledge.
+        """
+        query = self._prepared_query_for_step(state=state, step_id=step_id, step=step)
+        if not query:
+            return None
+        await event_bus.emit(run_id, {
+            "type": "QUERY_WEB_SEARCH_EXECUTION_STARTED",
+            "title": "Query web search execution started",
+            "message": "Executing the locked query prepared by execution_preparation.",
+            "node_id": node_id,
+            "step_id": step_id,
+            "result": {"query": query},
+        })
+        try:
+            search = await self.web_research.search(query=query, max_results=5)
+        except Exception as exc:
+            await event_bus.emit(run_id, {
+                "type": "QUERY_WEB_SEARCH_EXECUTION_FAILED",
+                "title": "Query web search execution failed",
+                "message": str(exc),
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": {"query": query},
+            })
+            return None
+        results = search.get("results") if isinstance(search.get("results"), list) else []
+        fetched: list[dict[str, Any]] = []
+        for item in results[:5]:
+            url = str(item.get("url") or "").strip() if isinstance(item, dict) else ""
+            if not url:
+                continue
+            try:
+                doc = await self.web_research.fetch(url=url, max_chars=12000)
+            except Exception:
+                doc = {}
+            if isinstance(doc, dict) and doc.get("status") == "success":
+                fetched.append(doc)
+        documents = [{"document": d, "source_search_result": next((r for r in results if isinstance(r, dict) and r.get("url") == d.get("url")), {})} for d in fetched if isinstance(d, dict)]
+        optimized = self.web_evidence_optimizer.optimize(
+            user_input=str(state.get("input") or ""),
+            capability="web_retrieval",
+            objective=str(step.get("objective") or query),
+            search_results=results,
+            documents=documents,
+        )
+        generic_records = self.content_extraction.extract_from_search_results(results) if results else []
+        if fetched:
+            acquired = await self._generic_content_documents(selected_evidence=results, timeout_seconds=25.0)
+            extracted = self.content_extraction.extract(fetched_documents=acquired) if acquired else []
+            if extracted:
+                generic_records = extracted
+        answer_material = self._answer_material_from_content_records(generic_records)
+        normalized_facts = self._facts_from_content_records(generic_records)
+        source_urls = [str(x.get("url") or "") for x in results if isinstance(x, dict) and x.get("url")]
+        step_source_contract = step.get("source_contract") if isinstance(step.get("source_contract"), dict) else ((state.get("source_contract") if isinstance(state.get("source_contract"), dict) else {}))
+        step_execution_known = step.get("execution_known") if isinstance(step.get("execution_known"), dict) else ((state.get("execution_known") if isinstance(state.get("execution_known"), dict) else {}))
+        data = {
+            "answer_material": answer_material,
+            "normalized_facts": normalized_facts,
+            "content": answer_material,
+            "source_urls": source_urls,
+            "evidence_urls": source_urls,
+            "search_results": results,
+            "fetched_documents": fetched,
+            "optimized_evidence": optimized,
+            "query": query,
+            "source_contract": step_source_contract,
+            "execution_known": step_execution_known,
+            "prompt_profile": step.get("prompt_profile") or "source_retrieval",
+            "execution_method": "web_search",
+        }
+        status = "success" if answer_material and source_urls else "failed"
+        result = {
+            "status": status,
+            "data": data,
+            "provenance": {
+                "source": "generic_web_research",
+                "method": "web_search",
+                "query": query,
+                "source_urls": source_urls,
+                "source_contract": step_source_contract,
+                "search_status": search.get("status") if isinstance(search, dict) else "unknown",
+                "executed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        }
+        return {"tool": {"id": "generic_web_research", "source": "execution_preparation"}, "input": {"query": query, "method": "web_search"}, "result": result}
+
     async def _execute_prepared_external_resource(
         self,
         *,
@@ -1704,7 +1827,10 @@ class ToolCallExecutor:
                 if web.get("credential_interaction_required"):
                     return False
                 api_contract = web.get("api_contract_from_discovery") if isinstance(web.get("api_contract_from_discovery"), dict) else {}
-                return bool(web.get("required") and web.get("approved_in_preparation") and (web.get("targets") or api_contract.get("selected_endpoint")))
+                query_contract = web.get("query_contract") if isinstance(web.get("query_contract"), dict) else {}
+                has_query_contract = bool(str(query_contract.get("query") or "").strip())
+                discovery_allowed = bool((web.get("discovery_contract") or {}).get("allowed")) if isinstance(web.get("discovery_contract"), dict) else False
+                return bool(web.get("required") and web.get("approved_in_preparation") and (web.get("targets") or api_contract.get("selected_endpoint") or (discovery_allowed and has_query_contract)))
             if method == "api_call":
                 api = item.get("api_call_preparation") if isinstance(item.get("api_call_preparation"), dict) else {}
                 if api.get("credential_interaction_required"):

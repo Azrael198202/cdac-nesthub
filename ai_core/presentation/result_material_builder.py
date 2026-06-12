@@ -66,10 +66,21 @@ class ResultMaterialBuilder:
                 return {key: value.strip()}
         data = result.get("data")
         if isinstance(data, dict):
+            # Source-retrieval material must remain structured until the
+            # contract-aware formatter validates item count and requested fields.
+            # Do not collapse it into generic normalized_facts first.
+            source_docs = self._source_documents(data)
+            if self._is_source_retrieval_result(result, data):
+                public = {k: v for k, v in data.items() if k not in self.INTERNAL_KEYS}
+                if source_docs:
+                    public["source_documents"] = source_docs
+                for key in ("source_contract", "execution_known", "presentation_contract", "prompt_profile", "execution_method"):
+                    if key in result and key not in public:
+                        public[key] = result.get(key)
+                return public
             # Prefer structured runtime evidence over pre-composed answer text.
             # Pre-composed text may contain extractor traces; structured evidence
             # can be normalized and validated by the semantic contract engine.
-            source_docs = self._source_documents(data)
             if isinstance(data.get("normalized_facts"), list):
                 return {
                     "normalized_facts": data.get("normalized_facts"),
@@ -156,10 +167,24 @@ class ResultMaterialBuilder:
             unique.append(doc)
         return unique
 
+    def _is_source_retrieval_result(self, result: dict[str, Any], data: dict[str, Any]) -> bool:
+        method = str(result.get("execution_method") or data.get("execution_method") or "").casefold()
+        profile = str(result.get("prompt_profile") or data.get("prompt_profile") or "").casefold()
+        source_contract = result.get("source_contract") if isinstance(result.get("source_contract"), dict) else data.get("source_contract")
+        if isinstance(source_contract, dict) and source_contract.get("requires_source_material") is True:
+            return True
+        if method in {"web_search", "web_query"} or profile == "source_retrieval":
+            return True
+        return any(isinstance(data.get(key), list) for key in ("search_results", "fetched_documents", "source_cards"))
+
     def _metadata(self, step: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
         metadata: dict[str, Any] = {}
-        for key in ("step_id", "capability", "component_type", "component_id"):
+        for key in ("step_id", "capability", "component_type", "component_id", "source_contract", "execution_known", "semantic_known", "presentation_contract", "prompt_profile", "execution_method"):
             value = step.get(key) or result.get(key)
             if value is not None:
                 metadata[key] = value
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        for key in ("source_contract", "execution_known", "semantic_known", "presentation_contract", "prompt_profile", "execution_method"):
+            if key not in metadata and data.get(key) is not None:
+                metadata[key] = data.get(key)
         return metadata

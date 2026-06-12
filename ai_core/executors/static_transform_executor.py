@@ -392,6 +392,8 @@ class StaticTransformExecutor:
         credential_web_targets = self._filter_credential_required_references(raw_web_targets)
         credential_endpoint_candidates = self._filter_credential_required_references(raw_endpoint_candidates)
         query_contract = references["query_contract"]
+        if method == "web_search" and not str(query_contract.get("query") or "").strip():
+            query_contract["query"] = " ".join(str(step.get("objective") or step.get("target") or "").split())
         query_contract_targets = query_contract.get("targets") if isinstance(query_contract.get("targets"), list) else []
         query_contract["targets"] = self._filter_preparable_references(query_contract_targets)
         query_contract["credential_required_targets"] = self._filter_credential_required_references(query_contract_targets)
@@ -451,7 +453,7 @@ class StaticTransformExecutor:
                 "evidence_url_policy": {"preserve_planned_targets": True, "preserve_actual_result_urls": True, "compare_planned_and_actual": True},
                 "next_resource_stage": "api_contract_preparation" if (endpoint_candidates or credential_endpoint_candidates) else "web_evidence_collection",
                 "api_contract_from_discovery": discovered_api_contract if method == "web_search" else None,
-                "approved_in_preparation": method == "web_search" and bool(web_targets or selected_api_endpoint),
+                "approved_in_preparation": method == "web_search" and bool(web_targets or selected_api_endpoint or query_contract.get("query")),
                 "credential_interaction_required": method == "web_search" and credential_only,
                 "discovery_required": method == "web_search" and not bool(web_targets or endpoint_candidates or credential_endpoint_candidates),
                 "discovery_contract": {"allowed": True, "selection_policy": "collect explicit query/target references before execution; preserve collected source URLs as evidence; structured candidates must be converted into API contracts before execution when possible"} if method == "web_search" and not bool(web_targets or endpoint_candidates or credential_endpoint_candidates) else None,
@@ -609,7 +611,15 @@ class StaticTransformExecutor:
                 api_contract = web.get("api_contract_from_discovery") if isinstance(web.get("api_contract_from_discovery"), dict) else {}
                 if web.get("credential_interaction_required"):
                     return False
-                return bool(web.get("approved_in_preparation") and (web.get("targets") or api_contract.get("selected_endpoint")))
+                query_contract = web.get("query_contract") if isinstance(web.get("query_contract"), dict) else {}
+                # Query-based web retrieval is a prepared resource even when the
+                # planner did not pre-select concrete URLs.  The resource is the
+                # locked search contract itself.  Concrete source URLs are
+                # discovered during execution and then verified before entering
+                # semantic_known/final output.
+                has_query_contract = bool(str(query_contract.get("query") or "").strip())
+                discovery_allowed = bool((web.get("discovery_contract") or {}).get("allowed")) if isinstance(web.get("discovery_contract"), dict) else False
+                return bool(web.get("approved_in_preparation") and (web.get("targets") or api_contract.get("selected_endpoint") or (discovery_allowed and has_query_contract)))
             if method == "api_call":
                 api = item.get("api_call_preparation") if isinstance(item.get("api_call_preparation"), dict) else {}
                 if api.get("credential_interaction_required"):
