@@ -700,6 +700,17 @@ class AgentStudioService:
         runs.sort(key=lambda item: str(item.get("completed_at") or item.get("started_at") or ""), reverse=True)
         return str(runs[0].get("task_name") or "").strip() or None
 
+    def _sanitize_task_name_for_lookup(self, task_name: str | None) -> str:
+        """Normalize a user supplied task name without changing stored ids.
+
+        Natural commands often include trailing punctuation, for example
+        ``Pause task TaskA.``.  Lifecycle operations must address the durable
+        task record, so lookup strips only command punctuation/quotes while
+        preserving the task id itself.
+        """
+        text = str(task_name or "").strip()
+        return text.strip().strip('\"\'`').rstrip('.,;:!？。')
+
     def _task_graph_storage_candidates(self, task_name: str | None) -> list[tuple[str, Path]]:
         """Return durable storage candidates for legacy and compiled task graphs.
 
@@ -709,17 +720,20 @@ class AgentStudioService:
         generated participant, so every lookup goes through this task-name based
         storage resolver.
         """
-        candidate = str(task_name or "").strip()
+        candidate = self._sanitize_task_name_for_lookup(task_name)
         root = Path(getattr(self.store, "root", "runtime")) / "generated" / "tasks"
         out: list[tuple[str, Path]] = []
         if candidate:
-            out.append((candidate, root / f"{candidate}.json"))
+            # Compiled task directories are the execution authority.  Check them
+            # before legacy flat records so pause/resume changes affect the same
+            # record the scheduler scans.
             out.append((candidate, root / candidate / "source_task_graph.json"))
+            out.append((candidate, root / f"{candidate}.json"))
         try:
-            for path in root.glob("*.json"):
-                out.append((path.stem, path))
             for path in root.glob("*/source_task_graph.json"):
                 out.append((path.parent.name, path))
+            for path in root.glob("*.json"):
+                out.append((path.stem, path))
         except Exception:
             pass
         seen: set[str] = set()
@@ -733,7 +747,7 @@ class AgentStudioService:
         return unique
 
     def _read_task_graph_record(self, task_name: str | None) -> tuple[str | None, dict[str, Any], Path | None]:
-        candidate = str(task_name or "").strip()
+        candidate = self._sanitize_task_name_for_lookup(task_name)
         folded = candidate.casefold()
         fallback: tuple[str | None, dict[str, Any], Path | None] = (None, {}, None)
         for storage_name, path in self._task_graph_storage_candidates(candidate):
@@ -811,8 +825,9 @@ class AgentStudioService:
         and records operational timestamps.  It does not know which agents or
         capabilities the task uses.
         """
-        resolved, graph, graph_path = self._read_task_graph_record(task_name)
-        resolved = resolved or str(task_name or "").strip()
+        lookup_name = self._sanitize_task_name_for_lookup(task_name)
+        resolved, graph, graph_path = self._read_task_graph_record(lookup_name)
+        resolved = resolved or lookup_name
         if not resolved:
             return {"ok": False, "status": "failed", "error": {"code": "missing_task_name", "message": "A task name is required."}}
         if not graph:
@@ -837,9 +852,40 @@ class AgentStudioService:
         graph["schedule_policy"] = policy
         graph["schedule_instance_id"] = policy.get("schedule_instance_id")
         graph["updated_at"] = now
-        self._write_task_graph_record(resolved, graph, graph_path)
-        self._emit_schedule_observation("schedule_resumed" if enabled else "schedule_paused", task_name=resolved, data={"enabled": bool(enabled), "state": policy.get("state"), "schedule_instance_id": policy.get("schedule_instance_id")})
-        return {"ok": True, "status": "resumed" if enabled else "paused", "task_name": resolved, "schedule_policy": policy}
+        written_paths: list[str] = []
+        primary_path = self._write_task_graph_record(resolved, graph, graph_path)
+        written_paths.append(str(primary_path))
+        # Keep legacy and compiled task records in sync when both exist.  Older
+        # UI paths may read the flat record while the scheduler scans the
+        # compiled source_task_graph.json.  Lifecycle state is task-level state,
+        # so mirroring it prevents pause/resume from appearing successful while
+        # the active scheduler record remains enabled.
+        for storage_name, candidate_path in self._task_graph_storage_candidates(resolved):
+            if not candidate_path.exists() or str(candidate_path) in written_paths:
+                continue
+            try:
+                other = json.loads(candidate_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(other, dict):
+                continue
+            declared = str(other.get("task_name") or other.get("graph_id") or storage_name or "").strip()
+            if declared.casefold() != str(resolved).casefold() and storage_name.casefold() != str(resolved).casefold():
+                continue
+            other_policy = self._task_schedule_policy(other)
+            if str(other_policy.get("mode") or "none") in {"", "none"}:
+                continue
+            other_policy.update(policy)
+            other["schedule_policy"] = other_policy
+            other["schedule_instance_id"] = policy.get("schedule_instance_id")
+            other["updated_at"] = now
+            try:
+                candidate_path.write_text(json.dumps(other, ensure_ascii=False, indent=2), encoding="utf-8")
+                written_paths.append(str(candidate_path))
+            except Exception:
+                pass
+        self._emit_schedule_observation("schedule_resumed" if enabled else "schedule_paused", task_name=resolved, data={"enabled": bool(enabled), "state": policy.get("state"), "schedule_instance_id": policy.get("schedule_instance_id"), "updated_records": written_paths})
+        return {"ok": True, "status": "resumed" if enabled else "paused", "task_name": resolved, "schedule_policy": policy, "updated_records": written_paths}
 
     def pause_task_schedule(self, task_name: str | None) -> dict[str, Any]:
         result = self.set_task_schedule_enabled(str(task_name or ""), False)
@@ -2130,6 +2176,47 @@ class AgentStudioService:
         return report_dict
 
 
+    def _load_authoritative_task_graph_for_execution(self, task_name: str) -> tuple[dict[str, Any] | None, bool]:
+        """Load the executable task graph with compiled artifacts as authority.
+
+        Saved task json files are creation-time records and may still contain
+        legacy participant selections.  When a compiled task directory exists
+        and passed validation, execution must use that compiled graph first so
+        bindings are resolved from compiled steps instead of the old delegation
+        graph.  This rule is generic and independent of capability names.
+        """
+        name = str(task_name or "").strip()
+        if not name:
+            return None, False
+        compiled = self.compiled_task_loader.as_task_graph(name)
+        if compiled:
+            compiled["_execution_authority"] = "compiled_task"
+            return compiled, True
+        legacy = self.store.read_json(f"generated/tasks/{name}.json")
+        return (legacy if isinstance(legacy, dict) else None), False
+
+    def _execution_participants_for_task_graph(self, task_graph: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return participants for the current executable graph only.
+
+        Compiled task graphs can contain generated semantic steps that are not
+        durable agents.  They must be rebuilt from the task graph and included
+        before registered tool steps.  Do not fall back to all durable agents
+        when selected ids are declared, because that reintroduces the legacy
+        delegation path and can skip upstream compiled steps.
+        """
+        all_participants = self.store.list_json("generated/agents")
+        selected_ids = {str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()}
+        if not selected_ids:
+            return all_participants
+        participants = [p for p in all_participants if str(p.get("participant_id") or p.get("id") or "").strip() in selected_ids]
+        found_ids = {str(p.get("participant_id") or p.get("id") or "").strip() for p in participants}
+        missing_ids = selected_ids - found_ids
+        if missing_ids:
+            participants.extend(self._participants_from_task_graph(task_graph, missing_ids))
+        order = {pid: i for i, pid in enumerate(task_graph.get("selected_participant_ids") or [])}
+        participants.sort(key=lambda p: order.get(str(p.get("participant_id") or p.get("id") or "").strip(), 10**9))
+        return participants
+
     async def execute_task(self, task_name: str | None, provided_inputs: dict[str, Any] | None = None, instruction: str | None = None) -> dict[str, Any]:
         state_run_id = str((provided_inputs or {}).get("_runtime_state_run_id") or (provided_inputs or {}).get("_state_run_id") or "studio_runtime")
         runtime_state_manager.emit(
@@ -2151,8 +2238,8 @@ class AgentStudioService:
                 "status": "blocked",
                 "message": "A task name is required.",
             }
-        compiled_loaded = self.compiled_task_loader.as_task_graph(str(task_name))
-        task_graph = compiled_loaded or self.store.read_json(f"generated/tasks/{task_name}.json")
+        resolved_task_name = self._resolve_task_name(task_name) or str(task_name or "").strip()
+        task_graph, compiled_loaded = self._load_authoritative_task_graph_for_execution(resolved_task_name)
         if not task_graph:
             return {
                 "action": "execute_task_graph",
@@ -2160,6 +2247,7 @@ class AgentStudioService:
                 "status": "not_found",
                 "task_name": task_name,
             }
+        task_name = resolved_task_name
         if not compiled_loaded:
             compile_result = self.task_graph_compiler.compile_validate_save(task_graph)
             if compile_result.get("status") != "completed":
@@ -2172,9 +2260,9 @@ class AgentStudioService:
                     "final_answer": "Task compile failed",
                     "validation_report": compile_result.get("validation_report"),
                 }
-            compiled_loaded = self.compiled_task_loader.as_task_graph(str(task_name))
-            if compiled_loaded:
-                task_graph = compiled_loaded
+            task_graph, compiled_loaded = self._load_authoritative_task_graph_for_execution(resolved_task_name)
+            if not task_graph:
+                task_graph = self.store.read_json(f"generated/tasks/{task_name}.json") or {}
         execution_type = self._task_execution_type(task_graph)
         schedule_policy = self._task_schedule_policy(task_graph)
         runtime_state_manager.emit(run_id=state_run_id, step_id="task.load", level="developer", kind="validation", status="completed", title="Task graph loaded", message="Task graph loaded from runtime storage.", output={"task_name": task_name, "task_count": len(task_graph.get("tasks") or []) if isinstance(task_graph, dict) else 0, "execution_type": execution_type, "schedule_state": schedule_policy.get("state")}, progress=100)
@@ -2207,17 +2295,7 @@ class AgentStudioService:
         payload_only_execution = bool(payload_only_ids)
         if payload_only_ids:
             task_graph = self._task_graph_with_payload_only_participants(task_graph, payload_only_ids)
-        all_participants = self.store.list_json("generated/agents")
-        selected_ids = {str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()}
-        if selected_ids:
-            participants = [p for p in all_participants if str(p.get("participant_id") or p.get("id") or "").strip() in selected_ids]
-            found_ids = {str(p.get("participant_id") or p.get("id") or "").strip() for p in participants}
-            missing_ids = selected_ids - found_ids
-            if missing_ids:
-                task_participants = self._participants_from_task_graph(task_graph, missing_ids)
-                participants.extend(task_participants)
-        else:
-            participants = all_participants
+        participants = self._execution_participants_for_task_graph(task_graph)
         runtime_parameters = {}
         if isinstance(task_graph.get("runtime_parameters"), dict):
             runtime_parameters.update(task_graph.get("runtime_parameters") or {})
@@ -2345,7 +2423,8 @@ class AgentStudioService:
                 "run_id": run_id,
                 "message": "The paused run does not reference a task name.",
             }
-        task_graph = self.store.read_json(f"generated/tasks/{task_name}.json")
+        resolved_task_name = self._resolve_task_name(task_name) or task_name
+        task_graph, _compiled_loaded = self._load_authoritative_task_graph_for_execution(resolved_task_name)
         if not task_graph:
             return {
                 "action": "resume_task_graph",
@@ -2354,9 +2433,8 @@ class AgentStudioService:
                 "run_id": run_id,
                 "task_name": task_name,
             }
-        all_participants = self.store.list_json("generated/agents")
-        selected_ids = set(task_graph.get("selected_participant_ids") or [])
-        participants = [p for p in all_participants if p.get("participant_id") in selected_ids] or all_participants
+        task_name = resolved_task_name
+        participants = self._execution_participants_for_task_graph(task_graph)
         pending = run_payload.get("pending_action") if isinstance(run_payload.get("pending_action"), dict) else {}
         if str(pending.get("source") or "") == "execution_reuse_asset":
             runtime_parameters = {}

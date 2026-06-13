@@ -74,6 +74,9 @@ class LiteLLMBrainClient:
         errors: list[dict[str, Any]] = []
         for attempt_route in self._route_attempts(route):
             model = self._litellm_model(attempt_route)
+            if not model:
+                errors.append({"provider": attempt_route.provider, "model": attempt_route.model, "error": "missing_litellm_provider_or_model"})
+                continue
             options = self._merge_options(route=attempt_route, response_format=response_format, kwargs=kwargs)
             try:
                 raw = await acompletion(model=model, messages=messages, **options)
@@ -101,6 +104,9 @@ class LiteLLMBrainClient:
         errors: list[dict[str, Any]] = []
         for attempt_route in self._route_attempts(route):
             model = self._litellm_model(attempt_route)
+            if not model:
+                errors.append({"provider": attempt_route.provider, "model": attempt_route.model, "error": "missing_litellm_provider_or_model"})
+                continue
             options = self._merge_options(route=attempt_route, response_format=response_format, kwargs=kwargs)
             try:
                 raw = completion(model=model, messages=messages, **options)
@@ -137,11 +143,36 @@ class LiteLLMBrainClient:
     def _litellm_model(self, route: BrainModelRoute) -> str:
         provider = str(route.provider or "").strip()
         model = str(route.model or "").strip()
+        if provider.casefold() == "auto":
+            provider = ""
+        # If the model is already a LiteLLM-qualified id, trust that exact id.
+        if "/" in model:
+            prefix, _sep, _rest = model.partition("/")
+            if prefix.strip():
+                return model
         if not provider:
-            return model
+            provider = self._infer_provider_from_model(model)
+        if not provider or not model:
+            # Do not call LiteLLM with an ambiguous model string.  LiteLLM prints
+            # repeated provider-list messages to stderr in that case, which makes
+            # runtime logs look like a task failure while hiding the real routing
+            # issue.  Return an empty model so the caller records a structured
+            # routing error instead.
+            return ""
         if model.startswith(provider + "/"):
             return model
-        return f"{provider}/{model}" if model else provider
+        return f"{provider}/{model}"
+
+    def _infer_provider_from_model(self, model: str) -> str:
+        text = str(model or "").strip()
+        lower = text.casefold()
+        if not text:
+            return ""
+        if ":" in text or lower.startswith(("qwen", "llama", "mistral", "deepseek", "gemma", "phi", "codellama")):
+            return "ollama"
+        if lower.startswith(("gpt-", "o1", "o3", "o4", "chatgpt")):
+            return "openai"
+        return ""
 
     def _route_attempts(self, route: BrainModelRoute) -> list[BrainModelRoute]:
         attempts = [route]

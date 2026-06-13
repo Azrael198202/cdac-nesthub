@@ -126,13 +126,22 @@ def _maybe_start_scheduler_after_studio_payload(payload: dict[str, Any] | None) 
 
 
 async def _execute_due_task(task_name: str, task_graph: dict[str, Any] | None = None) -> dict[str, Any]:
-    task_graph = task_graph if isinstance(task_graph, dict) else {}
+    authoritative_graph = None
+    try:
+        loaded, _compiled = studio_service._load_authoritative_task_graph_for_execution(str(task_name or ""))
+        authoritative_graph = loaded if isinstance(loaded, dict) else None
+    except Exception:
+        authoritative_graph = None
+    task_graph = authoritative_graph or (task_graph if isinstance(task_graph, dict) else {})
     policy = task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {}
     controller_ids = {str(x).strip() for x in (policy.get("controller_participant_ids") or []) if str(x).strip()}
     tasks = task_graph.get("tasks") if isinstance(task_graph.get("tasks"), list) else []
     payload_ids: list[str] = []
     for item in tasks:
         if not isinstance(item, dict):
+            continue
+        step_type = str(item.get("step_type") or item.get("workflow_step_type") or "").strip().casefold()
+        if step_type in {"schedule_controller", "scheduled_trigger", "task_controller"}:
             continue
         pid = str(item.get("participant_id") or "").strip()
         if pid and pid not in controller_ids and pid not in payload_ids:
