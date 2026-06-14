@@ -2218,6 +2218,64 @@ class AgentDelegationRuntime:
                 return str(value).strip()
         return ""
 
+
+    def _binding_task_graph_for_name(self, task_name: str) -> dict[str, Any] | None:
+        """Load a task graph shape suitable for workflow-output binding.
+
+        Runtime execution now supports compiled task directories as the source of
+        truth.  Side-effecting tools must resolve templates against that compiled
+        payload graph, not only against the legacy flat task JSON file.
+        """
+        if not task_name:
+            return None
+        flat = self.store.read_json(f"generated/tasks/{task_name}.json")
+        if isinstance(flat, dict) and isinstance(flat.get("tasks"), list):
+            return flat
+        base = Path(self.store.root) / "generated" / "tasks" / str(task_name)
+        if not base.exists() or not base.is_dir():
+            return flat if isinstance(flat, dict) else None
+        graph = self._read_json_file(base / "graph.json")
+        manifest = self._read_json_file(base / "task_manifest.json")
+        bindings = self._read_json_file(base / "bindings.json")
+        steps: list[dict[str, Any]] = []
+        if isinstance(graph, dict) and isinstance(graph.get("steps"), list):
+            steps = [copy.deepcopy(x) for x in graph.get("steps") if isinstance(x, dict)]
+        elif isinstance(manifest, dict) and isinstance(manifest.get("steps"), list):
+            steps = [copy.deepcopy(x) for x in manifest.get("steps") if isinstance(x, dict)]
+        tasks: list[dict[str, Any]] = []
+        for idx, step in enumerate(steps, start=1):
+            sid = str(step.get("step_id") or step.get("id") or f"step_{idx:03d}").strip()
+            participant_id = str(step.get("participant_id") or step.get("participant") or sid).strip()
+            name = str(step.get("name") or step.get("instruction") or sid).strip()
+            tasks.append({
+                **step,
+                "id": sid,
+                "step_id": sid,
+                "compiled_step_id": sid,
+                "source_step_id": sid,
+                "participant_id": participant_id,
+                "display_name": name,
+                "name": name,
+            })
+        if not tasks and isinstance(flat, dict):
+            return flat
+        return {
+            "task_name": task_name,
+            "graph_id": task_name,
+            "tasks": tasks,
+            "bindings": bindings.get("bindings") if isinstance(bindings, dict) and isinstance(bindings.get("bindings"), list) else [],
+            "compiled_task": True,
+        }
+
+    def _read_json_file(self, path: Path) -> dict[str, Any]:
+        try:
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+        return {}
+
     def _resolve_task_variable_placeholders_for_participant(
         self,
         *,
@@ -2627,15 +2685,48 @@ class AgentDelegationRuntime:
                     debug.append({"scope": "explicit_step_aliases", "changed": bool(second.changed), "unresolved_count": len(unresolved)})
         return resolved_value, unresolved, debug
 
+    def _executable_input_contains_unverified_failure(self, value: Any) -> list[dict[str, Any]]:
+        """Detect failure diagnostics before executing side-effect tools.
+
+        This is a generic side-effect safety gate.  It prevents provider errors,
+        verification failures, and unresolved runtime diagnostics from being
+        materialized into email/chat/export bodies.  It does not inspect task
+        or business vocabulary.
+        """
+        findings: list[dict[str, Any]] = []
+        markers = (
+            "no real llm provider is available",
+            "provider_error_recovered",
+            "model request timed out",
+            "provider failed",
+            "verification failed",
+            "source retrieval did not produce",
+            "unresolved workflow output references",
+            "workflow finished, but no verified",
+        )
+        def visit(item: Any, path: str = "$") -> None:
+            if isinstance(item, dict):
+                for k, v in item.items():
+                    visit(v, f"{path}.{k}")
+                return
+            if isinstance(item, list):
+                for i, v in enumerate(item):
+                    visit(v, f"{path}[{i}]")
+                return
+            if isinstance(item, str):
+                low = item.casefold()
+                if any(m in low for m in markers):
+                    findings.append({"path": path, "reason": "unverified_failure_material", "preview": item[:240]})
+        visit(value)
+        return findings
+
     async def _execute_registered_tool_capability(self, *, participant: dict[str, Any], task_name: str, completed_results: list[Any] | None = None, dependency_plan: dict[str, Any] | None = None) -> AgentExecutionResult | None:
         profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
         tool_id = str(profile.get("tool_id") or "").strip()
         if not tool_id:
             return None
         self._ensure_task_runtime_parameters_for_participant(participant=participant, task_name=task_name)
-        task_graph_for_templates = self.store.read_json(f"generated/tasks/{task_name}.json") if task_name else None
-        if not isinstance(task_graph_for_templates, dict):
-            task_graph_for_templates = None
+        task_graph_for_templates = self._binding_task_graph_for_name(task_name) if task_name else None
         self._resolve_task_variable_placeholders_for_participant(
             participant=participant,
             completed_results=completed_results or [],
@@ -2712,6 +2803,25 @@ class AgentDelegationRuntime:
                     "capability_type": "runtime_registered_tool",
                     "tool_id": tool_id,
                     "unresolved_templates": unresolved_templates,
+                    "binding_debug": binding_debug,
+                    "input_keys": sorted(executable_input_data.keys()),
+                },
+                origin="auxiliary_brain",
+            )
+        unsafe_material = self._executable_input_contains_unverified_failure(executable_input_data)
+        if unsafe_material:
+            return AgentExecutionResult(
+                participant_id=self._participant_identity(participant),
+                participant_name=self._participant_name(participant),
+                core_run_id=new_id("registered_tool_unverified_material"),
+                status="failed",
+                final_answer="Registered capability input contains unverified failure material and was not executed.",
+                workflow_results={
+                    "status": "failed",
+                    "failure_class": "unverified_failure_material",
+                    "capability_type": "runtime_registered_tool",
+                    "tool_id": tool_id,
+                    "unsafe_material": unsafe_material,
                     "binding_debug": binding_debug,
                     "input_keys": sorted(executable_input_data.keys()),
                 },

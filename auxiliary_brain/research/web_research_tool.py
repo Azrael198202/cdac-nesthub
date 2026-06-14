@@ -8,13 +8,14 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, quote_plus, unquote, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urljoin
 
 import httpx
 from bs4 import BeautifulSoup
 
 from ai_core.config.paths import RUNTIME_TRACES
 from ai_core.utils.safe_json import safe_json_dumps
+from auxiliary_brain.research.source_retrieval_settings import SourceRetrievalSettingsStore
 
 
 @dataclass
@@ -42,8 +43,9 @@ class GenericWebResearchTool:
     def __init__(self) -> None:
         self.trace_dir = RUNTIME_TRACES / "web_research"
         self.trace_dir.mkdir(parents=True, exist_ok=True)
+        self.source_settings = SourceRetrievalSettingsStore()
 
-    async def search(self, *, query: str, max_results: int = 5, timeout_seconds: float = 20.0) -> dict[str, Any]:
+    async def search(self, *, query: str, max_results: int = 5, timeout_seconds: float = 20.0, engine_id: str | None = None) -> dict[str, Any]:
         """Best-effort generic web search with structured evidence output.
 
         URL discovery is explicit and provider-backed. The default provider is a
@@ -71,7 +73,7 @@ class GenericWebResearchTool:
                 "attempts": [{"provider": "direct_url", "kind": "direct", "status": "success", "url": direct_url}],
             })
 
-        providers = self._search_provider_specs(query)
+        providers = self._search_provider_specs(query, engine_id=engine_id)
         results: list[dict[str, Any]] = []
         attempts: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
@@ -97,6 +99,8 @@ class GenericWebResearchTool:
                             query=query,
                             response_status=response.status_code,
                             max_results=max_results,
+                            base_url=url,
+                            provider_name=provider_name,
                         )
                     kept = 0
                     for item in extracted:
@@ -129,7 +133,7 @@ class GenericWebResearchTool:
             payload["error"] = "no search results collected"
         return self._record("search", payload)
 
-    def _search_provider_specs(self, query: str) -> list[dict[str, Any]]:
+    def _search_provider_specs(self, query: str, engine_id: str | None = None) -> list[dict[str, Any]]:
         """Return configured search-engine providers.
 
         This is generic infrastructure, not business routing. DuckDuckGo HTML is
@@ -137,13 +141,13 @@ class GenericWebResearchTool:
         required environment configuration exists.
         """
         encoded = quote_plus(query)
-        requested = str(os.getenv("AI_CORE_WEB_SEARCH_PROVIDER") or "auto").strip().lower()
+        requested = str(engine_id or os.getenv("AI_CORE_WEB_SEARCH_PROVIDER") or "").strip().lower()
         providers: list[dict[str, Any]] = []
 
         def add_duckduckgo() -> None:
             providers.extend([
-                {"provider": "duckduckgo_html", "kind": "html", "url": "https://duckduckgo.com/html/?q=" + encoded, "requires_key": False},
-                {"provider": "duckduckgo_html_fallback", "kind": "html", "url": "https://html.duckduckgo.com/html/?q=" + encoded, "requires_key": False},
+                {"provider": "duckduckgo_html", "engine_id": "duckduckgo", "kind": "html", "url": "https://duckduckgo.com/html/?q=" + encoded, "requires_key": False},
+                {"provider": "duckduckgo_html_fallback", "engine_id": "duckduckgo", "kind": "html", "url": "https://html.duckduckgo.com/html/?q=" + encoded, "requires_key": False},
             ])
 
         def add_bing() -> None:
@@ -152,11 +156,13 @@ class GenericWebResearchTool:
             if endpoint and key:
                 providers.append({
                     "provider": "bing_api",
+                    "engine_id": "bing",
                     "kind": "bing_json",
                     "url": endpoint + "/v7.0/search?q=" + encoded,
                     "headers": {"Ocp-Apim-Subscription-Key": key},
                     "requires_key": True,
                 })
+            providers.append({"provider": "bing_html", "engine_id": "bing", "kind": "html", "url": "https://www.bing.com/search?q=" + encoded, "requires_key": False})
 
         def add_google() -> None:
             cse_id = str(os.getenv("GOOGLE_CSE_ID") or "")
@@ -164,22 +170,30 @@ class GenericWebResearchTool:
             if cse_id and api_key:
                 providers.append({
                     "provider": "google_custom_search",
+                    "engine_id": "google",
                     "kind": "google_json",
                     "url": "https://www.googleapis.com/customsearch/v1?key=" + quote_plus(api_key) + "&cx=" + quote_plus(cse_id) + "&q=" + encoded,
                     "requires_key": True,
                 })
+            providers.append({"provider": "google_html", "engine_id": "google", "kind": "html", "url": "https://www.google.com/search?q=" + encoded, "requires_key": False})
 
-        if requested in {"bing", "bing_api"}:
-            add_bing()
-        elif requested in {"google", "google_custom_search", "google_cse"}:
-            add_google()
-        elif requested in {"duckduckgo", "duckduckgo_html", "ddg"}:
-            add_duckduckgo()
+        def add_engine(engine: str) -> None:
+            engine = str(engine or "").strip().lower()
+            if engine in {"google", "google_custom_search", "google_cse"}:
+                add_google()
+            elif engine in {"bing", "bing_api"}:
+                add_bing()
+            elif engine in {"duckduckgo", "duckduckgo_html", "ddg"}:
+                add_duckduckgo()
+
+        if requested:
+            add_engine(requested)
         else:
-            add_bing()
-            add_google()
-            add_duckduckgo()
+            for engine in self.source_settings.engine_order_for_execution():
+                add_engine(engine)
         if not providers:
+            add_google()
+            add_bing()
             add_duckduckgo()
         return providers
 
@@ -189,13 +203,19 @@ class GenericWebResearchTool:
             name = str(spec.get("provider") or "").strip()
             if name and name not in names:
                 names.append(name)
+        settings = self.source_settings.load()
         return {
-            "configured_provider": str(os.getenv("AI_CORE_WEB_SEARCH_PROVIDER") or "auto"),
+            "configured_provider": str(os.getenv("AI_CORE_WEB_SEARCH_PROVIDER") or "runtime_settings"),
+            "routing_mode": settings.routing_mode,
+            "configured_engine_order": settings.engine_order or ["google", "bing", "duckduckgo"],
             "active_provider_order": names,
-            "default_provider": "duckduckgo_html",
+            "default_provider": "google",
             "optional_providers": {
                 "bing_api": bool(os.getenv("BING_SEARCH_ENDPOINT") and os.getenv("BING_SEARCH_API_KEY")),
                 "google_custom_search": bool(os.getenv("GOOGLE_CSE_ID") and os.getenv("GOOGLE_API_KEY")),
+                "google_html": True,
+                "bing_html": True,
+                "duckduckgo_html": True,
             },
             "url_discovery_method": "search_engine_or_direct_url",
         }
@@ -244,7 +264,7 @@ class GenericWebResearchTool:
                 break
         return output
 
-    def _extract_search_results(self, *, html_text: str, query: str, response_status: int, max_results: int) -> list[dict[str, Any]]:
+    def _extract_search_results(self, *, html_text: str, query: str, response_status: int, max_results: int, base_url: str = "", provider_name: str = "") -> list[dict[str, Any]]:
         soup = BeautifulSoup(html_text or "", "html.parser")
         output: list[dict[str, Any]] = []
 
@@ -258,12 +278,14 @@ class GenericWebResearchTool:
                 anchor = container if getattr(container, "name", "") == "a" else container.find("a", href=True)
             if anchor is None or not anchor.get("href"):
                 continue
-            url = self._normalize_search_url(str(anchor.get("href") or ""))
+            url = self._normalize_search_url(str(anchor.get("href") or ""), base_url=base_url)
             if not self._safe_http_url(url) or self._is_search_navigation_url(url):
                 continue
             title = self._clean(anchor.get_text(" ") or anchor.get("title") or url)
-            snippet_node = container.select_one(".result__snippet, .snippet, p") if hasattr(container, "select_one") else None
+            snippet_node = container.select_one(".result__snippet, .b_caption p, .snippet, p") if hasattr(container, "select_one") else None
             snippet = self._clean(snippet_node.get_text(" ") if snippet_node else container.get_text(" "))
+            if not self._looks_like_search_result_item(url=url, title=title, snippet=snippet, provider_name=provider_name):
+                continue
             if snippet == title:
                 snippet = ""
             output.append(asdict(WebResearchResult(
@@ -283,7 +305,52 @@ class GenericWebResearchTool:
         parsed = urlparse(url)
         host = (parsed.netloc or "").casefold()
         path = (parsed.path or "").casefold()
-        return ("duckduckgo" in host and path in {"/", "/html/", "/lite/"}) or path.startswith("/settings")
+        query = (parsed.query or "").casefold()
+        if not host:
+            return True
+        if "google." in host or host.startswith("support.google"):
+            # Search result pages, JavaScript enable pages, support, account, and
+            # retry URLs are provider/navigation material, not user evidence.
+            if host.startswith("support.google") or path.startswith(("/search", "/httpservice/", "/preferences", "/settings", "/sorry", "/account", "/support", "/copilotsearch")):
+                return True
+            if host in {"www.google.com", "google.com"} and path in {"/", ""}:
+                return True
+        if "bing.com" in host:
+            if path.startswith(("/search", "/copilotsearch", "/account", "/profile", "/images", "/videos", "/maps")):
+                return True
+            if path in {"/", ""} and ("form=" in query or not query):
+                return True
+        if "duckduckgo" in host and path in {"/", "/html/", "/lite/", "/settings"}:
+            return True
+        return path.startswith("/settings")
+
+    def _looks_like_search_result_item(self, *, url: str, title: str, snippet: str, provider_name: str = "") -> bool:
+        """Reject provider chrome while keeping generic public result cards.
+
+        HTML search pages often include links such as "Enable JavaScript",
+        "Search help", "Images", and account/navigation pages.  Those links
+        are valid URLs but not source material.  This filter is deliberately
+        provider-neutral: a candidate needs an external destination and either
+        a meaningful title or snippet.
+        """
+        parsed = urlparse(url)
+        host = (parsed.netloc or "").casefold()
+        provider = str(provider_name or "").casefold()
+        provider_hosts = {
+            "google": ("google.", "gstatic.", "googleusercontent."),
+            "bing": ("bing.com", "microsoft.com"),
+            "duckduckgo": ("duckduckgo.com", "duck.co"),
+        }
+        for engine, fragments in provider_hosts.items():
+            if engine in provider and any(fragment in host for fragment in fragments):
+                return False
+        compact = self._clean(" ".join([title, snippet]))
+        if len(compact) < 8:
+            return False
+        bad_titles = {"all", "search", "images", "videos", "maps", "news", "shopping", "feedback", "settings", "tools", "here", "click here"}
+        if compact.casefold() in bad_titles:
+            return False
+        return True
 
     def _http_headers(self) -> dict[str, str]:
         return {
@@ -306,6 +373,7 @@ class GenericWebResearchTool:
 
             dom_items = self._extract_dom_evidence_items(soup, limit=260)
             dom_text = self._clean(" ".join(item.get("text", "") for item in dom_items))[:max_chars]
+            discovered_links = self._extract_discovered_links(soup, base_url=url, limit=240)
             html_excerpt = self._extract_html_excerpt(raw_html, max_chars=max_chars)
 
             text_soup = BeautifulSoup(raw_html, "html.parser")
@@ -327,6 +395,7 @@ class GenericWebResearchTool:
                 "html_excerpt": html_excerpt,
                 "dom_evidence_text": dom_text,
                 "dom_evidence_items": dom_items[:80],
+                "discovered_links": discovered_links[:120],
                 "fetched_at": self._now(),
             })
         except Exception as exc:
@@ -362,6 +431,40 @@ class GenericWebResearchTool:
             return self._clean(" ".join(chunks))[:max_chars]
         except Exception:
             return self._clean(raw_html or "")[:max_chars]
+
+
+    def _extract_discovered_links(self, soup: BeautifulSoup, *, base_url: str, limit: int = 200) -> list[dict[str, Any]]:
+        """Extract same-document child URI candidates from a fetched page.
+
+        This is generic URI exploration material.  It does not classify a page by
+        business type.  Downstream retrieval decides whether a URI is useful by
+        contract satisfaction, relevance, and consistency.
+        """
+        links: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for tag in soup.find_all("a"):
+            href = str(tag.get("href") or "").strip()
+            url = self._normalize_search_url(href, base_url=base_url)
+            if not self._safe_http_url(url):
+                continue
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                continue
+            normalized = url.split("#", 1)[0].strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            anchor_text = self._clean(tag.get_text(" ", strip=True))
+            title = self._clean(str(tag.get("title") or tag.get("aria-label") or ""))
+            links.append({
+                "url": normalized,
+                "anchor_text": anchor_text[:240],
+                "title": title[:240],
+                "source_url": base_url,
+            })
+            if len(links) >= limit:
+                break
+        return links
 
     def _extract_dom_evidence_items(self, soup: BeautifulSoup, *, limit: int = 200) -> list[dict[str, Any]]:
         """Extract generic DOM evidence from text and useful attributes.
@@ -420,7 +523,7 @@ class GenericWebResearchTool:
         payload["web_research_trace"] = {"trace_id": trace_id, "trace_path": str(path)}
         return payload
 
-    def _normalize_search_url(self, href: str) -> str:
+    def _normalize_search_url(self, href: str, base_url: str = "") -> str:
         href = str(href or "").strip()
         if not href:
             return ""
@@ -436,6 +539,8 @@ class GenericWebResearchTool:
                     return candidate
         if href.startswith("//"):
             return "https:" + href
+        if base_url and href.startswith("/"):
+            return urljoin(base_url, href)
         return href
 
     def _safe_http_url(self, value: str) -> bool:
