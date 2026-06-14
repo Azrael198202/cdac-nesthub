@@ -416,35 +416,121 @@ class FinalAnswerSynthesizer:
         cards: list[dict[str, str]] = []
         seen: set[str] = set()
 
-        def clean(value: Any, max_chars: int = 500) -> str:
+        def looks_like_image_url(text: Any) -> bool:
+            value = str(text or "").strip()
+            if not value:
+                return False
+            lowered = value.lower().split("?", 1)[0]
+            return (
+                lowered.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"))
+                or "imgix-proxy" in lowered
+                or "/image/" in lowered
+                or "/images/" in lowered
+            )
+
+        def strip_markup(value: Any) -> str:
+            text = str(value or "")
+            text = re.sub(r"!\[[^\]]*\]\((https?://[^)]+)\)", " ", text)
+            text = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1", text)
+            text = re.sub(r"https?://\S+", " ", text)
+            return " ".join(text.split())
+
+        def clean(value: Any, max_chars: int = 500, *, allow_image_url: bool = False) -> str:
+            if isinstance(value, (dict, list)):
+                try:
+                    value = json.dumps(value, ensure_ascii=False)
+                except Exception:
+                    value = str(value)
             text = " ".join(str(value or "").split())
+            if not allow_image_url and looks_like_image_url(text):
+                return ""
+            if not allow_image_url:
+                text = strip_markup(text)
             if len(text) > max_chars:
                 text = text[: max_chars - 3].rsplit(" ", 1)[0] + "..."
             return text.strip()
 
+        def embedded_value(text: Any, keys: tuple[str, ...]) -> str:
+            raw = str(text or "")
+            for key in keys:
+                # Handles both JSON strings and Python-style dict repr snippets.
+                patterns = (
+                    rf'"{re.escape(key)}"\s*:\s*"([^"]+)"',
+                    rf"'{re.escape(key)}'\s*:\s*'([^']+)'",
+                )
+                for pattern in patterns:
+                    match = re.search(pattern, raw)
+                    if match:
+                        value = clean(match.group(1), 650)
+                        if value:
+                            return value
+            return ""
+
+        def first_non_image(item: dict[str, Any], keys: tuple[str, ...], limit: int) -> str:
+            embedded_keys = tuple(dict.fromkeys((*keys, "description", "summary", "snippet", "text", "content", "title", "headline")))
+            for key in keys:
+                embedded = embedded_value(item.get(key), embedded_keys)
+                if embedded:
+                    return clean(embedded, limit)
+                value = clean(item.get(key), limit)
+                if value and not (value.startswith("{") and ":" in value):
+                    return value
+            # Sometimes source adapters store the usable public text inside a raw item field.
+            for key in ("raw", "data", "item", "record", "payload", "summary", "text", "description", "snippet"):
+                embedded = embedded_value(item.get(key), embedded_keys)
+                if embedded:
+                    return clean(embedded, limit)
+            return ""
+
+        def public_source_name(item: dict[str, Any], url: str) -> str:
+            source_value = item.get("source")
+            if isinstance(source_value, dict):
+                for key in ("name", "title", "host", "domain", "url"):
+                    value = clean(source_value.get(key), 160, allow_image_url=(key == "url"))
+                    if value and not value.startswith("http"):
+                        return value
+            value = first_non_image(item, ("publisher", "source_name", "site_name", "host", "domain"), 160)
+            if value:
+                return value
+            if url:
+                host = re.sub(r"^https?://", "", url).split("/", 1)[0]
+                return host
+            return "Source unavailable"
+
         def time_like(item: dict[str, Any], text: str) -> str:
-            for key in ("published_at", "publication_time", "time", "date", "datetime", "time_expression"):
+            for key in ("published_at", "publishedAt", "publication_time", "time", "date", "datetime", "time_expression"):
                 value = clean(item.get(key), 120)
                 if value:
                     return value
+                embedded = embedded_value(item.get(key), ("publishedAt", "published_at", "publication_time", "date", "time"))
+                if embedded:
+                    return clean(embedded, 120)
+            embedded = embedded_value(text, ("publishedAt", "published_at", "publication_time", "date", "time"))
+            if embedded:
+                return clean(embedded, 120)
             match = re.search(r"(\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b|\b\d{1,2}:\d{2}\b|\b\d{1,2}\s*(?:AM|PM)\b|\b\d{1,2}\s*(?:minutes?|hours?|days?)\s+ago\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}\b)", text, flags=re.IGNORECASE)
             return match.group(0) if match else ""
 
         def add_from_dict(item: dict[str, Any]) -> None:
-            url = clean(item.get("url") or item.get("source_url") or item.get("link"), 300)
-            title = clean(item.get("title") or item.get("source_title") or item.get("name"), 220)
-            summary = clean(item.get("snippet") or item.get("description") or item.get("summary") or item.get("text") or item.get("text_excerpt") or item.get("visible_text_excerpt"), 650)
+            url = clean(item.get("url") or item.get("source_url") or item.get("link"), 500, allow_image_url=True)
+            if looks_like_image_url(url):
+                # Preserve image URLs for UI rendering only when they are explicit media, not as article identity.
+                url = ""
+            title = first_non_image(item, ("title", "headline", "source_title", "name"), 220)
+            summary = first_non_image(item, ("description", "snippet", "summary", "text", "text_excerpt", "visible_text_excerpt", "content"), 650)
+            if not title and summary:
+                title = self._clean_sentence(summary[:180])
             if not title and not summary:
                 return
             key = (url or title or summary[:120]).casefold()
             if key in seen:
                 return
             seen.add(key)
-            joined = " ".join(part for part in (title, summary) if part)
+            joined = " ".join(part for part in (title, summary, str(item)) if part)
             cards.append({
-                "title": title or self._clean_sentence(summary[:180]),
+                "title": title or "Untitled item",
                 "summary": summary or title,
-                "source": clean(item.get("source") or item.get("host") or item.get("publisher") or url, 300),
+                "source": public_source_name(item, url),
                 "url": url,
                 "time": time_like(item, joined),
             })
@@ -454,7 +540,10 @@ class FinalAnswerSynthesizer:
                 return
             if isinstance(value, dict):
                 # Add dictionaries that look like public source cards.
-                if any(value.get(k) for k in ("url", "source_url", "link")) and any(value.get(k) for k in ("title", "source_title", "name", "snippet", "description", "summary", "text_excerpt", "visible_text_excerpt", "text")):
+                has_locator = any(value.get(k) for k in ("url", "source_url", "link"))
+                has_title = any(value.get(k) for k in ("title", "headline", "source_title"))
+                has_text = any(value.get(k) for k in ("description", "snippet", "summary", "text", "text_excerpt", "visible_text_excerpt", "content"))
+                if has_locator or (has_title and has_text):
                     add_from_dict(value)
                 for child in value.values():
                     if isinstance(child, (dict, list)):

@@ -66,23 +66,41 @@ function renderVideoLikeMedia(url, label){
   }
   return `<video class="answerVideoPreview" src="${safeUrl}" controls preload="metadata" title="${safeLabel}"></video>`;
 }
+function isDisplayableImageUrl(url){
+  const clean=String(url||'').split('?')[0].toLowerCase();
+  return /\.(png|jpe?g|webp|gif|svg)$/.test(clean) || clean.includes('/image/') || clean.includes('imgix-proxy');
+}
+function renderImageMedia(url, label){
+  const safeUrl=escapeHtml(url);
+  const safeLabel=escapeHtml(label||'image');
+  const cls=isGifDownloadUrl(url)?'answerGifPreview':'answerImageThumb';
+  return `<a class="imageThumbLink" href="${safeUrl}" target="_blank" rel="noopener"><img class="${cls}" src="${safeUrl}" alt="${safeLabel}" loading="lazy" /></a>`;
+}
 function linkifyAnswerLine(line){
   const trimmed=String(line||'').trim();
-  const imageMarkdown=/!\[([^\]]*)\]\((\/api\/downloads\/[^)]+)\)/g;
+  const imageMarkdown=/!\[([^\]]*)\]\(([^)]+)\)/g;
   const videoMarkdown=/\[video:?\s*([^\]]*)\]\((\/api\/downloads\/[^)]+)\)/gi;
   const videoHtml=/<video[^>]*src=[\"'](\/api\/downloads\/[^\"']+)[\"'][^>]*><\/video>/gi;
   let mediaBlocks=[];
   let textPart=trimmed.replace(imageMarkdown, function(_, alt, url){
-    const safeAlt=escapeHtml(alt||'generated image');
-    const safeUrl=escapeHtml(url);
-    mediaBlocks.push(`<a class="imageThumbLink" href="${safeUrl}" target="_blank" rel="noopener"><img class="answerImageThumb" src="${safeUrl}" alt="${safeAlt}" loading="lazy" /></a>`);
-    return '';
+    if(isDisplayableImageUrl(url)){
+      mediaBlocks.push(renderImageMedia(url, alt||'image'));
+      return '';
+    }
+    return `[${alt||'image'}](${url})`;
   }).replace(videoMarkdown, function(_, label, url){
     mediaBlocks.push(renderVideoLikeMedia(url, label||'generated video'));
     return '';
   }).replace(videoHtml, function(_, url){
     mediaBlocks.push(renderVideoLikeMedia(url, 'generated video'));
     return '';
+  });
+  textPart=textPart.replace(/(^|\s)(https?:\/\/[^\s<>()]+(?:\([^\s<>()]*\))?[^\s<>().,;:!?])/g, function(match, prefix, url){
+    if(isDisplayableImageUrl(url)){
+      mediaBlocks.push(renderImageMedia(url, 'image'));
+      return prefix;
+    }
+    return match;
   }).trim();
   let escaped=escapeHtml(textPart);
   escaped = escaped

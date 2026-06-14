@@ -14,6 +14,7 @@ from ai_core.llm.provider_handlers.utils import LLMJSONParseError, parse_json_co
 from ai_core.runtime.governance import RuntimeCostPolicy
 from presentation_brain import PresentationBrain, PresentationRequest
 from auxiliary_brain.protocols.runtime_protocol import PrimaryRuntimeRequestEnvelope, PrimaryRuntimeExecutionPolicy
+from ai_core.utils.safe_json import make_json_safe, safe_json_dumps
 
 
 @dataclass
@@ -1209,7 +1210,7 @@ class PrimaryBrainDelegationClient:
                         "Use only the provided input and timestamp."
                     )
                 },
-                rendered_user_prompt=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                rendered_user_prompt=safe_json_dumps(payload, separators=(",", ":")),
                 schema=schema,
             )
             answer = result.get("final_answer") if isinstance(result, dict) else ""
@@ -1249,7 +1250,7 @@ class PrimaryBrainDelegationClient:
         }
         if local_context:
             payload["context"] = local_context
-        return "AGENT_REQUEST=" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        return "AGENT_REQUEST=" + safe_json_dumps(payload, separators=(",", ":"))
 
     def _contains_unresolved_workflow_template(self, value: Any) -> bool:
         if isinstance(value, str):
@@ -1352,7 +1353,7 @@ class PrimaryBrainDelegationClient:
                 node_id="output",
                 adapter=adapter,
                 prompt=prompt,
-                rendered_user_prompt=json.dumps(payload, ensure_ascii=False),
+                rendered_user_prompt=safe_json_dumps(payload),
                 schema=schema,
             )
             value = result.get("final_answer") if isinstance(result, dict) else None
@@ -1406,6 +1407,12 @@ class PrimaryBrainDelegationClient:
             "initializing workflow",
             "status: initializing",
             "the workflow is blocked",
+            "not json serializable",
+            "is not json serializable",
+            "object of type",
+            "serialization_failure",
+            "runtime payload is not serializable",
+            "runtime_serialization_problem",
         ]
         if any(fragment in lower for fragment in placeholder_fragments):
             return False

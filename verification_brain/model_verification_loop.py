@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from verification_brain.settings import VerificationBrainSettingsStore
+from verification_brain.runtime_validator import RuntimeSerializationValidator
 
 
 @dataclass
@@ -81,6 +82,7 @@ class ModelVerificationLoop:
         self.config = config or ModelVerificationLoopConfig()
         self.settings_store = VerificationBrainSettingsStore()
         self.convergence = ConvergenceController()
+        self.runtime_validator = RuntimeSerializationValidator()
 
     def runtime_settings(self) -> Any:
         return self.settings_store.load()
@@ -125,6 +127,23 @@ class ModelVerificationLoop:
 
         settings = self.runtime_settings()
         current = candidate if isinstance(candidate, dict) else {"value": candidate}
+        runtime_validation = self.runtime_validator.validate_and_repair(current)
+        if runtime_validation.repaired:
+            current = runtime_validation.value if isinstance(runtime_validation.value, dict) else {"value": runtime_validation.value}
+            await event_bus.emit(run_id, {
+                "type": "RUNTIME_SERIALIZATION_REPAIRED",
+                "title": "Runtime serialization repaired",
+                "message": runtime_validation.error or "Runtime payload was converted to a JSON-safe form.",
+                "node_id": node_id,
+                "findings": runtime_validation.findings,
+            })
+        elif not runtime_validation.passed:
+            current = {
+                "status": "failed",
+                "failure_class": "runtime_serialization_problem",
+                "message": runtime_validation.error or "Runtime payload is not serializable.",
+                "findings": runtime_validation.findings,
+            }
         attempts: list[dict[str, Any]] = []
         max_rounds = self._positive_int(adapter.get("model_verification_max_attempts"), settings.max_repair_rounds)
 
@@ -191,6 +210,17 @@ class ModelVerificationLoop:
                 attempt_index=attempt_index + 1,
             )
             if isinstance(regenerated, dict):
+                runtime_validation = self.runtime_validator.validate_and_repair(regenerated)
+                if runtime_validation.repaired:
+                    regenerated = runtime_validation.value if isinstance(runtime_validation.value, dict) else {"value": runtime_validation.value}
+                    await event_bus.emit(run_id, {
+                        "type": "RUNTIME_SERIALIZATION_REPAIRED",
+                        "title": "Runtime serialization repaired after regeneration",
+                        "message": runtime_validation.error or "Regenerated payload was converted to a JSON-safe form.",
+                        "node_id": node_id,
+                        "attempt_index": attempt_index + 1,
+                        "findings": runtime_validation.findings,
+                    })
                 if validator is not None:
                     try:
                         validator.validate_data(regenerated, schema)

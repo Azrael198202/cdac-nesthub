@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -394,15 +395,45 @@ class SourceRetrievalItemComposer:
             })
         return items
 
+    def _first_public_record_text(self, record: dict[str, Any], keys: tuple[str, ...]) -> str:
+        if not isinstance(record, dict):
+            return ""
+        embedded_keys = tuple(dict.fromkeys((*keys, "description", "summary", "snippet", "text", "content", "title", "headline")))
+        for key in keys:
+            embedded = self._embedded_public_text(record.get(key), embedded_keys)
+            if embedded:
+                return embedded[:650]
+            text = self._public_text(record.get(key))
+            if text and not (text.startswith("{") and ":" in text):
+                return text[:650]
+        for key in ("raw", "data", "item", "record", "payload", "summary", "description", "snippet", "text", "content"):
+            embedded = self._embedded_public_text(record.get(key), embedded_keys)
+            if embedded:
+                return embedded[:650]
+        return ""
+
+    def _source_name(self, record: dict[str, Any]) -> str:
+        if not isinstance(record, dict):
+            return ""
+        source = record.get("source")
+        if isinstance(source, dict):
+            for key in ("name", "title", "host", "domain"):
+                text = self._public_text(source.get(key))
+                if text:
+                    return text[:180]
+        return self._first_public_record_text(record, ("publisher", "source_name", "site_name", "host", "domain"))
+
     def _item_from_record(self, record: dict[str, Any], *, fallback_source: dict[str, Any] | None = None) -> dict[str, Any]:
         fallback_source = fallback_source if isinstance(fallback_source, dict) else {}
-        title = self._clean(record.get("title") or record.get("name") or record.get("source_title") or fallback_source.get("title"))
-        summary = self._clean(record.get("summary") or record.get("snippet") or record.get("description") or record.get("text") or record.get("text_excerpt") or record.get("visible_text_excerpt"))
+        title = self._first_public_record_text(record, ("title", "headline", "name", "source_title")) or self._first_public_record_text(fallback_source, ("title", "headline", "name", "source_title"))
+        summary = self._first_public_record_text(record, ("description", "snippet", "summary", "text", "text_excerpt", "visible_text_excerpt", "content"))
         url = self._clean(record.get("url") or record.get("source_url") or record.get("link") or fallback_source.get("url") or fallback_source.get("source_url"))
-        source = self._clean(record.get("source") or record.get("publisher") or record.get("site_name") or record.get("source_name") or record.get("domain") or record.get("source_title"))
+        if self._looks_like_media_reference(url):
+            url = ""
+        source = self._source_name(record) or self._source_name(fallback_source)
         publication_time = self._clean(
-            record.get("publication_time") or record.get("published_at") or record.get("published") or record.get("date") or record.get("time") or record.get("time_expression") or record.get("datetime")
-        )
+            record.get("publication_time") or record.get("published_at") or record.get("publishedAt") or record.get("published") or record.get("date") or record.get("time") or record.get("time_expression") or record.get("datetime")
+        ) or self._embedded_public_text(str(record), ("publishedAt", "published_at", "publication_time", "date", "time"))
         if not publication_time:
             publication_time = self._derive_publication_time(" ".join(str(x or "") for x in [record.get("title"), record.get("summary"), record.get("snippet"), record.get("description"), record.get("text"), record.get("text_excerpt"), record.get("visible_text_excerpt")]))
         if not source and url:
@@ -758,7 +789,49 @@ class SourceRetrievalItemComposer:
         return match.group(1).removeprefix("www.")
 
     def _clean(self, value: Any) -> str:
-        return " ".join(str(value or "").split()).strip()
+        if isinstance(value, (dict, list)):
+            try:
+                value = json.dumps(value, ensure_ascii=False)
+            except Exception:
+                value = str(value)
+        text = " ".join(str(value or "").split()).strip()
+        text = re.sub(r"!\[[^\]]*\]\((https?://[^)]+)\)", " ", text)
+        text = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1", text)
+        return " ".join(text.split()).strip()
+
+    def _looks_like_media_reference(self, value: Any) -> bool:
+        text = self._clean(value).lower()
+        if not text:
+            return False
+        without_query = text.split("?", 1)[0]
+        return (
+            without_query.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"))
+            or "imgix-proxy" in text
+            or "/image/" in text
+            or "/images/" in text
+        )
+
+    def _public_text(self, value: Any) -> str:
+        text = self._clean(value)
+        if self._looks_like_media_reference(text):
+            return ""
+        text = re.sub(r"https?://\S+", " ", text)
+        return " ".join(text.split()).strip()
+
+    def _embedded_public_text(self, value: Any, keys: tuple[str, ...]) -> str:
+        raw = str(value or "")
+        for key in keys:
+            for pattern in (
+                rf'"{re.escape(key)}"\s*:\s*"([^"]+)"',
+                rf"'{re.escape(key)}'\s*:\s*'([^']+)'",
+            ):
+                match = re.search(pattern, raw)
+                if match:
+                    text = self._public_text(match.group(1))
+                    if text:
+                        return text
+        return ""
+
 
     def _safe_int(self, value: Any) -> int:
         try:

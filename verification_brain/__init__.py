@@ -1,6 +1,7 @@
 from verification_brain.contracts import VerificationExpectation, VerificationResult
 from verification_brain.engine import RuntimeVerificationBrain
 from verification_brain.model_verification_loop import ModelVerificationLoop, ModelVerificationLoopConfig, ConvergenceController
+from verification_brain.runtime_validator import RuntimeSerializationValidator, RuntimeSerializationValidationResult
 from verification_brain.settings import VerificationBrainSettings, VerificationBrainSettingsStore
 
 __all__ = [
@@ -12,6 +13,8 @@ __all__ = [
     "ConvergenceController",
     "VerificationBrainSettings",
     "VerificationBrainSettingsStore",
+    "RuntimeSerializationValidator",
+    "RuntimeSerializationValidationResult",
 ]
 
 try:

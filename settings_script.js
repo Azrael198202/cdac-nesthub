@@ -1,107 +1,4 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>NestHub Runtime Settings</title>
-  <style>
-    :root{color-scheme:dark;--bg:#0f172a;--panel:#111827;--card:#1f2937;--line:#334155;--text:#e5e7eb;--muted:#93c5fd;--accent:#0ea5e9;--ok:#22c55e;--warn:#f59e0b;}
-    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif;font-size:14px;height:100vh;overflow:hidden}header{padding:18px 24px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:12px;height:78px}h1{font-size:20px;margin:0}.sub{color:#bfdbfe;font-size:12px;margin-top:4px}.btn{border:0;border-radius:10px;background:#334155;color:white;padding:9px 13px;font-weight:700;cursor:pointer;text-decoration:none}.btn.primary{background:#0369a1}.btn.ok{background:#047857}.layout{display:flex;flex-direction:column;gap:12px;padding:14px;height:calc(100vh - 78px);min-height:0}.tabbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.tabBtn{border:1px solid var(--line);border-radius:999px;background:#111827;color:#cbd5e1;padding:9px 14px;font-weight:800;cursor:pointer}.tabBtn.active{background:#0f3b5f;border-color:#38bdf8;color:#e0f2fe}.tabPanel{display:none;min-height:0;flex:1}.tabPanel.active{display:grid;grid-template-columns:230px minmax(0,1fr);gap:14px}.settingsMenu{border:1px solid var(--line);border-radius:14px;background:var(--panel);padding:10px;overflow:auto;min-height:0}.settingsMenu a,.settingsMenu button{display:block;width:100%;text-align:left;margin:0 0 8px 0;border:1px solid var(--line);border-radius:10px;background:#020617;color:#dbeafe;padding:9px 10px;text-decoration:none;font-weight:700;cursor:pointer}.settingsMenu a:hover,.settingsMenu button:hover{border-color:#38bdf8}.contentScroll{overflow:auto;min-height:0}.dynamicSettings{display:grid;grid-template-columns:320px minmax(0,1fr);gap:14px;min-height:0;height:100%}.fixedGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(560px,1fr));gap:14px;align-items:start}.wideCard{grid-column:1 / -1}.modelGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.promptGrid{display:grid;grid-template-columns:280px minmax(0,1fr);gap:12px;min-height:360px}.promptList{overflow:auto;border:1px solid var(--line);border-radius:12px;background:#0b1220;padding:8px;max-height:420px}.promptItem{border:1px solid var(--line);border-radius:10px;background:#020617;padding:9px;margin-bottom:8px;cursor:pointer}.promptItem.active{border-color:#38bdf8;background:#16243a}.settingsHint{font-size:12px;color:#93c5fd;margin-top:8px}.panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);overflow:hidden;min-height:0;display:flex;flex-direction:column}.panel h2{font-size:14px;margin:0;padding:13px 14px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}.scroll{overflow:auto;padding:12px;min-height:0;flex:1}.tool{border:1px solid var(--line);border-radius:12px;background:#0b1220;padding:10px;margin-bottom:10px;cursor:pointer}.tool.active{border-color:#22c55e;background:#10231a}.toolName{font-weight:800}.small{font-size:12px;color:#bfdbfe}.muted{color:#94a3b8}.card{border:1px solid var(--line);border-radius:12px;background:var(--card);padding:14px;margin-bottom:12px;scroll-margin-top:12px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.field{margin:10px 0}.field label{display:block;font-weight:700;color:#bfdbfe;margin-bottom:5px}.input,.select,.textarea{width:100%;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:9px}.textarea{min-height:110px;font-family:ui-monospace,Consolas,monospace}.textarea.large{min-height:240px;max-height:38vh;resize:vertical}.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:3px 8px;margin:3px 4px 0 0;color:#bae6fd;font-size:12px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}.toast{position:fixed;right:20px;bottom:20px;background:#064e3b;border:1px solid #22c55e;color:#dcfce7;padding:10px 14px;border-radius:10px}.pre{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;background:#020617;border:1px solid var(--line);border-radius:10px;padding:10px;max-height:260px;overflow:auto}@media(max-width:1100px){.tabPanel.active{grid-template-columns:1fr}.settingsMenu{display:flex;gap:8px;overflow:auto}.settingsMenu a,.settingsMenu button{white-space:nowrap}.dynamicSettings{grid-template-columns:1fr}.fixedGrid{grid-template-columns:1fr}.promptGrid{grid-template-columns:1fr}}
-  </style>
-</head>
-<body>
-<header><div><h1>NestHub Runtime Settings</h1><div class="sub">Configure runtime-generated tools, profiles, secrets, and approval policy outside task execution.</div></div><div class="row"><a class="btn" href="/" target="_blank">Agent Studio</a><button class="btn primary" onclick="loadSettings()">Refresh</button></div></header>
-<div class="layout">
-  <div class="tabbar">
-    <button id="fixedTabButton" class="tabBtn active" onclick="showSettingsTab('fixed')">Fixed settings</button>
-    <button id="dynamicTabButton" class="tabBtn" onclick="showSettingsTab('dynamic')">Dynamic generated settings</button>
-  </div>
 
-  <section id="fixedSettingsTab" class="tabPanel active">
-    <nav class="settingsMenu">
-      <a href="#fixed-model">Model orchestration</a>
-      <a href="#fixed-source">Source retrieval</a>
-      <a href="#fixed-verification">Verification Brain</a>
-      <a href="#fixed-prompts">Layer model & prompt defaults</a>
-    </nav>
-    <div class="contentScroll">
-      <div class="fixedGrid">
-        <section id="fixed-model" class="card"><h3 style="margin-top:0">Model orchestration <span class="small">Local / API / Hybrid</span></h3><div id="modelSettings">
-          <div class="modelGrid">
-            <div class="field"><label>Model mode</label><select id="settingsModelMode" class="select" onchange="onSettingsModelModeChanged()"><option value="local_only">Local only</option><option value="api_only">API only</option><option value="hybrid">Hybrid</option></select></div>
-            <div class="field"><label id="settingsModelLabel">Initial model</label><select id="settingsInitialModel" class="select"></select></div>
-            <div class="field"><label>Escalation</label><select id="settingsEscalation" class="select"><option value="true">Enabled</option><option value="false">Disabled</option></select></div>
-            <div class="field"><label>Presentation profile</label><select id="settingsPresentationProfile" class="select"><option value="user">User</option><option value="advanced">Advanced</option><option value="developer">Developer</option><option value="diagnostic">Diagnostic</option></select></div>
-          </div>
-          <div class="row"><button class="btn ok" onclick="saveModelSettings()">Save model settings</button><button class="btn" onclick="loadModelSettings()">Refresh model settings</button></div>
-          <div id="modelSettingsHint" class="settingsHint">Loading model orchestration settings...</div>
-        </div></section>
-
-        <section id="fixed-source" class="card"><h3 style="margin-top:0">Source retrieval <span class="small">Runtime search engines</span></h3>
-          <div class="modelGrid">
-            <div class="field"><label>Routing mode</label><select id="sourceRoutingMode" class="select"><option value="fixed">Fixed</option><option value="fallback">Fallback</option><option value="consensus">Consensus</option></select></div>
-            <div class="field"><label>Primary engine</label><select id="sourcePrimaryEngine" class="select"><option value="google">Google</option><option value="bing">Bing</option><option value="duckduckgo">DuckDuckGo</option></select></div>
-            <div class="field"><label>Secondary engine</label><select id="sourceSecondaryEngine" class="select"><option value="google">Google</option><option value="bing">Bing</option><option value="duckduckgo">DuckDuckGo</option></select></div>
-            <div class="field"><label>Third engine</label><select id="sourceThirdEngine" class="select"><option value="google">Google</option><option value="bing">Bing</option><option value="duckduckgo">DuckDuckGo</option></select></div>
-            <div class="field"><label>Verification threshold</label><input id="sourceVerificationThreshold" class="input" type="number" min="0" max="1" step="0.05" value="0.8"></div>
-          </div>
-          <div class="row"><button class="btn ok" onclick="saveSourceRetrievalSettings()">Save source retrieval</button></div>
-          <div id="sourceRetrievalHint" class="settingsHint">Default: Google first. Fallback mode tries the next engine when collected material is insufficient.</div>
-        </section>
-
-        <section id="fixed-verification" class="card"><h3 style="margin-top:0">Verification Brain <span class="small">stage gate / repair loop</span></h3>
-          <div class="modelGrid">
-            <div class="field"><label>Enabled</label><select id="vbEnabled" class="select"><option value="true">Enabled</option><option value="false">Disabled</option></select></div>
-            <div class="field"><label>Verify model stages</label><select id="vbVerifyModelStages" class="select"><option value="true">Enabled</option><option value="false">Disabled</option></select></div>
-            <div class="field"><label>Stage scope</label><select id="vbVerifyAllStages" class="select"><option value="false">Main model stages</option><option value="true">All model stages</option></select></div>
-            <div class="field"><label>Block next layer on failure</label><select id="vbBlockStage" class="select"><option value="true">Block</option><option value="false">Record only</option></select></div>
-            <div class="field"><label>Repair rounds</label><input id="vbMaxRepairRounds" class="input" type="number" min="0" max="12" step="1" value="3"></div>
-            <div class="field"><label>Minimum quality</label><input id="vbMinimumQuality" class="input" type="number" min="0" max="1" step="0.01" value="0.86"></div>
-            <div class="field"><label>Minimum confidence</label><input id="vbMinimumConfidence" class="input" type="number" min="0" max="1" step="0.01" value="0.70"></div>
-            <div class="field"><label>Minimum consensus</label><input id="vbMinimumConsensus" class="input" type="number" min="0" max="1" step="0.01" value="0.70"></div>
-            <div class="field"><label>Meta verification</label><select id="vbRequireMeta" class="select"><option value="true">Required</option><option value="false">Disabled</option></select></div>
-          </div>
-          <div class="row"><button class="btn ok" onclick="saveVerificationBrainSettings()">Save verification brain</button></div>
-          <div id="verificationBrainHint" class="settingsHint">Verification Brain checks each configured stage before the next layer receives a verified state.</div>
-        </section>
-
-        <section id="fixed-prompts" class="card wideCard"><h3 style="margin-top:0">Layer model & prompt defaults <span class="small">from Model & Prompt Studio</span></h3>
-          <div class="promptGrid">
-            <div>
-              <div class="field"><label>Filter layer / workflow / graph</label><input id="mpFilter" class="input" oninput="renderPromptDefaultList()" placeholder="Filter defaults"></div>
-              <div id="mpDefaultList" class="promptList"><div class="muted">Loading default model and prompt map...</div></div>
-            </div>
-            <div>
-              <div class="modelGrid">
-                <div class="field"><label>Mode</label><select id="mpMode" class="select"></select></div>
-                <div class="field"><label>Provider</label><select id="mpProvider" class="select"></select></div>
-                <div class="field"><label>Model</label><select id="mpModel" class="select"></select></div>
-              </div>
-              <div class="modelGrid">
-                <div class="field"><label>System prompt</label><textarea id="mpSystemPrompt" class="textarea large" spellcheck="false"></textarea></div>
-                <div class="field"><label>User / rendered prompt template</label><textarea id="mpUserPrompt" class="textarea large" spellcheck="false"></textarea></div>
-              </div>
-              <div class="row"><button class="btn ok" onclick="savePromptDefaultOverride()">Save default model / prompt</button><a class="btn" href="/model_prompt_studio" target="_blank">Open Model & Prompt Studio</a><span id="mpSelectedMeta" class="small">Select a layer entry.</span></div>
-            </div>
-          </div>
-        </section>
-      </div>
-    </div>
-  </section>
-
-  <section id="dynamicSettingsTab" class="tabPanel">
-    <nav class="settingsMenu">
-      <a href="#dynamic-tools" onclick="showSettingsTab('dynamic')">Registered tools</a>
-      <a href="#dynamic-detail" onclick="showSettingsTab('dynamic')">Selected tool settings</a>
-      <button type="button" onclick="loadSettings()">Refresh dynamic settings</button>
-    </nav>
-    <div class="dynamicSettings contentScroll">
-      <section id="dynamic-tools" class="panel"><h2>Dynamic generated tools <span id="toolCount" class="small"></span></h2><div id="toolList" class="scroll"><div class="muted">Loading...</div></div></section>
-      <section id="dynamic-detail" class="panel"><h2>Dynamic tool settings <span id="selectedToolTitle" class="small"></span></h2><div class="scroll" id="detail"><div class="muted">Select a registered tool.</div></div></section>
-    </div>
-  </section>
-</div>
-<script>
 let state={tools:[],profiles:[],approval_policies:[]};
 let selectedToolId='';
 let modelSelectionState=null;
@@ -111,14 +8,6 @@ let selectedPromptDefault=null;
 function escapeHtml(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function api(url, options){const res=await fetch(url,options||{});const text=await res.text();let data={};try{data=text?JSON.parse(text):{};}catch(e){data={ok:false,error:text};}if(!res.ok||data.ok===false){throw new Error((data.error&&data.error.message)||data.error||data.message||('HTTP '+res.status));}return data;}
 function showToast(t){const old=document.querySelector('.toast');if(old)old.remove();const el=document.createElement('div');el.className='toast';el.textContent=t;document.body.appendChild(el);setTimeout(()=>el.remove(),1800);}
-
-function showSettingsTab(name){
-  const fixed=name!=='dynamic';
-  document.getElementById('fixedSettingsTab').classList.toggle('active', fixed);
-  document.getElementById('dynamicSettingsTab').classList.toggle('active', !fixed);
-  document.getElementById('fixedTabButton').classList.toggle('active', fixed);
-  document.getElementById('dynamicTabButton').classList.toggle('active', !fixed);
-}
 
 function modelOptionText(item){const parts=[item.label||item.model_id||'model']; if(item.provider)parts.push(item.provider); if(item.cost_class)parts.push(item.cost_class); return parts.join(' / ');}
 function fillModelSelect(select, items, value){select.innerHTML='';(items||[]).forEach(item=>{const opt=document.createElement('option');opt.value=item.model_id;opt.textContent=modelOptionText(item);opt.dataset.family=item.family||'';opt.dataset.provider=item.provider||'';if(item.requires_secret)opt.dataset.secret=item.requires_secret;select.appendChild(opt);});if(value&&Array.from(select.options).some(o=>o.value===value)){select.value=value;}else if(select.options.length){select.selectedIndex=0;}}
@@ -161,6 +50,3 @@ function typedValue(el,spec){const type=String((spec&&spec.type)||'string');if(t
 async function saveProfile(){const t=(state.tools||[]).find(x=>x.tool_id===selectedToolId);if(!t)return;const connProps=props(t.connection_schema);const secProps=props(t.secret_schema);const config={};const secrets={};Object.keys(connProps).forEach(k=>{const el=document.getElementById('conn_'+k);if(el)config[k]=typedValue(el,connProps[k]);});Object.keys(secProps).forEach(k=>{const el=document.getElementById('secret_'+k);if(el&&el.value)secrets[k]=el.value;});await api('/api/agent-studio/runtime-tool-profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:selectedToolId,profile_id:'default',config,secrets})});showToast('Profile saved');await loadSettings();}
 loadSettings().catch(e=>{document.getElementById('toolList').innerHTML='<div class="muted">'+escapeHtml(e.message)+'</div>';});
 loadModelSettings();
-</script>
-</body>
-</html>

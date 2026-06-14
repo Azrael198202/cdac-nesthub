@@ -2703,6 +2703,12 @@ class AgentDelegationRuntime:
             "source retrieval did not produce",
             "unresolved workflow output references",
             "workflow finished, but no verified",
+            "not json serializable",
+            "is not json serializable",
+            "object of type",
+            "runtime_serialization_problem",
+            "serialization_failure",
+            "registered capability input still contains unresolved",
         )
         def visit(item: Any, path: str = "$") -> None:
             if isinstance(item, dict):

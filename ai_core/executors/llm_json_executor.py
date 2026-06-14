@@ -24,6 +24,7 @@ from ai_core.llm.operation_prompt_profiles import OperationPromptProfileRouter
 from auxiliary_brain.runtime.observability.stage_observer import RuntimeStageObserver
 from ai_core.context.known_state_classifier import KnownStateClassifier
 from verification_brain.model_verification_loop import ModelVerificationLoop
+from ai_core.utils.safe_json import make_json_safe
 
 
 class LLMJsonExecutor:
@@ -625,9 +626,9 @@ class LLMJsonExecutor:
         result["_adapter_id"] = adapter.get("adapter_id")
         result["_model_id"] = adapter.get("preferred_local_model") or adapter.get("model") or adapter.get("model_id")
         result["_provider"] = adapter.get("provider") or adapter.get("provider_template")
-        result["_prompt_trace_path"] = prompt_trace_path
-        result["_output_trace_path"] = locals().get("output_trace_path")
-        return result
+        result["_prompt_trace_path"] = str(prompt_trace_path)
+        result["_output_trace_path"] = str(locals().get("output_trace_path") or "")
+        return make_json_safe(result)
 
     def _postprocess_stage_result(self, *, node_id: str | None, result: dict, state: dict, slim_user_input: str) -> dict:
         node = str(node_id or "")
@@ -794,8 +795,54 @@ class LLMJsonExecutor:
                 for k, v in entities.items():
                     if v not in (None, "", [], {}):
                         result["normalized_intent"].setdefault(str(k), v)
+            self._carry_forward_input_execution_contract(result=result, parsed=parsed)
         result.setdefault("missing_information", [])
         return result
+
+    def _carry_forward_input_execution_contract(self, *, result: dict, parsed: dict) -> None:
+        """Preserve generic execution/source signals discovered upstream.
+
+        input_parsing may identify that the user request needs an external
+        material action or provenance-bearing fields.  Later planning layers
+        must not drop that signal, otherwise the workflow can fall back to
+        plain generation and source retrieval is never executed.  This helper is
+        metadata-driven and uses only fixed action contracts, not task words.
+        """
+        if not isinstance(result, dict) or not isinstance(parsed, dict):
+            return
+        containers = []
+        for key in ("data", "input_record", "execution_decision", "source_contract", "source_policy"):
+            value = parsed.get(key)
+            if isinstance(value, dict):
+                containers.append(value)
+        selected_action = ""
+        for container in containers:
+            selected_action = self._selected_action_type(container)
+            if selected_action:
+                break
+            action_value = container.get("action") if isinstance(container, dict) else None
+            selected_action = self._action_type_from_text(action_value)
+            if selected_action:
+                break
+        if selected_action:
+            method = self._method_from_action_type(selected_action)
+            decision = result.get("execution_decision") if isinstance(result.get("execution_decision"), dict) else {}
+            decision.setdefault("selected_action_type", selected_action)
+            decision.setdefault("selection_source", "upstream_execution_contract")
+            result["execution_decision"] = decision
+            result.setdefault("execution_method", method)
+            source_policy = result.get("source_policy") if isinstance(result.get("source_policy"), dict) else {}
+            source_policy.setdefault("allow_external", method in {"api_call", "web_search"})
+            source_policy.setdefault("allow_internal", True)
+            source_policy.setdefault("requires_live_evidence", method in {"api_call", "web_search"})
+            result["source_policy"] = source_policy
+        input_record = parsed.get("input_record") if isinstance(parsed.get("input_record"), dict) else {}
+        required_fields = input_record.get("required_fields") if isinstance(input_record.get("required_fields"), list) else []
+        if required_fields:
+            source_contract = result.get("source_contract") if isinstance(result.get("source_contract"), dict) else {}
+            source_contract.setdefault("requires_source_material", self._container_requests_provenance_fields({"required_fields": required_fields}))
+            source_contract.setdefault("requested_output_fields", required_fields)
+            result["source_contract"] = source_contract
 
     FIXED_EXECUTION_ACTIONS = dict(ACTION_TO_METHOD)
 
@@ -901,7 +948,7 @@ class LLMJsonExecutor:
         source_contract = runtime_options.get("standalone_source_contract") if isinstance(runtime_options.get("standalone_source_contract"), dict) else {}
         if source_contract:
             candidates.append(source_contract)
-        for key in ("knowledge_evaluation", "intent_recognition", "context_awareness", "workflow_planning", "agent_action_planning", "execution_preparation"):
+        for key in ("input_parsing", "knowledge_evaluation", "intent_recognition", "requirement_completion", "context_awareness", "workflow_planning", "agent_action_planning", "execution_preparation"):
             value = results.get(key)
             if isinstance(value, dict):
                 candidates.append(value)
@@ -1106,11 +1153,12 @@ class LLMJsonExecutor:
         # create missing planned_steps, but it must not change the selected
         # execution action. This keeps workflow_planning as the single place
         # where the fixed action options are ranked and selected.
-        selected_action = self._selected_action_type(intent, clean_context, requirement_payload, parsed) or "ask_user"
+        input_record_container = parsed if isinstance(parsed, dict) else {}
+        selected_action = self._selected_action_type(intent, clean_context, requirement_payload, input_record_container) or "ask_user"
         selected_action = self._repair_source_step_action(
             state=state,
             selected_action=selected_action,
-            containers=[intent, clean_context, requirement_payload, parsed, results.get("knowledge_evaluation") if isinstance(results.get("knowledge_evaluation"), dict) else {}],
+            containers=[intent, clean_context, requirement_payload, input_record_container, results.get("knowledge_evaluation") if isinstance(results.get("knowledge_evaluation"), dict) else {}],
             step={},
         )
         decision_source = self._execution_decision_from_plan(intent) or self._execution_decision_from_plan(clean_context) or {}

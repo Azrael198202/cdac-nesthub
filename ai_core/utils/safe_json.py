@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from datetime import date, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +56,12 @@ def make_json_safe(value: Any, *, max_depth: int = 30, max_items: int = 2000) ->
 
         if isinstance(obj, Path):
             return str(obj)
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        if isinstance(obj, date):
+            return obj.isoformat()
+        if isinstance(obj, Enum):
+            return obj.value
         if isinstance(obj, bytes):
             try:
                 return obj.decode("utf-8")
