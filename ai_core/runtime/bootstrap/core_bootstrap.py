@@ -238,10 +238,10 @@ class RuntimeBootstrap:
                     "fallback_models": [
                         "qwen3.5:2b",
                         "qwen3.5:4b-q4_k_m",
-                        "qwen3:32b",
-                        "qwen3:14b",
-                        "qwen3:8b",
                         "qwen3:4b",
+                        "qwen3:8b",
+                        "qwen3:14b",
+                        "qwen3:32b",
                         "qwen2.5:3b",
                         "qwen3:1.7b",
                         "llama3.2:8b",

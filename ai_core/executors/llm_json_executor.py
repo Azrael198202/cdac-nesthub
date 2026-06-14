@@ -23,6 +23,7 @@ from ai_core.llm.prompt_io_recorder import PromptIORecorder
 from ai_core.llm.operation_prompt_profiles import OperationPromptProfileRouter
 from auxiliary_brain.runtime.observability.stage_observer import RuntimeStageObserver
 from ai_core.context.known_state_classifier import KnownStateClassifier
+from verification_brain.model_verification_loop import ModelVerificationLoop
 
 
 class LLMJsonExecutor:
@@ -53,6 +54,7 @@ class LLMJsonExecutor:
         self.prompt_io_recorder = PromptIORecorder()
         self.stage_observer = RuntimeStageObserver()
         self.operation_prompt_profiles = OperationPromptProfileRouter()
+        self.model_verification_loop = ModelVerificationLoop()
 
     async def execute(self, workflow_node: dict, node_config: dict, state: dict, capability_result: dict) -> dict:
         run_id = state["run_id"]
@@ -587,6 +589,37 @@ class LLMJsonExecutor:
             )
 
         result = self._postprocess_stage_result(node_id=node_id, result=result, state=state, slim_user_input=slim_user_input)
+        result = await self.model_verification_loop.verify_and_repair(
+            node_id=str(node_id or ""),
+            state=state,
+            candidate=result,
+            adapter=adapter,
+            prompt=prompt,
+            rendered_user_prompt=rendered,
+            schema=schema,
+            router=self.router,
+            event_bus=event_bus,
+            run_id=run_id,
+            validator=self.validator,
+            recorder=self.prompt_io_recorder,
+        )
+        result = self._postprocess_stage_result(node_id=node_id, result=result, state=state, slim_user_input=slim_user_input)
+        model_verification = result.get("_model_verification") if isinstance(result, dict) else {}
+        if isinstance(model_verification, dict) and model_verification.get("status") == "failed" and self.model_verification_loop.block_stage_on_failure() and self.model_verification_loop.should_verify(node_id=str(node_id or ""), adapter=adapter):
+            last_judgment = model_verification.get("last_judgment") if isinstance(model_verification.get("last_judgment"), dict) else {}
+            await event_bus.emit(run_id, {
+                "type": "MODEL_VERIFICATION_BLOCKED_STAGE",
+                "title": "Model verification blocked stage transition",
+                "message": str(last_judgment.get("reason") or "Model verification did not pass."),
+                "node_id": node_id,
+                "verification": model_verification,
+            })
+            raise RecoverableValidationError(
+                message=str(last_judgment.get("correction_prompt") or last_judgment.get("reason") or "Model verification did not pass."),
+                node_id=node_id,
+                result=result,
+                schema_path=schema_path,
+            )
         result["_executor_type"] = "llm_json"
         result["_node_id"] = node_id
         result["_adapter_id"] = adapter.get("adapter_id")

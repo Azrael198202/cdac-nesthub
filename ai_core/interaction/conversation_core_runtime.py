@@ -13,6 +13,7 @@ from ai_core.context.vector_memory_store import VectorMemoryStore
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.llm.provider_router import ProviderRouter
 from auxiliary_brain.research.web_research_tool import GenericWebResearchTool
+from auxiliary_brain.research.source_deep_retrieval import SourceDeepRetrievalExplorer
 from ai_core.web_evidence_optimizer import WebEvidenceOptimizer
 from auxiliary_brain.capability_acquisition import RuntimeCapabilityGapImplementer
 from ai_core.events.need_capability_event import NeedCapabilityEvent
@@ -21,6 +22,7 @@ from ai_core.runtime.state import runtime_state_manager
 from ai_core.runtime.semantic import SourceRelevanceSelector, EvidenceClaimRanker
 from ai_core.runtime.reasoning import EvidenceNormalizationLayer, ClaimResolutionLayer, AnswerPlanningLayer, ContentExtractionLayer, AnswerQualityGate
 from presentation_brain import PresentationBrain, PresentationRequest
+from ai_core.presentation.source_retrieval_item_composer import SourceRetrievalItemComposer
 
 
 class ConversationCoreRuntime:
@@ -49,6 +51,8 @@ class ConversationCoreRuntime:
         self.content_extractor = ContentExtractionLayer()
         self.answer_quality_gate = AnswerQualityGate()
         self.presentation_brain = PresentationBrain()
+        self.source_retrieval_composer = SourceRetrievalItemComposer()
+        self.source_deep_retrieval = SourceDeepRetrievalExplorer(composer=self.source_retrieval_composer)
 
     async def run(self, message: str, *, latest_task: str | None = None, session_id: str | None = None, runtime_state_run_id: str | None = None) -> dict[str, Any]:
         conversation_trace_id = "conversation_core_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
@@ -161,11 +165,24 @@ class ConversationCoreRuntime:
         execution: dict[str, Any],
         verification: dict[str, Any],
     ) -> str:
+        evidence = execution.get("evidence") if isinstance(execution.get("evidence"), dict) else {}
         materials = [{
             "source": "conversation_execution",
             "status": execution.get("status"),
             "answer_material": answer_material,
-            "evidence": execution.get("evidence") if isinstance(execution.get("evidence"), dict) else {},
+            "content": {
+                "answer_material": answer_material,
+                "evidence": evidence,
+                "results": evidence.get("results") if isinstance(evidence.get("results"), list) else [],
+                "fetched_documents": evidence.get("fetched_documents") if isinstance(evidence.get("fetched_documents"), list) else [],
+                "source_contract": self.source_retrieval_composer.source_contract(
+                    state={"original_input": original_input, "execution": execution},
+                    materials=[{"evidence": evidence}],
+                ),
+                "execution_method": execution.get("execution_mode"),
+                "prompt_profile": "source_retrieval" if str(execution.get("execution_mode") or "") == "web_search" else "",
+            },
+            "evidence": evidence,
         }]
         try:
             result = await self.presentation_brain.synthesize(PresentationRequest(
@@ -184,7 +201,10 @@ class ConversationCoreRuntime:
                 output_policy={"delivery_format": "text"},
             ))
             rendered = str(result.final_answer or "").strip()
-            return rendered or str(answer_material or "").strip()
+            if rendered and rendered != "Workflow finished, but no verified user-facing answer was produced.":
+                return rendered
+            fallback = self._verified_source_contract_answer(original_input=original_input, execution=execution)
+            return fallback or str(answer_material or "").strip()
         except Exception:
             try:
                 from presentation_brain.link_renderer import LinkRenderer
@@ -1004,26 +1024,164 @@ class ConversationCoreRuntime:
             query = self._capability_gap_query(text) if capability_gap else text
             planned_queries = self.web_evidence_optimizer.plan_queries(user_input=text, capability=str(selected.get("capability") or ""), objective=query)
             search_query = str((planned_queries[0] or {}).get("query") or query) if planned_queries else query
-            search = await self.web_research.search(query=search_query, max_results=max_results)
-            evidence_items = search.get("results") if isinstance(search.get("results"), list) else []
-            fetched = []
-            for item in evidence_items[:max(2, min(max_results, 5))]:
-                url = str(item.get("url") or "").strip() if isinstance(item, dict) else ""
-                if not url:
-                    continue
-                doc = await self.web_research.fetch(url=url, max_chars=8000)
-                if isinstance(doc, dict) and doc.get("status") == "success":
-                    fetched.append(doc)
-            verification_policy = selected.get("source_policy") if isinstance(selected.get("source_policy"), dict) else {}
-            min_sources = int(verification_policy.get("min_sources") or 1)
-            web_verification = self._verify_web_evidence(text, search, fetched, min_sources=min_sources)
+            settings = self.web_research.source_settings.load()
+            engine_order = self.web_research.source_settings.engine_order_for_execution()
+            if not engine_order:
+                engine_order = [None]
+            if settings.routing_mode == "consensus":
+                # Consensus keeps the same execution contract but merges the
+                # candidate material from all configured engines before the
+                # verification and output-contract gates.  This is generic
+                # source routing; the workflow does not choose a provider.
+                engine_order = engine_order[: max(1, int(settings.max_engines_per_request or 3))]
+            elif settings.routing_mode == "fixed":
+                engine_order = engine_order[:1]
+
+            engine_attempt_reports: list[dict[str, Any]] = []
+            best_attempt: dict[str, Any] | None = None
+            merged_results: list[dict[str, Any]] = []
+            merged_fetched: list[dict[str, Any]] = []
+
+            async def run_engine_attempt(engine: str | None) -> dict[str, Any]:
+                search_payload = await self.web_research.search(query=search_query, max_results=max_results, engine_id=engine)
+                items = search_payload.get("results") if isinstance(search_payload.get("results"), list) else []
+                verification_policy = selected.get("source_policy") if isinstance(selected.get("source_policy"), dict) else {}
+                # Deep retrieval is contract driven.  A search result URL is only
+                # an entry point: the runtime follows child URIs until the output
+                # contract is satisfied or the URI/depth budget is exhausted.
+                deep = await self.source_deep_retrieval.explore(
+                    user_input=text,
+                    search_payload=search_payload,
+                    fetcher=self.web_research.fetch,
+                    source_policy=verification_policy,
+                )
+                docs = deep.get("fetched_documents") if isinstance(deep.get("fetched_documents"), list) else []
+                min_sources = int(verification_policy.get("min_sources") or 1)
+                source_verification = self._verify_web_evidence(text, search_payload, docs, min_sources=min_sources)
+                temp_evidence = {
+                    "query": query,
+                    "search_query_used": search_query,
+                    "planned_queries": planned_queries,
+                    "original_user_input": text,
+                    "search_status": search_payload.get("status"),
+                    "source_count": len(items),
+                    "fetched_count": len(docs),
+                    "urls": [str(x.get("url") or "") for x in items if isinstance(x, dict) and x.get("url")],
+                    "visited_urls": deep.get("visited_urls") if isinstance(deep.get("visited_urls"), list) else [],
+                    "results": items,
+                    "fetched_documents": docs,
+                    "verification": source_verification,
+                    "verification_status": source_verification.get("status"),
+                    "search_strategy": "direct_url" if re.search(r"https?://", query) else "search_engine",
+                    "search_provider_config": search_payload.get("provider_config") if isinstance(search_payload.get("provider_config"), dict) else {},
+                    "attempts": search_payload.get("attempts") if isinstance(search_payload.get("attempts"), list) else [],
+                    "engine_id": engine or "runtime_settings",
+                    "deep_retrieval": {
+                        "status": deep.get("status"),
+                        "stop_reason": deep.get("stop_reason"),
+                        "events": deep.get("events") if isinstance(deep.get("events"), list) else [],
+                    },
+                }
+                temp_execution = {
+                    "status": "completed",
+                    "execution_mode": "web_search",
+                    "capability": "web_retrieval",
+                    "answer_material": str(deep.get("answer") or ""),
+                    "evidence": temp_evidence,
+                }
+                contract_check = self._source_output_contract_check(temp_execution)
+                return {
+                    "engine_id": engine or "runtime_settings",
+                    "search": search_payload,
+                    "evidence_items": items,
+                    "fetched": docs,
+                    "web_verification": source_verification,
+                    "source_output_contract_check": contract_check,
+                    "evidence": temp_evidence,
+                    "deep_retrieval": deep,
+                    "usable": bool(source_verification.get("passed")) and (not contract_check.get("required") or contract_check.get("passed") is True),
+                }
+
+            if settings.routing_mode == "consensus":
+                for engine in engine_order:
+                    attempt = await run_engine_attempt(engine)
+                    engine_attempt_reports.append({
+                        "engine_id": attempt.get("engine_id"),
+                        "usable": attempt.get("usable"),
+                        "source_count": len(attempt.get("evidence_items") or []),
+                        "fetched_count": len(attempt.get("fetched") or []),
+                        "verification": attempt.get("web_verification"),
+                        "source_output_contract_check": attempt.get("source_output_contract_check"),
+                    })
+                    for item in attempt.get("evidence_items") or []:
+                        if isinstance(item, dict) and item.get("url") and str(item.get("url")) not in {str(x.get("url")) for x in merged_results if isinstance(x, dict)}:
+                            merged_results.append(item)
+                    for doc in attempt.get("fetched") or []:
+                        if isinstance(doc, dict) and doc.get("url") and str(doc.get("url")) not in {str(x.get("url")) for x in merged_fetched if isinstance(x, dict)}:
+                            merged_fetched.append(doc)
+                merged_search = {"status": "success" if merged_results else "error", "results": merged_results, "provider_config": {"routing_mode": "consensus", "engine_order": engine_order}, "attempts": engine_attempt_reports}
+                merged_verification = self._verify_web_evidence(text, merged_search, merged_fetched, min_sources=int((selected.get("source_policy") or {}).get("min_sources") or 1) if isinstance(selected.get("source_policy"), dict) else 1)
+                temp_evidence = {
+                    "query": query,
+                    "search_query_used": search_query,
+                    "planned_queries": planned_queries,
+                    "original_user_input": text,
+                    "search_status": merged_search.get("status"),
+                    "source_count": len(merged_results),
+                    "fetched_count": len(merged_fetched),
+                    "urls": [str(x.get("url") or "") for x in merged_results if isinstance(x, dict) and x.get("url")],
+                    "results": merged_results,
+                    "fetched_documents": merged_fetched,
+                    "verification": merged_verification,
+                    "verification_status": merged_verification.get("status"),
+                    "search_strategy": "search_engine",
+                    "search_provider_config": merged_search.get("provider_config"),
+                    "attempts": engine_attempt_reports,
+                    "engine_id": "consensus",
+                }
+                best_attempt = {"engine_id": "consensus", "search": merged_search, "evidence_items": merged_results, "fetched": merged_fetched, "web_verification": merged_verification, "evidence": temp_evidence, "source_output_contract_check": self._source_output_contract_check({"status":"completed","execution_mode":"web_search","capability":"web_retrieval","answer_material":"","evidence":temp_evidence})}
+            else:
+                for engine in engine_order:
+                    attempt = await run_engine_attempt(engine)
+                    engine_attempt_reports.append({
+                        "engine_id": attempt.get("engine_id"),
+                        "usable": attempt.get("usable"),
+                        "source_count": len(attempt.get("evidence_items") or []),
+                        "fetched_count": len(attempt.get("fetched") or []),
+                        "verification": attempt.get("web_verification"),
+                        "source_output_contract_check": attempt.get("source_output_contract_check"),
+                    })
+                    if best_attempt is None:
+                        best_attempt = attempt
+                    else:
+                        previous_check = best_attempt.get("source_output_contract_check") if isinstance(best_attempt.get("source_output_contract_check"), dict) else {}
+                        current_check = attempt.get("source_output_contract_check") if isinstance(attempt.get("source_output_contract_check"), dict) else {}
+                        prev_score = int(previous_check.get("item_count") or 0) + len(best_attempt.get("evidence_items") or [])
+                        curr_score = int(current_check.get("item_count") or 0) + len(attempt.get("evidence_items") or [])
+                        if curr_score > prev_score:
+                            best_attempt = attempt
+                    if attempt.get("usable"):
+                        best_attempt = attempt
+                        break
+
+            best_attempt = best_attempt or {"search": {}, "evidence_items": [], "fetched": [], "web_verification": {"passed": False}, "evidence": {}, "source_output_contract_check": {}}
+            search = best_attempt.get("search") if isinstance(best_attempt.get("search"), dict) else {}
+            evidence_items = best_attempt.get("evidence_items") if isinstance(best_attempt.get("evidence_items"), list) else []
+            fetched = best_attempt.get("fetched") if isinstance(best_attempt.get("fetched"), list) else []
+            web_verification = best_attempt.get("web_verification") if isinstance(best_attempt.get("web_verification"), dict) else {}
             verified_urls = set(web_verification.get("verified_urls") if isinstance(web_verification.get("verified_urls"), list) else [])
             verified_results = [x for x in evidence_items if isinstance(x, dict) and str(x.get("url") or "") in verified_urls]
             verified_fetched = [x for x in fetched if isinstance(x, dict) and str(x.get("url") or "") in verified_urls]
             verified_search = dict(search)
-            verified_search["results"] = verified_results
+            verified_search["results"] = verified_results or evidence_items
+            deep_payload = best_attempt.get("deep_retrieval") if isinstance(best_attempt.get("deep_retrieval"), dict) else {}
+            deep_answer = str(deep_payload.get("answer") or "").strip()
+            pre_contract = best_attempt.get("source_output_contract_check") if isinstance(best_attempt.get("source_output_contract_check"), dict) else {}
             if web_verification.get("passed"):
-                material = await self._web_answer_material(text, verified_search, verified_fetched, run_id)
+                if deep_answer and (not pre_contract.get("required") or pre_contract.get("passed") is True):
+                    material = deep_answer
+                else:
+                    material = await self._web_answer_material(text, verified_search, verified_fetched or fetched, run_id)
             else:
                 material = self._external_retrieval_failure_material({
                     "query": query,
@@ -1032,7 +1190,7 @@ class ConversationCoreRuntime:
                     "source_count": len(evidence_items),
                     "fetched_count": len(fetched),
                     "urls": [str(x.get("url") or "") for x in evidence_items if isinstance(x, dict) and x.get("url")],
-                    "attempts": search.get("attempts") if isinstance(search.get("attempts"), list) else [],
+                    "attempts": engine_attempt_reports or (search.get("attempts") if isinstance(search.get("attempts"), list) else []),
                     "verification": web_verification,
                     "failure_reason": "web_evidence_verification_failed",
                 })
@@ -1051,7 +1209,9 @@ class ConversationCoreRuntime:
                 "search_status": search.get("status"),
                 "source_count": len(evidence_items),
                 "fetched_count": len(fetched),
-                "urls": [str(x.get("url") or "") for x in evidence_items if isinstance(x, dict) and x.get("url")],
+                "urls": list(dict.fromkeys([str(x.get("url") or "") for x in evidence_items if isinstance(x, dict) and x.get("url")] + [str(u) for u in (deep_payload.get("visited_urls") if isinstance(deep_payload.get("visited_urls"), list) else []) if str(u).strip()])),
+                "visited_urls": deep_payload.get("visited_urls") if isinstance(deep_payload.get("visited_urls"), list) else [],
+                "deep_retrieval": {"status": deep_payload.get("status"), "stop_reason": deep_payload.get("stop_reason"), "events": deep_payload.get("events") if isinstance(deep_payload.get("events"), list) else []},
                 "results": evidence_items,
                 "fetched_documents": fetched,
                 "optimized_evidence": optimized,
@@ -1060,6 +1220,9 @@ class ConversationCoreRuntime:
                 "search_strategy": "direct_url" if re.search(r"https?://", query) else "search_engine",
                 "search_provider_config": search.get("provider_config") if isinstance(search.get("provider_config"), dict) else {},
                 "attempts": search.get("attempts") if isinstance(search.get("attempts"), list) else [],
+                "engine_attempts": engine_attempt_reports,
+                "selected_engine_id": best_attempt.get("engine_id"),
+                "pre_synthesis_source_output_contract_check": best_attempt.get("source_output_contract_check") if isinstance(best_attempt.get("source_output_contract_check"), dict) else {},
                 "need_capability_event": plan.get("need_capability_event") if isinstance(plan.get("need_capability_event"), dict) else {},
             }
             implementation = None
@@ -1408,6 +1571,11 @@ class ConversationCoreRuntime:
             runtime_impl = capability_impl.get("runtime_implementation") if isinstance(capability_impl.get("runtime_implementation"), dict) else None
         evidence_verification = evidence.get("verification") if isinstance(evidence.get("verification"), dict) else {}
         passed = bool(execution.get("answer_material")) and (not expects_web or (bool(urls) and bool(evidence_verification.get("passed"))))
+        source_output_check: dict[str, Any] = {}
+        if expects_web:
+            source_output_check = self._source_output_contract_check(execution)
+            if source_output_check.get("required") and source_output_check.get("passed") is not True:
+                passed = False
         if runtime_impl and runtime_impl.get("status") in {
             "sandbox_failed",
             "not_registered",
@@ -1435,7 +1603,60 @@ class ConversationCoreRuntime:
             "runtime_implementation_status": runtime_impl.get("status") if runtime_impl else "not_applicable",
             "runtime_capability_registered": bool((runtime_impl or {}).get("registration")),
             "safe_implementation_policy": "external_code_not_executed_without_validation" if execution.get("capability_gap_resolution") else "not_applicable",
+            "source_output_contract_check": source_output_check,
         }
+
+    def _source_output_contract_check(self, execution: dict[str, Any]) -> dict[str, Any]:
+        evidence = execution.get("evidence") if isinstance(execution.get("evidence"), dict) else {}
+        original_input = str(evidence.get("original_user_input") or "")
+        state = {"original_input": original_input, "execution": execution}
+        materials = [{
+            "source": "conversation_execution",
+            "status": execution.get("status"),
+            "answer_material": execution.get("answer_material"),
+            "evidence": evidence,
+            "content": {
+                "answer_material": execution.get("answer_material"),
+                "evidence": evidence,
+                "results": evidence.get("results") if isinstance(evidence.get("results"), list) else [],
+                "fetched_documents": evidence.get("fetched_documents") if isinstance(evidence.get("fetched_documents"), list) else [],
+            },
+        }]
+        contract = self.source_retrieval_composer.source_contract(state=state, materials=materials)
+        required = bool(contract.get("requires_source_material") or contract.get("requested_output_fields") or contract.get("output_cardinality"))
+        if not required:
+            return {"required": False, "passed": True, "reason": "no_source_output_contract"}
+        composed = self.source_retrieval_composer.compose(state=state, materials=materials)
+        synthesis = composed.get("synthesis") if isinstance(composed.get("synthesis"), dict) else {}
+        errors = synthesis.get("validation_errors") if isinstance(synthesis.get("validation_errors"), list) else []
+        return {
+            "required": True,
+            "passed": composed.get("status") == "completed" and bool(composed.get("answer")),
+            "reason": "source_output_contract_satisfied" if composed.get("status") == "completed" else "source_output_contract_not_satisfied",
+            "requested_fields": synthesis.get("requested_fields") or contract.get("requested_output_fields") or [],
+            "requested_count": synthesis.get("requested_count") or (contract.get("output_cardinality") or {}).get("requested_count"),
+            "item_count": synthesis.get("item_count") or 0,
+            "validation_errors": errors,
+        }
+
+    def _verified_source_contract_answer(self, *, original_input: str, execution: dict[str, Any]) -> str:
+        evidence = execution.get("evidence") if isinstance(execution.get("evidence"), dict) else {}
+        state = {"original_input": original_input or evidence.get("original_user_input") or "", "execution": execution}
+        materials = [{
+            "source": "conversation_execution",
+            "status": execution.get("status"),
+            "answer_material": execution.get("answer_material"),
+            "evidence": evidence,
+            "content": {
+                "answer_material": execution.get("answer_material"),
+                "evidence": evidence,
+                "results": evidence.get("results") if isinstance(evidence.get("results"), list) else [],
+                "fetched_documents": evidence.get("fetched_documents") if isinstance(evidence.get("fetched_documents"), list) else [],
+            },
+        }]
+        composed = self.source_retrieval_composer.compose(state=state, materials=materials)
+        answer = str(composed.get("answer") or "").strip()
+        return answer if answer else ""
 
     def _verify_web_evidence(self, user_input: str, search: dict[str, Any], fetched: list[dict[str, Any]], *, min_sources: int = 1) -> dict[str, Any]:
         """Generic evidence verification for web retrieval.

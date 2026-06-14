@@ -26,6 +26,8 @@ from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.config.paths import RUNTIME_DOWNLOADS
 from auxiliary_brain.runtime_tools.runtime_registered_tool_service import RuntimeRegisteredToolService
 from ai_core.runtime.approval_policy_store import RuntimeApprovalPolicyStore
+from auxiliary_brain.research.source_retrieval_settings import SourceRetrievalSettingsStore
+from verification_brain.settings import VerificationBrainSettingsStore
 from ai_core.graph.graph_visualization import GraphVisualStateBuilder
 from auxiliary_brain.runtime.observability.runtime_console import emit_console_event, list_console_sources, read_console_source
 from auxiliary_brain.runtime.observability.model_prompt_registry import ModelPromptRegistry
@@ -48,6 +50,8 @@ graph_visual_builder = GraphVisualStateBuilder()
 knowledge_service = KnowledgeService()
 registered_tool_service = RuntimeRegisteredToolService()
 approval_policy_store = RuntimeApprovalPolicyStore()
+source_retrieval_settings_store = SourceRetrievalSettingsStore()
+verification_brain_settings_store = VerificationBrainSettingsStore()
 feedback_repair_orchestrator = FeedbackRepairOrchestrator()
 scheduled_task_runner = ScheduledTaskRunner()
 async_job_store = RuntimeAsyncJobStore()
@@ -1155,8 +1159,24 @@ async def runtime_settings():
         "tools": registered_tool_service.list_tools(),
         "profiles": registered_tool_service.list_profiles(),
         "approval_policies": approval_policy_store.list_policies(),
+        "source_retrieval": source_retrieval_settings_store.as_api_payload(),
+        "verification_brain": verification_brain_settings_store.as_api_payload(),
     })
 
+
+
+
+
+
+@app.post("/api/runtime/settings/verification-brain")
+async def runtime_settings_verification_brain(payload: dict[str, Any]):
+    saved = verification_brain_settings_store.save(payload if isinstance(payload, dict) else {})
+    return JSONResponse({"ok": True, "verification_brain": verification_brain_settings_store.as_api_payload(), "saved": saved})
+
+@app.post("/api/runtime/settings/source-retrieval")
+async def runtime_settings_source_retrieval(payload: dict[str, Any]):
+    saved = source_retrieval_settings_store.save(payload if isinstance(payload, dict) else {})
+    return JSONResponse({"ok": True, "source_retrieval": source_retrieval_settings_store.as_api_payload(), "saved": saved})
 
 @app.post("/api/runtime/settings/tool-approval")
 async def runtime_settings_tool_approval(req: RuntimeApprovalPolicyRequest):

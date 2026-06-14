@@ -61,10 +61,12 @@ from ai_core.runtime.governance import RuntimeCostPolicy
 from ai_core.runtime.evidence import EvidenceBudgetAllocator, CandidateEvidenceRanker, AdaptiveEvidenceReducer
 from ai_core.execution.execution_method_contract import ExecutionMethodContract, ExecutionMethodProposalEngine, ExecutionMethodResolver
 from auxiliary_brain.research.deep_web_research import DeepWebResearchPipeline
+from auxiliary_brain.research.source_retrieval_settings import SourceRetrievalSettingsStore
 from auxiliary_brain.research.structured_provider_executor import StructuredProviderExecutor
 from ai_core.llm.provider_router import ProviderRouter
 from ai_core.config.paths import PROJECT_ROOT, RUNTIME_GENERATED, RUNTIME_REGISTRY
 from ai_core.runtime.reasoning import ContentAcquisitionLayer, ContentExtractionLayer
+from ai_core.presentation.source_retrieval_item_composer import SourceRetrievalItemComposer
 
 
 class ToolCallExecutor:
@@ -112,6 +114,8 @@ class ToolCallExecutor:
         self.execution_continuation = ExecutionContinuationCoordinator()
         self.answer_sufficiency = AnswerSufficiencyEvaluator()
         self.web_research = GenericWebResearchTool()
+        self.source_retrieval_settings = SourceRetrievalSettingsStore()
+        self.source_retrieval_composer = SourceRetrievalItemComposer()
         self.web_evidence_optimizer = WebEvidenceOptimizer()
         self.evidence_short_circuit = EvidenceSatisfiedShortCircuit()
         self.capability_router = CapabilityRouter()
@@ -1511,49 +1515,112 @@ class ToolCallExecutor:
             "step_id": step_id,
             "result": {"query": query},
         })
-        try:
-            search = await self.web_research.search(query=query, max_results=5)
-        except Exception as exc:
+        step_source_contract = step.get("source_contract") if isinstance(step.get("source_contract"), dict) else ((state.get("source_contract") if isinstance(state.get("source_contract"), dict) else {}))
+        requested_count = self._requested_source_item_count(step=step, state=state, source_contract=step_source_contract)
+        routing_settings = self.source_retrieval_settings.load()
+        engine_order = self.source_retrieval_settings.engine_order_for_execution()
+        engine_attempts: list[dict[str, Any]] = []
+        step_execution_known = step.get("execution_known") if isinstance(step.get("execution_known"), dict) else ((state.get("execution_known") if isinstance(state.get("execution_known"), dict) else {}))
+        search: dict[str, Any] = {}
+        results: list[dict[str, Any]] = []
+        fetched: list[dict[str, Any]] = []
+        generic_records: list[dict[str, Any]] = []
+        optimized: dict[str, Any] = {}
+        selected_engine = ""
+        max_candidates = max(12, min(30, requested_count * 6 if requested_count > 0 else 12))
+        for engine_id in engine_order:
+            try:
+                search = await self.web_research.search(query=query, max_results=max_candidates, engine_id=engine_id)
+            except Exception as exc:
+                engine_attempts.append({"engine_id": engine_id, "status": "error", "error": str(exc)})
+                continue
+            current_results = search.get("results") if isinstance(search.get("results"), list) else []
+            current_fetched: list[dict[str, Any]] = []
+            current_records: list[dict[str, Any]] = []
+            current_optimized: dict[str, Any] = {}
+            last_contract_check: dict[str, Any] = {}
+            url_attempts: list[dict[str, Any]] = []
+            # A source-retrieval step must not stop at the search-result page.
+            # For each engine, follow discovered URLs first, extract page
+            # material, and only then run the compiled output contract check.
+            # If the contract is not satisfied after all candidate URLs for
+            # this engine are exhausted, the router may move to the next engine.
+            for index, item in enumerate(current_results[:max_candidates], start=1):
+                url = str(item.get("url") or "").strip() if isinstance(item, dict) else ""
+                if not url:
+                    url_attempts.append({"index": index, "status": "skipped", "reason": "missing_url"})
+                    continue
+                try:
+                    doc = await self.web_research.fetch(url=url, max_chars=18000)
+                except Exception as exc:
+                    doc = {"status": "error", "url": url, "error": str(exc)}
+                if isinstance(doc, dict) and doc.get("status") == "success":
+                    current_fetched.append(doc)
+                url_attempts.append({"index": index, "url": url, "status": doc.get("status") if isinstance(doc, dict) else "error", "response_status": doc.get("response_status") if isinstance(doc, dict) else None})
+                documents = [{"document": d, "source_search_result": next((r for r in current_results if isinstance(r, dict) and r.get("url") == d.get("url")), {})} for d in current_fetched if isinstance(d, dict)]
+                current_optimized = self.web_evidence_optimizer.optimize(
+                    user_input=str(state.get("input") or ""),
+                    capability="web_retrieval",
+                    objective=str(step.get("objective") or query),
+                    search_results=current_results,
+                    documents=documents,
+                )
+                extracted = self.content_extraction.extract(fetched_documents=documents) if documents else []
+                if extracted:
+                    current_records = extracted
+                elif current_results:
+                    current_records = self.content_extraction.extract_from_search_results(current_results)
+                last_contract_check = self._source_retrieval_contract_check_for_material(
+                    query=query,
+                    step=step,
+                    state=state,
+                    source_contract=step_source_contract,
+                    execution_known=step_execution_known,
+                    search_results=current_results,
+                    fetched_documents=current_fetched,
+                    content_records=current_records,
+                    answer_material=self._answer_material_from_content_records(current_records),
+                )
+                if last_contract_check.get("passed") is True:
+                    break
+            source_count = len([str(x.get("url") or "") for x in current_results if isinstance(x, dict) and x.get("url")])
+            material_ok = bool(last_contract_check.get("passed"))
+            engine_attempts.append({
+                "engine_id": engine_id,
+                "status": "success" if material_ok else "insufficient",
+                "result_count": len(current_results),
+                "record_count": len(current_records),
+                "source_count": source_count,
+                "fetched_count": len(current_fetched),
+                "url_attempts": url_attempts,
+                "source_output_contract_check": last_contract_check,
+            })
+            if material_ok or routing_settings.routing_mode == "fixed":
+                selected_engine = engine_id
+                results = current_results
+                fetched = current_fetched
+                generic_records = current_records
+                optimized = current_optimized
+                break
+            if not results:
+                selected_engine = engine_id
+                results = current_results
+                fetched = current_fetched
+                generic_records = current_records
+                optimized = current_optimized
+        if not results and not generic_records:
             await event_bus.emit(run_id, {
                 "type": "QUERY_WEB_SEARCH_EXECUTION_FAILED",
                 "title": "Query web search execution failed",
-                "message": str(exc),
+                "message": "No configured source retrieval engine produced enough source material.",
                 "node_id": node_id,
                 "step_id": step_id,
-                "result": {"query": query},
+                "result": {"query": query, "engine_attempts": engine_attempts},
             })
             return None
-        results = search.get("results") if isinstance(search.get("results"), list) else []
-        fetched: list[dict[str, Any]] = []
-        for item in results[:5]:
-            url = str(item.get("url") or "").strip() if isinstance(item, dict) else ""
-            if not url:
-                continue
-            try:
-                doc = await self.web_research.fetch(url=url, max_chars=12000)
-            except Exception:
-                doc = {}
-            if isinstance(doc, dict) and doc.get("status") == "success":
-                fetched.append(doc)
-        documents = [{"document": d, "source_search_result": next((r for r in results if isinstance(r, dict) and r.get("url") == d.get("url")), {})} for d in fetched if isinstance(d, dict)]
-        optimized = self.web_evidence_optimizer.optimize(
-            user_input=str(state.get("input") or ""),
-            capability="web_retrieval",
-            objective=str(step.get("objective") or query),
-            search_results=results,
-            documents=documents,
-        )
-        generic_records = self.content_extraction.extract_from_search_results(results) if results else []
-        if fetched:
-            acquired = await self._generic_content_documents(selected_evidence=results, timeout_seconds=25.0)
-            extracted = self.content_extraction.extract(fetched_documents=acquired) if acquired else []
-            if extracted:
-                generic_records = extracted
         answer_material = self._answer_material_from_content_records(generic_records)
         normalized_facts = self._facts_from_content_records(generic_records)
         source_urls = [str(x.get("url") or "") for x in results if isinstance(x, dict) and x.get("url")]
-        step_source_contract = step.get("source_contract") if isinstance(step.get("source_contract"), dict) else ((state.get("source_contract") if isinstance(state.get("source_contract"), dict) else {}))
-        step_execution_known = step.get("execution_known") if isinstance(step.get("execution_known"), dict) else ((state.get("execution_known") if isinstance(state.get("execution_known"), dict) else {}))
         data = {
             "answer_material": answer_material,
             "normalized_facts": normalized_facts,
@@ -1561,6 +1628,9 @@ class ToolCallExecutor:
             "source_urls": source_urls,
             "evidence_urls": source_urls,
             "search_results": results,
+            "source_retrieval_engine": selected_engine,
+            "source_retrieval_engine_attempts": engine_attempts,
+            "source_retrieval_routing_mode": routing_settings.routing_mode,
             "fetched_documents": fetched,
             "optimized_evidence": optimized,
             "query": query,
@@ -1580,6 +1650,8 @@ class ToolCallExecutor:
                 "source_urls": source_urls,
                 "source_contract": step_source_contract,
                 "search_status": search.get("status") if isinstance(search, dict) else "unknown",
+                "source_retrieval_engine": selected_engine,
+                "source_retrieval_engine_attempts": engine_attempts,
                 "executed_at": datetime.now(timezone.utc).isoformat(),
             },
         }
@@ -4735,6 +4807,71 @@ class ToolCallExecutor:
         return documents
 
 
+    def _source_retrieval_contract_check_for_material(
+        self,
+        *,
+        query: str,
+        step: dict[str, Any],
+        state: dict[str, Any],
+        source_contract: dict[str, Any],
+        execution_known: dict[str, Any],
+        search_results: list[dict[str, Any]],
+        fetched_documents: list[dict[str, Any]],
+        content_records: list[dict[str, Any]],
+        answer_material: str,
+    ) -> dict[str, Any]:
+        """Validate source-retrieval material against the compiled output contract.
+
+        This check is intentionally engine-neutral. It validates the material
+        after URL follow-up/fetch, not the search page itself. Search result
+        cards are allowed only as discovery/provenance; fetched page material
+        must be present before an item can satisfy a source-output contract.
+        """
+        state_payload = {
+            "original_input": str(state.get("input") or state.get("original_input") or query),
+            "source_contract": source_contract,
+            "execution_known": execution_known,
+            "execution_method": "web_search",
+            "prompt_profile": step.get("prompt_profile") or "source_retrieval",
+        }
+        materials = [{
+            "source": "source_retrieval_engine_material",
+            "status": "candidate",
+            "answer_material": answer_material,
+            "metadata": {
+                "source_contract": source_contract,
+                "execution_known": execution_known,
+            },
+            "content": {
+                "answer_material": answer_material,
+                "source_contract": source_contract,
+                "execution_known": execution_known,
+                "search_results": search_results,
+                "results": search_results,
+                "fetched_documents": fetched_documents,
+                "source_documents": fetched_documents,
+                "extracted_content_records": content_records,
+                "items": content_records,
+            },
+            "evidence": {
+                "original_user_input": str(state.get("input") or state.get("original_input") or query),
+                "results": search_results,
+                "fetched_documents": fetched_documents,
+            },
+        }]
+        composed = self.source_retrieval_composer.compose(state=state_payload, materials=materials)
+        synthesis = composed.get("synthesis") if isinstance(composed.get("synthesis"), dict) else {}
+        return {
+            "required": True,
+            "passed": composed.get("status") == "completed" and bool(composed.get("answer")),
+            "reason": "source_output_contract_satisfied" if composed.get("status") == "completed" else "source_output_contract_not_satisfied",
+            "item_count": synthesis.get("item_count") or 0,
+            "requested_count": synthesis.get("requested_count"),
+            "requested_fields": synthesis.get("requested_fields") or [],
+            "validation_errors": synthesis.get("validation_errors") if isinstance(synthesis.get("validation_errors"), list) else [],
+            "answer_preview": str(composed.get("answer") or "")[:1000],
+        }
+
     def _answer_material_from_content_records(self, records: list[dict[str, Any]]) -> str:
         lines: list[str] = []
         for index, record in enumerate(records[:10], start=1):
@@ -4794,6 +4931,27 @@ class ToolCallExecutor:
             )
         except Exception:
             return []
+
+    def _requested_source_item_count(self, *, step: dict[str, Any], state: dict[str, Any], source_contract: dict[str, Any]) -> int:
+        candidates: list[Any] = []
+        for container in (source_contract, step.get("execution_known") if isinstance(step.get("execution_known"), dict) else {}, state.get("execution_known") if isinstance(state.get("execution_known"), dict) else {}):
+            if not isinstance(container, dict):
+                continue
+            candidates.extend([
+                container.get("requested_items"),
+                container.get("requested_count"),
+                container.get("item_count"),
+            ])
+            cardinality = container.get("output_cardinality") if isinstance(container.get("output_cardinality"), dict) else {}
+            candidates.extend([cardinality.get("requested_items"), cardinality.get("requested_count"), cardinality.get("min_items")])
+        for value in candidates:
+            try:
+                count = int(value)
+            except Exception:
+                continue
+            if count > 0:
+                return max(1, min(count, 20))
+        return 3
 
     def _runtime_known_parameters(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Collect runtime parameters without dropping arrays or normalized objects.

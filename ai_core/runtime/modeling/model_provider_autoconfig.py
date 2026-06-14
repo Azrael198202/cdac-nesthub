@@ -127,7 +127,7 @@ class ModelProviderAutoConfigurator:
                     "chat_endpoint": "/api/chat",
                     "generate_endpoint": "/api/generate",
                     "model": "qwen3.5:2b",
-                    "fallback_models": ["qwen3.5:2b", "qwen3.5:4b-q4_k_m", "qwen3:4b", "qwen3:8b"],
+                    "fallback_models": ["qwen3.5:2b", "qwen3.5:4b-q4_k_m", "qwen3:4b", "qwen3:8b", "qwen3:14b", "qwen3:32b"],
                     "provider_models": {
                         "qwen3.5:2b": "qwen3.5:2b",
                         "qwen3.5:4b-q4_k_m": "qwen3.5:4b-q4_k_m",

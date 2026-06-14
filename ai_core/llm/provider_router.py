@@ -1,5 +1,6 @@
 import time
 import json
+import re
 from ai_core.config.loader import ConfigLoader
 from ai_core.runtime.modeling.model_provider_autoconfig import ModelProviderAutoConfigurator
 from ai_core.config.paths import RUNTIME_CONFIGS
@@ -38,6 +39,18 @@ class ProviderRouter:
         self.prompt_io_recorder = PromptIORecorder()
         self.litellm_json_escalation = LiteLLMBrainClient()
 
+
+
+    def _safe_model_trace_id(self, model: object) -> str:
+        """Return a filesystem/event safe model identifier for trace phases.
+
+        Trace phase names are internal runtime metadata.  The conversion is
+        deterministic and model/vendor agnostic; it never affects routing.
+        """
+        text = str(model or "unknown_model").strip() or "unknown_model"
+        text = re.sub(r"[^A-Za-z0-9_.-]+", "_", text)
+        text = re.sub(r"_+", "_", text).strip("._-")
+        return (text or "unknown_model")[:80]
 
     def _canonical_stage_node(self, node_id: str) -> str:
         node = str(node_id or "")
@@ -220,6 +233,68 @@ class ProviderRouter:
         updated["capabilities"] = sorted(caps)
         return updated
 
+
+    def _stage_model_candidates(self, *, provider_name: str, provider: dict, adapter: dict, node_id: str) -> list[str]:
+        """Return ordered model candidates for the same provider.
+
+        This is a generic stage-quality escalation path.  It does not inspect
+        task/business words.  The selected provider remains the same, but a
+        weak/invalid/timeout model can be replaced by policy-declared fallback
+        models such as 4B/8B/14B variants.  Missing local models are still
+        handled by the provider handler through auto-pull/auto-install policy.
+        """
+        primary = str(provider.get("model") or "").strip()
+        configured = [str(x).strip() for x in (provider.get("fallback_models") or []) if str(x or "").strip()]
+        candidates: list[str] = []
+        for item in [primary] + configured:
+            if item and item not in candidates:
+                candidates.append(item)
+        if not candidates:
+            return []
+        # Early JSON/intent/planning/verification stages should be able to
+        # escalate when the initially selected small model is unstable.  The
+        # order is still read from provider configuration; no concrete task or
+        # domain vocabulary is used here.
+        return candidates
+
+    def _provider_variant_for_model(self, *, provider: dict, model: str, candidates: list[str]) -> dict:
+        variant = dict(provider or {})
+        variant["model"] = model
+        # Keep the selected model first so provider handlers can pull it on
+        # demand.  Keep the rest available only for missing-model fallback; the
+        # router itself controls quality/timeout escalation between models.
+        variant["fallback_models"] = [model] + [m for m in candidates if m and m != model]
+        try:
+            idx = max(0, candidates.index(model))
+            base_timeout = float(variant.get("timeout_seconds") or 30)
+            if idx > 0:
+                # Larger fallback models need a little more time.  This is
+                # generic model-lifecycle logic and remains bounded.
+                variant["timeout_seconds"] = min(max(base_timeout, 20.0) * (1.0 + min(idx, 3) * 0.5), 180.0)
+        except Exception:
+            pass
+        return variant
+
+    def _model_attempt_error_is_escalatable(self, exc: Exception) -> bool:
+        text = str(exc or "").casefold()
+        # Generic provider/model-quality failures.  These are not business
+        # checks; they mean the current model failed to return the required
+        # structured contract or was too slow/unavailable.
+        markers = (
+            "timed out",
+            "timeout",
+            "extra data",
+            "invalid json",
+            "malformed json",
+            "json",
+            "parse",
+            "not found",
+            "did not become ready",
+            "service is not reachable",
+            "provider not provided",
+        )
+        return any(m in text for m in markers)
+
     async def generate_json(self, run_id: str, node_id: str, adapter: dict, prompt: dict, rendered_user_prompt: str, schema: dict) -> dict:
         config = self._config()
         adapter = self.runtime_cost_policy.apply_adapter_budget(adapter, config)
@@ -282,150 +357,180 @@ class ProviderRouter:
                 continue
 
             provider_type = provider.get("type")
-            started = time.monotonic()
+            model_candidates = self._stage_model_candidates(provider_name=provider_name, provider=provider, adapter=adapter, node_id=node_id)
+            if not model_candidates:
+                model_candidates = [str(provider.get("model") or "")]
+            provider_level_last_error: Exception | None = None
 
-            await event_bus.emit(run_id, {
-                "type": "LLM_PROVIDER_START",
-                "title": "Calling LLM provider",
-                "message": f"{provider_name} / type={provider_type} / model={provider.get('model')}",
-                "node_id": node_id,
-                "provider": provider_name,
-                "provider_type": provider_type,
-                "model": provider.get("model"),
-            })
+            for model_candidate_index, model_candidate in enumerate(model_candidates):
+                candidate_provider = self._provider_variant_for_model(provider=provider, model=model_candidate, candidates=model_candidates)
+                started = time.monotonic()
 
-            try:
-                handler = self.registry.get(provider_type)
-                rendered_for_provider = self._compact_rendered_prompt(node_id=node_id, text=rendered_user_prompt, adapter=adapter)
-                budget = self.prompt_budget.budget_for(provider=provider, adapter=adapter)
-                budgeted_prompt = self.prompt_budget.fit_text(rendered_for_provider, budget_tokens=budget)
-                if budgeted_prompt.truncated:
-                    await event_bus.emit(run_id, {
-                        "type": "LLM_PROMPT_BUDGET_APPLIED",
-                        "title": "Prompt budget applied",
-                        "message": f"Prompt reduced to fit budget. estimated_tokens={budgeted_prompt.estimated_tokens}, budget_tokens={budget}",
-                        "node_id": node_id,
-                        "provider": provider_name,
-                        "model": provider.get("model"),
-                        "estimated_tokens": budgeted_prompt.estimated_tokens,
-                        "budget_tokens": budget,
-                    })
-                provider_request_trace = self.prompt_io_recorder.record(
-                    run_id=run_id,
-                    node_id=node_id,
-                    phase=f"provider_request_{provider_name}",
-                    payload={
-                        "run_id": run_id,
-                        "node_id": node_id,
-                        "provider": provider_name,
-                        "provider_type": provider_type,
-                        "model": provider.get("model"),
-                        "timeout_seconds": provider.get("timeout_seconds"),
-                        "options": provider.get("options"),
-                        "think": provider.get("think"),
-                        "prompt": {"system": prompt.get("system"), "user": budgeted_prompt.text},
-                        "schema": schema,
-                        "budget": {
-                            "budget_tokens": budget,
+                await event_bus.emit(run_id, {
+                    "type": "LLM_PROVIDER_START" if model_candidate_index == 0 else "LLM_MODEL_ESCALATION_START",
+                    "title": "Calling LLM provider" if model_candidate_index == 0 else "Escalating model within provider",
+                    "message": f"{provider_name} / type={provider_type} / model={candidate_provider.get('model')}",
+                    "node_id": node_id,
+                    "provider": provider_name,
+                    "provider_type": provider_type,
+                    "model": candidate_provider.get("model"),
+                    "model_attempt_index": model_candidate_index,
+                    "model_candidates": model_candidates,
+                })
+
+                try:
+                    handler = self.registry.get(provider_type)
+                    rendered_for_provider = self._compact_rendered_prompt(node_id=node_id, text=rendered_user_prompt, adapter=adapter)
+                    budget = self.prompt_budget.budget_for(provider=candidate_provider, adapter=adapter)
+                    budgeted_prompt = self.prompt_budget.fit_text(rendered_for_provider, budget_tokens=budget)
+                    if budgeted_prompt.truncated:
+                        await event_bus.emit(run_id, {
+                            "type": "LLM_PROMPT_BUDGET_APPLIED",
+                            "title": "Prompt budget applied",
+                            "message": f"Prompt reduced to fit budget. estimated_tokens={budgeted_prompt.estimated_tokens}, budget_tokens={budget}",
+                            "node_id": node_id,
+                            "provider": provider_name,
+                            "model": candidate_provider.get("model"),
                             "estimated_tokens": budgeted_prompt.estimated_tokens,
-                            "truncated": budgeted_prompt.truncated,
+                            "budget_tokens": budget,
+                        })
+                    provider_request_trace = self.prompt_io_recorder.record(
+                        run_id=run_id,
+                        node_id=node_id,
+                        phase=f"provider_request_{provider_name}_{self._safe_model_trace_id(candidate_provider.get('model'))}",
+                        payload={
+                            "run_id": run_id,
+                            "node_id": node_id,
+                            "provider": provider_name,
+                            "provider_type": provider_type,
+                            "model": candidate_provider.get("model"),
+                            "timeout_seconds": candidate_provider.get("timeout_seconds"),
+                            "options": candidate_provider.get("options"),
+                            "think": candidate_provider.get("think"),
+                            "prompt": {"system": prompt.get("system"), "user": budgeted_prompt.text},
+                            "schema": schema,
+                            "budget": {
+                                "budget_tokens": budget,
+                                "estimated_tokens": budgeted_prompt.estimated_tokens,
+                                "truncated": budgeted_prompt.truncated,
+                            },
                         },
-                    },
-                )
-                await event_bus.emit(run_id, {
-                    "type": "LLM_PROVIDER_REQUEST_RECORDED",
-                    "title": "LLM provider request recorded",
-                    "message": provider_request_trace,
-                    "node_id": node_id,
-                    "provider": provider_name,
-                    "trace_path": provider_request_trace,
-                })
-
-                result = await self._generate_json_with_repair_retry(
-                    handler=handler,
-                    run_id=run_id,
-                    node_id=node_id,
-                    provider_name=provider_name,
-                    provider=provider,
-                    prompt=prompt,
-                    rendered_user_prompt=budgeted_prompt.text,
-                    schema=schema,
-                )
-
-                elapsed = round(time.monotonic() - started, 2)
-                provider_response_trace = self.prompt_io_recorder.record(
-                    run_id=run_id,
-                    node_id=node_id,
-                    phase=f"provider_response_{provider_name}",
-                    payload={
-                        "run_id": run_id,
+                    )
+                    await event_bus.emit(run_id, {
+                        "type": "LLM_PROVIDER_REQUEST_RECORDED",
+                        "title": "LLM provider request recorded",
+                        "message": provider_request_trace,
                         "node_id": node_id,
                         "provider": provider_name,
-                        "provider_type": provider_type,
-                        "model": provider.get("model"),
-                        "elapsed_seconds": elapsed,
-                        "result": result,
-                    },
-                )
-                await event_bus.emit(run_id, {
-                    "type": "LLM_PROVIDER_DONE",
-                    "title": "LLM provider completed",
-                    "message": f"{provider_name} completed in {elapsed}s",
-                    "node_id": node_id,
-                    "provider": provider_name,
-                    "provider_type": provider_type,
-                    "elapsed_seconds": elapsed,
-                    "trace_path": provider_response_trace,
-                })
-                return result
+                        "model": candidate_provider.get("model"),
+                        "trace_path": provider_request_trace,
+                    })
 
-            except Exception as exc:
-                elapsed = round(time.monotonic() - started, 2)
-                last_error = f"{provider_name}: {exc}"
-
-                provider_error_trace = self.prompt_io_recorder.record(
-                    run_id=run_id,
-                    node_id=node_id,
-                    phase=f"provider_error_{provider_name}",
-                    payload={
-                        "run_id": run_id,
-                        "node_id": node_id,
-                        "provider": provider_name,
-                        "provider_type": provider_type,
-                        "model": provider.get("model"),
-                        "elapsed_seconds": elapsed,
-                        "error": str(exc),
-                    },
-                )
-                await event_bus.emit(run_id, {
-                    "type": "LLM_PROVIDER_ERROR",
-                    "title": "LLM provider failed",
-                    "message": f"{provider_name} failed after {elapsed}s: {exc}; trace={provider_error_trace}",
-                    "node_id": node_id,
-                    "provider": provider_name,
-                    "provider_type": provider_type,
-                    "elapsed_seconds": elapsed,
-                    "trace_path": provider_error_trace,
-                })
-
-                if "MISSING_SECRET:" in str(exc):
-                    secret_key = str(exc).split("MISSING_SECRET:", 1)[1].split()[0].strip() or "provider_secret"
-                    # The secret may have been provided by a previous participant
-                    # during the same delegation run. Re-check the canonical store
-                    # before emitting another UI interaction. This prevents repeated
-                    # API-key prompts when resume state is stale or multiple agents
-                    # share the same provider credential.
-                    if SecretStore().has(secret_key):
-                        last_error = f"MISSING_SECRET_ALREADY_SATISFIED:{secret_key}"
-                        continue
-                    await self._emit_missing_secret_interaction(
+                    result = await self._generate_json_with_repair_retry(
+                        handler=handler,
                         run_id=run_id,
                         node_id=node_id,
                         provider_name=provider_name,
-                        secret_key=secret_key,
+                        provider=candidate_provider,
+                        prompt=prompt,
+                        rendered_user_prompt=budgeted_prompt.text,
+                        schema=schema,
                     )
-                    last_error = f"MISSING_SECRET:{secret_key}"
+
+                    elapsed = round(time.monotonic() - started, 2)
+                    provider_response_trace = self.prompt_io_recorder.record(
+                        run_id=run_id,
+                        node_id=node_id,
+                        phase=f"provider_response_{provider_name}_{self._safe_model_trace_id(candidate_provider.get('model'))}",
+                        payload={
+                            "run_id": run_id,
+                            "node_id": node_id,
+                            "provider": provider_name,
+                            "provider_type": provider_type,
+                            "model": candidate_provider.get("model"),
+                            "elapsed_seconds": elapsed,
+                            "result": result,
+                        },
+                    )
+                    await event_bus.emit(run_id, {
+                        "type": "LLM_PROVIDER_DONE",
+                        "title": "LLM provider completed",
+                        "message": f"{provider_name}/{candidate_provider.get('model')} completed in {elapsed}s",
+                        "node_id": node_id,
+                        "provider": provider_name,
+                        "provider_type": provider_type,
+                        "model": candidate_provider.get("model"),
+                        "elapsed_seconds": elapsed,
+                        "trace_path": provider_response_trace,
+                    })
+                    return result
+
+                except Exception as exc:
+                    provider_level_last_error = exc
+                    elapsed = round(time.monotonic() - started, 2)
+                    last_error = f"{provider_name}/{model_candidate}: {exc}"
+
+                    provider_error_trace = self.prompt_io_recorder.record(
+                        run_id=run_id,
+                        node_id=node_id,
+                        phase=f"provider_error_{provider_name}_{self._safe_model_trace_id(model_candidate)}",
+                        payload={
+                            "run_id": run_id,
+                            "node_id": node_id,
+                            "provider": provider_name,
+                            "provider_type": provider_type,
+                            "model": model_candidate,
+                            "elapsed_seconds": elapsed,
+                            "error": str(exc),
+                        },
+                    )
+                    await event_bus.emit(run_id, {
+                        "type": "LLM_PROVIDER_ERROR",
+                        "title": "LLM provider failed",
+                        "message": f"{provider_name}/{model_candidate} failed after {elapsed}s: {exc}; trace={provider_error_trace}",
+                        "node_id": node_id,
+                        "provider": provider_name,
+                        "provider_type": provider_type,
+                        "model": model_candidate,
+                        "elapsed_seconds": elapsed,
+                        "trace_path": provider_error_trace,
+                    })
+
+                    if "MISSING_SECRET:" in str(exc):
+                        break
+
+                    if model_candidate_index < len(model_candidates) - 1 and self._model_attempt_error_is_escalatable(exc):
+                        await event_bus.emit(run_id, {
+                            "type": "LLM_MODEL_ESCALATION",
+                            "title": "Model quality escalation",
+                            "message": f"{provider_name}/{model_candidate} failed contract; trying next configured model.",
+                            "node_id": node_id,
+                            "provider": provider_name,
+                            "failed_model": model_candidate,
+                            "next_model": model_candidates[model_candidate_index + 1],
+                        })
+                        continue
+                    break
+
+            exc = provider_level_last_error or ProviderUnavailableError(f"{provider_name}: no model candidate succeeded")
+            if "MISSING_SECRET:" in str(exc):
+                secret_key = str(exc).split("MISSING_SECRET:", 1)[1].split()[0].strip() or "provider_secret"
+                # The secret may have been provided by a previous participant
+                # during the same delegation run. Re-check the canonical store
+                # before emitting another UI interaction. This prevents repeated
+                # API-key prompts when resume state is stale or multiple agents
+                # share the same provider credential.
+                if SecretStore().has(secret_key):
+                    last_error = f"MISSING_SECRET_ALREADY_SATISFIED:{secret_key}"
                     continue
+                await self._emit_missing_secret_interaction(
+                    run_id=run_id,
+                    node_id=node_id,
+                    provider_name=provider_name,
+                    secret_key=secret_key,
+                )
+                last_error = f"MISSING_SECRET:{secret_key}"
+                continue
 
         raise ProviderUnavailableError(
             "No real LLM provider is available. "

@@ -111,6 +111,25 @@ class OutputExecutor:
         tool_results: list[dict[str, Any]] = []
         provenance_records: list[dict[str, Any]] = []
         result_materials: list[dict[str, Any]] = []
+        if execution and not execution_steps:
+            result_materials.append({
+                "source": "execution",
+                "status": execution.get("status"),
+                "content": {
+                    "answer_material": execution.get("answer_material"),
+                    "evidence": execution.get("evidence") if isinstance(execution.get("evidence"), dict) else {},
+                    "results": ((execution.get("evidence") or {}).get("results") if isinstance(execution.get("evidence"), dict) else []),
+                    "fetched_documents": ((execution.get("evidence") or {}).get("fetched_documents") if isinstance(execution.get("evidence"), dict) else []),
+                    "execution_method": execution.get("execution_mode"),
+                    "prompt_profile": "source_retrieval" if str(execution.get("execution_mode") or "") == "web_search" else "",
+                },
+                "metadata": {
+                    "execution_method": execution.get("execution_mode"),
+                    "prompt_profile": "source_retrieval" if str(execution.get("execution_mode") or "") == "web_search" else "",
+                },
+                "provenance": execution.get("provenance") if isinstance(execution.get("provenance"), dict) else {},
+                "quality": {},
+            })
         for step in execution_steps:
             if not isinstance(step, dict):
                 continue
@@ -132,9 +151,9 @@ class OutputExecutor:
             output_policy=((state.get("runtime") or {}).get("output_policy") or {}) if isinstance(state.get("runtime"), dict) else {},
         ))
         synthesized = presentation.to_dict()
-        final_answer = synthesized.get("final_answer") or self._answer_material_from_execution_steps(execution_steps) or "Workflow finished, but no user-facing answer was produced."
+        final_answer = synthesized.get("final_answer") or self._answer_material_from_execution_steps(execution_steps) or self._answer_material_from_execution(execution) or "Workflow finished, but no user-facing answer was produced."
         if not self._is_public_answer_text(final_answer):
-            fallback_answer = self._answer_material_from_execution_steps(execution_steps)
+            fallback_answer = self._answer_material_from_execution_steps(execution_steps) or self._answer_material_from_execution(execution)
             final_answer = fallback_answer if fallback_answer else "Workflow finished, but no verified user-facing answer was produced."
 
         if trust_summary.get("trust_level") == "unverified_generated_result" and final_answer.startswith("I could not"):
@@ -171,6 +190,20 @@ class OutputExecutor:
         )
         return not any(marker in text for marker in blocked_markers)
 
+
+    def _answer_material_from_execution(self, execution: dict[str, Any]) -> str:
+        if not isinstance(execution, dict):
+            return ""
+        for key in ("final_answer", "answer", "answer_material", "generated_content", "content", "text", "message"):
+            value = execution.get(key)
+            if isinstance(value, str) and value.strip() and self._is_public_answer_text(value):
+                return value.strip()
+        data = execution.get("data") if isinstance(execution.get("data"), dict) else {}
+        for key in ("final_answer", "answer", "answer_material", "generated_content", "content", "text", "message"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip() and self._is_public_answer_text(value):
+                return value.strip()
+        return ""
 
     def _answer_material_from_execution_steps(self, execution_steps: list[dict[str, Any]]) -> str:
         """Extract public generated answer material from execution results.
