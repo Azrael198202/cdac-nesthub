@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,8 @@ from typing import Any
 import yaml
 
 from ai_core.config.paths import CONFIGS_DIR, RUNTIME_GENERATED
+from ai_core.secrets.secret_store import SecretStore
+from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 
 
 @dataclass
@@ -65,8 +68,111 @@ class BrainModelRouter:
             fallback=route_def.get("fallback") if isinstance(route_def.get("fallback"), list) else [],
             decision_reason=self._reason(brain_policy, task_type=task_type, complexity=complexity, route_def=route_def),
         )
+        route = self._apply_runtime_model_selection(route)
         self.record_decision(route=route, context=context or {})
         return route
+
+
+
+    def _apply_runtime_model_selection(self, route: BrainModelRoute) -> BrainModelRoute:
+        """Constrain brain policy routes by the user-facing runtime model mode.
+
+        The policy file may describe high/critical API escalation routes, but the
+        runtime settings page is the execution authority for whether API routes
+        are allowed.  In local_only mode no brain may call an API provider.  If a
+        policy route is disallowed, this method chooses the first allowed
+        fallback; when none exists it falls back to the selected runtime model.
+        The logic is provider-family based and remains independent of task or
+        business vocabulary.
+        """
+        try:
+            selection = UserModelSelectionStore().snapshot()
+        except Exception:
+            return route
+
+        allowed_fallbacks = [item for item in (route.fallback or []) if self._route_item_allowed(item, selection)]
+        if self._provider_model_allowed(route.provider, route.model, selection) and self._route_secret_available(route.provider):
+            if len(allowed_fallbacks) != len(route.fallback or []):
+                route = BrainModelRoute(
+                    brain=route.brain,
+                    task_type=route.task_type,
+                    complexity=route.complexity,
+                    provider=route.provider,
+                    model=route.model,
+                    model_alias=route.model_alias,
+                    source=route.source,
+                    options=dict(route.options or {}),
+                    fallback=allowed_fallbacks,
+                    decision_reason=route.decision_reason + "; runtime_model_mode_filtered_fallbacks",
+                )
+            return route
+
+        replacement = allowed_fallbacks[0] if allowed_fallbacks else self._runtime_default_route(selection)
+        provider = str(replacement.get("provider") or "").strip()
+        model = str(replacement.get("model") or "").strip()
+        options = replacement.get("options") if isinstance(replacement.get("options"), dict) else dict(route.options or {})
+        remaining_fallbacks = allowed_fallbacks[1:] if allowed_fallbacks else []
+        return BrainModelRoute(
+            brain=route.brain,
+            task_type=route.task_type,
+            complexity=route.complexity,
+            provider=provider,
+            model=model,
+            model_alias=str(replacement.get("model_alias") or replacement.get("alias") or route.model_alias or ""),
+            source=route.source,
+            options=options,
+            fallback=remaining_fallbacks,
+            decision_reason=route.decision_reason + "; runtime_model_mode_replaced_disallowed_route",
+        )
+
+    def _route_item_allowed(self, item: dict[str, Any], selection: Any) -> bool:
+        if not isinstance(item, dict):
+            return False
+        provider = str(item.get("provider") or "").strip()
+        model = str(item.get("model") or "").strip()
+        return self._provider_model_allowed(provider, model, selection) and self._route_secret_available(provider)
+
+    def _provider_model_allowed(self, provider: str, model: str, selection: Any) -> bool:
+        provider = str(provider or "").strip()
+        model = str(model or "").strip()
+        if not provider and "/" in model:
+            provider = model.split("/", 1)[0]
+        is_local = self._provider_is_local(provider, model)
+        if getattr(selection, "local_only", False):
+            return is_local
+        if getattr(selection, "api_only", False):
+            return not is_local
+        return True
+
+    def _provider_is_local(self, provider: str, model: str = "") -> bool:
+        text = str(provider or "").strip().casefold()
+        model_text = str(model or "").strip().casefold()
+        if text.startswith(("ollama", "vllm", "lmstudio", "huggingface_local")):
+            return True
+        if text in {"openai", "claude", "anthropic", "azure", "gemini"}:
+            return False
+        if ":" in model_text or model_text.startswith(("qwen", "llama", "mistral", "deepseek", "gemma", "phi", "codellama")):
+            return True
+        return False
+
+    def _route_secret_available(self, provider: str) -> bool:
+        provider = str(provider or "").strip().casefold()
+        secret_key = ""
+        if provider == "openai":
+            secret_key = "OPENAI_API_KEY"
+        elif provider in {"claude", "anthropic"}:
+            secret_key = "ANTHROPIC_API_KEY"
+        if not secret_key:
+            return True
+        try:
+            return bool(os.getenv(secret_key) or SecretStore().get(secret_key))
+        except Exception:
+            return bool(os.getenv(secret_key))
+
+    def _runtime_default_route(self, selection: Any) -> dict[str, Any]:
+        if getattr(selection, "api_only", False):
+            return {"provider": getattr(selection, "initial_provider", "openai"), "model": getattr(selection, "selected_api_model_id", "") or getattr(selection, "initial_model_id", "")}
+        return {"provider": getattr(selection, "initial_provider", "ollama") or "ollama", "model": getattr(selection, "selected_local_model_id", "") or getattr(selection, "initial_model_id", "") or "qwen3.5:2b"}
 
     def record_decision(self, *, route: BrainModelRoute, context: dict[str, Any] | None = None) -> None:
         event = {

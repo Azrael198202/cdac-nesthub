@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ai_core.model_orchestration.brain_model_router import BrainModelRoute, BrainModelRouter
+from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
+from ai_core.secrets.secret_store import SecretStore
 
 
 @dataclass
@@ -58,6 +61,60 @@ class LiteLLMBrainClient:
         route = self.router.select(brain=brain, task_type=task_type, complexity=complexity, context=context or {})
         return self.complete_with_route_sync(route=route, messages=messages, response_format=response_format, **kwargs)
 
+    def _attempt_allowed(self, route: BrainModelRoute) -> tuple[bool, str]:
+        """Preflight a LiteLLM route before calling the library.
+
+        LiteLLM prints provider-list guidance to process stderr when it receives
+        an ambiguous or disallowed route.  The runtime should expose a structured
+        routing error instead, so task workers do not look stuck on provider-list
+        output.
+        """
+        try:
+            selection = UserModelSelectionStore().snapshot()
+        except Exception:
+            selection = None
+        provider = str(route.provider or "").strip()
+        model = str(route.model or "").strip()
+        if not provider and "/" in model:
+            provider = model.split("/", 1)[0]
+        if selection is not None:
+            is_local = self._provider_is_local(provider, model)
+            if getattr(selection, "local_only", False) and not is_local:
+                return False, "provider_disallowed_by_local_only_runtime_mode"
+            if getattr(selection, "api_only", False) and is_local:
+                return False, "provider_disallowed_by_api_only_runtime_mode"
+        secret_key = self._required_secret(provider)
+        if secret_key and not self._secret_available(secret_key):
+            return False, f"missing_provider_secret:{secret_key}"
+        if not self._litellm_model(route):
+            return False, "missing_litellm_provider_or_model"
+        return True, ""
+
+    def _provider_is_local(self, provider: str, model: str = "") -> bool:
+        provider_text = str(provider or "").strip().casefold()
+        model_text = str(model or "").strip().casefold()
+        if provider_text.startswith(("ollama", "vllm", "lmstudio", "huggingface_local")):
+            return True
+        if provider_text in {"openai", "claude", "anthropic", "azure", "gemini"}:
+            return False
+        if ":" in model_text or model_text.startswith(("qwen", "llama", "mistral", "deepseek", "gemma", "phi", "codellama")):
+            return True
+        return False
+
+    def _required_secret(self, provider: str) -> str:
+        text = str(provider or "").strip().casefold()
+        if text == "openai":
+            return "OPENAI_API_KEY"
+        if text in {"claude", "anthropic"}:
+            return "ANTHROPIC_API_KEY"
+        return ""
+
+    def _secret_available(self, secret_key: str) -> bool:
+        try:
+            return bool(os.getenv(secret_key) or SecretStore().get(secret_key))
+        except Exception:
+            return bool(os.getenv(secret_key))
+
     async def complete_with_route(
         self,
         *,
@@ -73,9 +130,10 @@ class LiteLLMBrainClient:
 
         errors: list[dict[str, Any]] = []
         for attempt_route in self._route_attempts(route):
-            model = self._litellm_model(attempt_route)
-            if not model:
-                errors.append({"provider": attempt_route.provider, "model": attempt_route.model, "error": "missing_litellm_provider_or_model"})
+            allowed, reason = self._attempt_allowed(attempt_route)
+            model = self._litellm_model(attempt_route) if allowed else ""
+            if not allowed:
+                errors.append({"provider": attempt_route.provider, "model": attempt_route.model, "error": reason})
                 continue
             options = self._merge_options(route=attempt_route, response_format=response_format, kwargs=kwargs)
             try:
@@ -103,9 +161,10 @@ class LiteLLMBrainClient:
 
         errors: list[dict[str, Any]] = []
         for attempt_route in self._route_attempts(route):
-            model = self._litellm_model(attempt_route)
-            if not model:
-                errors.append({"provider": attempt_route.provider, "model": attempt_route.model, "error": "missing_litellm_provider_or_model"})
+            allowed, reason = self._attempt_allowed(attempt_route)
+            model = self._litellm_model(attempt_route) if allowed else ""
+            if not allowed:
+                errors.append({"provider": attempt_route.provider, "model": attempt_route.model, "error": reason})
                 continue
             options = self._merge_options(route=attempt_route, response_format=response_format, kwargs=kwargs)
             try:

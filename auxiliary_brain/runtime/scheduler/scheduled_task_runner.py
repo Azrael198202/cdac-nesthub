@@ -21,6 +21,7 @@ class ScheduledTaskRunner:
         self.trace_dir = Path(trace_dir)
         self._task: asyncio.Task[Any] | None = None
         self._stopped = asyncio.Event()
+        self._inflight: dict[str, asyncio.Task[Any]] = {}
 
     def start(self, executor: Callable[..., Awaitable[dict[str, Any]]], *, tick_seconds: int = 5) -> bool:
         """Start the background loop when an event loop is available.
@@ -65,6 +66,7 @@ class ScheduledTaskRunner:
     async def run_once(self, executor: Callable[..., Awaitable[dict[str, Any]]]) -> list[dict[str, Any]]:
         now = datetime.now(timezone.utc)
         executed: list[dict[str, Any]] = []
+        self._prune_inflight()
         for path in self._task_record_paths():
             task_graph = self._read(path)
             if not isinstance(task_graph, dict):
@@ -74,7 +76,8 @@ class ScheduledTaskRunner:
                 continue
             if str(policy.get("state") or "active").strip().casefold() not in {"active", "running", "resumed"}:
                 continue
-            if str(policy.get("mode") or "") != "recurring":
+            mode = str(policy.get("mode") or "").strip().casefold()
+            if mode not in {"recurring", "once", "one_time", "one-time"}:
                 continue
             next_run_at = self._parse_time(policy.get("next_run_at")) or now
             if next_run_at > now:
@@ -83,8 +86,45 @@ class ScheduledTaskRunner:
             schedule_instance_id = str(policy.get("schedule_instance_id") or task_graph.get("schedule_instance_id") or f"schedule_{task_name}")
             policy.setdefault("schedule_instance_id", schedule_instance_id)
             policy.setdefault("lifecycle_key", schedule_instance_id)
+            interval = int(policy.get("interval_seconds") or 0)
+
+            if schedule_instance_id in self._inflight:
+                if interval > 0:
+                    policy["last_skip_at"] = now.isoformat()
+                    policy["next_run_at"] = (now + timedelta(seconds=interval)).isoformat()
+                    task_graph["schedule_policy"] = policy
+                    self._write(path, task_graph)
+                self._trace({
+                    "event": "scheduled_task_overlap_skipped",
+                    "task_name": task_name,
+                    "schedule_instance_id": schedule_instance_id,
+                    "next_run_at": policy.get("next_run_at"),
+                    "reason": "same_schedule_instance_already_running",
+                })
+                executed.append({"task_name": task_name, "status": "skipped_running", "schedule_instance_id": schedule_instance_id})
+                continue
+
             self._trace({"event": "due_task_found", "task_name": task_name, "schedule_instance_id": schedule_instance_id, "next_run_at": next_run_at.isoformat()})
             self._trace({"event": "scheduled_task_due", "task_name": task_name, "schedule_instance_id": schedule_instance_id, "next_run_at": next_run_at.isoformat()})
+
+            if interval > 0 and mode == "recurring":
+                policy["last_dispatched_at"] = now.isoformat()
+                policy["next_run_at"] = (now + timedelta(seconds=interval)).isoformat()
+            else:
+                policy["last_dispatched_at"] = now.isoformat()
+                policy["enabled"] = False
+                policy["state"] = "completed"
+            task_graph["schedule_policy"] = policy
+            self._write(path, task_graph)
+            self._trace({
+                "event": "next_run_at_updated",
+                "task_name": task_name,
+                "schedule_instance_id": schedule_instance_id,
+                "next_run_at": policy.get("next_run_at"),
+                "last_run_at": policy.get("last_dispatched_at"),
+                "update_timing": "before_dispatch",
+            })
+
             try:
                 controller_ids = self._controller_participant_ids(task_graph)
                 payload_ids = self._payload_participant_ids(task_graph, controller_ids)
@@ -95,29 +135,46 @@ class ScheduledTaskRunner:
                     "payload_participants": payload_ids,
                     "schedule_instance_id": schedule_instance_id,
                 })
-                result = await self._call_executor(executor, task_name, task_graph)
-                executed.append({"task_name": task_name, "status": result.get("status"), "run_id": result.get("run_id")})
-                self._trace({
-                    "event": "dispatch_completed",
-                    "task_name": task_name,
-                    "result_status": result.get("status"),
-                    "run_id": result.get("run_id"),
-                    "schedule_instance_id": schedule_instance_id,
-                    "missing_inputs": result.get("missing_inputs") or [],
-                    "pending_action_kind": ((result.get("pending_action") or {}).get("kind") if isinstance(result.get("pending_action"), dict) else None),
-                })
-                self._trace({"event": "scheduled_task_executed", "task_name": task_name, "schedule_instance_id": schedule_instance_id, "result_status": result.get("status"), "run_id": result.get("run_id")})
+                dispatch_task = asyncio.create_task(
+                    self._dispatch_and_trace(executor, task_name, task_graph, schedule_instance_id)
+                )
+                self._inflight[schedule_instance_id] = dispatch_task
+                executed.append({"task_name": task_name, "status": "dispatched", "schedule_instance_id": schedule_instance_id})
             except Exception as exc:
                 executed.append({"task_name": task_name, "status": "failed", "error": str(exc)})
-                self._trace({"event": "scheduled_task_execute_failed", "task_name": task_name, "error_type": exc.__class__.__name__, "error": str(exc)})
-            interval = int(policy.get("interval_seconds") or 0)
-            if interval > 0:
-                policy["last_run_at"] = now.isoformat()
-                policy["next_run_at"] = (now + timedelta(seconds=interval)).isoformat()
-                task_graph["schedule_policy"] = policy
-                self._write(path, task_graph)
-                self._trace({"event": "next_run_at_updated", "task_name": task_name, "schedule_instance_id": schedule_instance_id, "next_run_at": policy.get("next_run_at"), "last_run_at": policy.get("last_run_at")})
+                self._trace({"event": "scheduled_task_dispatch_failed", "task_name": task_name, "error_type": exc.__class__.__name__, "error": str(exc)})
         return executed
+
+    async def _dispatch_and_trace(
+        self,
+        executor: Callable[..., Awaitable[dict[str, Any]]],
+        task_name: str,
+        task_graph: dict[str, Any],
+        schedule_instance_id: str,
+    ) -> None:
+        try:
+            result = await self._call_executor(executor, task_name, task_graph)
+            if not isinstance(result, dict):
+                result = {"status": "completed", "result": result}
+            self._trace({
+                "event": "dispatch_completed",
+                "task_name": task_name,
+                "result_status": result.get("status"),
+                "run_id": result.get("run_id"),
+                "schedule_instance_id": schedule_instance_id,
+                "missing_inputs": result.get("missing_inputs") or [],
+                "pending_action_kind": ((result.get("pending_action") or {}).get("kind") if isinstance(result.get("pending_action"), dict) else None),
+            })
+            self._trace({"event": "scheduled_task_executed", "task_name": task_name, "schedule_instance_id": schedule_instance_id, "result_status": result.get("status"), "run_id": result.get("run_id")})
+        except Exception as exc:
+            self._trace({"event": "scheduled_task_execute_failed", "task_name": task_name, "schedule_instance_id": schedule_instance_id, "error_type": exc.__class__.__name__, "error": str(exc)})
+        finally:
+            self._inflight.pop(schedule_instance_id, None)
+
+    def _prune_inflight(self) -> None:
+        for key, task in list(self._inflight.items()):
+            if task.done():
+                self._inflight.pop(key, None)
 
     def _task_record_paths(self) -> list[Path]:
         compiled_sources = list(self.tasks_dir.glob("*/source_task_graph.json"))
