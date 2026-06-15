@@ -846,8 +846,9 @@ class RuntimeBlueprintArtifactGenerator:
         except SyntaxError:
             return source
         functions = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
-        if any(fn.name == function_name and len(list(fn.args.posonlyargs) + list(fn.args.args)) == 1 for fn in functions):
-            return source
+        existing_entrypoint = next((fn for fn in functions if fn.name == function_name and len(list(fn.args.posonlyargs) + list(fn.args.args)) == 1), None)
+        if existing_entrypoint is not None:
+            return self._wrap_existing_payload_entrypoint(source, function_name=function_name)
         candidates = [fn for fn in functions if not fn.name.startswith("_") and fn.name != function_name]
         if not candidates:
             return source
@@ -872,6 +873,48 @@ def {function_name}(payload=None):
     _generated_delegate = {target_name}
     {call}
 """.format(function_name=function_name, target_name=target.name, call=call)
+        return (source or "").rstrip() + wrapper + "\n"
+
+
+    def _wrap_existing_payload_entrypoint(self, source: str, *, function_name: str = "run") -> str:
+        """Wrap an already-declared runtime entrypoint with the framework envelope.
+
+        Generated code is allowed to choose its internal behavior, but the
+        runtime contract is generic and non-negotiable: the manifest
+        entrypoint must accept one payload argument and return a JSON-safe
+        dict for every branch.  LLM-generated tools often perform a mutation
+        and fall off the end of ``run``.  That is valid Python, but it returns
+        None and breaks the runtime.  This adapter preserves the original
+        implementation under a private name and normalizes the returned value
+        into the framework payload contract without adding any capability or
+        domain-specific logic.
+        """
+        private_name = f"_generated_original_{function_name}"
+        try:
+            tree = ast.parse(source or "")
+        except SyntaxError:
+            return source
+        entrypoint_nodes = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name]
+        if not entrypoint_nodes:
+            return source
+        marker = f"{private_name} = {function_name}"
+        if marker in source:
+            return source
+        wrapper = """
+
+# Generic runtime entrypoint contract adapter inserted by the capability generator.
+# It keeps the generated implementation intact and only enforces the runtime
+# boundary: run(payload) must return a JSON-serializable dict.
+{private_name} = {function_name}
+def {function_name}(payload=None):
+    payload = payload if isinstance(payload, dict) else {{}}
+    result = {private_name}(payload)
+    if isinstance(result, dict):
+        return result
+    if result is None:
+        return {{"status": "completed", "result": None}}
+    return {{"status": "completed", "result": result}}
+""".format(private_name=private_name, function_name=function_name)
         return (source or "").rstrip() + wrapper + "\n"
 
     def _approval_policy_or_default(self, value: Any, *, runtime_execution_policy: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -57,25 +57,119 @@ class CompiledTaskLoader:
         report = compiled.get("validation_report") if isinstance(compiled.get("validation_report"), dict) else {}
         if report.get("passed") is not True:
             return None
-        graph = compiled.get("source_task_graph") if isinstance(compiled.get("source_task_graph"), dict) else {}
-        graph = dict(graph)
-        graph["tasks"] = self._merge_compiled_contracts(graph.get("tasks"), compiled.get("steps"))
-        # The compiled task directory is the execution authority.  Runtime
-        # execution must not fall back to the old selected-participant list,
-        # because that list may contain schedule controllers and may omit
-        # generated natural-language steps.  Rebuild the payload participant
-        # list from compiled executable tasks only.
+
+        source_graph = compiled.get("source_task_graph") if isinstance(compiled.get("source_task_graph"), dict) else {}
+        graph = dict(source_graph)
+
+        # Execute from the compiled artifact, not from the creation-time source
+        # graph.  The source graph may contain durable-agent ids and generated
+        # step ids from before compilation.  The compiled graph is the authority
+        # for step ids, dependencies, and binding edges.
+        compiled_tasks = self._tasks_from_compiled_graph(compiled)
+        graph["tasks"] = compiled_tasks or self._merge_compiled_contracts(graph.get("tasks"), compiled.get("steps"))
         graph["selected_participant_ids"] = self._payload_participant_ids(graph.get("tasks"))
+
+        bindings = compiled.get("bindings") if isinstance(compiled.get("bindings"), list) else []
+        graph["workflow_variable_contract"] = {
+            "contract_type": "compiled_workflow_variable_contract",
+            "bindings": bindings,
+            "template_parsing_enabled": False,
+        }
         graph["compiled_task"] = {
             "task_id": compiled.get("task_id"),
             "base_path": compiled.get("base_path"),
             "manifest": compiled.get("manifest"),
             "execution_plan": compiled.get("execution_plan"),
-            "bindings": compiled.get("bindings") or [],
+            "bindings": bindings,
             "contracts_applied_to_tasks": True,
             "selected_participant_ids_rebuilt_from_compiled_steps": True,
+            "compiled_graph_is_execution_authority": True,
         }
         return graph
+
+    def _tasks_from_compiled_graph(self, compiled: dict[str, Any]) -> list[dict[str, Any]]:
+        graph = compiled.get("graph") if isinstance(compiled.get("graph"), dict) else {}
+        nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+        steps = compiled.get("steps") if isinstance(compiled.get("steps"), list) else []
+        execution_plan = compiled.get("execution_plan") if isinstance(compiled.get("execution_plan"), dict) else {}
+        plan_steps = execution_plan.get("steps") if isinstance(execution_plan.get("steps"), list) else []
+        source_graph = compiled.get("source_task_graph") if isinstance(compiled.get("source_task_graph"), dict) else {}
+        source_tasks = source_graph.get("tasks") if isinstance(source_graph.get("tasks"), list) else []
+        by_step = {str(x.get("step_id") or "").strip(): x for x in steps if isinstance(x, dict)}
+        plan_by_step = {str(x.get("step_id") or "").strip(): x for x in plan_steps if isinstance(x, dict)}
+
+        def original_for_index(index: int) -> dict[str, Any]:
+            if 0 <= index < len(source_tasks) and isinstance(source_tasks[index], dict):
+                return source_tasks[index]
+            return {}
+
+        out: list[dict[str, Any]] = []
+        for index, node in enumerate(nodes, start=1):
+            if not isinstance(node, dict):
+                continue
+            sid = str(node.get("id") or node.get("step_id") or f"step_{index:03d}").strip()
+            if not sid:
+                continue
+            step = by_step.get(sid) or {}
+            plan = plan_by_step.get(sid) or {}
+            original = original_for_index(index - 1)
+            execution_contract = node.get("execution_contract") if isinstance(node.get("execution_contract"), dict) else step.get("execution_contract") if isinstance(step.get("execution_contract"), dict) else {}
+            capability_id = str(execution_contract.get("capability_id") or "").strip()
+            profile = original.get("capability_profile") if isinstance(original.get("capability_profile"), dict) else {}
+            if capability_id and not profile:
+                profile = {
+                    "capability_type": "runtime_registered_tool",
+                    "tool_id": capability_id,
+                    "capability": capability_id,
+                }
+            depends_on = node.get("dependencies") if isinstance(node.get("dependencies"), list) else plan.get("depends_on") if isinstance(plan.get("depends_on"), list) else []
+            binding_contract = step.get("binding_contract") if isinstance(step.get("binding_contract"), dict) else {}
+            node_bindings = node.get("bindings") if isinstance(node.get("bindings"), list) else []
+            if node_bindings:
+                binding_contract = {**binding_contract, "bindings": node_bindings, "template_parsing_enabled": False}
+            name = str(node.get("label") or original.get("participant_display_name") or original.get("display_name") or original.get("name") or sid).strip()
+            instruction = str(node.get("instruction") or step.get("instruction") or original.get("source_instruction_fragment") or original.get("execution_objective") or original.get("instruction") or "").strip()
+            out.append({
+                **original,
+                "id": sid,
+                "step_id": sid,
+                "compiled_step_id": sid,
+                "source_step_id": sid,
+                "participant_id": sid,
+                "participant_display_name": name,
+                "display_name": name,
+                "name": name,
+                "agent_name": name,
+                "source_instruction_fragment": instruction,
+                "execution_objective": instruction,
+                "instruction": instruction,
+                "depends_on": [str(x).strip() for x in depends_on if str(x).strip()],
+                "input_from": [str(x).strip() for x in depends_on if str(x).strip()],
+                "input_contract": {
+                    "contract_type": "runtime_step_input_contract",
+                    "bound_from_upstream": [str(x).strip() for x in depends_on if str(x).strip()],
+                    "accepts_verified_material": bool(depends_on),
+                    "user_input_required_for_bound_material": False,
+                },
+                "output_contract": {
+                    "contract_type": "runtime_step_output_contract",
+                    "produces_verified_material": True,
+                    "planner_metadata_is_not_result_material": True,
+                },
+                "prompt_profile": step.get("prompt_profile") if isinstance(step.get("prompt_profile"), dict) else {},
+                "execution_contract": execution_contract,
+                "source_contract": step.get("source_contract") if isinstance(step.get("source_contract"), dict) else {},
+                "presentation_contract": step.get("presentation_contract") if isinstance(step.get("presentation_contract"), dict) else {},
+                "binding_contract": binding_contract,
+                "execution_known": step.get("execution_known") if isinstance(step.get("execution_known"), dict) else {},
+                "semantic_known": step.get("semantic_known") if isinstance(step.get("semantic_known"), dict) else {},
+                "task_metadata": step.get("task_metadata") if isinstance(step.get("task_metadata"), dict) else {},
+                "capability_profile": profile,
+                "execution_policy": "runtime_registered_tool" if capability_id else str(original.get("execution_policy") or "delegate_to_ai_core"),
+                "workflow_step_type": "runtime_capability" if capability_id else str(original.get("workflow_step_type") or original.get("step_type") or "semantic_intermediate_step"),
+                "compiled_graph_node": True,
+            })
+        return out
 
 
     def _payload_participant_ids(self, tasks: Any) -> list[str]:

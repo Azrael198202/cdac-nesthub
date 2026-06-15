@@ -20,6 +20,7 @@ from auxiliary_brain.media import ImageGenerationService, VideoGenerationService
 from auxiliary_brain.parameters.agent_parameter_contract import AgentParameterContractService
 from auxiliary_brain.runtime_tools.runtime_registered_tool_service import RuntimeRegisteredToolService
 from auxiliary_brain.runtime.capability.registered_tool_parameter_bridge import RegisteredToolParameterBridge
+from auxiliary_brain.task_compiler import CompiledTaskLoader
 
 
 class AgentDelegationRuntime:
@@ -42,8 +43,17 @@ class AgentDelegationRuntime:
         self.registered_tool_parameter_bridge = RegisteredToolParameterBridge()
         self.workflow_output_resolver = WorkflowOutputResolver()
         self.output_normalizer = OutputNormalizer()
+        self.compiled_task_loader = CompiledTaskLoader()
 
     async def execute_task(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
+        # If a validated compiled task artifact exists, use it as the execution
+        # authority. This prevents old creation-time participant lists from
+        # bypassing compiled dataflow edges. The rule is task-id based and does
+        # not depend on any business name or tool.
+        task_name = str((task_graph or {}).get("task_name") or (task_graph or {}).get("graph_id") or "").strip()
+        authoritative = self._binding_task_graph_for_name(task_name) if task_name else None
+        if isinstance(authoritative, dict) and authoritative.get("compiled_task"):
+            task_graph = authoritative
         selected = self._fresh_task_participants(self._select_participants(task_graph, participants))
         selected = self._hydrate_runtime_bindings_for_task(task_graph, selected)
         return await self._execute_task_with_selected(task_graph, selected)
@@ -1589,23 +1599,25 @@ class AgentDelegationRuntime:
             if not isinstance(task, dict):
                 continue
             target = str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
-            raw_deps = task.get("depends_on") or task.get("requires") or task.get("input_from") or []
-            if isinstance(raw_deps, dict):
-                raw_deps = [raw_deps]
-            if isinstance(raw_deps, str):
-                raw_deps = [raw_deps]
             deps: list[str] = []
-            for item in raw_deps:
+            for item in self._task_dependency_candidates(task):
                 raw = item.get("id") if isinstance(item, dict) else item
                 dep = str(raw or "").strip()
-                if dep:
-                    deps.append(dep)
+                dep_id = dependency_alias_to_pid.get(_alias(dep)) or (dep if dep in identities else name_to_id.get(dep.lower(), dep))
+                if dep_id and dep_id != target and dep_id not in deps:
+                    deps.append(dep_id)
             if target and deps:
                 explicit_by_task.setdefault(target, []).extend(deps)
 
+        for target, dep_id in self._workflow_variable_dependency_edges(task_graph, dependency_alias_to_pid):
+            if target and dep_id and target != dep_id:
+                explicit_by_task.setdefault(target, [])
+                if dep_id not in explicit_by_task[target]:
+                    explicit_by_task[target].append(dep_id)
+
         for pid, participant in identities.items():
             objective = self._participant_objective(participant).lower()
-            raw_deps = participant.get("depends_on") or participant.get("requires") or participant.get("input_from") or explicit_by_task.get(pid) or []
+            raw_deps = self._task_dependency_candidates(participant) or explicit_by_task.get(pid) or []
             if isinstance(raw_deps, dict):
                 raw_deps = [raw_deps]
             if isinstance(raw_deps, str):
@@ -2230,44 +2242,18 @@ class AgentDelegationRuntime:
         """
         if not task_name:
             return None
+        # Prefer the compiled task directory over the legacy flat creation record.
+        # The compiled artifact owns dependency edges and binding contracts.
+        try:
+            compiled = self.compiled_task_loader.as_task_graph(str(task_name))
+            if isinstance(compiled, dict) and isinstance(compiled.get("tasks"), list):
+                return compiled
+        except Exception:
+            pass
         flat = self.store.read_json(f"generated/tasks/{task_name}.json")
-        if isinstance(flat, dict) and isinstance(flat.get("tasks"), list):
+        if isinstance(flat, dict):
             return flat
-        base = Path(self.store.root) / "generated" / "tasks" / str(task_name)
-        if not base.exists() or not base.is_dir():
-            return flat if isinstance(flat, dict) else None
-        graph = self._read_json_file(base / "graph.json")
-        manifest = self._read_json_file(base / "task_manifest.json")
-        bindings = self._read_json_file(base / "bindings.json")
-        steps: list[dict[str, Any]] = []
-        if isinstance(graph, dict) and isinstance(graph.get("steps"), list):
-            steps = [copy.deepcopy(x) for x in graph.get("steps") if isinstance(x, dict)]
-        elif isinstance(manifest, dict) and isinstance(manifest.get("steps"), list):
-            steps = [copy.deepcopy(x) for x in manifest.get("steps") if isinstance(x, dict)]
-        tasks: list[dict[str, Any]] = []
-        for idx, step in enumerate(steps, start=1):
-            sid = str(step.get("step_id") or step.get("id") or f"step_{idx:03d}").strip()
-            participant_id = str(step.get("participant_id") or step.get("participant") or sid).strip()
-            name = str(step.get("name") or step.get("instruction") or sid).strip()
-            tasks.append({
-                **step,
-                "id": sid,
-                "step_id": sid,
-                "compiled_step_id": sid,
-                "source_step_id": sid,
-                "participant_id": participant_id,
-                "display_name": name,
-                "name": name,
-            })
-        if not tasks and isinstance(flat, dict):
-            return flat
-        return {
-            "task_name": task_name,
-            "graph_id": task_name,
-            "tasks": tasks,
-            "bindings": bindings.get("bindings") if isinstance(bindings, dict) and isinstance(bindings.get("bindings"), list) else [],
-            "compiled_task": True,
-        }
+        return None
 
     def _read_json_file(self, path: Path) -> dict[str, Any]:
         try:
@@ -2384,6 +2370,56 @@ class AgentDelegationRuntime:
 
     def _normalize_task_variable_key(self, value: Any) -> str:
         return self.workflow_output_resolver.normalize_key(value)
+
+    def _task_dependency_candidates(self, item: dict[str, Any]) -> list[Any]:
+        candidates: list[Any] = []
+        if not isinstance(item, dict):
+            return candidates
+        for key in ("depends_on", "requires", "input_from"):
+            value = item.get(key)
+            if isinstance(value, list):
+                candidates.extend(value)
+            elif isinstance(value, dict):
+                candidates.append(value.get("id") or value.get("step_id") or value.get("participant_id") or value)
+            elif value not in (None, "", [], {}):
+                candidates.append(value)
+        input_contract = item.get("input_contract") if isinstance(item.get("input_contract"), dict) else {}
+        bound = input_contract.get("bound_from_upstream")
+        if isinstance(bound, list):
+            candidates.extend(bound)
+        elif bound not in (None, "", [], {}):
+            candidates.append(bound)
+        return candidates
+
+    def _workflow_variable_dependency_edges(self, task_graph: dict[str, Any], alias_to_pid: dict[str, str]) -> list[tuple[str, str]]:
+        contract = task_graph.get("workflow_variable_contract") if isinstance(task_graph.get("workflow_variable_contract"), dict) else {}
+        bindings = contract.get("bindings") if isinstance(contract.get("bindings"), list) else []
+        edges: list[tuple[str, str]] = []
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                continue
+            target = self._resolve_dependency_alias(
+                binding.get("target_step") or binding.get("target_step_id") or binding.get("to_step") or binding.get("target_path"),
+                alias_to_pid,
+            )
+            source_ref = binding.get("source_step_id") or binding.get("source_step") or binding.get("from_step") or binding.get("source_alias")
+            if not source_ref:
+                source_ref = str(binding.get("reference") or "").split(".", 1)[0]
+            source = self._resolve_dependency_alias(source_ref, alias_to_pid)
+            if target and source and target != source and (target, source) not in edges:
+                edges.append((target, source))
+        return edges
+
+    def _resolve_dependency_alias(self, value: Any, alias_to_pid: dict[str, str]) -> str:
+        key = self.workflow_output_resolver.normalize_key(value)
+        if not key:
+            return ""
+        if key in alias_to_pid:
+            return alias_to_pid[key]
+        for alias in sorted(alias_to_pid, key=len, reverse=True):
+            if alias and (key.startswith(alias + "_") or key.startswith(alias + ".")):
+                return alias_to_pid[alias]
+        return ""
 
     def _dependency_material_text(self, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> str:
         deps = self._participant_dependency_ids(participant, dependency_plan)
@@ -2556,7 +2592,7 @@ class AgentDelegationRuntime:
         has_structural = isinstance(values.get("_detected_structural_values"), dict) and bool(values.get("_detected_structural_values"))
         if has_material and has_structural:
             return
-        task_graph = self.store.read_json(f"generated/tasks/{task_name}.json") if task_name else None
+        task_graph = self._binding_task_graph_for_name(task_name) if task_name else None
         source_material = self._task_source_material(task_graph=task_graph if isinstance(task_graph, dict) else {}, fallback_values=[values.get("_source_text")])
         if source_material and not has_material:
             values.setdefault("_original_user_material", source_material)
@@ -2578,7 +2614,7 @@ class AgentDelegationRuntime:
         """
         if not isinstance(participant, dict) or not task_name:
             return
-        task_graph = self.store.read_json(f"generated/tasks/{task_name}.json")
+        task_graph = self._binding_task_graph_for_name(task_name)
         if not isinstance(task_graph, dict):
             return
         values = task_graph.get("runtime_parameters") if isinstance(task_graph.get("runtime_parameters"), dict) else {}

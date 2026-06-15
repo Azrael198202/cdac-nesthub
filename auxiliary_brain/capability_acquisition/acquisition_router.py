@@ -1389,8 +1389,9 @@ def test_runtime_contract_smoke():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     result = getattr(module, function_name)(payload)
+    assert result is not None, "entrypoint_returned_none_not_dict"
+    assert isinstance(result, dict), f"entrypoint_returned_non_dict:{type(result).__name__}"
     json.dumps(result, ensure_ascii=False)
-    assert isinstance(result, dict)
     status = str(result.get("status") or "").lower()
     assert status not in {"error", "failure", "failed"}, result
 """ % (str(tool_dir), str(manifest_path))
@@ -1495,12 +1496,14 @@ def test_runtime_contract_smoke():
             "undeclared_external_test_dependencies",
             "entrypoint_output_not_json_serializable_or_execution_failed",
             "entrypoint_smoke_test_failed",
+            "entrypoint_returned_none_not_dict",
+            "output_is_not_object",
             "artifact_quality_gate_failed",
         }:
             return True
         checks = validation.get("checks") if isinstance(validation.get("checks"), list) else []
         text = json.dumps(checks, ensure_ascii=False, default=str).casefold()
-        return any(marker in text for marker in ["nameerror", "typeerror", "not json serializable", "undefined_names", "unit_test", "runtime_test_mode_guard", "missing_runtime_test_mode_guard", "timeoutexpired"])
+        return any(marker in text for marker in ["nameerror", "typeerror", "not json serializable", "undefined_names", "unit_test", "runtime_test_mode_guard", "missing_runtime_test_mode_guard", "timeoutexpired", "entrypoint_returned_none_not_dict", "output_is_not_object"])
 
     def _compact_validation_failure(self, validation: dict[str, Any]) -> dict[str, Any]:
         checks = validation.get("checks") if isinstance(validation.get("checks"), list) else []

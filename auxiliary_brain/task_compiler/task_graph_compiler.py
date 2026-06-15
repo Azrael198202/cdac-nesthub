@@ -35,6 +35,7 @@ class TaskGraphCompiler:
         task_id = self._task_id(task_graph)
         steps = self.step_compiler.compile_steps(task_graph)
         bindings = self.binding_compiler.compile(steps, task_graph)
+        self._apply_binding_dependencies_to_steps(steps, bindings)
         execution_plan = self.execution_plan_compiler.compile(steps, bindings, task_graph)
         graph = {
             "graph_id": str(task_graph.get("graph_id") or task_id),
@@ -63,6 +64,38 @@ class TaskGraphCompiler:
             "steps": steps,
             "source_task_graph": task_graph,
         }
+
+
+    def _apply_binding_dependencies_to_steps(self, steps: list[dict[str, Any]], bindings: list[dict[str, Any]]) -> None:
+        """Materialize dataflow bindings as execution dependencies.
+
+        Bindings are generic producer/consumer contracts.  Any target that
+        consumes an upstream field must wait for that producer to finish and
+        verify.  This is not a Step1/Step2 rule; it works for arbitrary node ids
+        and arbitrary binding fields.
+        """
+        by_id = {str(step.get("step_id") or "").strip(): step for step in steps if isinstance(step, dict)}
+        for binding in bindings or []:
+            if not isinstance(binding, dict):
+                continue
+            source = str(binding.get("source_step") or "").strip()
+            target = str(binding.get("target_step") or "").strip()
+            if not source or not target or source == target or target not in by_id:
+                continue
+            deps = by_id[target].setdefault("depends_on", [])
+            if not isinstance(deps, list):
+                deps = []
+                by_id[target]["depends_on"] = deps
+            if source not in deps:
+                deps.append(source)
+            input_contract = by_id[target].setdefault("input_contract", {})
+            if isinstance(input_contract, dict):
+                bound = input_contract.setdefault("bound_from_upstream", [])
+                if isinstance(bound, list) and source not in bound:
+                    bound.append(source)
+                input_contract["accepts_verified_material"] = True
+                input_contract.setdefault("contract_type", "runtime_step_input_contract")
+                input_contract.setdefault("user_input_required_for_bound_material", False)
 
     def save(self, compiled: dict[str, Any]) -> Path:
         task_id = str(compiled.get("task_id") or "compiled_task")

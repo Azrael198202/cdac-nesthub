@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+import re
 
 
 @dataclass(frozen=True)
@@ -121,8 +122,8 @@ class TaskMindGraphBuilder:
 
     def _relation_plan(self, task_graph: dict[str, Any], selected: list[dict[str, Any]]) -> dict[str, Any]:
         identities = {self._participant_id(p): p for p in selected if self._participant_id(p)}
-        name_to_id = {self._participant_name(p).lower(): pid for pid, p in identities.items()}
         task_order = self._task_participant_order(task_graph, identities)
+        alias_to_pid = self._dependency_alias_map(task_graph, identities)
         plan: dict[str, Any] = {
             "default_relationship": "independent",
             "participants": {},
@@ -136,28 +137,31 @@ class TaskMindGraphBuilder:
         for task in task_graph.get("tasks") or []:
             if not isinstance(task, dict):
                 continue
-            target = str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
-            if target and target not in identities:
-                target = name_to_id.get(target.lower(), target)
-            raw_deps = task.get("depends_on") or task.get("requires") or task.get("input_from") or []
-            if isinstance(raw_deps, str):
-                raw_deps = [raw_deps]
+            target = self._resolve_dependency_alias(
+                task.get("participant_id") or task.get("participant") or task.get("agent_id"),
+                alias_to_pid,
+            )
+            if not target:
+                continue
+            raw_deps = self._task_dependency_candidates(task)
             deps: list[str] = []
             for item in raw_deps:
-                dep = str(item).strip()
-                if not dep:
-                    continue
-                dep_id = dep if dep in identities else name_to_id.get(dep.lower(), dep)
-                if dep_id != target and dep_id not in deps:
+                dep_id = self._resolve_dependency_alias(item, alias_to_pid)
+                if dep_id and dep_id != target and dep_id not in deps:
                     deps.append(dep_id)
-            if target:
-                explicit_by_task.setdefault(target, []).extend(deps)
-                contract_by_task[target] = {
-                    "input_contract": task.get("input_contract") if isinstance(task.get("input_contract"), dict) else {},
-                    "output_contract": task.get("output_contract") if isinstance(task.get("output_contract"), dict) else {},
-                    "source_step_id": task.get("source_step_id"),
-                    "source_instruction_fragment": task.get("source_instruction_fragment"),
-                }
+            explicit_by_task.setdefault(target, []).extend(deps)
+            contract_by_task[target] = {
+                "input_contract": task.get("input_contract") if isinstance(task.get("input_contract"), dict) else {},
+                "output_contract": task.get("output_contract") if isinstance(task.get("output_contract"), dict) else {},
+                "source_step_id": task.get("source_step_id"),
+                "source_instruction_fragment": task.get("source_instruction_fragment"),
+            }
+
+        for target, dep_id in self._workflow_variable_dependency_edges(task_graph, alias_to_pid):
+            if target and dep_id and target != dep_id:
+                explicit_by_task.setdefault(target, [])
+                if dep_id not in explicit_by_task[target]:
+                    explicit_by_task[target].append(dep_id)
 
         raw_plan: dict[str, list[str]] = {}
         has_task_dependencies = any(explicit_by_task.values())
@@ -165,15 +169,9 @@ class TaskMindGraphBuilder:
             raw: list[str] = []
             raw.extend(explicit_by_task.get(pid) or [])
             if not raw:
-                raw_deps = participant.get("depends_on") or participant.get("requires") or participant.get("input_from") or []
-                if isinstance(raw_deps, str):
-                    raw_deps = [raw_deps]
-                for item in raw_deps:
-                    dep = str(item).strip()
-                    if not dep:
-                        continue
-                    dep_id = dep if dep in identities else name_to_id.get(dep.lower(), dep)
-                    if dep_id != pid and dep_id not in raw:
+                for item in self._task_dependency_candidates(participant):
+                    dep_id = self._resolve_dependency_alias(item, alias_to_pid)
+                    if dep_id and dep_id != pid and dep_id not in raw:
                         raw.append(dep_id)
 
             # Textual references are a last-resort structural signal only when
@@ -182,22 +180,30 @@ class TaskMindGraphBuilder:
             # from overriding explicit step contracts.
             if not has_task_dependencies and not raw:
                 objective = self._participant_objective(participant).lower()
-                for peer_name, peer_id in name_to_id.items():
+                for alias, peer_id in alias_to_pid.items():
                     if peer_id == pid or peer_id in raw:
                         continue
-                    if peer_name and peer_name in objective:
+                    if alias and alias in self._normalize_dependency_key(objective):
                         raw.append(peer_id)
             raw_plan[pid] = raw
 
         normalized_plan, removed_edges = self._normalize_dependency_map(raw_plan, task_order)
         for pid, participant in identities.items():
             deps = normalized_plan.get(pid) or []
-            input_contract = (contract_by_task.get(pid) or {}).get("input_contract") or {
-                "contract_type": "runtime_step_input_contract",
-                "bound_from_upstream": deps,
-                "accepts_verified_material": bool(deps),
-                "user_input_required_for_bound_material": False,
-            }
+            original_input_contract = (contract_by_task.get(pid) or {}).get("input_contract") or {}
+            if original_input_contract:
+                input_contract = dict(original_input_contract)
+                input_contract["bound_from_upstream"] = deps
+                input_contract["accepts_verified_material"] = bool(deps) or bool(input_contract.get("accepts_verified_material"))
+                input_contract.setdefault("contract_type", "runtime_step_input_contract")
+                input_contract.setdefault("user_input_required_for_bound_material", False)
+            else:
+                input_contract = {
+                    "contract_type": "runtime_step_input_contract",
+                    "bound_from_upstream": deps,
+                    "accepts_verified_material": bool(deps),
+                    "user_input_required_for_bound_material": False,
+                }
             output_contract = (contract_by_task.get(pid) or {}).get("output_contract") or {
                 "contract_type": "runtime_step_output_contract",
                 "produces_verified_material": True,
@@ -231,6 +237,103 @@ class TaskMindGraphBuilder:
             ],
         }
         return plan
+
+    def _normalize_dependency_key(self, value: Any) -> str:
+        text = str(value or "").strip().casefold()
+        text = re.sub(r"\s+", "", text)
+        text = text.replace("-", "_")
+        text = re.sub(r"_+", "_", text)
+        return text.strip("_")
+
+    def _dependency_alias_map(self, task_graph: dict[str, Any], identities: dict[str, dict[str, Any]]) -> dict[str, str]:
+        aliases: dict[str, str] = {}
+
+        def add(value: Any, pid: str) -> None:
+            key = self._normalize_dependency_key(value)
+            if key and pid:
+                aliases.setdefault(key, pid)
+
+        for pid, participant in identities.items():
+            add(pid, pid)
+            add(self._participant_name(participant), pid)
+            for key in ("source_step_id", "declared_step_id", "structural_step_id", "id", "task_id", "step_id", "participant_display_name", "display_name", "name"):
+                add(participant.get(key), pid)
+
+        for ordinal, task in enumerate(task_graph.get("tasks") or [], start=1):
+            if not isinstance(task, dict):
+                continue
+            raw_pid = str(task.get("participant_id") or task.get("participant") or task.get("agent_id") or "").strip()
+            pid = raw_pid if raw_pid in identities else self._resolve_dependency_alias(raw_pid, aliases)
+            if not pid:
+                continue
+            values = [
+                raw_pid,
+                task.get("id"), task.get("task_id"), task.get("step_id"),
+                task.get("source_step_id"), task.get("declared_step_id"), task.get("structural_step_id"),
+                task.get("participant_display_name"), task.get("display_name"), task.get("name"), task.get("agent_name"),
+                f"step{ordinal}", f"step_{ordinal}", f"step {ordinal}", f"step_{ordinal:03d}",
+                f"stage{ordinal}", f"stage_{ordinal}", f"stage {ordinal}",
+            ]
+            for value in values:
+                add(value, pid)
+                match = re.search(r"(\d+)", str(value or ""))
+                if match:
+                    number = int(match.group(1))
+                    for template in ("step{}", "step_{}", "step {}", "step_{:03d}", "stage{}", "stage_{}", "stage {}"):
+                        try:
+                            add(template.format(number), pid)
+                        except Exception:
+                            pass
+        return aliases
+
+    def _resolve_dependency_alias(self, value: Any, alias_to_pid: dict[str, str]) -> str:
+        key = self._normalize_dependency_key(value)
+        if not key:
+            return ""
+        if key in alias_to_pid:
+            return alias_to_pid[key]
+        # Some runtime-parameter keys append a field name to a participant or step
+        # alias.  Resolve the longest structural prefix without relying on any
+        # business-specific field names.
+        for alias in sorted(alias_to_pid, key=len, reverse=True):
+            if alias and (key.startswith(alias + "_") or key.startswith(alias + ".")):
+                return alias_to_pid[alias]
+        return ""
+
+    def _task_dependency_candidates(self, item: dict[str, Any]) -> list[Any]:
+        candidates: list[Any] = []
+        for key in ("depends_on", "requires", "input_from"):
+            value = item.get(key)
+            if isinstance(value, list):
+                candidates.extend(value)
+            elif value not in (None, "", [], {}):
+                candidates.append(value)
+        input_contract = item.get("input_contract") if isinstance(item.get("input_contract"), dict) else {}
+        bound = input_contract.get("bound_from_upstream")
+        if isinstance(bound, list):
+            candidates.extend(bound)
+        elif bound not in (None, "", [], {}):
+            candidates.append(bound)
+        return candidates
+
+    def _workflow_variable_dependency_edges(self, task_graph: dict[str, Any], alias_to_pid: dict[str, str]) -> list[tuple[str, str]]:
+        contract = task_graph.get("workflow_variable_contract") if isinstance(task_graph.get("workflow_variable_contract"), dict) else {}
+        bindings = contract.get("bindings") if isinstance(contract.get("bindings"), list) else []
+        edges: list[tuple[str, str]] = []
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                continue
+            target = self._resolve_dependency_alias(
+                binding.get("target_step") or binding.get("target_step_id") or binding.get("to_step") or binding.get("target_path"),
+                alias_to_pid,
+            )
+            source = self._resolve_dependency_alias(
+                binding.get("source_step_id") or binding.get("source_step") or binding.get("from_step") or binding.get("source_alias") or str(binding.get("reference") or "").split(".", 1)[0],
+                alias_to_pid,
+            )
+            if target and source and target != source and (target, source) not in edges:
+                edges.append((target, source))
+        return edges
 
     def _task_participant_order(self, task_graph: dict[str, Any], identities: dict[str, dict[str, Any]]) -> list[str]:
         order: list[str] = []
