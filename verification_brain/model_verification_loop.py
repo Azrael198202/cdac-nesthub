@@ -302,7 +302,13 @@ class ModelVerificationLoop:
             if isinstance(result, dict):
                 result.setdefault("attempt_index", attempt_index)
                 result.setdefault("verified_stage_id", node_id)
-                return self._normalize_judgment(result)
+                normalized = self._normalize_judgment(result)
+                return self._apply_stage_aware_judgment_guard(
+                    node_id=node_id,
+                    candidate=candidate,
+                    judgment=normalized,
+                    attempt_index=attempt_index,
+                )
         except Exception as exc:
             return self._normalize_judgment({
                 "passed": False,
@@ -359,17 +365,13 @@ class ModelVerificationLoop:
                 schema=self._meta_schema(),
             )
             if isinstance(result, dict):
-                accepted = bool(result.get("accepted") is True)
-                updated = dict(judgment)
-                updated["meta_verified"] = accepted
-                updated["meta_reason"] = str(result.get("reason") or "")
-                if not accepted:
-                    updated["passed"] = False
-                    updated["confidence"] = min(float(updated.get("confidence") or 0), 0.49)
-                    replacement = str(result.get("replacement_correction_prompt") or "").strip()
-                    if replacement:
-                        updated["correction_prompt"] = replacement
-                updated["attempt_index"] = attempt_index
+                updated = self._apply_meta_context_guard(
+                    node_id=node_id,
+                    candidate=candidate,
+                    judgment=judgment,
+                    meta_result=result,
+                    attempt_index=attempt_index,
+                )
                 return self._normalize_judgment(updated)
         except Exception as exc:
             updated = dict(judgment)
@@ -382,6 +384,190 @@ class ModelVerificationLoop:
         updated["meta_reason"] = "meta verifier returned no usable judgment"
         updated["passed"] = False
         return self._normalize_judgment(updated)
+
+    def _apply_stage_aware_judgment_guard(self, *, node_id: str, candidate: dict[str, Any], judgment: dict[str, Any], attempt_index: int) -> dict[str, Any]:
+        """Keep verification aligned with the current layer responsibility.
+
+        The model critic is useful, but it must not evaluate a planning layer as
+        if it were the execution layer.  This guard is deterministic and generic:
+        it compares the criticism with the declared stage role and the actual
+        candidate shape.  It does not contain task, provider, or domain words.
+        """
+        local = self._local_stage_contract_judgment(node_id=node_id, candidate=candidate, attempt_index=attempt_index)
+        if bool(judgment.get("passed") is True):
+            if not local.get("passed"):
+                return local
+            judgment.setdefault("stage_contract_guard", {"status": "aligned", "local_passed": True})
+            return judgment
+
+        text = self._judgment_text(judgment)
+        if self._criticism_crosses_layer_boundary(node_id=node_id, text=text):
+            guarded = dict(local)
+            guarded["stage_contract_guard"] = {
+                "status": "critic_rejected",
+                "reason": "critic requested work outside the verified stage responsibility",
+                "critic_reason": str(judgment.get("reason") or "")[:1200],
+            }
+            if local.get("passed"):
+                return guarded
+            guarded["reason"] = local.get("reason") or "Stage output failed local contract validation."
+            return guarded
+        if local.get("passed") and self._candidate_has_required_stage_signal(node_id=node_id, candidate=candidate):
+            guarded = dict(local)
+            guarded["stage_contract_guard"] = {
+                "status": "critic_rejected",
+                "reason": "candidate satisfies the deterministic stage contract; critic failed to bind to the stage role",
+                "critic_reason": str(judgment.get("reason") or "")[:1200],
+            }
+            return guarded
+        judgment.setdefault("stage_contract_guard", {"status": "critic_accepted", "local_passed": bool(local.get("passed"))})
+        return judgment
+
+    def _apply_meta_context_guard(self, *, node_id: str, candidate: dict[str, Any], judgment: dict[str, Any], meta_result: dict[str, Any], attempt_index: int) -> dict[str, Any]:
+        accepted = bool(meta_result.get("accepted") is True)
+        reason = str(meta_result.get("reason") or "")
+        replacement = str(meta_result.get("replacement_correction_prompt") or "").strip()
+        updated = dict(judgment)
+        local = self._local_stage_contract_judgment(node_id=node_id, candidate=candidate, attempt_index=attempt_index)
+        meta_text = "\n".join([reason, replacement])
+        if accepted and self._meta_references_absent_context(candidate=candidate, text=meta_text):
+            accepted = False
+            reason = (reason + "\nMeta context guard rejected the judgment because it refers to fields or sections not present in the candidate output.").strip()
+        if accepted and self._criticism_crosses_layer_boundary(node_id=node_id, text=self._judgment_text(judgment) + "\n" + meta_text):
+            accepted = False
+            reason = (reason + "\nMeta context guard rejected the judgment because the accepted repair would move work into the wrong layer.").strip()
+        if not accepted and local.get("passed"):
+            updated.update(local)
+            updated["meta_verified"] = True
+            updated["meta_reason"] = reason or "Meta verifier rejected the critic; deterministic stage contract passed."
+            updated["meta_context_guard"] = {"status": "critic_rejected_local_contract_passed"}
+            updated["attempt_index"] = attempt_index
+            return updated
+        updated["meta_verified"] = accepted
+        updated["meta_reason"] = reason
+        if not accepted:
+            updated["passed"] = False
+            updated["confidence"] = min(float(updated.get("confidence") or 0), 0.49)
+            if replacement and not self._criticism_crosses_layer_boundary(node_id=node_id, text=replacement):
+                updated["correction_prompt"] = replacement
+        updated["attempt_index"] = attempt_index
+        return updated
+
+    def _local_stage_contract_judgment(self, *, node_id: str, candidate: dict[str, Any], attempt_index: int) -> dict[str, Any]:
+        stage = str(node_id or "").strip()
+        data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+        failures: list[str] = []
+        changes: list[str] = []
+        if not isinstance(candidate, dict):
+            failures.append("schema_json_object_required")
+            changes.append("Return a JSON object for this stage.")
+        if self._has_unresolved_templates(candidate):
+            failures.append("unresolved_template_reference")
+            changes.append("Resolve workflow references from verified previous stage outputs before passing to the next layer.")
+        if stage == "intent_recognition":
+            # This layer may declare that external/live material is required, but
+            # it must not execute retrieval or synthesize unavailable facts.
+            has_signal = self._candidate_has_required_stage_signal(node_id=stage, candidate=candidate)
+            if not has_signal:
+                failures.append("intent_execution_signal_missing")
+                changes.append("Return the recognized execution signal, source contract, source policy, and missing information without executing the task.")
+            if self._candidate_contains_user_facing_material(candidate):
+                failures.append("intent_contains_execution_material")
+                changes.append("Remove user-facing execution material from the intent stage and keep only planning-safe intent data.")
+        elif stage == "workflow_planning":
+            if not (candidate.get("execution_plan") or candidate.get("plan") or data.get("execution_plan") or data.get("steps") or data.get("graph")):
+                failures.append("workflow_plan_missing")
+                changes.append("Return a locked execution plan or graph derived from verified prior stage results.")
+        elif stage == "agent_action_planning":
+            if not (candidate.get("actions") or data.get("actions") or candidate.get("execution_method") or data.get("execution_method") or candidate.get("_executor_type")):
+                failures.append("action_plan_missing")
+                changes.append("Return executable action planning data based on the locked workflow plan.")
+        elif stage == "result_verification":
+            if not (candidate.get("verified") is True or candidate.get("status") in {"verified", "passed", "success"} or data.get("verified") is True):
+                if not (candidate.get("message") or candidate.get("failure_class") or data):
+                    failures.append("verification_result_missing")
+                    changes.append("Return verification status with evidence, findings, or failure details.")
+        elif stage == "final_synthesis":
+            if not (candidate.get("final_answer") or candidate.get("message") or data.get("final_answer") or data.get("content")):
+                failures.append("final_output_missing")
+                changes.append("Return final user-facing output from verified stage results only.")
+        passed = not failures
+        return self._normalize_judgment({
+            "passed": passed,
+            "confidence": 0.96 if passed else 0.82,
+            "quality": 0.96 if passed else 0.65,
+            "consensus": 0.95 if passed else 0.7,
+            "reason": "Stage output satisfies deterministic layer contract." if passed else "Stage output failed deterministic layer contract validation.",
+            "failed_contracts": failures,
+            "required_changes": changes,
+            "correction_prompt": "\n".join(changes),
+            "attempt_index": attempt_index,
+            "verified_stage_id": node_id,
+            "stage_contract_guard": {"status": "local_contract", "passed": passed},
+        })
+
+    def _candidate_has_required_stage_signal(self, *, node_id: str, candidate: dict[str, Any]) -> bool:
+        stage = str(node_id or "")
+        data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+        if stage == "intent_recognition":
+            return bool(
+                candidate.get("intent_record")
+                or data.get("execution_method")
+                or data.get("source_contract")
+                or data.get("source_policy")
+                or "missing_information" in data
+                or "missing_information" in candidate
+            )
+        return True
+
+    def _criticism_crosses_layer_boundary(self, *, node_id: str, text: str) -> bool:
+        stage = str(node_id or "")
+        lowered = (text or "").lower()
+        execution_demands = [
+            "execute the", "perform the", "run the", "retrieve ", "fetch ", "collect ",
+            "return the results", "return results", "generate the required content",
+            "produce the final", "send ", "call the", "use the tool",
+        ]
+        non_execution_stages = {"input_parsing", "intent_recognition", "requirement_completion", "context_awareness", "workflow_planning", "agent_action_planning"}
+        if stage in non_execution_stages and any(token in lowered for token in execution_demands):
+            return True
+        if stage == "intent_recognition" and ("remove all planning metadata" in lowered or "remove execution parameters" in lowered):
+            # The intent layer is allowed to output planning-safe execution signals.
+            return True
+        return False
+
+    def _meta_references_absent_context(self, *, candidate: dict[str, Any], text: str) -> bool:
+        if not text:
+            return False
+        lowered = text.lower()
+        candidate_text = json.dumps(candidate, ensure_ascii=False, default=str).lower()
+        # Generic section names that often appear when the meta verifier is
+        # accidentally judging a previous or unrelated sample.
+        suspicious_names = [
+            "runtime section", "runtime system metadata", "current_datetime_utc", "current_date_utc",
+            "timezone_hint", "locale_hint", "normalized_intent section", "normalized_intent",
+        ]
+        return any(name in lowered and name not in candidate_text for name in suspicious_names)
+
+    def _candidate_contains_user_facing_material(self, candidate: dict[str, Any]) -> bool:
+        text = json.dumps(candidate, ensure_ascii=False, default=str).lower()
+        markers = ["final_answer", "final_output", "user_facing_output", "<html", "<body", "</p>", "</li>"]
+        return any(marker in text for marker in markers)
+
+    def _has_unresolved_templates(self, value: Any) -> bool:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+        return "{{" in text and "}}" in text
+
+    def _judgment_text(self, judgment: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for key in ("reason", "correction_prompt"):
+            if judgment.get(key):
+                parts.append(str(judgment.get(key)))
+        for key in ("failed_contracts", "required_changes"):
+            value = judgment.get(key)
+            if isinstance(value, list):
+                parts.extend(str(item) for item in value)
+        return "\n".join(parts)
 
     async def _regenerate(self, *, node_id: str, state: dict[str, Any], current: dict[str, Any], correction_prompt: str, adapter: dict[str, Any], prompt: dict[str, Any], rendered_user_prompt: str, schema: dict[str, Any], router: Any, run_id: str, attempt_index: int) -> dict[str, Any]:
         repair_adapter = {

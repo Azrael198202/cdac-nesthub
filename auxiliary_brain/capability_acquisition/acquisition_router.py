@@ -234,6 +234,14 @@ class RuntimeCapabilityGapImplementer:
             evidence["urls"] = ["runtime-policy://basic-runtime-capability-contract"]
             evidence["source_note"] = "Policy-backed runtime acquisition without external source material."
 
+        # Preserve explicitly declared interface and verification facts from the
+        # acquisition request after the runtime planner has produced a template.
+        # This is contract-driven and generic: it does not infer any concrete
+        # service behavior; it only prevents planner/model loss of user-declared
+        # schemas, identity, approval policy, and match requirements.
+        template = self._augment_blueprint_from_user_request(dict(template), user_input=user_input)
+        template = self._merge_identity_contract_into_template(template, identity_contract)
+
         dependency_resolution = self._resolve_dependencies(template)
         mark("DependencyResolver", "completed" if dependency_resolution.get("passed") else str(dependency_resolution.get("status") or "failed"), result=dependency_resolution)
         if not dependency_resolution.get("passed"):
@@ -695,7 +703,75 @@ class RuntimeCapabilityGapImplementer:
                 },
                 "additionalProperties": False,
             }
+        declared_policy = self._extract_declared_approval_policy(text)
+        if declared_policy:
+            merged["approval_policy"] = declared_policy
+            execution_policy = dict(merged.get("runtime_execution_policy") if isinstance(merged.get("runtime_execution_policy"), dict) else {})
+            execution_policy["approval_policy"] = declared_policy
+            merged["runtime_execution_policy"] = execution_policy
+        contract = dict(merged.get("capability_match_contract") if isinstance(merged.get("capability_match_contract"), dict) else {})
+        contract_markers = self._extract_declared_match_markers(text)
+        if contract_markers:
+            existing = contract.get("required_markers") if isinstance(contract.get("required_markers"), list) else []
+            contract["required_markers"] = list(dict.fromkeys([*existing, *contract_markers]))
+        declared_interface = {
+            "input_schema": declared_input,
+            "connection_schema": declared_connection,
+            "secret_schema": declared_secret,
+            "approval_policy": declared_policy,
+        }
+        contract["declared_interface"] = {k: v for k, v in declared_interface.items() if v}
+        if contract:
+            merged["capability_match_contract"] = contract
         return merged
+
+    def _extract_declared_approval_policy(self, text: str) -> dict[str, Any]:
+        lines = str(text or "").splitlines()
+        in_section = False
+        modes: list[str] = []
+        default_mode = ""
+        for raw in lines:
+            line = raw.strip().strip("-* ")
+            if re.search(r"approval\s+policy", line, flags=re.IGNORECASE):
+                in_section = True
+            elif in_section and re.match(r"^[A-Za-z].*:$", line) and not re.search(r"support|default|mode", line, flags=re.IGNORECASE):
+                break
+            if not in_section:
+                continue
+            support_match = re.search(r"support\s+([a-zA-Z0-9_\-]+)", line, flags=re.IGNORECASE)
+            if support_match:
+                mode = support_match.group(1).strip().casefold()
+                if mode and mode not in modes:
+                    modes.append(mode)
+            default_match = re.search(r"default\s+(?:mode\s*)?[:：]?\s*([a-zA-Z0-9_\-]+)", line, flags=re.IGNORECASE)
+            if default_match:
+                default_mode = default_match.group(1).strip().casefold()
+        if not modes and not default_mode:
+            return {}
+        if default_mode and default_mode not in modes:
+            modes.append(default_mode)
+        return {"supported_modes": modes, "default_mode": default_mode or (modes[0] if modes else "")}
+
+    def _extract_declared_match_markers(self, text: str) -> list[str]:
+        markers: list[str] = []
+        for raw in str(text or "").splitlines():
+            line = raw.strip().strip("-* ")
+            if not re.search(r"\bverify\b", line, flags=re.IGNORECASE):
+                continue
+            for pattern in [
+                r"\bis\s+([^.;。]+)$",
+                r"\bunder\s+([^.;。]+)$",
+                r"\bas\s+([^.;。]+)$",
+                r"\bon\s+port\s+([0-9]+)",
+                r"\buse\s+([^.;。]+)$",
+            ]:
+                match = re.search(pattern, line, flags=re.IGNORECASE)
+                if match:
+                    value = match.group(1).strip().strip("`'\"")
+                    if value and len(value) <= 120 and value.casefold() not in {"true", "false", "completed", "passed"}:
+                        markers.append(value)
+                    break
+        return list(dict.fromkeys(markers))
 
     def _section_declares_only(self, text: str, header_patterns: list[str]) -> bool:
         lines = str(text or "").splitlines()
@@ -740,6 +816,9 @@ class RuntimeCapabilityGapImplementer:
                 props[name]["type"] = "boolean"
             elif "integer" in detail or "number" in detail:
                 props[name]["type"] = "number"
+            elif str(name).casefold() in {"attachments", "files", "file_paths"} or str(name).casefold().endswith("s") and any(token in str(name).casefold() for token in ["file", "attachment", "path"]):
+                props[name]["type"] = "array"
+                props[name]["items"] = {"type": "string"}
             if "default" in detail:
                 # Preserve the original spelling/case of explicit defaults.
                 # The lower-cased detail string is only for keyword detection;
@@ -1509,7 +1588,9 @@ def test_runtime_contract_smoke():
             ok = not present_ids
             id_checks_passed = id_checks_passed and ok
             checks.append({"name": "forbidden_tool_ids", "passed": ok, "present": present_ids})
-        passed = not missing and not present_forbidden and id_checks_passed
+        interface_check = self._declared_interface_contract_check(contract=contract, artifact=artifact)
+        checks.append(interface_check)
+        passed = not missing and not present_forbidden and id_checks_passed and bool(interface_check.get("passed"))
         report = {
             "passed": passed,
             "status": "completed" if passed else "failed",
@@ -1519,6 +1600,50 @@ def test_runtime_contract_smoke():
         if tool_dir.exists():
             (tool_dir / "capability_match_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         return report
+
+    def _declared_interface_contract_check(self, *, contract: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
+        declared = contract.get("declared_interface") if isinstance(contract.get("declared_interface"), dict) else {}
+        if not declared:
+            return {"name": "declared_interface_contract", "passed": True, "status": "not_required"}
+        tool_dir = Path(str(artifact.get("tool_dir") or ""))
+        manifest = artifact.get("manifest") if isinstance(artifact.get("manifest"), dict) else None
+        if manifest is None:
+            for name in ("manifest.json", "tool.json"):
+                path = tool_dir / name
+                if path.exists():
+                    try:
+                        manifest = json.loads(path.read_text(encoding="utf-8") or "{}")
+                        break
+                    except Exception:
+                        manifest = None
+        if not isinstance(manifest, dict):
+            return {"name": "declared_interface_contract", "passed": False, "reason": "manifest_unavailable"}
+        checks: list[dict[str, Any]] = []
+        for schema_name in ("input_schema", "connection_schema", "secret_schema"):
+            expected = declared.get(schema_name) if isinstance(declared.get(schema_name), dict) else {}
+            if not expected:
+                continue
+            actual = manifest.get(schema_name) if isinstance(manifest.get(schema_name), dict) else {}
+            expected_props = set((expected.get("properties") if isinstance(expected.get("properties"), dict) else {}).keys())
+            actual_props = set((actual.get("properties") if isinstance(actual.get("properties"), dict) else {}).keys())
+            missing = sorted(expected_props - actual_props)
+            extra = sorted(actual_props - expected_props) if expected.get("additionalProperties") is False else []
+            ok = not missing and not extra
+            checks.append({"name": schema_name, "passed": ok, "missing": missing, "extra": extra, "expected": sorted(expected_props), "actual": sorted(actual_props)})
+        expected_policy = declared.get("approval_policy") if isinstance(declared.get("approval_policy"), dict) else {}
+        if expected_policy:
+            actual_policy = manifest.get("approval_policy") if isinstance(manifest.get("approval_policy"), dict) else {}
+            if not actual_policy:
+                runtime_policy = manifest.get("runtime_execution_policy") if isinstance(manifest.get("runtime_execution_policy"), dict) else {}
+                actual_policy = runtime_policy.get("approval_policy") if isinstance(runtime_policy.get("approval_policy"), dict) else {}
+            exp_modes = set(expected_policy.get("supported_modes") if isinstance(expected_policy.get("supported_modes"), list) else [])
+            act_modes = set(actual_policy.get("supported_modes") if isinstance(actual_policy.get("supported_modes"), list) else actual_policy.get("modes") if isinstance(actual_policy.get("modes"), list) else [])
+            exp_default = str(expected_policy.get("default_mode") or "").casefold()
+            act_default = str(actual_policy.get("default_mode") or actual_policy.get("default") or "").casefold()
+            ok = (not exp_modes or exp_modes.issubset(act_modes)) and (not exp_default or exp_default == act_default)
+            checks.append({"name": "approval_policy", "passed": ok, "expected_modes": sorted(exp_modes), "actual_modes": sorted(act_modes), "expected_default": exp_default, "actual_default": act_default})
+        failed = [c for c in checks if not c.get("passed")]
+        return {"name": "declared_interface_contract", "passed": not failed, "checks": checks, "reason": "declared_interface_mismatch" if failed else ""}
 
     def _validate_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]:
         tool_dir = Path(str(artifact.get("tool_dir") or ""))

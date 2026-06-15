@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Any
 import re
 
+from auxiliary_brain.delegation.output_normalizer import OutputNormalizer
+
 
 @dataclass(frozen=True)
 class TemplateResolution:
@@ -36,6 +38,8 @@ class WorkflowOutputResolver:
         "message",
         "data",
     )
+    _NORMALIZER = OutputNormalizer()
+
     _PLACEHOLDER_MARKERS = (
         "completed without a user-facing final answer",
         "intermediate node data was intentionally not exposed",
@@ -81,38 +85,39 @@ class WorkflowOutputResolver:
         return True
 
     def first_scalar(self, value: Any) -> str:
-        if value in (None, "", [], {}):
-            return ""
-        if isinstance(value, str):
-            return value.strip()
-        if isinstance(value, (int, float, bool)):
-            return str(value)
-        if isinstance(value, list):
-            parts = [self.first_scalar(item) for item in value]
-            return "\n".join([p for p in parts if p]).strip()
-        if isinstance(value, dict):
-            for key in self._PUBLIC_FIELD_NAMES:
-                if key in value:
-                    text = self.first_scalar(value.get(key))
-                    if text:
-                        return text
-            return "\n".join([self.first_scalar(v) for v in value.values() if self.first_scalar(v)]).strip()
-        return str(value)
+        return self._NORMALIZER.to_text(value)
 
     def extract_public_fields(self, result: Any) -> dict[str, Any]:
         fields: dict[str, Any] = {}
         direct_answer = getattr(result, "final_answer", None)
         if self.is_public_material(direct_answer):
-            fields["final_answer"] = str(direct_answer).strip() if isinstance(direct_answer, str) else direct_answer
+            fields["final_answer"] = direct_answer
         workflow_results = getattr(result, "workflow_results", None)
         if isinstance(workflow_results, dict):
             self._collect_public_fields(workflow_results, fields)
-        primary = self.first_scalar(fields.get("final_answer") or fields.get("answer") or fields.get("result") or fields.get("content") or fields.get("text"))
+        primary_source = fields.get("final_answer") or fields.get("answer") or fields.get("result") or fields.get("content") or fields.get("text")
+        normalized = self._NORMALIZER.normalize(primary_source if primary_source not in (None, "", [], {}) else fields)
+        primary = str(normalized.get("text") or "").strip()
+        html = str(normalized.get("html") or "").strip()
         if primary and self.is_public_material(primary):
-            fields.setdefault("final_answer", primary)
+            fields["final_answer"] = primary
             fields.setdefault("answer", primary)
             fields.setdefault("text", primary)
             fields.setdefault("result", primary)
+            fields.setdefault("final_answer_text", primary)
+            fields.setdefault("body_text", primary)
+        if html and self.is_public_material(html):
+            # Keep rich rendering material as generic presentation metadata.
+            # Users and task authors should continue to reference final_answer;
+            # downstream adapters decide whether text or HTML is needed.
+            fields.setdefault("presentation_html", html)
+            fields.setdefault("html", html)
+        media = normalized.get("media") if isinstance(normalized.get("media"), list) else []
+        if media:
+            fields.setdefault("media", media)
+        attachments = normalized.get("attachments") if isinstance(normalized.get("attachments"), list) else []
+        if attachments:
+            fields.setdefault("attachments", attachments)
         return {k: v for k, v in fields.items() if self.is_public_material(v)}
 
     def _collect_public_fields(self, node: Any, out: dict[str, Any], prefix: str = "") -> None:

@@ -13,6 +13,7 @@ from auxiliary_brain.storage import JsonStore
 from auxiliary_brain.runtime import new_id
 from auxiliary_brain.delegation.task_mind_graph import TaskMindGraphBuilder
 from auxiliary_brain.delegation.workflow_output_resolver import WorkflowOutputResolver
+from auxiliary_brain.delegation.output_normalizer import OutputNormalizer
 from ai_core.config.paths import RUNTIME_DOWNLOADS
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from auxiliary_brain.media import ImageGenerationService, VideoGenerationService
@@ -40,6 +41,7 @@ class AgentDelegationRuntime:
         self.registered_tool_service = RuntimeRegisteredToolService()
         self.registered_tool_parameter_bridge = RegisteredToolParameterBridge()
         self.workflow_output_resolver = WorkflowOutputResolver()
+        self.output_normalizer = OutputNormalizer()
 
     async def execute_task(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
         selected = self._fresh_task_participants(self._select_participants(task_graph, participants))
@@ -2638,6 +2640,58 @@ class AgentDelegationRuntime:
                 out[key] = value
         return out
 
+
+    def _normalize_registered_tool_presentation_input(self, *, input_data: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
+        """Normalize structured/media-rich values before side-effect execution.
+
+        The rule is schema-driven and presentation-generic: if a registered tool
+        declares text/html/attachment-like fields, upstream dict/list material is
+        converted into safe scalar text/html values.  This keeps the runtime
+        reusable and avoids capability-specific branching.
+        """
+        if not isinstance(input_data, dict):
+            return {}
+        profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+        schema = profile.get("input_schema") if isinstance(profile.get("input_schema"), dict) else {}
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        if not props:
+            return input_data
+        out = dict(input_data)
+        normalized_by_key: dict[str, dict[str, Any]] = {}
+
+        def normalize_value(key: str, value: Any) -> dict[str, Any]:
+            if key not in normalized_by_key:
+                normalized_by_key[key] = self.output_normalizer.normalize(value)
+            return normalized_by_key[key]
+
+        # Scalar string fields should not receive raw dict/list objects.
+        for key, spec in props.items():
+            if key not in out:
+                continue
+            expected = spec.get("type") if isinstance(spec, dict) else None
+            if isinstance(expected, list):
+                expected = next((x for x in expected if x != "null"), expected[0] if expected else None)
+            value = out.get(key)
+            if expected == "string" and isinstance(value, (dict, list, tuple, set)):
+                out[key] = str(normalize_value(str(key), value).get("text") or "")
+
+        # If a declared html-like field is empty, derive it from the richest
+        # available content-like field.  Names are generic presentation roles.
+        html_keys = [k for k in props if str(k).replace("-", "_").casefold() in {"html", "html_body", "body_html", "content_html"}]
+        text_keys = [k for k in props if str(k).replace("-", "_").casefold() in {"body", "text", "content", "message", "final_answer", "answer"}]
+        attachment_keys = [k for k in props if str(k).replace("-", "_").casefold() in {"attachments", "files", "file_paths"}]
+        source_key = next((k for k in text_keys if out.get(k) not in (None, "", [], {})), None)
+        rich_key = next((k for k in out.keys() if str(k).replace("-", "_").casefold() in {"presentation_html", "html"} and out.get(k) not in (None, "", [], {})), None)
+        if source_key:
+            normalized = normalize_value(str(source_key), out.get(source_key))
+            for html_key in html_keys:
+                if out.get(html_key) in (None, "", [], {}):
+                    out[html_key] = str(out.get(rich_key) if rich_key else normalized.get("html") or "")
+            for attachment_key in attachment_keys:
+                if out.get(attachment_key) in (None, "", [], {}):
+                    out[attachment_key] = normalized.get("attachments") or []
+        return out
+
     def _resolve_executable_input_templates(
         self,
         *,
@@ -2795,6 +2849,10 @@ class AgentDelegationRuntime:
             completed_results=completed_results or [],
             dependency_plan=dependency_plan or {},
             task_graph=task_graph_for_templates,
+        )
+        executable_input_data = self._normalize_registered_tool_presentation_input(
+            input_data=executable_input_data,
+            participant=participant,
         )
         if unresolved_templates:
             return AgentExecutionResult(

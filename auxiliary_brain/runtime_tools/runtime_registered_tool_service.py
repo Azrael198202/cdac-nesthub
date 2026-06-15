@@ -202,17 +202,20 @@ class RuntimeRegisteredToolService:
                 schema_section="secret_schema",
             )
 
+        runtime_flags = {
+            "profile_id": profile_id,
+            "connection": connection_values,
+            "secrets": secret_values,
+            "secret_refs": runtime_context.get("secret_refs") if isinstance(runtime_context.get("secret_refs"), dict) else {},
+            "approval_confirmed": bool(approval_confirmed),
+        }
+        if "dry_run" in execution_controls:
+            runtime_flags["dry_run"] = self._truthy_execution_control(execution_controls, "dry_run")
         invocation_payload = {
             "input": runtime_input,
             "connection": connection_values,
             "secrets": secret_values,
-            "_runtime": {
-                "profile_id": profile_id,
-                "connection": connection_values,
-                "secrets": secret_values,
-                "secret_refs": runtime_context.get("secret_refs") if isinstance(runtime_context.get("secret_refs"), dict) else {},
-                "approval_confirmed": bool(approval_confirmed),
-            },
+            "_runtime": runtime_flags,
         }
         result = self.runner.run_tool(spec, invocation_payload, run_id=run_id, node_id="agent_studio_registered_tool", step_id=str(tool_id), capability=str(spec.get("capability") or ""))
         success = str(result.get("status") or "").lower() in {"success", "ok", "executed", "completed"}
@@ -419,6 +422,7 @@ class RuntimeRegisteredToolService:
         "confirmed",
         "approval",
         "approved",
+        "dry_run",
     }
 
     def _control_tail(self, key: Any) -> str:
