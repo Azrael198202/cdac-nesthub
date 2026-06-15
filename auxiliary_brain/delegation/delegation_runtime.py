@@ -21,6 +21,7 @@ from auxiliary_brain.parameters.agent_parameter_contract import AgentParameterCo
 from auxiliary_brain.runtime_tools.runtime_registered_tool_service import RuntimeRegisteredToolService
 from auxiliary_brain.runtime.capability.registered_tool_parameter_bridge import RegisteredToolParameterBridge
 from auxiliary_brain.task_compiler import CompiledTaskLoader
+from ai_core.executors.tool_call_executor import ToolCallExecutor
 
 
 class AgentDelegationRuntime:
@@ -44,6 +45,7 @@ class AgentDelegationRuntime:
         self.workflow_output_resolver = WorkflowOutputResolver()
         self.output_normalizer = OutputNormalizer()
         self.compiled_task_loader = CompiledTaskLoader()
+        self.locked_tool_executor = ToolCallExecutor()
 
     async def execute_task(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
         # If a validated compiled task artifact exists, use it as the execution
@@ -163,6 +165,38 @@ class AgentDelegationRuntime:
                 completed_results=agent_results,
                 dependency_plan=dependency_plan,
             )
+            locked_result = await self._try_execute_locked_compiled_step(
+                participant=participant,
+                task_graph=task_graph,
+                completed_results=agent_results,
+                dependency_plan=dependency_plan,
+                task_name=task_name,
+                task_instruction=task_instruction,
+                run_payload=run_payload,
+            )
+            if locked_result is not None:
+                result = locked_result
+                result_payload = self._sanitize_result_payload(result.__dict__)
+                agent_results.append(result)
+                run_payload["agent_results"].append(result_payload)
+                self._record_progress(
+                    run_payload,
+                    f"participant_{index + 1}_complete",
+                    f"Participant finished: {participant_name}",
+                    "completed" if result.status == "completed" else result.status,
+                )
+                if result.status in {"requires_key", "requires_input", "paused"}:
+                    run_payload.update({
+                        "status": result.status,
+                        "current_stage": "waiting_for_required_input",
+                        "pending_action": result.pending_action,
+                        "missing_inputs": result.missing_inputs or [],
+                        "completed_at": self._now(),
+                    })
+                    self._record_progress(run_payload, "waiting_input", "Waiting for required input", "waiting")
+                    self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+                    return run_payload
+                continue
             capability_result = await self._try_execute_generated_capability(
                 participant=participant,
                 completed_results=agent_results,
@@ -2511,6 +2545,150 @@ class AgentDelegationRuntime:
         if not Path(base).suffix:
             base = f"{base}.{ext}"
         return re.sub(r"[^A-Za-z0-9._-]", "_", base) or f"generated_output.{ext}"
+
+
+    def _locked_step_execution_method(self, participant: dict[str, Any]) -> str:
+        """Return the execution method locked by the compiled task contract.
+
+        This is generic and contract-driven. A compiled step may describe its
+        method in execution_contract, task_metadata, or the loaded execution
+        plan. The runtime must follow this contract instead of re-entering the
+        full primary planning pipeline.
+        """
+        if not isinstance(participant, dict):
+            return ""
+        candidates: list[Any] = []
+        for key in ("execution_contract", "task_metadata", "execution_known"):
+            value = participant.get(key)
+            if isinstance(value, dict):
+                candidates.extend([value.get("execution_method"), value.get("method"), value.get("selected_method")])
+                nested = value.get("execution") if isinstance(value.get("execution"), dict) else {}
+                candidates.extend([nested.get("execution_method"), nested.get("method")])
+        candidates.extend([participant.get("execution_method"), participant.get("method")])
+        for item in candidates:
+            text = str(item or "").strip().replace("-", "_").casefold()
+            if text == "web_query":
+                text = "web_search"
+            if text:
+                return text
+        return ""
+
+    def _is_locked_intermediate_step(self, participant: dict[str, Any]) -> bool:
+        if not isinstance(participant, dict):
+            return False
+        if not participant.get("compiled_graph_node"):
+            return False
+        step_type = str(participant.get("workflow_step_type") or participant.get("step_type") or "").strip().casefold()
+        if step_type in {"runtime_capability", "registered_tool", "runtime_registered_tool"}:
+            return False
+        return bool(self._locked_step_execution_method(participant))
+
+    def _locked_step_state(self, *, participant: dict[str, Any], task_graph: dict[str, Any], task_instruction: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
+        step_id = str(participant.get("compiled_step_id") or participant.get("step_id") or participant.get("source_step_id") or participant.get("participant_id") or "step").strip()
+        objective = str(participant.get("execution_objective") or participant.get("instruction") or participant.get("source_instruction_fragment") or task_instruction or "").strip()
+        source_contract = participant.get("source_contract") if isinstance(participant.get("source_contract"), dict) else {}
+        execution_known = participant.get("execution_known") if isinstance(participant.get("execution_known"), dict) else {}
+        presentation_contract = participant.get("presentation_contract") if isinstance(participant.get("presentation_contract"), dict) else {}
+        step = {
+            "step_id": step_id,
+            "objective": objective,
+            "instruction": objective,
+            "source_contract": source_contract,
+            "execution_known": execution_known,
+            "presentation_contract": presentation_contract,
+            "prompt_profile": participant.get("prompt_profile") if isinstance(participant.get("prompt_profile"), dict) else {},
+        }
+        state = {
+            "input": objective or task_instruction,
+            "task_instruction": task_instruction,
+            "source_contract": source_contract,
+            "execution_known": execution_known,
+            "compiled_step": step,
+            "execution_plan": task_graph.get("execution_plan") if isinstance(task_graph.get("execution_plan"), dict) else {},
+            "run_id": str(task_graph.get("graph_id") or task_graph.get("task_name") or "compiled_task"),
+        }
+        return step_id, step, state
+
+    async def _try_execute_locked_compiled_step(
+        self,
+        *,
+        participant: dict[str, Any],
+        task_graph: dict[str, Any],
+        completed_results: list[Any],
+        dependency_plan: dict[str, Any],
+        task_name: str,
+        task_instruction: str,
+        run_payload: dict[str, Any],
+    ) -> AgentExecutionResult | None:
+        """Execute compiled intermediate steps through their locked method.
+
+        A compiled task graph is execution authority. If a generated step says
+        ``execution_method=web_search`` the scheduler must run source retrieval
+        directly and must not send the text back through input parsing / intent /
+        workflow planning. This prevents scheduled graph runs from hanging in a
+        second planning pass and preserves the layer boundary.
+        """
+        if not self._is_locked_intermediate_step(participant):
+            return None
+        method = self._locked_step_execution_method(participant)
+        if method != "web_search":
+            return None
+        step_id, step, state = self._locked_step_state(participant=participant, task_graph=task_graph, task_instruction=task_instruction)
+        self._record_progress(run_payload, f"{step_id}_locked_{method}", f"Executing locked step method: {method}", "running")
+        try:
+            raw = await self.locked_tool_executor._execute_prepared_query_web_search(
+                run_id=str(run_payload.get("run_id") or new_id("locked_source_run")),
+                node_id=step_id,
+                step_id=step_id,
+                step=step,
+                state=state,
+            )
+        except Exception as exc:
+            return AgentExecutionResult(
+                participant_id=self._participant_identity(participant),
+                participant_name=self._participant_name(participant),
+                core_run_id=new_id("locked_step_error"),
+                status="failed",
+                final_answer=f"Locked execution method failed: {method}. {exc}",
+                workflow_results={"status": "failed", "failure_class": "locked_execution_method_error", "execution_method": method, "error": str(exc)},
+                origin="auxiliary_brain",
+            )
+        if not isinstance(raw, dict):
+            return AgentExecutionResult(
+                participant_id=self._participant_identity(participant),
+                participant_name=self._participant_name(participant),
+                core_run_id=new_id("locked_step_no_result"),
+                status="failed",
+                final_answer=f"Locked execution method did not produce verified material: {method}.",
+                workflow_results={"status": "failed", "failure_class": "locked_execution_no_result", "execution_method": method},
+                origin="auxiliary_brain",
+            )
+        materials = [{"content": raw, "provenance": raw.get("result", {}).get("provenance") if isinstance(raw.get("result"), dict) else {}}]
+        try:
+            composed = self.locked_tool_executor.source_retrieval_composer.compose(state=state, materials=materials)
+        except Exception:
+            composed = {}
+        final_answer = str((composed or {}).get("answer") or "").strip()
+        workflow_results = {
+            "status": "completed" if final_answer else "failed",
+            "execution_method": method,
+            "locked_execution_applied": True,
+            "raw_execution": raw,
+            "presentation": composed,
+            "verified_result_material": (composed or {}).get("result_material") or materials,
+        }
+        status = "completed" if final_answer and str((composed or {}).get("status") or "").lower() == "completed" else "failed"
+        if not final_answer:
+            final_answer = str((composed or {}).get("answer") or "Source retrieval did not produce enough verified material to satisfy the compiled output contract.")
+        return AgentExecutionResult(
+            participant_id=self._participant_identity(participant),
+            participant_name=self._participant_name(participant),
+            core_run_id=new_id("locked_step_result"),
+            status=status,
+            final_answer=final_answer,
+            workflow_results=workflow_results,
+            origin="auxiliary_brain",
+        )
 
     async def _try_execute_generated_capability(
         self,
