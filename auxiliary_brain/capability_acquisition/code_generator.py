@@ -120,6 +120,28 @@ class RuntimeBlueprintArtifactGenerator:
             verification_expectations=verification_expectations,
             specification_contract=specification_contract,
         )
+        # Formation Contract is the only source of required/optional decisions.
+        # Schemas are mechanically regenerated from the contract before any
+        # code generation or validation.
+        normalized_from_contract = self.formation_builder.normalize_schemas_from_field_contracts(formation.get("contract") if isinstance(formation.get("contract"), dict) else {})
+        input_schema = normalized_from_contract.get("input_schema", input_schema)
+        output_schema = normalized_from_contract.get("output_schema", output_schema)
+        connection_schema = normalized_from_contract.get("connection_schema", connection_schema)
+        secret_schema = normalized_from_contract.get("secret_schema", secret_schema)
+        declared_input_schema = input_schema
+        declared_output_schema = output_schema
+        declared_connection_schema = connection_schema
+        declared_secret_schema = secret_schema
+        verification_input = self._verification_input_with_schema_sample(verification_input, input_schema, connection_schema, secret_schema)
+        specification_contract = self.contract_compiler.compile(
+            blueprint=blueprint,
+            input_schema=input_schema,
+            output_schema=output_schema,
+            connection_schema=connection_schema,
+            secret_schema=secret_schema,
+            verification_input=verification_input,
+            verification_expectations=verification_expectations,
+        )
         self._emit_formation_progress(run_id=run_id, tool_id=tool_id, formation=formation)
         capability_contract = self._capability_contract(tool_id=tool_id, blueprint=blueprint)
         files = blueprint.get("files") if isinstance(blueprint.get("files"), list) else []
@@ -143,9 +165,8 @@ class RuntimeBlueprintArtifactGenerator:
                 files = []
             else:
                 files = candidate_files
-                input_schema = self._reconcile_required_fields_from_source(input_schema, files, scope="input")
-                connection_schema = self._reconcile_required_fields_from_source(connection_schema, files, scope="connection")
-                secret_schema = self._reconcile_required_fields_from_source(secret_schema, files, scope="secrets")
+                # Requiredness is already fixed by Formation Contract.  Source
+                # code is validated against it; it must not rewrite schema.required.
                 input_schema = self._merge_declared_schema(declared_input_schema, input_schema, default_name="input")
                 output_schema = self._merge_declared_schema(declared_output_schema, output_schema, default_name="output")
                 connection_schema = self._merge_declared_schema(declared_connection_schema, connection_schema, default_name="connection")
@@ -200,6 +221,22 @@ class RuntimeBlueprintArtifactGenerator:
                     input_schema = boundary["input_schema"]
                     connection_schema = boundary["connection_schema"]
                     secret_schema = boundary["secret_schema"]
+                    # Re-apply Formation Contract requiredness after merging any
+                    # LLM-returned schema properties.  LLM may enrich properties,
+                    # but must not make a second required/optional decision.
+                    normalized_from_contract = self.formation_builder.normalize_schemas_from_field_contracts({
+                        **(formation.get("contract") if isinstance(formation.get("contract"), dict) else {}),
+                        "schemas": {
+                            "input_schema": input_schema,
+                            "output_schema": output_schema,
+                            "connection_schema": connection_schema,
+                            "secret_schema": secret_schema,
+                        },
+                    })
+                    input_schema = normalized_from_contract.get("input_schema", input_schema)
+                    output_schema = normalized_from_contract.get("output_schema", output_schema)
+                    connection_schema = normalized_from_contract.get("connection_schema", connection_schema)
+                    secret_schema = normalized_from_contract.get("secret_schema", secret_schema)
                     verification_input = self._verification_input_with_schema_sample(boundary["verification_input"], input_schema, connection_schema, secret_schema)
                     specification_contract = self.contract_compiler.compile(
                         blueprint={**blueprint, **llm_artifact},
@@ -211,9 +248,8 @@ class RuntimeBlueprintArtifactGenerator:
                         verification_expectations=verification_expectations,
                     )
                     files = self._stabilize_standard_library_runtime_files(files, blueprint=blueprint)
-                    input_schema = self._reconcile_required_fields_from_source(input_schema, files, scope="input")
-                    connection_schema = self._reconcile_required_fields_from_source(connection_schema, files, scope="connection")
-                    secret_schema = self._reconcile_required_fields_from_source(secret_schema, files, scope="secrets")
+                    # Requiredness is already fixed by Formation Contract.  Source
+                    # code is validated against it; it must not rewrite schema.required.
                     boundary = self.schema_boundary.normalize(
                         input_schema=input_schema,
                         connection_schema=connection_schema,
@@ -472,6 +508,7 @@ class RuntimeBlueprintArtifactGenerator:
             "Return only one JSON object matching required_return_shape. "
             "Generate real executable Python code for the entrypoint. The entrypoint accepts one optional dict payload and returns a JSON-serializable dict. "
             "Payload sections are strict: input fields from payload['input'], connection fields from payload['connection'], secret fields from payload['secrets'], runtime flags from payload['_runtime']. "
+            "Required/optional status is defined only by formation_contract.field_contracts. Do not infer new required fields from code and do not change schema.required independently. "
             "Do not duplicate connection or secret fields into input. Do not store secrets in code, manifests, tests, logs, or ordinary input fields. "
             "Prefer Python standard library. Declare dependencies only when required by the supplied contract. "
             "Sandbox tests must not perform external network calls or live side effects; use dry_run or mocks when side effects require external services. "

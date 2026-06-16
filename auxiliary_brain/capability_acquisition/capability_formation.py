@@ -72,6 +72,12 @@ class CapabilityFormationContractBuilder:
             or ""
         ).strip()
         entrypoint = blueprint.get("entrypoint") if isinstance(blueprint.get("entrypoint"), dict) else {}
+        field_contracts = {
+            "input": self._field_contracts_from_schema(input_schema, scope="input"),
+            "output": self._field_contracts_from_schema(output_schema, scope="output"),
+            "connection": self._field_contracts_from_schema(connection_schema, scope="connection"),
+            "secrets": self._field_contracts_from_schema(secret_schema, scope="secrets"),
+        }
         contract = {
             "identity": {
                 "capability_id": capability_id,
@@ -87,6 +93,7 @@ class CapabilityFormationContractBuilder:
                 "connection_schema": connection_schema,
                 "secret_schema": secret_schema,
             },
+            "field_contracts": field_contracts,
             "runtime": runtime_execution_policy,
             "approval": approval_policy,
             "verification": {
@@ -113,12 +120,32 @@ class CapabilityFormationContractBuilder:
         if not str(entrypoint.get("module") or "").strip() or not str(entrypoint.get("function") or "").strip():
             missing.append("identity.entrypoint")
 
+        field_contracts = formation_contract.get("field_contracts") if isinstance(formation_contract.get("field_contracts"), dict) else {}
+        schema_to_scope = {
+            "input_schema": "input",
+            "output_schema": "output",
+            "connection_schema": "connection",
+            "secret_schema": "secrets",
+        }
         for schema_name in ("input_schema", "output_schema", "connection_schema", "secret_schema"):
             schema = schemas.get(schema_name)
             if not self._is_json_schema(schema):
                 missing.append(f"schemas.{schema_name}")
             elif schema_name in {"connection_schema", "secret_schema"} and not self._is_closed_schema(schema):
                 missing.append(f"schemas.{schema_name}.additionalProperties_false")
+            scope = schema_to_scope[schema_name]
+            contracts = field_contracts.get(scope) if isinstance(field_contracts.get(scope), dict) else {}
+            if not isinstance(contracts, dict):
+                missing.append(f"field_contracts.{scope}")
+            elif isinstance(schema, dict):
+                props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+                required = {str(x) for x in schema.get("required", []) if isinstance(x, str)} if isinstance(schema.get("required"), list) else set()
+                for field_name in props.keys():
+                    item = contracts.get(str(field_name)) if isinstance(contracts.get(str(field_name)), dict) else None
+                    if item is None or "required" not in item:
+                        missing.append(f"field_contracts.{scope}.{field_name}.required")
+                    elif bool(item.get("required")) != (str(field_name) in required):
+                        missing.append(f"field_contracts.{scope}.{field_name}.schema_required_mismatch")
 
         if not runtime:
             missing.append("runtime")
@@ -174,6 +201,105 @@ class CapabilityFormationContractBuilder:
             missing_contracts=sorted(set(missing)),
             generation_strategy=strategy,
         )
+
+
+    def normalize_schemas_from_field_contracts(self, formation_contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        """Derive schema.required arrays mechanically from Formation Contract.
+
+        Requiredness may be decided while forming the contract, but downstream
+        schemas are not allowed to make a second independent decision.  This
+        keeps schema, runtime validation, sandbox samples, and registry metadata
+        aligned without using capability names or field-name special cases.
+        """
+        if not isinstance(formation_contract, dict):
+            return {}
+        schemas = formation_contract.get("schemas") if isinstance(formation_contract.get("schemas"), dict) else {}
+        field_contracts = formation_contract.get("field_contracts") if isinstance(formation_contract.get("field_contracts"), dict) else {}
+        result: dict[str, dict[str, Any]] = {}
+        mapping = {
+            "input_schema": "input",
+            "output_schema": "output",
+            "connection_schema": "connection",
+            "secret_schema": "secrets",
+        }
+        for schema_name, scope in mapping.items():
+            schema = schemas.get(schema_name) if isinstance(schemas.get(schema_name), dict) else {}
+            contracts = field_contracts.get(scope) if isinstance(field_contracts.get(scope), dict) else {}
+            result[schema_name] = self._schema_with_required_from_contract(schema, contracts)
+        return result
+
+    def _schema_with_required_from_contract(self, schema: dict[str, Any], field_contract: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(schema) if isinstance(schema, dict) else {"type": "object", "properties": {}}
+        normalized.setdefault("type", "object")
+        props = normalized.get("properties") if isinstance(normalized.get("properties"), dict) else {}
+        normalized["properties"] = props
+        required: list[str] = []
+        for name in props.keys():
+            item = field_contract.get(str(name)) if isinstance(field_contract.get(str(name)), dict) else {}
+            if bool(item.get("required")) and str(name) not in required:
+                required.append(str(name))
+        normalized["required"] = required
+        if props:
+            normalized.setdefault("additionalProperties", False)
+        return normalized
+
+    def _field_contracts_from_schema(self, schema: dict[str, Any], *, scope: str) -> dict[str, dict[str, Any]]:
+        if not isinstance(schema, dict):
+            return {}
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        declared_required = {str(x) for x in schema.get("required", []) if isinstance(x, str)} if isinstance(schema.get("required"), list) else set()
+        has_declared_required_array = isinstance(schema.get("required"), list) and bool(schema.get("required"))
+        contracts: dict[str, dict[str, Any]] = {}
+        for name, raw_field_schema in props.items():
+            field_name = str(name)
+            field_schema = raw_field_schema if isinstance(raw_field_schema, dict) else {}
+            explicit = self._explicit_requiredness(field_schema)
+            if explicit is not None:
+                required = explicit
+                source = "field_explicit_requiredness"
+            elif field_name in declared_required:
+                required = True
+                source = "schema_required_array"
+            elif scope in {"connection", "secrets"} and not has_declared_required_array and not self._has_runtime_default(field_schema):
+                # Generic operational dependency rule: connection/secret values
+                # without an explicit default or optional marker are required to
+                # initialize a side-effecting runtime.  This is scope-based, not
+                # capability-name or field-name routing.
+                required = True
+                source = "operational_dependency_without_default"
+            else:
+                required = False
+                source = "contract_optional"
+            contracts[field_name] = {
+                "required": bool(required),
+                "source": source,
+                "has_default": self._has_runtime_default(field_schema),
+            }
+        return contracts
+
+    def _explicit_requiredness(self, field_schema: dict[str, Any]) -> bool | None:
+        for key in ("x-required", "required"):
+            if key in field_schema and isinstance(field_schema.get(key), bool):
+                return bool(field_schema.get(key))
+        for key in ("x-optional", "optional", "nullable"):
+            if key in field_schema and isinstance(field_schema.get(key), bool):
+                if bool(field_schema.get(key)):
+                    return False
+        return None
+
+    def _has_runtime_default(self, field_schema: dict[str, Any]) -> bool:
+        if not isinstance(field_schema, dict):
+            return False
+        if "default" in field_schema:
+            return True
+        if "const" in field_schema:
+            return True
+        typ = field_schema.get("type")
+        if isinstance(typ, list) and "null" in typ:
+            return True
+        if field_schema.get("nullable") is True:
+            return True
+        return False
 
     def _is_json_schema(self, value: Any) -> bool:
         if not isinstance(value, dict):
