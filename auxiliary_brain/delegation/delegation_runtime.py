@@ -22,6 +22,7 @@ from auxiliary_brain.runtime_tools.runtime_registered_tool_service import Runtim
 from auxiliary_brain.runtime.capability.registered_tool_parameter_bridge import RegisteredToolParameterBridge
 from auxiliary_brain.task_compiler import CompiledTaskLoader
 from ai_core.executors.tool_call_executor import ToolCallExecutor
+from auxiliary_brain.runtime.execution.reuse_policy import ExecutionReusePolicyClassifier, COMPILED_DIRECT
 
 
 class AgentDelegationRuntime:
@@ -46,6 +47,7 @@ class AgentDelegationRuntime:
         self.output_normalizer = OutputNormalizer()
         self.compiled_task_loader = CompiledTaskLoader()
         self.locked_tool_executor = ToolCallExecutor()
+        self.execution_reuse_policy_classifier = ExecutionReusePolicyClassifier()
 
     async def execute_task(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
         # If a validated compiled task artifact exists, use it as the execution
@@ -56,6 +58,8 @@ class AgentDelegationRuntime:
         authoritative = self._binding_task_graph_for_name(task_name) if task_name else None
         if isinstance(authoritative, dict) and authoritative.get("compiled_task"):
             task_graph = authoritative
+        if isinstance(task_graph, dict):
+            task_graph = self.execution_reuse_policy_classifier.apply_to_task_graph(task_graph)
         selected = self._fresh_task_participants(self._select_participants(task_graph, participants))
         selected = self._hydrate_runtime_bindings_for_task(task_graph, selected)
         return await self._execute_task_with_selected(task_graph, selected)
@@ -429,13 +433,16 @@ class AgentDelegationRuntime:
             "source_result_count": len(agent_results),
             "synthesis_result_count": len(synthesis_results),
         }
-        self._record_progress(run_payload, "final_synthesis", "Primary runtime synthesizing delegated results", "running")
-        synthesis = await self.primary_client.synthesize_delegated_results(
-            task_name=task_name,
-            task_instruction=task_instruction,
-            agent_results=synthesis_results,
-            shared_context={"community_id": community_id, "task_mind_graph": task_mind_graph},
-        )
+        self._record_progress(run_payload, "final_synthesis", "Synthesizing delegated results", "running")
+        if self._should_use_deterministic_synthesis(task_graph):
+            synthesis = self._deterministic_synthesis_from_results(task_name=task_name, agent_results=synthesis_results)
+        else:
+            synthesis = await self.primary_client.synthesize_delegated_results(
+                task_name=task_name,
+                task_instruction=task_instruction,
+                agent_results=synthesis_results,
+                shared_context={"community_id": community_id, "task_mind_graph": task_mind_graph},
+            )
         self._record_progress(run_payload, "final_synthesis_complete", "Final synthesis completed", "completed")
         delivery_id = new_id("delivery")
         delivery_payload = {
@@ -2689,6 +2696,40 @@ class AgentDelegationRuntime:
             workflow_results=workflow_results,
             origin="auxiliary_brain",
         )
+
+    def _should_use_deterministic_synthesis(self, task_graph: dict[str, Any]) -> bool:
+        if not isinstance(task_graph, dict):
+            return False
+        policy = task_graph.get("execution_reuse_policy") if isinstance(task_graph.get("execution_reuse_policy"), dict) else {}
+        if str(policy.get("mode") or "").strip().casefold() == COMPILED_DIRECT:
+            return True
+        return False
+
+    def _deterministic_synthesis_from_results(self, *, task_name: str, agent_results: list[Any]) -> dict[str, Any]:
+        terminal = []
+        for result in agent_results or []:
+            status = str(getattr(result, "status", "") or "").strip()
+            text = str(getattr(result, "final_answer", "") or "").strip()
+            payload = getattr(result, "workflow_results", None)
+            if not text and isinstance(payload, dict):
+                for key in ("final_answer", "answer", "output", "current_time", "text"):
+                    value = payload.get(key)
+                    if value not in (None, "", [], {}):
+                        text = str(value)
+                        break
+            if text:
+                terminal.append(text)
+            elif status and status != "completed":
+                terminal.append(status)
+        final_answer = "\n".join(x for x in terminal if x).strip()
+        return {
+            "status": "completed" if final_answer else "completed_with_no_participant_result",
+            "final_answer": final_answer,
+            "synthesis_mode": "deterministic_compiled_direct",
+            "task_name": task_name,
+            "llm_used": False,
+            "replanned": False,
+        }
 
     async def _try_execute_generated_capability(
         self,

@@ -150,6 +150,12 @@ class RuntimeCapabilityGapImplementer:
         # Existing runtime templates may be used only when explicitly enabled for
         # compatibility by AI_CORE_ALLOW_TEMPLATE_FALLBACK=true.
         mark("TemplateResolver", "skipped", reason="template_less_blueprint_generation_is_default")
+        # Capability acquisition has its own lifecycle and must keep the
+        # original acquisition pipeline semantics.  It is not a scheduled/task
+        # execution path, so it must not be wrapped in a secondary worker that
+        # can detach the blueprint planner/materializer from the acquisition
+        # state machine.  Long-running protection is handled by the outer
+        # capability-acquisition job policy, not by splitting this stage again.
         planner_record = self._plan_capability_with_runtime_planner(
             user_input=user_input, identity_contract=identity_contract, evidence=evidence, event_contract=event_contract, state_run_id=run_id
         )

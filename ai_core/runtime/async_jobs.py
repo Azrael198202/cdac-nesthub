@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -23,7 +24,7 @@ class RuntimeAsyncJobStore:
         self._jobs: dict[str, dict[str, Any]] = {}
         self._tasks: dict[str, asyncio.Task[Any]] = {}
 
-    def submit(self, *, name: str, runner: Callable[[], Awaitable[dict[str, Any]]], metadata: dict[str, Any] | None = None, job_id: str | None = None) -> dict[str, Any]:
+    def submit(self, *, name: str, runner: Callable[[], Awaitable[dict[str, Any]]], metadata: dict[str, Any] | None = None, job_id: str | None = None, timeout_seconds: int | None = None) -> dict[str, Any]:
         job_id = str(job_id or f"job_{uuid4().hex[:16]}").strip() or f"job_{uuid4().hex[:16]}"
         now = self._now()
         record = {
@@ -33,6 +34,8 @@ class RuntimeAsyncJobStore:
             "created_at": now,
             "updated_at": now,
             "metadata": metadata if isinstance(metadata, dict) else {},
+            "timeout_seconds": self._resolve_timeout_seconds(timeout_seconds=timeout_seconds, metadata=metadata),
+            "watchdog": {"enabled": True, "last_heartbeat_at": now, "stale_after_seconds": self._resolve_stale_seconds(metadata=metadata)},
             "result": None,
             "error": None,
         }
@@ -62,7 +65,8 @@ class RuntimeAsyncJobStore:
         record = self._jobs.get(job_id) or self._read(job_id)
         if not isinstance(record, dict):
             return None
-        return self._merge_durable_runtime_state(record)
+        record = self._merge_durable_runtime_state(record)
+        return self._recover_stale_running_job(record)
 
     def _merge_durable_runtime_state(self, record: dict[str, Any]) -> dict[str, Any]:
         """Recover visible job result from durable runtime_state after reload.
@@ -81,6 +85,23 @@ class RuntimeAsyncJobStore:
         if not isinstance(run, dict):
             return record
         run_status = str(run.get("status") or "")
+        # Runtime state is the durable heartbeat for an isolated worker.
+        # The async job snapshot is process-local and may not be updated while
+        # the private worker is inside a long runtime stage, so polling this
+        # endpoint must merge runtime_state.updated_at back into the job
+        # watchdog.  This is generic lifecycle logic, not task-specific logic.
+        run_updated = run.get("updated_at")
+        if run_updated:
+            watchdog = record.get("watchdog") if isinstance(record.get("watchdog"), dict) else {}
+            if str(watchdog.get("last_heartbeat_at") or "") < str(run_updated):
+                recovered = dict(record)
+                watchdog = dict(watchdog)
+                watchdog["last_heartbeat_at"] = run_updated
+                recovered["watchdog"] = watchdog
+                recovered["updated_at"] = run_updated
+                self._jobs[job_id] = recovered
+                self._write(recovered)
+                record = recovered
         terminal = {"completed", "paused", "failed", "cancelled"}
         if run_status not in terminal:
             return record
@@ -114,8 +135,19 @@ class RuntimeAsyncJobStore:
                     items.append(item)
         except Exception:
             pass
-        items.sort(key=lambda x: str(x.get("updated_at") or x.get("created_at") or ""), reverse=True)
-        return items[: max(1, int(limit or 50))]
+        recovered_items = []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            job_id = str(item.get("job_id") or "")
+            if job_id and job_id in seen:
+                continue
+            if job_id:
+                seen.add(job_id)
+            recovered_items.append(self._recover_stale_running_job(self._merge_durable_runtime_state(item)))
+        recovered_items.sort(key=lambda x: str(x.get("updated_at") or x.get("created_at") or ""), reverse=True)
+        return recovered_items[: max(1, int(limit or 50))]
 
     async def _run(self, job_id: str, runner: Callable[[], Awaitable[dict[str, Any]]]) -> None:
         record = self._jobs.get(job_id)
@@ -124,6 +156,9 @@ class RuntimeAsyncJobStore:
         record["status"] = "running"
         record["started_at"] = self._now()
         record["updated_at"] = record["started_at"]
+        watchdog = record.get("watchdog") if isinstance(record.get("watchdog"), dict) else {}
+        watchdog["last_heartbeat_at"] = record["updated_at"]
+        record["watchdog"] = watchdog
         self._write(record)
         runtime_state_manager.emit(
             run_id=job_id,
@@ -142,7 +177,12 @@ class RuntimeAsyncJobStore:
             # sandbox validation, installs, or other blocking operations.  If
             # those operations run directly inside the server loop, other pages
             # such as Runtime State Console cannot load until the job ends.
-            result = await asyncio.to_thread(self._run_runner_in_private_loop, runner)
+            timeout_seconds = self._timeout_from_record(record)
+            worker_future = asyncio.to_thread(self._run_runner_in_private_loop, runner)
+            if timeout_seconds > 0:
+                result = await asyncio.wait_for(worker_future, timeout=timeout_seconds)
+            else:
+                result = await worker_future
             record["result"] = result if isinstance(result, dict) else {"value": result}
             result_status = str((record["result"] or {}).get("status") or "completed")
             record["status"] = "failed" if result_status in {"failed", "error"} else "completed"
@@ -182,8 +222,22 @@ class RuntimeAsyncJobStore:
             )
             runtime_state_manager.finish_run(job_id, status=record["status"], summary=f"Async job {record['status']}", output={"result_status": result_status})
         except Exception as exc:
+            timeout_type = isinstance(exc, asyncio.TimeoutError)
+            timeout_seconds = self._timeout_from_record(record)
+            message = (
+                f"Async runtime job exceeded timeout_seconds={timeout_seconds}. The durable job was marked failed so the UI can recover."
+                if timeout_type
+                else str(exc)
+            )
             record["status"] = "failed"
-            record["error"] = {"type": exc.__class__.__name__, "message": str(exc)}
+            record["error"] = {"type": "AsyncJobTimeout" if timeout_type else exc.__class__.__name__, "message": message, "timeout_seconds": timeout_seconds if timeout_type else None}
+            record["result"] = {
+                "ok": False,
+                "status": "failed",
+                "final_answer": message,
+                "error": record["error"],
+                "runtime_state": {"run_id": job_id, "state_url": f"/runtime-state?run_id={job_id}"},
+            }
             record["finished_at"] = self._now()
             record["updated_at"] = record["finished_at"]
             runtime_state_manager.emit(
@@ -193,11 +247,11 @@ class RuntimeAsyncJobStore:
                 kind="error",
                 status="failed",
                 title="Job failed",
-                message=str(exc),
+                message=message,
                 error=record["error"],
                 progress=100,
             )
-            runtime_state_manager.finish_run(job_id, status="failed", summary=str(exc), error=record["error"])
+            runtime_state_manager.finish_run(job_id, status="failed", summary=message, error=record["error"], output={"timeout_seconds": timeout_seconds} if timeout_type else None)
         self._write(record)
 
     def _run_runner_in_private_loop(self, runner: Callable[[], Awaitable[dict[str, Any]]]) -> Any:
@@ -205,6 +259,116 @@ class RuntimeAsyncJobStore:
         if inspect.isawaitable(value):
             return asyncio.run(value)
         return value
+
+    def _resolve_timeout_seconds(self, *, timeout_seconds: int | None = None, metadata: dict[str, Any] | None = None) -> int:
+        if timeout_seconds is not None:
+            try:
+                return max(0, int(timeout_seconds))
+            except Exception:
+                pass
+        meta = metadata if isinstance(metadata, dict) else {}
+        for key in ("timeout_seconds", "max_runtime_seconds", "job_timeout_seconds"):
+            if key in meta:
+                try:
+                    return max(0, int(meta.get(key) or 0))
+                except Exception:
+                    continue
+        try:
+            return max(0, int(os.getenv("AI_RUNTIME_ASYNC_JOB_TIMEOUT_SECONDS") or "900"))
+        except Exception:
+            return 900
+
+    def _resolve_stale_seconds(self, *, metadata: dict[str, Any] | None = None) -> int:
+        meta = metadata if isinstance(metadata, dict) else {}
+        for key in ("stale_after_seconds", "watchdog_stale_seconds"):
+            if key in meta:
+                try:
+                    return max(30, int(meta.get(key) or 0))
+                except Exception:
+                    continue
+        try:
+            return max(30, int(os.getenv("AI_RUNTIME_ASYNC_JOB_STALE_SECONDS") or "300"))
+        except Exception:
+            return 300
+
+    def _timeout_from_record(self, record: dict[str, Any]) -> int:
+        try:
+            return max(0, int(record.get("timeout_seconds") or 0))
+        except Exception:
+            return 0
+
+    def _parse_ts(self, value: Any) -> datetime | None:
+        try:
+            text = str(value or "")
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            dt = datetime.fromisoformat(text)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    def _stale_watchdog_enabled(self, record: dict[str, Any]) -> bool:
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        if metadata.get("stale_watchdog_enabled") is False:
+            return False
+        if str(metadata.get("job_family") or "").strip() == "capability_acquisition":
+            return False
+        watchdog = record.get("watchdog") if isinstance(record.get("watchdog"), dict) else {}
+        if watchdog.get("enabled") is False:
+            return False
+        return True
+
+    def _recover_stale_running_job(self, record: dict[str, Any]) -> dict[str, Any]:
+        status = str(record.get("status") or "")
+        if status not in {"queued", "running"}:
+            return record
+        job_id = str(record.get("job_id") or "")
+        if not job_id:
+            return record
+        timeout_seconds = self._timeout_from_record(record)
+        started_at = self._parse_ts(record.get("started_at") or record.get("created_at"))
+        watchdog = record.get("watchdog") if isinstance(record.get("watchdog"), dict) else {}
+        stale_after_seconds = self._resolve_stale_seconds(metadata={"stale_after_seconds": watchdog.get("stale_after_seconds")})
+        heartbeat_at = self._parse_ts(watchdog.get("last_heartbeat_at"))
+        updated_at = self._parse_ts(record.get("updated_at"))
+        last_activity_at = max([dt for dt in [heartbeat_at, updated_at, started_at] if dt is not None], default=None)
+        now_dt = datetime.now(timezone.utc)
+        timed_out = bool(timeout_seconds > 0 and started_at and (now_dt - started_at).total_seconds() > timeout_seconds)
+        stale = bool(
+            self._stale_watchdog_enabled(record)
+            and last_activity_at
+            and (now_dt - last_activity_at).total_seconds() > stale_after_seconds
+        )
+        if not timed_out and not stale:
+            return record
+        if timed_out:
+            message = f"Async runtime job exceeded timeout_seconds={timeout_seconds} without a terminal result. The durable job was recovered as failed."
+            error_type = "AsyncJobWatchdogTimeout"
+        else:
+            message = f"Async runtime job produced no progress for stale_after_seconds={stale_after_seconds}. The durable job was recovered as failed with a visible result."
+            error_type = "AsyncJobStaleNoProgress"
+        recovered = dict(record)
+        recovered["status"] = "failed"
+        recovered["updated_at"] = self._now()
+        recovered["finished_at"] = recovered.get("finished_at") or recovered["updated_at"]
+        recovered["error"] = {"type": error_type, "message": message, "timeout_seconds": timeout_seconds, "stale_after_seconds": stale_after_seconds}
+        recovered["result"] = {
+            "ok": False,
+            "status": "failed",
+            "final_answer": message,
+            "error": recovered["error"],
+            "runtime_state": {"run_id": job_id, "state_url": f"/runtime-state?run_id={job_id}"},
+            "durable_recovered": True,
+        }
+        self._jobs[job_id] = recovered
+        self._write(recovered)
+        try:
+            runtime_state_manager.finish_run(job_id, status="failed", summary=message, error=recovered["error"], output={"watchdog": recovered["error"].get("type")})
+        except Exception:
+            pass
+        return recovered
 
 
     def close_non_terminal_jobs_on_startup(self, *, reason: str = "Runtime process restarted before the async worker finished.") -> int:

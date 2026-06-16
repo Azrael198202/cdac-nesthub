@@ -130,9 +130,14 @@ def _maybe_start_scheduler_after_studio_payload(payload: dict[str, Any] | None) 
 
 
 async def _execute_due_task(task_name: str, task_graph: dict[str, Any] | None = None) -> dict[str, Any]:
+    # Scheduled executions must not reuse the request-facing AgentStudioService.
+    # Each worker owns a fresh service instance so mutable execution context,
+    # pending input state, selected participants, and runtime traces stay scoped
+    # to this scheduled dispatch.
+    worker_studio_service = AgentStudioService()
     authoritative_graph = None
     try:
-        loaded, _compiled = studio_service._load_authoritative_task_graph_for_execution(str(task_name or ""))
+        loaded, _compiled = worker_studio_service._load_authoritative_task_graph_for_execution(str(task_name or ""))
         authoritative_graph = loaded if isinstance(loaded, dict) else None
     except Exception:
         authoritative_graph = None
@@ -153,13 +158,23 @@ async def _execute_due_task(task_name: str, task_graph: dict[str, Any] | None = 
     if not payload_ids:
         selected_ids = [str(x).strip() for x in (task_graph.get("selected_participant_ids") or []) if str(x).strip()]
         payload_ids = [x for x in selected_ids if x not in controller_ids]
-    dispatch_run_id = f"scheduled_{task_name}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
-    return await studio_service.execute_task(
+    schedule_instance_id = str(policy.get("schedule_instance_id") or (task_graph.get("scheduled_execution_scope") or {}).get("schedule_instance_id") or f"schedule_{task_name}")
+    worker_id = str(policy.get("worker_id") or (task_graph.get("scheduled_execution_scope") or {}).get("worker_id") or "")
+    safe_schedule = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in schedule_instance_id)[:80]
+    dispatch_run_id = f"scheduled_{safe_schedule}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
+    return await worker_studio_service.execute_task(
         task_name,
         provided_inputs={
             "_scheduled_payload_dispatch": True,
             "_automated_runtime_dispatch": True,
             "_runtime_state_run_id": dispatch_run_id,
+            "_runtime_execution_scope": {
+                "kind": "scheduled_task",
+                "task_name": task_name,
+                "schedule_instance_id": schedule_instance_id,
+                "worker_id": worker_id,
+                "isolation": "fresh_service_private_worker",
+            },
             "_payload_only_selected_participant_ids": payload_ids,
         },
         instruction="",
@@ -1433,7 +1448,13 @@ async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any
         method="agent_studio_service",
         progress=25,
     )
-    payload = await studio_service.handle_message(
+    # Each runtime operation must be isolated from the request-facing service.
+    # User-created tasks, generated capabilities, tool calls, model calls, and
+    # repair/verification loops may block or mutate execution context.  A fresh
+    # service instance per dispatch prevents one task from freezing or polluting
+    # Agent Studio itself or another task execution.
+    operation_studio_service = AgentStudioService()
+    payload = await operation_studio_service.handle_message(
         normalized_message,
         provided_inputs=provided_inputs,
         uploaded_artifacts=req.uploaded_artifacts,
@@ -1486,20 +1507,77 @@ async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any
     return payload if isinstance(payload, dict) else {"ok": True, "status": "completed", "runtime_state": {"run_id": state_run_id, "state_url": f"/runtime-state?run_id={state_run_id}"}, "result": payload}
 
 
+def _agent_studio_message_should_run_isolated(req: AgentStudioRequest) -> bool:
+    """Return whether a user-submitted runtime operation should run in a worker.
+
+    The default is isolated execution.  The FastAPI request loop and the
+    request-facing AgentStudioService must stay responsive even when a generated
+    task performs long local model calls, filesystem work, sandbox validation,
+    tool execution, or retry/repair loops.  A caller may explicitly request a
+    synchronous diagnostic path with provided_inputs._sync=true.
+    """
+    provided = req.provided_inputs if isinstance(req.provided_inputs, dict) else {}
+    if bool(provided.get("_sync")):
+        return False
+    if str(os.getenv("AI_RUNTIME_AGENT_STUDIO_FORCE_SYNC") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    return True
+
+
+def _agent_studio_message_job_policy(req: AgentStudioRequest) -> dict[str, Any]:
+    """Return generic job lifecycle policy for Agent Studio messages.
+
+    Capability acquisition is a runtime-generation lifecycle, not a normal task
+    execution lifecycle.  It may write artifacts, validate code, and register
+    runtime contracts after the blueprint stage.  Therefore stale no-progress
+    recovery must not terminate it merely because a single acquisition phase is
+    quiet.  It still keeps an absolute timeout so truly abandoned jobs recover
+    with a visible result.
+    """
+    text = str(req.message or "").casefold()
+    provided = req.provided_inputs if isinstance(req.provided_inputs, dict) else {}
+    explicit_family = str(provided.get("_job_family") or "").strip()
+    is_acquisition = explicit_family == "capability_acquisition" or (
+        "acquire runtime capability" in text
+        or "runtime autonomous acquisition mode" in text
+        or "capability acquisition" in text
+    )
+    if is_acquisition:
+        return {
+            "job_family": "capability_acquisition",
+            "timeout_seconds": int(os.getenv("AI_RUNTIME_CAPABILITY_ACQUISITION_TIMEOUT_SECONDS", "3600") or "3600"),
+            "stale_after_seconds": int(os.getenv("AI_RUNTIME_CAPABILITY_ACQUISITION_STALE_SECONDS", "1800") or "1800"),
+            "stale_watchdog_enabled": False,
+        }
+    return {
+        "job_family": "task_execution",
+        "timeout_seconds": int(os.getenv("AI_RUNTIME_AGENT_STUDIO_TIMEOUT_SECONDS", "900") or "900"),
+        "stale_after_seconds": int(os.getenv("AI_RUNTIME_AGENT_STUDIO_STALE_SECONDS", "300") or "300"),
+        "stale_watchdog_enabled": True,
+    }
+
+
 @app.post("/api/agent-studio/message")
 async def agent_studio_message(req: AgentStudioRequest):
     try:
-        async_requested = bool(req.async_mode) or bool((req.provided_inputs or {}).get("_async"))
+        async_requested = _agent_studio_message_should_run_isolated(req) or bool(req.async_mode) or bool((req.provided_inputs or {}).get("_async"))
         if async_requested:
             job_id = f"job_{uuid4().hex[:16]}"
             merged_inputs = dict(req.provided_inputs or {})
             merged_inputs["_runtime_state_run_id"] = job_id
             req.provided_inputs = merged_inputs
+            job_policy = _agent_studio_message_job_policy(req)
             accepted = async_job_store.submit(
                 name="agent_studio_message",
                 runner=lambda: _handle_agent_studio_message(req),
-                metadata={"surface": "agent_studio", "session_id": req.session_id, "message_preview": str(req.message or "")[:120]},
+                metadata={
+                    "surface": "agent_studio",
+                    "session_id": req.session_id,
+                    "message_preview": str(req.message or "")[:120],
+                    **job_policy,
+                },
                 job_id=job_id,
+                timeout_seconds=int(job_policy.get("timeout_seconds") or 0),
             )
             accepted["runtime_state"] = {"run_id": job_id, "state_url": f"/runtime-state?run_id={job_id}"}
             return JSONResponse(accepted, status_code=202)
