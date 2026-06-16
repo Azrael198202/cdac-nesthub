@@ -71,6 +71,7 @@ class PrimaryBrainDelegationClient:
         state.setdefault("runtime_options", {})["delegation_mode"] = True
         state.setdefault("runtime_options", {})["auto_approve_reviews"] = True
         if progress_callback:
+            progress_callback({"type": "NODE_STARTED", "run_id": core_run_id, "node_id": "primary_runtime_prepare"})
             self.runtime.add_event_listener(core_run_id, progress_callback)
         try:
             await self._run_runtime_with_timeout(core_run_id, state, self.runtime.run_prepared(state))
@@ -319,6 +320,7 @@ class PrimaryBrainDelegationClient:
         # explicitly through shared_context when the dependency graph requires it.
         state["context_window"] = {"rolling_summary": "", "recent_turns": [], "open_items": [], "boundary": {}}
         if progress_callback:
+            progress_callback({"type": "NODE_STARTED", "run_id": runtime_run_id, "node_id": "primary_runtime_prepare"})
             self.runtime.add_event_listener(runtime_run_id, progress_callback)
         try:
             await self._run_runtime_with_timeout(runtime_run_id, state, self.runtime.run_prepared(state))
@@ -668,6 +670,7 @@ class PrimaryBrainDelegationClient:
 
         pending = state.get("pending_action") if isinstance(state, dict) else None
         if progress_callback:
+            progress_callback({"type": "NODE_STARTED", "run_id": core_run_id, "node_id": "primary_runtime_prepare"})
             self.runtime.add_event_listener(core_run_id, progress_callback)
         try:
             if isinstance(pending, dict):

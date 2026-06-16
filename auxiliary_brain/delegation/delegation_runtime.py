@@ -1201,15 +1201,21 @@ class AgentDelegationRuntime:
             task_graph["runtime_parameters"] = runtime_parameters
             return await self._execute_task_with_selected(task_graph, selected)
         if str(pending.get("kind") or "") in {"profile_secret_update_required", "profile_configuration_update_required"}:
-            run_payload.update({
-                "status": "paused",
-                "current_stage": str(pending.get("kind") or "profile_update_required"),
-                "message": str((pending.get("request") or {}).get("message") or pending.get("message") or "Update the selected profile and retry the task."),
-                "pending_action": pending,
-                "completed_at": self._now(),
-            })
-            self.store.write_json(f"generated/results/{run_id}.json", run_payload)
-            return run_payload
+            # Profile repair is an execution pause of a runtime-registered
+            # capability, not a reason to restart the whole task graph.  Once
+            # the user has saved the external profile/secret values, resume the
+            # paused registered-tool participant in-place and preserve all
+            # completed upstream step outputs.  If the profile is still not
+            # ready, the registered-tool executor will return the same
+            # actionable pause.  This keeps task-internal semantics strictly
+            # sequential: completed predecessor nodes are reused, the paused
+            # node is retried, and downstream nodes run only after it completes.
+            return await self._resume_registered_tool_confirmation(
+                run_payload=run_payload,
+                task_graph=task_graph,
+                participants=selected,
+                provided_inputs=provided_inputs,
+            )
         task_mind_graph = self._build_task_mind_graph(task_graph, selected)
         dependency_plan = task_mind_graph.get("agent_relation_analysis") or self._build_participant_dependency_plan(task_graph, selected)
         run_payload["participant_dependency_plan"] = dependency_plan
@@ -3239,17 +3245,22 @@ class AgentDelegationRuntime:
             )
         if status == "requires_human_confirmation":
             preview = result.get("preview") if isinstance(result.get("preview"), dict) else {}
+            message = "This runtime-generated capability requires confirmation before execution."
             return AgentExecutionResult(
                 participant_id=self._participant_identity(participant),
                 participant_name=self._participant_name(participant),
                 core_run_id=new_id("registered_tool_approval_required"),
-                status="paused",
-                final_answer="",
+                # This is not an abort. It is an explicit runtime interaction
+                # boundary. Use requires_input so the UI and async-job wrapper
+                # can show an actionable continuation instead of the ambiguous
+                # phrase "Runtime job paused".
+                status="requires_input",
+                final_answer=message,
                 workflow_results={"status": "requires_human_confirmation", "tool_id": tool_id, "preview": preview},
                 pending_action={
                     "kind": "runtime_tool_human_confirmation",
                     "tool_id": tool_id,
-                    "message": "This runtime-generated capability requires confirmation before execution.",
+                    "message": message,
                     "approval_policy": approval_policy or result.get("approval_policy"),
                     "preview": preview,
                     "request": {"input_mode": "confirmation", "fields": [
@@ -3887,7 +3898,11 @@ class AgentDelegationRuntime:
         except TypeError as exc:
             if "progress_callback" not in str(exc):
                 raise
-            return await self.primary_client.execute_workflow_step_request(request)
+            return await self._await_primary_operation_with_heartbeat(
+                self.primary_client.execute_workflow_step_request(request),
+                progress_callback=progress_callback,
+                node_id="workflow_step",
+            )
 
 
     async def _execute_intermediate_step_with_progress(self, request, progress_callback):
@@ -3908,7 +3923,11 @@ class AgentDelegationRuntime:
         except TypeError as exc:
             if "progress_callback" not in str(exc):
                 raise
-            return await self.primary_client.execute_workflow_step_request(request)
+            return await self._await_primary_operation_with_heartbeat(
+                self.primary_client.execute_workflow_step_request(request),
+                progress_callback=progress_callback,
+                node_id="intermediate_step",
+            )
 
     async def _execute_agent_request_with_progress(self, request, progress_callback):
         try:
@@ -3920,7 +3939,11 @@ class AgentDelegationRuntime:
         except TypeError as exc:
             if "progress_callback" not in str(exc):
                 raise
-            return await self.primary_client.execute_agent_request(request)
+            return await self._await_primary_operation_with_heartbeat(
+                self.primary_client.execute_agent_request(request),
+                progress_callback=progress_callback,
+                node_id="agent_request",
+            )
 
     async def _resume_agent_request_with_progress(self, payload, progress_callback, provided_inputs: dict[str, Any] | None = None):
         try:
@@ -3932,20 +3955,28 @@ class AgentDelegationRuntime:
         except TypeError as exc:
             if "progress_callback" not in str(exc):
                 raise
-            return await self.primary_client.resume_agent_request(payload, provided_inputs=provided_inputs)
+            return await self._await_primary_operation_with_heartbeat(
+                self.primary_client.resume_agent_request(payload, provided_inputs=provided_inputs),
+                progress_callback=progress_callback,
+                node_id="agent_resume",
+            )
 
     async def _await_primary_operation_with_heartbeat(self, awaitable, *, progress_callback, node_id: str):
-        """Await a delegated primary-runtime operation with generic heartbeat.
+        """Await a delegated primary-runtime operation with durable heartbeat.
 
-        Long external retrieval and iterative validation can legitimately run
-        for several minutes without producing node-level events.  This bridge
-        keeps the parent task alive without changing execution decisions.
+        Some primary-runtime paths still contain synchronous provider, web, or
+        verification calls inside an async coroutine.  If we await them in this
+        same event loop, those calls can block the loop and prevent the parent
+        task from publishing heartbeat events.  Run the delegated operation in a
+        private worker thread/event loop and keep the parent delegation loop free
+        to write durable progress.  This is generic runtime isolation: it does
+        not inspect task names, agent names, tools, or capability types.
         """
-        task = asyncio.create_task(awaitable)
+        worker_task = asyncio.create_task(asyncio.to_thread(self._run_awaitable_in_private_loop, awaitable))
         count = 0
-        while not task.done():
+        while not worker_task.done():
             try:
-                return await asyncio.wait_for(asyncio.shield(task), timeout=15)
+                return await asyncio.wait_for(asyncio.shield(worker_task), timeout=15)
             except asyncio.TimeoutError:
                 count += 1
                 if progress_callback:
@@ -3955,7 +3986,16 @@ class AgentDelegationRuntime:
                         "node_id": node_id,
                         "heartbeat_count": count,
                     })
-        return await task
+        return await worker_task
+
+    def _run_awaitable_in_private_loop(self, awaitable):
+        """Run a delegated coroutine to completion in a private event loop.
+
+        The parent async job must remain responsive even when a child runtime
+        performs blocking work.  This helper intentionally has no business
+        knowledge; it is only a generic execution-boundary adapter.
+        """
+        return asyncio.run(awaitable)
 
 
     def _build_primary_runtime_progress_bridge(

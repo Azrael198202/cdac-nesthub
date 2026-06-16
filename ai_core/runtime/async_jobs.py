@@ -117,7 +117,11 @@ class RuntimeAsyncJobStore:
                 "status": run_status,
                 "run_id": job_id,
                 "runtime_state": {"run_id": job_id, "state_url": f"/runtime-state?run_id={job_id}"},
-                "final_answer": run.get("summary") or f"Runtime job {run_status}. See Runtime State Console for details.",
+                "final_answer": run.get("summary") or (
+                    "Runtime job is waiting for required user input. See Runtime State Console for details."
+                    if run_status == "paused"
+                    else f"Runtime job {run_status}. See Runtime State Console for details."
+                ),
                 "durable_recovered": True,
             }
             self._jobs[job_id] = recovered
@@ -178,11 +182,27 @@ class RuntimeAsyncJobStore:
             # those operations run directly inside the server loop, other pages
             # such as Runtime State Console cannot load until the job ends.
             timeout_seconds = self._timeout_from_record(record)
-            worker_future = asyncio.to_thread(self._run_runner_in_private_loop, runner)
-            if timeout_seconds > 0:
-                result = await asyncio.wait_for(worker_future, timeout=timeout_seconds)
+            worker_task = asyncio.create_task(asyncio.to_thread(self._run_runner_in_private_loop, runner))
+            heartbeat_count = 1
+            self._heartbeat_running_job(record, heartbeat_count=heartbeat_count)
+            started_at_dt = self._parse_ts(record.get("started_at"))
+            while not worker_task.done():
+                try:
+                    wait_seconds = self._heartbeat_interval_seconds(record)
+                    if timeout_seconds > 0 and started_at_dt:
+                        elapsed = (datetime.now(timezone.utc) - started_at_dt).total_seconds()
+                        wait_seconds = max(0.05, min(wait_seconds, max(0.05, timeout_seconds - elapsed)))
+                    result = await asyncio.wait_for(asyncio.shield(worker_task), timeout=wait_seconds)
+                    break
+                except asyncio.TimeoutError:
+                    heartbeat_count += 1
+                    now_dt = datetime.now(timezone.utc)
+                    if timeout_seconds > 0 and started_at_dt and (now_dt - started_at_dt).total_seconds() > timeout_seconds:
+                        worker_task.cancel()
+                        raise asyncio.TimeoutError()
+                    self._heartbeat_running_job(record, heartbeat_count=heartbeat_count)
             else:
-                result = await worker_future
+                result = await worker_task
             record["result"] = result if isinstance(result, dict) else {"value": result}
             normalized = self._normalize_result_status(record["result"])
             record["result"] = normalized["result"]
@@ -308,6 +328,26 @@ class RuntimeAsyncJobStore:
                 "result": payload,
                 "error": {"type": "RuntimeOperationFailed", "message": str(payload.get("final_answer") or payload.get("message") or "Runtime operation failed.")},
             }
+
+        waiting_statuses = {"requires_input", "requires_key", "waiting_input", "paused", "blocked_waiting_input"}
+        if result_status in waiting_statuses:
+            payload = dict(payload)
+            payload["status"] = result_status
+            if not str(payload.get("final_answer") or payload.get("message") or "").strip():
+                interaction = payload.get("interaction_request") if isinstance(payload.get("interaction_request"), dict) else {}
+                pending = payload.get("pending_action") if isinstance(payload.get("pending_action"), dict) else {}
+                payload["final_answer"] = (
+                    str(interaction.get("message") or pending.get("message") or "").strip()
+                    or "Runtime job is waiting for required user input. See Runtime State Console for details."
+                )
+                payload["message"] = payload["final_answer"]
+            return {
+                "job_status": "paused",
+                "result_status": result_status,
+                "result": payload,
+                "error": None,
+            }
+
         return {"job_status": "completed", "result_status": result_status, "result": payload, "error": None}
 
     def _runtime_failure_reason(self, payload: dict[str, Any]) -> str:
@@ -340,6 +380,20 @@ class RuntimeAsyncJobStore:
         if inspect.isawaitable(value):
             return asyncio.run(value)
         return value
+
+
+    def _heartbeat_interval_seconds(self, record: dict[str, Any] | None = None) -> float:
+        metadata = record.get("metadata") if isinstance(record, dict) and isinstance(record.get("metadata"), dict) else {}
+        for key in ("heartbeat_interval_seconds", "async_job_heartbeat_seconds"):
+            if key in metadata:
+                try:
+                    return max(0.05, float(metadata.get(key) or 0))
+                except Exception:
+                    pass
+        try:
+            return max(0.05, float(os.getenv("AI_RUNTIME_ASYNC_JOB_HEARTBEAT_SECONDS") or "15"))
+        except Exception:
+            return 15.0
 
     def _resolve_timeout_seconds(self, *, timeout_seconds: int | None = None, metadata: dict[str, Any] | None = None) -> int:
         if timeout_seconds is not None:
@@ -407,6 +461,12 @@ class RuntimeAsyncJobStore:
             return record
         job_id = str(record.get("job_id") or "")
         if not job_id:
+            return record
+        live_task = self._tasks.get(job_id)
+        if live_task is not None and not live_task.done():
+            # A live worker in this process is responsible for absolute timeout
+            # and periodic heartbeat.  Durable stale recovery is reserved for
+            # reload/interrupted workers that no longer have an in-process task.
             return record
         timeout_seconds = self._timeout_from_record(record)
         started_at = self._parse_ts(record.get("started_at") or record.get("created_at"))
@@ -482,6 +542,46 @@ class RuntimeAsyncJobStore:
             self._write(record)
             count += 1
         return count
+
+
+    def _heartbeat_running_job(self, record: dict[str, Any], *, heartbeat_count: int) -> None:
+        """Publish durable progress while the worker thread is still active.
+
+        The child runtime may be doing a long local model call, external retrieval,
+        sandbox operation, or validation loop that cannot emit fine-grained events.
+        This heartbeat belongs to the generic async job wrapper, so it does not
+        assume any task, agent, tool, or capability type.  Absolute timeout still
+        controls genuinely abandoned jobs.
+        """
+        if not isinstance(record, dict):
+            return
+        now = self._now()
+        record["updated_at"] = now
+        watchdog = record.get("watchdog") if isinstance(record.get("watchdog"), dict) else {}
+        watchdog["last_heartbeat_at"] = now
+        watchdog["heartbeat_count"] = heartbeat_count
+        record["watchdog"] = watchdog
+        record["last_visible_progress"] = {
+            "kind": "async_job_heartbeat",
+            "heartbeat_count": heartbeat_count,
+            "at": now,
+        }
+        self._write(record)
+        try:
+            runtime_state_manager.emit(
+                run_id=str(record.get("job_id") or ""),
+                step_id="job.heartbeat",
+                level="developer",
+                kind="lifecycle",
+                status="running",
+                title="Job heartbeat",
+                message="The isolated async worker is still running.",
+                method="async_worker",
+                output={"heartbeat_count": heartbeat_count},
+                progress=None,
+            )
+        except Exception:
+            pass
 
     def _write(self, record: dict[str, Any]) -> None:
         try:
