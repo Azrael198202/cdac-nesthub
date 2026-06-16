@@ -23,6 +23,8 @@ from auxiliary_brain.runtime.capability.registered_tool_parameter_bridge import 
 from auxiliary_brain.task_compiler import CompiledTaskLoader
 from ai_core.executors.tool_call_executor import ToolCallExecutor
 from auxiliary_brain.runtime.execution.reuse_policy import ExecutionReusePolicyClassifier, COMPILED_DIRECT
+from auxiliary_brain.runtime.execution.characteristics import ExecutionCharacteristicsClassifier
+from ai_core.runtime.state import runtime_state_manager
 
 
 class AgentDelegationRuntime:
@@ -48,6 +50,7 @@ class AgentDelegationRuntime:
         self.compiled_task_loader = CompiledTaskLoader()
         self.locked_tool_executor = ToolCallExecutor()
         self.execution_reuse_policy_classifier = ExecutionReusePolicyClassifier()
+        self.execution_characteristics_classifier = ExecutionCharacteristicsClassifier()
 
     async def execute_task(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
         # If a validated compiled task artifact exists, use it as the execution
@@ -60,6 +63,7 @@ class AgentDelegationRuntime:
             task_graph = authoritative
         if isinstance(task_graph, dict):
             task_graph = self.execution_reuse_policy_classifier.apply_to_task_graph(task_graph)
+            task_graph = self.execution_characteristics_classifier.apply_to_task_graph(task_graph)
         selected = self._fresh_task_participants(self._select_participants(task_graph, participants))
         selected = self._hydrate_runtime_bindings_for_task(task_graph, selected)
         return await self._execute_task_with_selected(task_graph, selected)
@@ -70,6 +74,7 @@ class AgentDelegationRuntime:
         task_instruction = str(task_graph.get("instruction") or task_graph.get("objective") or "")
         community_id = str(task_graph.get("community_id") or "default")
         runtime_parameters = dict(task_graph.get("runtime_parameters") or {}) if isinstance(task_graph.get("runtime_parameters"), dict) else {}
+        parent_runtime_state_run_id = str(task_graph.get("_runtime_state_run_id") or runtime_parameters.get("_runtime_state_run_id") or runtime_parameters.get("_state_run_id") or "").strip()
         source_material = self._task_source_material(task_graph=task_graph, fallback_values=[task_instruction])
         if source_material:
             runtime_parameters.setdefault("_original_user_material", source_material)
@@ -102,6 +107,8 @@ class AgentDelegationRuntime:
             # invocation without asking the old primary-runtime checkpoint to
             # restore it.  This is task-run state, not persisted agent state.
             "runtime_parameters": runtime_parameters,
+            "parent_runtime_state_run_id": parent_runtime_state_run_id,
+            "execution_characteristics": task_graph.get("execution_characteristics") if isinstance(task_graph.get("execution_characteristics"), dict) else {},
         }
         self._record_progress(run_payload, "prepare", "Preparing delegation run", "running")
         self._record_global_mind_graph_progress(run_payload, task_mind_graph)
@@ -1717,6 +1724,52 @@ class AgentDelegationRuntime:
             "reason": "requested_output_provenance_fields" if requires_source_material else "not_declared",
         }
 
+
+    def _step_execution_characteristics(self, participant: dict[str, Any]) -> dict[str, Any]:
+        """Return execution characteristics for a delegated step.
+
+        Characteristics are derived from structural contracts only.  This keeps
+        the runtime generic: it never branches on participant names, task names,
+        capability ids, or domain terms.  If task compilation already attached a
+        policy, reuse it.  Otherwise classify the participant's contracts here
+        so delegated ai_core calls receive the same stale/heartbeat expectations
+        as compiled graph steps.
+        """
+        if not isinstance(participant, dict):
+            return self.execution_characteristics_classifier.classify_step({}, index=0)
+        existing = participant.get("execution_characteristics")
+        if isinstance(existing, dict) and existing:
+            return copy.deepcopy(existing)
+        step = {
+            "step_id": participant.get("compiled_step_id")
+            or participant.get("step_id")
+            or participant.get("source_step_id")
+            or participant.get("participant_id")
+            or participant.get("id"),
+            "source_contract": participant.get("source_contract") if isinstance(participant.get("source_contract"), dict) else self._step_source_contract(participant),
+            "freshness_contract": participant.get("freshness_contract") if isinstance(participant.get("freshness_contract"), dict) else participant.get("refresh_policy"),
+            "execution_contract": participant.get("execution_contract") if isinstance(participant.get("execution_contract"), dict) else participant.get("execution_reuse_policy"),
+            "validation_contract": participant.get("validation_contract") if isinstance(participant.get("validation_contract"), dict) else participant.get("evidence_budget"),
+            "prompt_profile": participant.get("prompt_profile") if isinstance(participant.get("prompt_profile"), dict) else {},
+        }
+        return self.execution_characteristics_classifier.classify_step(step, index=0)
+
+    def _step_evidence_budget(self, participant: dict[str, Any]) -> dict[str, Any]:
+        """Return the bounded evidence budget for a delegated step.
+
+        The budget is a runtime guardrail, not a business rule.  It is copied
+        from the compiled step when present, otherwise taken from the generic
+        execution-characteristics classifier.
+        """
+        if not isinstance(participant, dict):
+            return {}
+        existing = participant.get("evidence_budget")
+        if isinstance(existing, dict) and existing:
+            return copy.deepcopy(existing)
+        policy = self._step_execution_characteristics(participant)
+        budget = policy.get("evidence_budget") if isinstance(policy, dict) else {}
+        return copy.deepcopy(budget) if isinstance(budget, dict) else {}
+
     def _build_participant_shared_context(
         self,
         *,
@@ -1758,6 +1811,8 @@ class AgentDelegationRuntime:
                     "preferred_action_type": "use_uploaded_file",
                 },
                 "source_contract": self._step_source_contract(participant),
+                "execution_characteristics": self._step_execution_characteristics(participant),
+                "evidence_budget": self._step_evidence_budget(participant),
             }
             peer_results = self._peer_results_for_participant(participant, completed_results, dependency_plan)
             if peer_results:
@@ -1789,6 +1844,9 @@ class AgentDelegationRuntime:
                 "resolution_key": "artifact_id_or_filename",
                 "preferred_action_type": "use_uploaded_file",
             },
+            "source_contract": self._step_source_contract(participant),
+            "execution_characteristics": self._step_execution_characteristics(participant),
+            "evidence_budget": self._step_evidence_budget(participant),
         }
         peer_results = self._peer_results_for_participant(participant, completed_results, dependency_plan)
         if peer_results:
@@ -3818,9 +3876,10 @@ class AgentDelegationRuntime:
         returns a public StepResult.
         """
         try:
-            return await self.primary_client.execute_workflow_step_request(
-                request,
+            return await self._await_primary_operation_with_heartbeat(
+                self.primary_client.execute_workflow_step_request(request, progress_callback=progress_callback),
                 progress_callback=progress_callback,
+                node_id="workflow_step",
             )
         except AttributeError:
             return await self._execute_agent_request_with_progress(request, progress_callback)
@@ -3840,9 +3899,10 @@ class AgentDelegationRuntime:
         corrupt the step's intent/planning.
         """
         try:
-            return await self.primary_client.execute_workflow_step_request(
-                request,
+            return await self._await_primary_operation_with_heartbeat(
+                self.primary_client.execute_workflow_step_request(request, progress_callback=progress_callback),
                 progress_callback=progress_callback,
+                node_id="intermediate_step",
             )
         except TypeError as exc:
             if "progress_callback" not in str(exc):
@@ -3851,9 +3911,10 @@ class AgentDelegationRuntime:
 
     async def _execute_agent_request_with_progress(self, request, progress_callback):
         try:
-            return await self.primary_client.execute_agent_request(
-                request,
+            return await self._await_primary_operation_with_heartbeat(
+                self.primary_client.execute_agent_request(request, progress_callback=progress_callback),
                 progress_callback=progress_callback,
+                node_id="agent_request",
             )
         except TypeError as exc:
             if "progress_callback" not in str(exc):
@@ -3862,15 +3923,39 @@ class AgentDelegationRuntime:
 
     async def _resume_agent_request_with_progress(self, payload, progress_callback, provided_inputs: dict[str, Any] | None = None):
         try:
-            return await self.primary_client.resume_agent_request(
-                payload,
+            return await self._await_primary_operation_with_heartbeat(
+                self.primary_client.resume_agent_request(payload, progress_callback=progress_callback, provided_inputs=provided_inputs),
                 progress_callback=progress_callback,
-                provided_inputs=provided_inputs,
+                node_id="agent_resume",
             )
         except TypeError as exc:
             if "progress_callback" not in str(exc):
                 raise
             return await self.primary_client.resume_agent_request(payload, provided_inputs=provided_inputs)
+
+    async def _await_primary_operation_with_heartbeat(self, awaitable, *, progress_callback, node_id: str):
+        """Await a delegated primary-runtime operation with generic heartbeat.
+
+        Long external retrieval and iterative validation can legitimately run
+        for several minutes without producing node-level events.  This bridge
+        keeps the parent task alive without changing execution decisions.
+        """
+        task = asyncio.create_task(awaitable)
+        count = 0
+        while not task.done():
+            try:
+                return await asyncio.wait_for(asyncio.shield(task), timeout=15)
+            except asyncio.TimeoutError:
+                count += 1
+                if progress_callback:
+                    progress_callback({
+                        "type": "DELEGATION_HEARTBEAT",
+                        "run_id": "primary_runtime_pending",
+                        "node_id": node_id,
+                        "heartbeat_count": count,
+                    })
+        return await task
+
 
     def _build_primary_runtime_progress_bridge(
         self,
@@ -3929,6 +4014,12 @@ class AgentDelegationRuntime:
         node_id = str(event.get("node_id") or "runtime")
         stage_prefix = f"participant_{participant_index}_ai_core"
 
+        if event_type == "DELEGATION_HEARTBEAT":
+            return {
+                "stage": f"{stage_prefix}_{node_id}_heartbeat",
+                "label": f"Primary runtime still working: {node_id}",
+                "status": "running",
+            }
         if event_type == "NODE_STARTED":
             return {
                 "stage": f"{stage_prefix}_{node_id}",
@@ -4020,13 +4111,31 @@ class AgentDelegationRuntime:
 
     def _record_progress(self, run_payload: dict[str, Any], stage: str, label: str, status: str) -> None:
         run_payload["current_stage"] = stage
-        run_payload.setdefault("progress_events", []).append({
+        event = {
             "stage": stage,
             "label": label,
             "status": status,
             "at": self._now(),
-        })
+        }
+        run_payload.setdefault("progress_events", []).append(event)
         self.store.write_json(f"generated/results/{run_payload['run_id']}.json", run_payload)
+        parent_run_id = str(run_payload.get("parent_runtime_state_run_id") or "").strip()
+        if parent_run_id:
+            try:
+                runtime_state_manager.emit(
+                    run_id=parent_run_id,
+                    step_id=f"delegation.{stage}",
+                    level="advanced",
+                    kind="lifecycle",
+                    status=status if status in {"running", "completed", "failed", "waiting", "paused"} else "running",
+                    title="Delegation progress",
+                    message=str(label or stage),
+                    method="delegation_runtime",
+                    output={"delegation_run_id": run_payload.get("run_id"), "stage": stage},
+                    progress=None,
+                )
+            except Exception:
+                pass
 
 
     def _hydrate_runtime_bindings_for_task(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -2343,6 +2343,7 @@ class AgentStudioService:
                 return reuse_response
             task_graph = dict(task_graph)
             task_graph["runtime_parameters"] = runtime_parameters
+            task_graph["_runtime_state_run_id"] = state_run_id
             runtime_state_manager.emit(run_id=state_run_id, step_id="execution.graph", level="user", kind="lifecycle", status="running", title="Graph execution", message="Executing the locked task graph.", method="delegation_runtime", progress=20)
             result = await self.delegation_runtime.execute_task(task_graph, participants)
             runtime_state_manager.emit(run_id=state_run_id, step_id="execution.graph", level="developer", kind="output", status=str(result.get("status") or "completed"), title="Graph execution result", message=str(result.get("status") or "completed"), output={"run_id": result.get("run_id"), "status": result.get("status")}, progress=100)
