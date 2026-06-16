@@ -624,7 +624,39 @@ class RuntimeCapabilityGapImplementer:
             if not isinstance(raw_blueprint, dict):
                 return {"status": "planner_failed", "reason": "planner_returned_no_blueprint", "confidence_score": confidence, "needs_external_evidence": True, "raw": payload}
             raw_blueprint = self._augment_blueprint_from_user_request(raw_blueprint, user_input=user_input)
-            template = self.blueprint_artifact_generator.materialize(raw_blueprint, identity_contract=identity_contract)
+            try:
+                runtime_state_manager.emit(
+                    run_id=state_run_id or "capability_planner",
+                    step_id="execution.artifact_generation",
+                    level="developer",
+                    kind="lifecycle",
+                    status="running",
+                    title="Artifact materialization",
+                    message="Blueprint accepted; materializing runtime artifact.",
+                    output={"phase": "materialize_started"},
+                    method="capability_acquisition",
+                    progress=68.0,
+                    next_action="generate_runtime_code",
+                )
+            except Exception:
+                pass
+            template = self.blueprint_artifact_generator.materialize(raw_blueprint, identity_contract=identity_contract, run_id=state_run_id)
+            try:
+                runtime_state_manager.emit(
+                    run_id=state_run_id or "capability_planner",
+                    step_id="execution.artifact_generation",
+                    level="developer",
+                    kind="output" if template.get("artifact_kind") == "real_runtime_implementation" else "error",
+                    status="completed" if template.get("artifact_kind") == "real_runtime_implementation" else "failed",
+                    title="Artifact materialization",
+                    message="Runtime artifact materialization finished.",
+                    output={"phase": "materialize_completed", "artifact_kind": template.get("artifact_kind"), "code_generation": template.get("code_generation")},
+                    method="capability_acquisition",
+                    progress=80.0,
+                    next_action="validate_runtime_artifact",
+                )
+            except Exception:
+                pass
             code_generation = template.get("code_generation") if isinstance(template.get("code_generation"), dict) else {}
             if template.get("artifact_kind") != "real_runtime_implementation":
                 return {

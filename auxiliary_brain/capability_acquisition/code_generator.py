@@ -5,7 +5,18 @@ import json
 import re
 import sys
 import time
+import threading
+from datetime import datetime, timezone
 from typing import Any
+
+try:
+    from ai_core.runtime.state import runtime_state_manager
+except Exception:  # pragma: no cover - optional runtime integration
+    runtime_state_manager = None
+try:
+    from auxiliary_brain.runtime.observability.runtime_console import emit_console_event
+except Exception:  # pragma: no cover - optional runtime integration
+    emit_console_event = None
 
 from ai_core.model_orchestration import LiteLLMBrainClient
 from auxiliary_brain.capability_acquisition.specification_contract_compiler import CapabilitySpecificationContractCompiler
@@ -30,7 +41,7 @@ class RuntimeBlueprintArtifactGenerator:
         self.contract_compiler = CapabilitySpecificationContractCompiler()
         self.schema_boundary = CapabilitySchemaBoundary()
 
-    def materialize(self, blueprint: dict[str, Any], *, identity_contract: dict[str, Any] | None = None) -> dict[str, Any]:
+    def materialize(self, blueprint: dict[str, Any], *, identity_contract: dict[str, Any] | None = None, run_id: str | None = None) -> dict[str, Any]:
         if not isinstance(blueprint, dict):
             blueprint = {}
         identity_contract = identity_contract or {}
@@ -140,6 +151,7 @@ class RuntimeBlueprintArtifactGenerator:
             if self._should_request_llm_generation(blueprint, identity_contract):
                 llm_artifact = self._generate_with_llm(
                     tool_id=tool_id,
+                    run_id=run_id,
                     entrypoint=entrypoint,
                     blueprint=blueprint,
                     identity_contract=identity_contract,
@@ -260,6 +272,7 @@ class RuntimeBlueprintArtifactGenerator:
         self,
         *,
         tool_id: str,
+        run_id: str | None,
         entrypoint: dict[str, Any],
         blueprint: dict[str, Any],
         identity_contract: dict[str, Any],
@@ -286,7 +299,17 @@ class RuntimeBlueprintArtifactGenerator:
                 specification_contract=specification_contract,
                 compact=bool(attempt.get("compact")),
             )
-            result = self.llm_client.complete_sync(
+            self._emit_generation_progress(
+                run_id=run_id,
+                tool_id=tool_id,
+                status="running",
+                phase="llm_request_started",
+                attempt=attempt,
+            )
+            result = self._complete_sync_with_heartbeat(
+                run_id=run_id,
+                tool_id=tool_id,
+                attempt=attempt,
                 brain="auxiliary_brain",
                 task_type="runtime_tool_code_generation",
                 complexity=str(attempt.get("complexity") or base_complexity),
@@ -298,6 +321,15 @@ class RuntimeBlueprintArtifactGenerator:
                     "generation_attempt": attempt,
                 },
                 response_format={"type": "json_object"} if attempt.get("force_json") else None,
+            )
+            self._emit_generation_progress(
+                run_id=run_id,
+                tool_id=tool_id,
+                status=str(result.status or "completed"),
+                phase="llm_response_received",
+                attempt=attempt,
+                route=result.route if isinstance(result.route, dict) else {},
+                error=result.error,
             )
             route = result.route if isinstance(result.route, dict) else {}
             record = {
@@ -359,74 +391,137 @@ class RuntimeBlueprintArtifactGenerator:
         specification_contract: dict[str, Any],
         compact: bool = False,
     ) -> list[dict[str, str]]:
+        """Build a compact, contract-only code generation prompt.
+
+        Code generation must not re-interpret the original user request.  The
+        planner/specification stages have already made the authoritative
+        decisions.  Keeping this prompt small reduces local-model latency and
+        avoids repeated intent/planning work during capability acquisition.
+        """
+        required_return_shape = {
+            "files": [
+                {"path": "tool.py", "content": "Python source code"},
+                {"path": "test_tool.py", "content": "plain Python test source code"},
+            ],
+            "input_schema": "JSON schema object",
+            "output_schema": "JSON schema object",
+            "connection_schema": "JSON schema object",
+            "secret_schema": "JSON schema object",
+            "dependencies": [
+                {"package": "pip package name", "import_name": "python import name", "auto_install": True}
+            ],
+            "verification_input": "JSON object used by sandbox validation",
+            "verification_expectations": "JSON object",
+            "capability_match_contract": "JSON object",
+        }
+        # Only pass normalized execution contracts.  Description is truncated and
+        # used as background text, not as a source for re-planning.
         contract = {
             "tool_id": tool_id,
             "entrypoint": entrypoint,
-            "blueprint": blueprint,
+            "capability_summary": str(blueprint.get("description") or "")[:1200 if compact else 2000],
             "identity_contract": identity_contract,
             "input_schema": input_schema,
             "output_schema": output_schema,
             "connection_schema": connection_schema,
             "secret_schema": secret_schema,
             "verification_input": verification_input,
-            "specification_contract": specification_contract,
-            "required_return_shape": {
-                "files": [{"path": "tool.py", "content": "Python source code"}, {"path": "test_tool.py", "content": "plain Python test source code"}],
-                "input_schema": "JSON schema object",
-                "output_schema": "JSON schema object",
-                "connection_schema": "JSON schema object",
-                "secret_schema": "JSON schema object",
-                "dependencies": [{"package": "pip package name", "import_name": "python import name", "auto_install": True}],
-                "verification_input": "JSON object used by sandbox validation",
-                "verification_expectations": "JSON object",
-                "capability_match_contract": "JSON object",
-            },
+            "runtime_execution_policy": blueprint.get("runtime_execution_policy") if isinstance(blueprint.get("runtime_execution_policy"), dict) else {},
+            "approval_policy": blueprint.get("approval_policy") if isinstance(blueprint.get("approval_policy"), dict) else {},
+            "capability_match_contract": blueprint.get("capability_match_contract") if isinstance(blueprint.get("capability_match_contract"), dict) else {},
+            "required_return_shape": required_return_shape,
         }
-        if compact:
-            contract = {
-                "tool_id": tool_id,
-                "entrypoint": entrypoint,
-                "description": str(blueprint.get("description") or "")[:1800],
-                "input_schema": input_schema,
-                "output_schema": output_schema,
-                "verification_input": verification_input,
-                "specification_contract": specification_contract,
-                "required_return_shape": contract["required_return_shape"],
-            }
+        if not compact:
+            compact_spec = self._compact_specification_contract(specification_contract)
+            if compact_spec:
+                contract["specification_contract"] = compact_spec
         system = (
-            "You generate runtime capability artifacts as JSON only. "
-            "Generate executable Python code that implements the supplied capability blueprint. "
-            "Do not use hardcoded sample results. Do not add domain assumptions not present in the blueprint. "
-            "Prefer the lowest sufficient implementation level first: standard-library and local deterministic code when it can satisfy the contract. "
-            "When the supplied contract, verification target, or previous failure evidence requires packages, declare the minimal required runtime dependencies in the dependencies array with accurate package and import names so the dependency-resolution layer can install and validate them. "
-            "Do not avoid dependencies by faking behavior, and do not add dependencies that are not needed for the verified objective. "
-            "If external documentation, web evidence, or a stronger model is needed, rely only on evidence and routing supplied by the acquisition/repair pipeline; do not invent undocumented APIs, endpoints, or package behavior. "
-            "Escalation is valid only when it is necessary to pass the declared verification contract and the generated artifact remains sandbox-testable. "
-            "The entrypoint function must accept one optional dict payload and return a JSON-serializable dict. "
-            "The payload may be either direct input fields or a runtime envelope with input, connection, secrets, and _runtime keys; read user parameters from payload['input'] when it is a dict, otherwise from the top-level payload. "
-            "Separate field lifecycle strictly. input_schema is only for invocation-time values supplied by the user, workflow variables, or previous step outputs. connection_schema is only for non-secret preset profile configuration. secret_schema is only for preset sensitive values. Generated code must read input fields only from payload['input'], connection fields only from payload['connection'], and secret fields only from payload['secrets']. Do not duplicate connection or secret fields into input_schema or verification_input['input']; do not ask task execution for preset profile values. "
-            "Do not store secrets in generated source code, generated manifests, tests, logs, or ordinary input fields; tests may use fake secret values only inside the secrets envelope or through mocks. "
-            "all nested output values must be JSON-native values such as strings, numbers, booleans, lists, dicts, or null. "
-            "The Python code must be real executable implementation code, not a placeholder, not blueprint-only, and not a stub. "
-            "The test file must be a plain Python script that uses only standard-library imports and assert statements; "
-            "do not import pytest or any external test runner. "
-            "The test file must run locally without external network calls and verify that json.dumps(run(payload)) succeeds only when the artifact can be exercised with sandbox-owned local inputs. "
-            "Sandbox validation is capability-independent and uses a generic execution policy. If the generated artifact requires preset connection profiles, secret material, credentials, accounts, SSL handshakes, external services, or user/runtime values that the sandbox cannot own, do not design tests that execute the live side-effect path. In that case, generated tests should remain import/contract/serialization safe or the sandbox will use static-only validation. "
-            "If the contract declares a local deterministic dry_run, mock, or test_mode path, extract payload['_runtime'] near the entrypoint start and honor that flag before external clients or irreversible side effects. This branch is recommended for externally effectful artifacts, but sandbox registration must not depend on real credentials. "
-            "Never initialize external clients, open network connections, require live credentials, mutate external systems, or perform irreversible side effects from generated tests. "
-            "Live execution may use connection and secret envelopes only after sandbox registration, profile configuration, and approval. "
-            "If live end-to-end verification needs real user values, expose those values through input_schema, connection_schema, and secret_schema so the runtime interaction layer can ask or load them after registration. "
-            "When a standard-library feature needs a platform support package to satisfy the contract, declare the support package rather than the standard-library module itself. "
-            "Never declare standard-library modules as pip dependencies. "
-            "Use the supplied specification_contract as the source of truth for field types, defaults, required values, formats, patterns, and output bindings. If the contract declares a user-facing format field or a format binding, generated code must implement the conversion or interpretation inside the generated implementation before formatting/parsing. Do not rely on sandbox or validator to repair formats. Do not return a declared format/template string itself as a runtime output value. "
-            "When reading optional fields, choose defaults that match the declared JSON schema type. Never call string methods on a value that may be a list, dict, boolean, number, or None. If code needs to split a value, first normalize the value with a generic helper that accepts string, list, tuple, set, None, and scalar values. "
-            "For iterable inputs, support both array values and delimiter-separated strings when the contract allows browser/runtime entry to provide either shape. Do not assume a missing optional field is a string or a list unless the contract declares that type. "
-            "Field requiredness is controlled only by each JSON schema required array in the supplied specification_contract. A field declared in properties is not required unless it is also listed in required. Do not use broad truthiness gates such as all([...]) or if not value to reject optional fields. Optional empty strings, empty lists, None, or absent fields must not cause a missing-required failure. When a side effect needs at least one of several optional alternatives, validate that generic group condition separately and report the actual group requirement without rewriting schema requiredness. "
-            "Generated tests for sandbox-executable artifacts should include a structural call with optional fields omitted or empty to prove optional fields are not hard-required. For artifacts that require live external values or secrets, do not execute the live path in sandbox tests; rely on schema/compile/static checks and runtime profile configuration for live use. "
-            "Return only a JSON object; no markdown, no prose."
+            "You are a runtime artifact generator. Use only the supplied artifact contract. "
+            "Do not reinterpret the original user request. Do not perform intent recognition, planning, research, or explanation. "
+            "Return only one JSON object matching required_return_shape. "
+            "Generate real executable Python code for the entrypoint. The entrypoint accepts one optional dict payload and returns a JSON-serializable dict. "
+            "Payload sections are strict: input fields from payload['input'], connection fields from payload['connection'], secret fields from payload['secrets'], runtime flags from payload['_runtime']. "
+            "Do not duplicate connection or secret fields into input. Do not store secrets in code, manifests, tests, logs, or ordinary input fields. "
+            "Prefer Python standard library. Declare dependencies only when required by the supplied contract. "
+            "Sandbox tests must not perform external network calls or live side effects; use dry_run or mocks when side effects require external services. "
+            "Do not hardcode dynamic output values except fake values used inside tests or dry-run mock branches. "
+            "No markdown. No prose. JSON only."
         )
-        user = "Generate the runtime artifact from this contract:\n" + json.dumps(contract, ensure_ascii=False, indent=2, default=str)
+        user = json.dumps(contract, ensure_ascii=False, separators=(",", ":"), default=str)
         return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+    def _compact_specification_contract(self, specification_contract: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(specification_contract, dict):
+            return {}
+        keep_keys = {
+            "capability_identity",
+            "verification_contract",
+            "output_bindings",
+            "security_contract",
+            "schema_version",
+        }
+        compact: dict[str, Any] = {k: specification_contract.get(k) for k in keep_keys if k in specification_contract}
+        # Bound the prompt size even if a prior stage attached verbose context.
+        raw = json.dumps(compact, ensure_ascii=False, default=str)
+        if len(raw) > 6000:
+            return {"schema_version": specification_contract.get("schema_version"), "summary": raw[:6000]}
+        return compact
+
+    def _complete_sync_with_heartbeat(self, *, run_id: str | None, tool_id: str, attempt: dict[str, Any], **kwargs: Any) -> Any:
+        stop = threading.Event()
+        started = time.time()
+
+        def beat() -> None:
+            while not stop.wait(15.0):
+                self._emit_generation_progress(
+                    run_id=run_id,
+                    tool_id=tool_id,
+                    status="running",
+                    phase="llm_request_waiting",
+                    attempt=attempt,
+                    elapsed_seconds=round(time.time() - started, 1),
+                )
+
+        thread = threading.Thread(target=beat, name=f"capability-codegen-heartbeat-{tool_id}", daemon=True)
+        thread.start()
+        try:
+            return self.llm_client.complete_sync(**kwargs)
+        finally:
+            stop.set()
+
+    def _emit_generation_progress(self, *, run_id: str | None, tool_id: str, status: str, phase: str, attempt: dict[str, Any] | None = None, **data: Any) -> None:
+        if not run_id:
+            return
+        payload = {"tool_id": tool_id, "phase": phase, "attempt": attempt or {}, **data}
+        try:
+            if emit_console_event is not None:
+                emit_console_event(
+                    area="capability_acquisition",
+                    event="ArtifactCodeGeneration",
+                    status=status,
+                    message=f"ArtifactCodeGeneration: {phase}",
+                    data=payload,
+                )
+        except Exception:
+            pass
+        try:
+            if runtime_state_manager is not None:
+                runtime_state_manager.emit(
+                    run_id=run_id,
+                    step_id="execution.artifact_code_generation",
+                    level="developer",
+                    kind="lifecycle" if status == "running" else ("error" if status == "failed" else "output"),
+                    status="running" if status == "running" else ("failed" if status == "failed" else "completed"),
+                    title="Artifact code generation",
+                    message=f"{phase} for {tool_id}",
+                    output=payload,
+                    method="capability_acquisition",
+                    progress=72.0 if status == "running" else 78.0,
+                    trace={"heartbeat_at": datetime.now(timezone.utc).isoformat()},
+                    next_action="wait_for_llm_code_generation" if status == "running" else "validate_generated_artifact",
+                )
+        except Exception:
+            pass
 
     def _parse_json_object(self, content: str) -> dict[str, Any] | None:
         text = str(content or "").strip()
@@ -1048,7 +1143,7 @@ def {function_name}(payload=None):
         complexities = order[start:]
         attempts: list[dict[str, Any]] = []
         for complexity in complexities:
-            attempts.append({"complexity": complexity, "force_json": True, "compact": False})
+            attempts.append({"complexity": complexity, "force_json": True, "compact": True})
             attempts.append({"complexity": complexity, "force_json": False, "compact": True})
         return attempts
 
