@@ -34,7 +34,6 @@ from verification_brain import RuntimeVerificationFoundation
 from presentation_brain import FailureMessageRenderer, PresentationProfileRegistry
 from ai_core.runtime.state import runtime_state_manager
 from auxiliary_brain.task_compiler import TaskGraphCompiler, CompiledTaskLoader
-from auxiliary_brain.runtime.execution.reuse_policy import ExecutionReusePolicyClassifier, COMPILED_DIRECT
 
 
 class AgentStudioService:
@@ -63,7 +62,6 @@ class AgentStudioService:
         self.verification_foundation = RuntimeVerificationFoundation()
         self.task_graph_compiler = TaskGraphCompiler()
         self.compiled_task_loader = CompiledTaskLoader()
-        self.execution_reuse_policy_classifier = ExecutionReusePolicyClassifier()
         self.failure_message_renderer = FailureMessageRenderer()
         self.direct_capability_dispatcher = CapabilityDispatcher(handlers={
             "image_generation": self._handle_direct_image_generation,
@@ -2242,8 +2240,6 @@ class AgentStudioService:
             }
         resolved_task_name = self._resolve_task_name(task_name) or str(task_name or "").strip()
         task_graph, compiled_loaded = self._load_authoritative_task_graph_for_execution(resolved_task_name)
-        if isinstance(task_graph, dict):
-            task_graph = self.execution_reuse_policy_classifier.apply_to_task_graph(task_graph)
         if not task_graph:
             return {
                 "action": "execute_task_graph",
@@ -2265,8 +2261,6 @@ class AgentStudioService:
                     "validation_report": compile_result.get("validation_report"),
                 }
             task_graph, compiled_loaded = self._load_authoritative_task_graph_for_execution(resolved_task_name)
-            if isinstance(task_graph, dict):
-                task_graph = self.execution_reuse_policy_classifier.apply_to_task_graph(task_graph)
             if not task_graph:
                 task_graph = self.store.read_json(f"generated/tasks/{task_name}.json") or {}
         execution_type = self._task_execution_type(task_graph)
@@ -2337,7 +2331,10 @@ class AgentStudioService:
             result = run_payload
         else:
             reuse_response = None
-            if self._task_graph_allows_execution_reuse(task_graph, participants):
+            if (
+                not payload_only_execution
+                and self._task_graph_allows_execution_reuse(task_graph, participants)
+            ):
                 reuse_response = await self._try_reused_task_execution(task_name, task_graph, participants, runtime_parameters)
             if reuse_response is not None:
                 return reuse_response
@@ -2394,29 +2391,11 @@ class AgentStudioService:
             )
             response["verification"] = {"status": "waiting_for_runtime_interaction"}
         else:
-            if self._should_use_lightweight_result_verification(task_graph, provided_inputs):
-                response["verification"] = {
-                    "status": "completed",
-                    "method": "lightweight_structural",
-                    "reason": "compiled_direct_scheduled_dispatch",
-                    "replanned": False,
-                }
-                runtime_state_manager.emit(run_id=state_run_id, step_id="result.verify", level="developer", kind="verification", status="completed", title="Result verification completed", message="lightweight_structural", output={"verification": response.get("verification")}, progress=100)
-            else:
-                runtime_state_manager.emit(run_id=state_run_id, step_id="result.verify", level="user", kind="verification", status="running", title="Result verification", message="Verifying execution material and response quality.", method="verification_brain", progress=40)
-                self._attach_verification_report(task_graph=task_graph, participants=participants, run_payload=result, response=response, stage="execute_task")
-                runtime_state_manager.emit(run_id=state_run_id, step_id="result.verify", level="developer", kind="verification", status="completed", title="Result verification completed", message=str((response.get("verification") or {}).get("status") or "completed"), output={"verification": response.get("verification")}, progress=100)
+            runtime_state_manager.emit(run_id=state_run_id, step_id="result.verify", level="user", kind="verification", status="running", title="Result verification", message="Verifying execution material and response quality.", method="verification_brain", progress=40)
+            self._attach_verification_report(task_graph=task_graph, participants=participants, run_payload=result, response=response, stage="execute_task")
+            runtime_state_manager.emit(run_id=state_run_id, step_id="result.verify", level="developer", kind="verification", status="completed", title="Result verification completed", message=str((response.get("verification") or {}).get("status") or "completed"), output={"verification": response.get("verification")}, progress=100)
         runtime_state_manager.emit(run_id=state_run_id, step_id="final.synthesis", level="user", kind="output", status=status, title="Final synthesis", message="Final response prepared for the user.", output={"status": status, "has_final_answer": bool(response.get("final_answer"))}, progress=100)
         return response
-
-    def _should_use_lightweight_result_verification(self, task_graph: dict[str, Any], provided_inputs: dict[str, Any] | None) -> bool:
-        if not isinstance(task_graph, dict):
-            return False
-        provided_inputs = provided_inputs or {}
-        if not bool(provided_inputs.get("_scheduled_payload_dispatch") or provided_inputs.get("_run_scheduled_payload_now")):
-            return False
-        policy = task_graph.get("execution_reuse_policy") if isinstance(task_graph.get("execution_reuse_policy"), dict) else {}
-        return str(policy.get("mode") or "").strip().casefold() == COMPILED_DIRECT
 
     async def resume_run(self, run_id: str, provided_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         run_id = (run_id or "").strip()

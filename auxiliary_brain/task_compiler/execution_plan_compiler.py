@@ -24,11 +24,9 @@ class ExecutionPlanCompiler:
                     "depends_on": step.get("depends_on") or [],
                     "bindings_in": [b.get("binding_id") for b in bindings if b.get("target_step") == step.get("step_id")],
                     "bindings_out": [b.get("binding_id") for b in bindings if b.get("source_step") == step.get("step_id")],
-                    "execution_reuse_policy": step.get("execution_reuse_policy") if isinstance(step.get("execution_reuse_policy"), dict) else {},
                 }
                 for step in steps
             ],
-            "execution_reuse_policy": task_graph.get("execution_reuse_policy") if isinstance(task_graph.get("execution_reuse_policy"), dict) else {},
             "binding_resolution": {
                 "resolver": "ResolveBinding",
                 "template_parsing_enabled": False,

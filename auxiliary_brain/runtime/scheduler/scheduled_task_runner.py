@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import inspect
 import json
 from datetime import datetime, timedelta, timezone
@@ -23,7 +22,6 @@ class ScheduledTaskRunner:
         self._task: asyncio.Task[Any] | None = None
         self._stopped = asyncio.Event()
         self._inflight: dict[str, asyncio.Task[Any]] = {}
-        self._worker_sequence = 0
 
     def start(self, executor: Callable[..., Awaitable[dict[str, Any]]], *, tick_seconds: int = 5) -> bool:
         """Start the background loop when an event loop is available.
@@ -137,19 +135,11 @@ class ScheduledTaskRunner:
                     "payload_participants": payload_ids,
                     "schedule_instance_id": schedule_instance_id,
                 })
-                worker_id = self._next_worker_id(schedule_instance_id)
                 dispatch_task = asyncio.create_task(
-                    self._dispatch_and_trace(executor, task_name, task_graph, schedule_instance_id, worker_id)
+                    self._dispatch_and_trace(executor, task_name, task_graph, schedule_instance_id)
                 )
                 self._inflight[schedule_instance_id] = dispatch_task
-                self._trace({
-                    "event": "isolated_worker_dispatched",
-                    "task_name": task_name,
-                    "schedule_instance_id": schedule_instance_id,
-                    "worker_id": worker_id,
-                    "isolation": "private_thread_private_event_loop",
-                })
-                executed.append({"task_name": task_name, "status": "dispatched", "schedule_instance_id": schedule_instance_id, "worker_id": worker_id})
+                executed.append({"task_name": task_name, "status": "dispatched", "schedule_instance_id": schedule_instance_id})
             except Exception as exc:
                 executed.append({"task_name": task_name, "status": "failed", "error": str(exc)})
                 self._trace({"event": "scheduled_task_dispatch_failed", "task_name": task_name, "error_type": exc.__class__.__name__, "error": str(exc)})
@@ -161,28 +151,9 @@ class ScheduledTaskRunner:
         task_name: str,
         task_graph: dict[str, Any],
         schedule_instance_id: str,
-        worker_id: str,
     ) -> None:
         try:
-            worker_graph = copy.deepcopy(task_graph)
-            worker_policy = worker_graph.get("schedule_policy") if isinstance(worker_graph.get("schedule_policy"), dict) else {}
-            worker_policy["schedule_instance_id"] = schedule_instance_id
-            worker_policy["worker_id"] = worker_id
-            worker_policy["execution_isolation"] = "private_thread_private_event_loop"
-            worker_graph["schedule_policy"] = worker_policy
-            worker_graph["scheduled_execution_scope"] = {
-                "task_name": task_name,
-                "schedule_instance_id": schedule_instance_id,
-                "worker_id": worker_id,
-                "isolation": "private_thread_private_event_loop",
-            }
-            self._trace({
-                "event": "isolated_worker_started",
-                "task_name": task_name,
-                "schedule_instance_id": schedule_instance_id,
-                "worker_id": worker_id,
-            })
-            result = await asyncio.to_thread(self._call_executor_in_private_loop, executor, task_name, worker_graph)
+            result = await self._call_executor(executor, task_name, task_graph)
             if not isinstance(result, dict):
                 result = {"status": "completed", "result": result}
             self._trace({
@@ -191,13 +162,12 @@ class ScheduledTaskRunner:
                 "result_status": result.get("status"),
                 "run_id": result.get("run_id"),
                 "schedule_instance_id": schedule_instance_id,
-                "worker_id": worker_id,
                 "missing_inputs": result.get("missing_inputs") or [],
                 "pending_action_kind": ((result.get("pending_action") or {}).get("kind") if isinstance(result.get("pending_action"), dict) else None),
             })
-            self._trace({"event": "scheduled_task_executed", "task_name": task_name, "schedule_instance_id": schedule_instance_id, "worker_id": worker_id, "result_status": result.get("status"), "run_id": result.get("run_id")})
+            self._trace({"event": "scheduled_task_executed", "task_name": task_name, "schedule_instance_id": schedule_instance_id, "result_status": result.get("status"), "run_id": result.get("run_id")})
         except Exception as exc:
-            self._trace({"event": "scheduled_task_execute_failed", "task_name": task_name, "schedule_instance_id": schedule_instance_id, "worker_id": worker_id, "error_type": exc.__class__.__name__, "error": str(exc)})
+            self._trace({"event": "scheduled_task_execute_failed", "task_name": task_name, "schedule_instance_id": schedule_instance_id, "error_type": exc.__class__.__name__, "error": str(exc)})
         finally:
             self._inflight.pop(schedule_instance_id, None)
 
@@ -212,14 +182,6 @@ class ScheduledTaskRunner:
         legacy = [path for path in self.tasks_dir.glob("*.json") if path.stem not in compiled_ids]
         return sorted(legacy + compiled_sources)
 
-
-    def _next_worker_id(self, schedule_instance_id: str) -> str:
-        self._worker_sequence += 1
-        safe = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(schedule_instance_id or "schedule"))[:80]
-        return f"worker_{safe}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}_{self._worker_sequence}"
-
-    def _call_executor_in_private_loop(self, executor: Callable[..., Awaitable[dict[str, Any]]], task_name: str, task_graph: dict[str, Any]) -> dict[str, Any]:
-        return asyncio.run(self._call_executor(executor, task_name, task_graph))
 
     async def _call_executor(self, executor: Callable[..., Awaitable[dict[str, Any]]], task_name: str, task_graph: dict[str, Any]) -> dict[str, Any]:
         """Call either legacy one-argument or graph-aware executors."""

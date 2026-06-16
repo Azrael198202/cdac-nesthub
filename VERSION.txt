@@ -1,1 +1,1 @@
-v23-isolated-workers-generic-execution-reuse-policy
+v24.1-layer-contract-boundary

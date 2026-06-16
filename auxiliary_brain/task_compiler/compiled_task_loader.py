@@ -6,13 +6,11 @@ from typing import Any
 import json
 
 from .project_paths import generated_tasks_dir
-from auxiliary_brain.runtime.execution.reuse_policy import ExecutionReusePolicyClassifier
 
 
 @dataclass(frozen=True)
 class CompiledTaskLoader:
     generated_root: Path = field(default_factory=generated_tasks_dir)
-    reuse_policy_classifier: ExecutionReusePolicyClassifier = field(default_factory=ExecutionReusePolicyClassifier)
 
     def load(self, task_id: str) -> dict[str, Any] | None:
         base = self.generated_root / self._safe(task_id)
@@ -39,7 +37,6 @@ class CompiledTaskLoader:
                     "execution_known": self._read_json(step_dir / "execution_known.json"),
                     "semantic_known": self._read_json(step_dir / "semantic_known.json"),
                     "task_metadata": self._read_json(step_dir / "task_metadata.json"),
-                    "execution_reuse_policy": self._read_json(step_dir / "execution_reuse_policy.json"),
                 })
         return {
             "task_id": self._safe(task_id),
@@ -76,17 +73,14 @@ class CompiledTaskLoader:
         graph["workflow_variable_contract"] = {
             "contract_type": "compiled_workflow_variable_contract",
             "bindings": bindings,
-            "execution_reuse_policy": ((compiled.get("manifest") or {}).get("execution_reuse_policy") if isinstance(compiled.get("manifest"), dict) else {}) or graph.get("execution_reuse_policy"),
             "template_parsing_enabled": False,
         }
-        graph = self.reuse_policy_classifier.apply_to_task_graph(graph)
         graph["compiled_task"] = {
             "task_id": compiled.get("task_id"),
             "base_path": compiled.get("base_path"),
             "manifest": compiled.get("manifest"),
             "execution_plan": compiled.get("execution_plan"),
             "bindings": bindings,
-            "execution_reuse_policy": ((compiled.get("manifest") or {}).get("execution_reuse_policy") if isinstance(compiled.get("manifest"), dict) else {}) or graph.get("execution_reuse_policy"),
             "contracts_applied_to_tasks": True,
             "selected_participant_ids_rebuilt_from_compiled_steps": True,
             "compiled_graph_is_execution_authority": True,
@@ -170,7 +164,6 @@ class CompiledTaskLoader:
                 "execution_known": step.get("execution_known") if isinstance(step.get("execution_known"), dict) else {},
                 "semantic_known": step.get("semantic_known") if isinstance(step.get("semantic_known"), dict) else {},
                 "task_metadata": step.get("task_metadata") if isinstance(step.get("task_metadata"), dict) else {},
-                "execution_reuse_policy": step.get("execution_reuse_policy") if isinstance(step.get("execution_reuse_policy"), dict) else {},
                 "capability_profile": profile,
                 "execution_policy": "runtime_registered_tool" if capability_id else str(original.get("execution_policy") or "delegate_to_ai_core"),
                 "workflow_step_type": "runtime_capability" if capability_id else str(original.get("workflow_step_type") or original.get("step_type") or "semantic_intermediate_step"),
@@ -218,7 +211,7 @@ class CompiledTaskLoader:
                 merged.append(dict(raw))
                 continue
             item = dict(raw)
-            for name in ("prompt_profile", "execution_contract", "source_contract", "presentation_contract", "binding_contract", "context_contract", "execution_known", "semantic_known", "task_metadata", "execution_reuse_policy"):
+            for name in ("prompt_profile", "execution_contract", "source_contract", "presentation_contract", "binding_contract", "context_contract", "execution_known", "semantic_known", "task_metadata"):
                 value = compiled.get(name)
                 if isinstance(value, dict):
                     item[name] = value

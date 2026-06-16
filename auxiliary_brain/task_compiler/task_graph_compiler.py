@@ -11,7 +11,6 @@ from .execution_plan_compiler import ExecutionPlanCompiler
 from .step_compiler import StepCompiler
 from .validation_compiler import TaskGraphCompileGate
 from .project_paths import generated_tasks_dir, ensure_prompt_profiles
-from auxiliary_brain.runtime.execution.reuse_policy import ExecutionReusePolicyClassifier
 
 
 @dataclass
@@ -21,7 +20,6 @@ class TaskGraphCompiler:
     binding_compiler: BindingCompiler = field(default_factory=BindingCompiler)
     execution_plan_compiler: ExecutionPlanCompiler = field(default_factory=ExecutionPlanCompiler)
     gate: TaskGraphCompileGate = field(default_factory=TaskGraphCompileGate)
-    reuse_policy_classifier: ExecutionReusePolicyClassifier = field(default_factory=ExecutionReusePolicyClassifier)
 
     def compile_validate_save(self, task_graph: dict[str, Any]) -> dict[str, Any]:
         ensure_prompt_profiles()
@@ -35,8 +33,7 @@ class TaskGraphCompiler:
 
     def compile(self, task_graph: dict[str, Any]) -> dict[str, Any]:
         task_id = self._task_id(task_graph)
-        steps = [self.reuse_policy_classifier.apply_to_compiled_step(step, index=i) for i, step in enumerate(self.step_compiler.compile_steps(task_graph), start=1)]
-        task_graph = self.reuse_policy_classifier.apply_to_task_graph(task_graph)
+        steps = self.step_compiler.compile_steps(task_graph)
         bindings = self.binding_compiler.compile(steps, task_graph)
         self._apply_binding_dependencies_to_steps(steps, bindings)
         execution_plan = self.execution_plan_compiler.compile(steps, bindings, task_graph)
@@ -56,7 +53,6 @@ class TaskGraphCompiler:
             "runtime_prompt_guessing": False,
             "binding_template_parsing_enabled": False,
             "execution_mode": "execute_compiled_task",
-            "execution_reuse_policy": task_graph.get("execution_reuse_policy") if isinstance(task_graph.get("execution_reuse_policy"), dict) else self.reuse_policy_classifier.classify_task([step.get("execution_reuse_policy") for step in steps if isinstance(step, dict)], task_graph),
             "schedule_policy": task_graph.get("schedule_policy") if isinstance(task_graph.get("schedule_policy"), dict) else {"enabled": False, "mode": "none"},
         }
         return {
@@ -118,7 +114,7 @@ class TaskGraphCompiler:
             step_dir = steps_dir / str(step.get("step_id") or "step")
             step_dir.mkdir(exist_ok=True)
             (step_dir / "instruction.txt").write_text(str(step.get("instruction") or ""), encoding="utf-8")
-            for name in ("prompt_profile", "execution_contract", "source_contract", "presentation_contract", "binding_contract", "execution_known", "semantic_known", "task_metadata", "execution_reuse_policy"):
+            for name in ("prompt_profile", "execution_contract", "source_contract", "presentation_contract", "binding_contract", "execution_known", "semantic_known", "task_metadata"):
                 self._write_json(step_dir / f"{name}.json", step.get(name) or {})
         self._write_json(base / "source_task_graph.json", compiled.get("source_task_graph") or {})
         return base
