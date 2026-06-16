@@ -39,3 +39,18 @@ python main.py
 Generated runtime tools are now checked by both execution smoke tests and runtime output contract checks. A tool cannot pass verification only by returning `status=completed`.
 
 The verifier rejects outputs that are copied placeholders or format strings, for example returning `yyyy-mm-dd` as a runtime value when the input format was `YYYY-MM-DD HH:mm`. For declared temporal formats, the returned temporal field must parse according to the requested format.
+
+## Fix: async job runtime failure propagation
+
+This version fixes a lifecycle wrapping bug where the async worker reported
+`Async job completed` even when the underlying runtime operation failed.
+
+Key changes:
+- Conversation runtime now propagates failed result_verification into the outer response status.
+- Async job store normalizes nested runtime verification and implementation status.
+- Agent Studio API infers terminal status from verification contracts, not just the outer wrapper.
+- Failed capability acquisition now returns a visible failure message instead of a misleading completed status.
+- Added tests for runtime failure visibility.
+
+Validation:
+- `pytest -q tests/runtime` => 15 passed

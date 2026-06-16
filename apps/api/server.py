@@ -1382,6 +1382,39 @@ async def perception_normalize(req: AgentStudioRequest):
         return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
 
 
+
+def _agent_studio_payload_status(payload: dict[str, Any]) -> str:
+    """Infer terminal status from runtime contract, not only outer wrapper.
+
+    The outer service may successfully synthesize a failure explanation.  That
+    must remain a failed runtime operation if result_verification or runtime
+    implementation status says the requested work did not complete.
+    """
+    status = str(payload.get("status") or "completed").strip() or "completed"
+    if status in {"failed", "error"}:
+        return "failed"
+    verification = payload.get("verification") if isinstance(payload.get("verification"), dict) else None
+    if verification is None:
+        workflow = payload.get("workflow_results") if isinstance(payload.get("workflow_results"), dict) else {}
+        verification = workflow.get("result_verification") if isinstance(workflow.get("result_verification"), dict) else None
+    failed_runtime_statuses = {
+        "sandbox_failed",
+        "not_registered",
+        "generated_but_validation_failed",
+        "generated_but_verification_failed",
+        "dependency_resolution_failed",
+        "code_generation_failed",
+        "planner_failed",
+        "planner_low_confidence",
+        "evidence_missing",
+    }
+    if isinstance(verification, dict) and verification.get("passed") is False:
+        runtime_status = str(verification.get("runtime_implementation_status") or "").strip()
+        if runtime_status in failed_runtime_statuses or verification.get("capability_gap_resolution"):
+            payload["status"] = "failed"
+            return "failed"
+    return status
+
 async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any]:
     provided_inputs = dict(req.provided_inputs or {})
     state_run_id = str(provided_inputs.get("_runtime_state_run_id") or provided_inputs.get("_state_run_id") or "").strip()
@@ -1495,7 +1528,7 @@ async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any
                 metadata={"action": str(payload.get("action") or ""), "perception_enabled": True},
             )
             payload["session_boundary"] = session_store.boundary_status(active_session_id)
-    final_status = str(payload.get("status") or "completed") if isinstance(payload, dict) else "completed"
+    final_status = _agent_studio_payload_status(payload) if isinstance(payload, dict) else "completed"
     waiting_statuses = {"requires_input", "requires_key", "waiting_input", "paused", "blocked_waiting_input"}
     terminal_status = "failed" if final_status in {"failed", "error"} else ("paused" if final_status in waiting_statuses else "completed")
     runtime_state_manager.finish_run(

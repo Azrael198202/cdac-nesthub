@@ -21,6 +21,7 @@ except Exception:  # pragma: no cover - optional runtime integration
 from ai_core.model_orchestration import LiteLLMBrainClient
 from auxiliary_brain.capability_acquisition.specification_contract_compiler import CapabilitySpecificationContractCompiler
 from auxiliary_brain.capability_acquisition.schema_boundary import CapabilitySchemaBoundary
+from auxiliary_brain.capability_acquisition.capability_formation import CapabilityFormationContractBuilder
 
 
 class RuntimeBlueprintArtifactGenerator:
@@ -40,6 +41,7 @@ class RuntimeBlueprintArtifactGenerator:
         self.llm_client = llm_client or LiteLLMBrainClient()
         self.contract_compiler = CapabilitySpecificationContractCompiler()
         self.schema_boundary = CapabilitySchemaBoundary()
+        self.formation_builder = CapabilityFormationContractBuilder()
 
     def materialize(self, blueprint: dict[str, Any], *, identity_contract: dict[str, Any] | None = None, run_id: str | None = None) -> dict[str, Any]:
         if not isinstance(blueprint, dict):
@@ -105,6 +107,20 @@ class RuntimeBlueprintArtifactGenerator:
             dependencies=dependencies,
         )
         approval_policy = self._approval_policy_or_default(blueprint.get("approval_policy"), runtime_execution_policy=runtime_execution_policy)
+        formation = self.formation_builder.build(
+            blueprint=blueprint,
+            identity_contract=identity_contract,
+            input_schema=input_schema,
+            output_schema=output_schema,
+            connection_schema=connection_schema,
+            secret_schema=secret_schema,
+            runtime_execution_policy=runtime_execution_policy,
+            approval_policy=approval_policy,
+            verification_input=verification_input,
+            verification_expectations=verification_expectations,
+            specification_contract=specification_contract,
+        )
+        self._emit_formation_progress(run_id=run_id, tool_id=tool_id, formation=formation)
         capability_contract = self._capability_contract(tool_id=tool_id, blueprint=blueprint)
         files = blueprint.get("files") if isinstance(blueprint.get("files"), list) else []
         artifact_kind = "blueprint_only_not_registerable"
@@ -161,6 +177,7 @@ class RuntimeBlueprintArtifactGenerator:
                     secret_schema=secret_schema,
                     verification_input=verification_input,
                     specification_contract=specification_contract,
+                    formation=formation,
                 )
                 generation_status = str(llm_artifact.get("generation_status") or "failed")
                 generation_route = llm_artifact.get("generation_route") if isinstance(llm_artifact.get("generation_route"), dict) else {}
@@ -257,6 +274,7 @@ class RuntimeBlueprintArtifactGenerator:
             "specification_contract": specification_contract,
             "acquisition_policy": blueprint.get("acquisition_policy") if isinstance(blueprint.get("acquisition_policy"), dict) else {"allow_llm_code_generation": True},
             "capability_match_contract": capability_contract,
+            "formation": formation,
             "artifact_kind": artifact_kind,
             "blueprint_source": blueprint.get("blueprint_source") or "runtime_blueprint_planner",
             "code_generation": {
@@ -282,10 +300,13 @@ class RuntimeBlueprintArtifactGenerator:
         secret_schema: dict[str, Any],
         verification_input: dict[str, Any],
         specification_contract: dict[str, Any],
+        formation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        formation = formation if isinstance(formation, dict) else {}
+        assessment = formation.get("assessment") if isinstance(formation.get("assessment"), dict) else {}
         base_complexity = self._generation_complexity(blueprint=blueprint, identity_contract=identity_contract)
         attempts: list[dict[str, Any]] = []
-        for attempt in self._generation_attempts(base_complexity):
+        for attempt in self._generation_attempts(base_complexity, formation_assessment=assessment):
             messages = self._generation_messages(
                 tool_id=tool_id,
                 entrypoint=entrypoint,
@@ -297,6 +318,7 @@ class RuntimeBlueprintArtifactGenerator:
                 secret_schema=secret_schema,
                 verification_input=verification_input,
                 specification_contract=specification_contract,
+                formation=formation,
                 compact=bool(attempt.get("compact")),
             )
             self._emit_generation_progress(
@@ -389,6 +411,7 @@ class RuntimeBlueprintArtifactGenerator:
         secret_schema: dict[str, Any],
         verification_input: dict[str, Any],
         specification_contract: dict[str, Any],
+        formation: dict[str, Any] | None = None,
         compact: bool = False,
     ) -> list[dict[str, str]]:
         """Build a compact, contract-only code generation prompt.
@@ -416,18 +439,26 @@ class RuntimeBlueprintArtifactGenerator:
         }
         # Only pass normalized execution contracts.  Description is truncated and
         # used as background text, not as a source for re-planning.
+        formation = formation if isinstance(formation, dict) else {}
+        formation_contract = formation.get("contract") if isinstance(formation.get("contract"), dict) else {}
+        formation_assessment = formation.get("assessment") if isinstance(formation.get("assessment"), dict) else {}
+        # Prefer the already validated formation contract.  The fallback below is
+        # still contract-only and does not include raw user text.
         contract = {
-            "tool_id": tool_id,
-            "entrypoint": entrypoint,
-            "capability_summary": str(blueprint.get("description") or "")[:1200 if compact else 2000],
-            "identity_contract": identity_contract,
-            "input_schema": input_schema,
-            "output_schema": output_schema,
-            "connection_schema": connection_schema,
-            "secret_schema": secret_schema,
-            "verification_input": verification_input,
-            "runtime_execution_policy": blueprint.get("runtime_execution_policy") if isinstance(blueprint.get("runtime_execution_policy"), dict) else {},
-            "approval_policy": blueprint.get("approval_policy") if isinstance(blueprint.get("approval_policy"), dict) else {},
+            "formation_contract": formation_contract or {
+                "tool_id": tool_id,
+                "entrypoint": entrypoint,
+                "identity_contract": identity_contract,
+                "schemas": {
+                    "input_schema": input_schema,
+                    "output_schema": output_schema,
+                    "connection_schema": connection_schema,
+                    "secret_schema": secret_schema,
+                },
+                "verification": {"verification_input": verification_input},
+            },
+            "formation_assessment": formation_assessment,
+            "capability_summary": str(blueprint.get("description") or "")[:800 if compact else 1200],
             "capability_match_contract": blueprint.get("capability_match_contract") if isinstance(blueprint.get("capability_match_contract"), dict) else {},
             "required_return_shape": required_return_shape,
         }
@@ -488,6 +519,41 @@ class RuntimeBlueprintArtifactGenerator:
             return self.llm_client.complete_sync(**kwargs)
         finally:
             stop.set()
+
+    def _emit_formation_progress(self, *, run_id: str | None, tool_id: str, formation: dict[str, Any]) -> None:
+        if not run_id:
+            return
+        assessment = formation.get("assessment") if isinstance(formation, dict) and isinstance(formation.get("assessment"), dict) else {}
+        payload = {"tool_id": tool_id, "formation_assessment": assessment}
+        try:
+            if emit_console_event is not None:
+                emit_console_event(
+                    area="capability_acquisition",
+                    event="CapabilityFormation",
+                    status=str(assessment.get("status") or "unknown"),
+                    message=f"CapabilityFormation: {assessment.get('level') or 'unknown'}",
+                    data=payload,
+                )
+        except Exception:
+            pass
+        try:
+            if runtime_state_manager is not None:
+                runtime_state_manager.emit(
+                    run_id=run_id,
+                    step_id="workflow.capability_formation",
+                    level="developer",
+                    kind="output" if assessment.get("passed") else "lifecycle",
+                    status="completed" if assessment.get("passed") else "running",
+                    title="Capability formation",
+                    message=f"formation {assessment.get('status') or 'unknown'} / {assessment.get('level') or 'unknown'}",
+                    output=payload,
+                    method="capability_acquisition",
+                    progress=66.0,
+                    trace={"heartbeat_at": datetime.now(timezone.utc).isoformat()},
+                    next_action="generate_runtime_artifact",
+                )
+        except Exception:
+            pass
 
     def _emit_generation_progress(self, *, run_id: str | None, tool_id: str, status: str, phase: str, attempt: dict[str, Any] | None = None, **data: Any) -> None:
         if not run_id:
@@ -1134,18 +1200,38 @@ def {function_name}(payload=None):
             return "medium"
         return "default"
 
-    def _generation_attempts(self, base_complexity: str) -> list[dict[str, Any]]:
-        order = ["basic", "medium", "high", "critical"]
+    def _generation_attempts(self, base_complexity: str, *, formation_assessment: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """Choose generic generation attempts from formation completeness.
+
+        This is not capability-name routing.  A mail sender, schedule recorder,
+        file transformer, or any other runtime capability may take the fast path
+        only when its formation contract is complete enough for generation.
+        """
+        formation_assessment = formation_assessment if isinstance(formation_assessment, dict) else {}
+        strategy = formation_assessment.get("generation_strategy") if isinstance(formation_assessment.get("generation_strategy"), dict) else {}
+        max_attempts = int(strategy.get("llm_attempts") or 0) if str(strategy.get("llm_attempts") or "").isdigit() else 0
+        level = str(formation_assessment.get("level") or "").strip()
         base = str(base_complexity or "default").strip().lower()
+        if level == "level_1_contract_complete":
+            complexity = "basic" if base in {"basic", "default", "medium"} else base
+            return [{"complexity": complexity, "force_json": True, "compact": True, "formation_level": level}]
+        if level == "level_2_contract_partial":
+            complexity = "medium" if base in {"default", "basic"} else base
+            attempts = [
+                {"complexity": complexity, "force_json": True, "compact": True, "formation_level": level},
+                {"complexity": complexity, "force_json": False, "compact": True, "formation_level": level},
+            ]
+            return attempts[:max_attempts or 2]
+        order = ["basic", "medium", "high", "critical"]
         if base not in order:
             base = "medium" if base == "default" else "high"
         start = order.index(base)
         complexities = order[start:]
         attempts: list[dict[str, Any]] = []
         for complexity in complexities:
-            attempts.append({"complexity": complexity, "force_json": True, "compact": True})
-            attempts.append({"complexity": complexity, "force_json": False, "compact": True})
-        return attempts
+            attempts.append({"complexity": complexity, "force_json": True, "compact": True, "formation_level": level or "unknown"})
+            attempts.append({"complexity": complexity, "force_json": False, "compact": True, "formation_level": level or "unknown"})
+        return attempts[:max_attempts or 4]
 
     def _capability_contract(self, *, tool_id: str, blueprint: dict[str, Any]) -> dict[str, Any]:
         declared = blueprint.get("capability_match_contract") if isinstance(blueprint.get("capability_match_contract"), dict) else {}

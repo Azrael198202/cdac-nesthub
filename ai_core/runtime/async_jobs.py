@@ -184,8 +184,12 @@ class RuntimeAsyncJobStore:
             else:
                 result = await worker_future
             record["result"] = result if isinstance(result, dict) else {"value": result}
-            result_status = str((record["result"] or {}).get("status") or "completed")
-            record["status"] = "failed" if result_status in {"failed", "error"} else "completed"
+            normalized = self._normalize_result_status(record["result"])
+            record["result"] = normalized["result"]
+            result_status = normalized["result_status"]
+            record["status"] = normalized["job_status"]
+            if record["status"] == "failed" and not record.get("error"):
+                record["error"] = normalized.get("error")
             record["finished_at"] = self._now()
             record["updated_at"] = record["finished_at"]
             runtime_state_manager.emit(
@@ -220,7 +224,8 @@ class RuntimeAsyncJobStore:
                 output={"result_status": result_status},
                 progress=100,
             )
-            runtime_state_manager.finish_run(job_id, status=record["status"], summary=f"Async job {record['status']}", output={"result_status": result_status})
+            summary = str((record.get("result") or {}).get("final_answer") or (record.get("result") or {}).get("message") or f"Async job {record['status']}")
+            runtime_state_manager.finish_run(job_id, status=record["status"], summary=summary[:1000], output={"result_status": result_status})
         except Exception as exc:
             timeout_type = isinstance(exc, asyncio.TimeoutError)
             timeout_seconds = self._timeout_from_record(record)
@@ -253,6 +258,82 @@ class RuntimeAsyncJobStore:
             )
             runtime_state_manager.finish_run(job_id, status="failed", summary=message, error=record["error"], output={"timeout_seconds": timeout_seconds} if timeout_type else None)
         self._write(record)
+
+
+    def _normalize_result_status(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Normalize a runtime result into async-job terminal semantics.
+
+        The async worker finishing successfully is not the same as the runtime
+        operation succeeding.  For example, a capability acquisition may reach
+        final_synthesis and produce a clear failure message because code
+        generation failed.  In that case the job must be marked failed and the
+        visible final_answer must contain the real reason, not the generic
+        phrase "Async job completed".
+        """
+        payload = result if isinstance(result, dict) else {"value": result}
+        result_status = str(payload.get("status") or "completed").strip() or "completed"
+        verification = self._deep_get_dict(payload, ["verification"]) or self._deep_get_dict(payload, ["workflow_results", "result_verification"])
+        runtime_status = ""
+        if isinstance(verification, dict):
+            runtime_status = str(verification.get("runtime_implementation_status") or "").strip()
+        failed_runtime_statuses = {
+            "sandbox_failed",
+            "not_registered",
+            "generated_but_validation_failed",
+            "generated_but_verification_failed",
+            "dependency_resolution_failed",
+            "code_generation_failed",
+            "planner_failed",
+            "planner_low_confidence",
+            "evidence_missing",
+        }
+        failed = result_status in {"failed", "error"}
+        if isinstance(verification, dict) and verification.get("passed") is False:
+            if runtime_status in failed_runtime_statuses or verification.get("capability_gap_resolution"):
+                failed = True
+        impl = self._deep_get_dict(payload, ["workflow_results", "execution", "capability_implementation", "runtime_implementation"])
+        if isinstance(impl, dict) and str(impl.get("status") or "").strip() in failed_runtime_statuses:
+            runtime_status = str(impl.get("status") or runtime_status)
+            failed = True
+        if failed:
+            payload = dict(payload)
+            payload["status"] = "failed"
+            if not str(payload.get("final_answer") or payload.get("message") or "").strip():
+                reason = self._runtime_failure_reason(payload) or runtime_status or result_status or "runtime_operation_failed"
+                payload["final_answer"] = f"Runtime operation failed: {reason}"
+                payload["message"] = payload["final_answer"]
+            return {
+                "job_status": "failed",
+                "result_status": "failed",
+                "result": payload,
+                "error": {"type": "RuntimeOperationFailed", "message": str(payload.get("final_answer") or payload.get("message") or "Runtime operation failed.")},
+            }
+        return {"job_status": "completed", "result_status": result_status, "result": payload, "error": None}
+
+    def _runtime_failure_reason(self, payload: dict[str, Any]) -> str:
+        for path in (
+            ["workflow_results", "execution", "capability_implementation", "runtime_implementation", "reason"],
+            ["workflow_results", "execution", "capability_implementation", "runtime_implementation", "code_generation", "error"],
+            ["workflow_results", "execution", "capability_implementation", "runtime_implementation", "status"],
+            ["verification", "runtime_implementation_status"],
+            ["workflow_results", "result_verification", "runtime_implementation_status"],
+        ):
+            value = self._deep_get(payload, path)
+            if str(value or "").strip():
+                return str(value)
+        return ""
+
+    def _deep_get_dict(self, payload: dict[str, Any], path: list[str]) -> dict[str, Any] | None:
+        value = self._deep_get(payload, path)
+        return value if isinstance(value, dict) else None
+
+    def _deep_get(self, payload: dict[str, Any], path: list[str]) -> Any:
+        cur: Any = payload
+        for key in path:
+            if not isinstance(cur, dict):
+                return None
+            cur = cur.get(key)
+        return cur
 
     def _run_runner_in_private_loop(self, runner: Callable[[], Awaitable[dict[str, Any]]]) -> Any:
         value = runner()

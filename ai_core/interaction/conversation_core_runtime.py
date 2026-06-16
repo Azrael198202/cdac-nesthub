@@ -128,13 +128,14 @@ class ConversationCoreRuntime:
         self._write_stage_trace(run_id, "final_synthesis", "completed", output)
 
         final_answer = str(output.get("final_answer") or output.get("message") or "").strip()
+        conversation_status = self._terminal_status_from_verification(verification=verification, output=output)
         self._persist_conversation_turn(active_session_id, run_id, state["input"], final_answer, state.get("results", {}))
         state["session_boundary"] = self.sessions.boundary_status(active_session_id)
         self._write_trace(state)
         return {
             "action": "conversation_message",
             "origin": "ai_core",
-            "status": "completed",
+            "status": conversation_status,
             "run_id": run_id,
             "message": final_answer,
             "final_answer": final_answer,
@@ -1294,6 +1295,40 @@ class ConversationCoreRuntime:
             "answer_material": answer,
             "knowledge_used": False,
         }
+
+
+    def _terminal_status_from_verification(self, *, verification: dict[str, Any], output: dict[str, Any]) -> str:
+        """Return the user-visible terminal status for the conversation run.
+
+        Final synthesis can succeed even when the underlying runtime operation
+        failed and produced a well-formed failure explanation.  The outer
+        conversation status must reflect the operation outcome, not merely that
+        final_synthesis produced text.  This is deliberately generic: it reads
+        verification contracts and runtime implementation status rather than
+        task names, agent names, or capability-specific words.
+        """
+        if not isinstance(verification, dict):
+            return str((output or {}).get("status") or "completed")
+        if verification.get("passed") is True:
+            return "completed"
+        runtime_status = str(verification.get("runtime_implementation_status") or "").strip()
+        failed_runtime_statuses = {
+            "sandbox_failed",
+            "not_registered",
+            "generated_but_validation_failed",
+            "generated_but_verification_failed",
+            "dependency_resolution_failed",
+            "code_generation_failed",
+            "planner_failed",
+            "planner_low_confidence",
+            "evidence_missing",
+        }
+        if runtime_status in failed_runtime_statuses:
+            return "failed"
+        if verification.get("capability_gap_resolution") and verification.get("passed") is False:
+            return "failed"
+        status = str((output or {}).get("status") or "completed").strip()
+        return "failed" if status in {"failed", "error"} else "completed"
 
     async def _output(
         self,
