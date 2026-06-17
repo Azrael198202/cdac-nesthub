@@ -39,7 +39,7 @@ class ModelProviderAutoConfigurator:
                 "workflow_planning": ["ollama", "openai", "claude"],
                 "reasoning": ["ollama", "openai", "claude"],
                 "stable_synthesis": ["ollama", "openai", "claude"],
-                "code_generation": ["ollama_coder_qwen25", "openai"],
+                "code_generation": ["ollama_coder_qwen25", "ollama_coder_deepseek_lite", "ollama_coder_deepseek_16b", "openai"],
                 "fallback": ["ollama", "openai", "claude"],
             },
             "providers": {
@@ -169,6 +169,52 @@ class ModelProviderAutoConfigurator:
                     "model_tags": ["local", "code_generation", "json_generation"],
                     "capabilities": ["code_generation", "json_generation"],
                 },
+
+                "ollama_coder_deepseek_lite": {
+                    "enabled": True,
+                    "type": "universal_model",
+                    "protocol": "ollama_chat",
+                    "base_url": "http://127.0.0.1:11434",
+                    "binary": "ollama",
+                    "auto_install": True,
+                    "auto_start": True,
+                    "auto_pull_missing_model": True,
+                    "model": "deepseek-coder-v2:lite",
+                    "fallback_models": ["deepseek-coder-v2:lite"],
+                    "timeout_seconds": 120,
+                    "model_tags": ["local", "code_generation", "json_generation"],
+                    "capabilities": ["code_generation", "json_generation"],
+                },
+                "ollama_coder_deepseek_16b": {
+                    "enabled": True,
+                    "type": "universal_model",
+                    "protocol": "ollama_chat",
+                    "base_url": "http://127.0.0.1:11434",
+                    "binary": "ollama",
+                    "auto_install": True,
+                    "auto_start": True,
+                    "auto_pull_missing_model": True,
+                    "model": "deepseek-coder-v2:16b",
+                    "fallback_models": ["deepseek-coder-v2:16b"],
+                    "timeout_seconds": 240,
+                    "model_tags": ["local", "code_generation", "json_generation"],
+                    "capabilities": ["code_generation", "json_generation"],
+                },
+                "ollama_coder_deepseek": {
+                    "enabled": True,
+                    "type": "universal_model",
+                    "protocol": "ollama_chat",
+                    "base_url": "http://127.0.0.1:11434",
+                    "binary": "ollama",
+                    "auto_install": True,
+                    "auto_start": True,
+                    "auto_pull_missing_model": True,
+                    "model": "deepseek-coder-v2:lite",
+                    "fallback_models": ["deepseek-coder-v2:lite", "deepseek-coder-v2:16b"],
+                    "timeout_seconds": 180,
+                    "model_tags": ["local", "code_generation", "json_generation"],
+                    "capabilities": ["code_generation", "json_generation"],
+                },
             },
             "policy": {
                 "require_real_provider": True,
@@ -201,7 +247,7 @@ class ModelProviderAutoConfigurator:
             names = [str(x) for x in route if str(x)]
             if not enable_vllm:
                 names = [x for x in names if not x.startswith("vllm")]
-            order = ["ollama", "ollama_coder_qwen25", "ollama_coder_deepseek", "openai", "claude", "lmstudio", "lmstudio_coder"]
+            order = ["ollama", "ollama_coder_qwen25", "ollama_coder_deepseek_lite", "ollama_coder_deepseek_16b", "ollama_coder_deepseek", "openai", "claude", "lmstudio", "lmstudio_coder"]
             ordered = [x for x in order if x in names]
             ordered.extend([x for x in names if x not in ordered])
             return ordered
@@ -214,7 +260,7 @@ class ModelProviderAutoConfigurator:
         rte = policy.get("runtime_execution_policy") if isinstance(policy.get("runtime_execution_policy"), dict) else {}
         if rte:
             rte["local_provider_order"] = normalize_route(rte.get("local_provider_order")) or ["ollama"]
-            rte["local_code_provider_order"] = normalize_route(rte.get("local_code_provider_order")) or ["ollama_coder_qwen25"]
+            rte["local_code_provider_order"] = normalize_route(rte.get("local_code_provider_order")) or ["ollama_coder_qwen25", "ollama_coder_deepseek_lite", "ollama_coder_deepseek_16b"]
             policy["runtime_execution_policy"] = rte
         config["policy"] = policy
         return config

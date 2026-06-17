@@ -8,6 +8,7 @@ import sys
 import time
 import threading
 import concurrent.futures
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -291,6 +292,32 @@ class RuntimeBlueprintArtifactGenerator:
         base_complexity = self._generation_complexity(blueprint=blueprint, identity_contract=identity_contract)
         attempts: list[dict[str, Any]] = []
         for attempt in self._generation_attempts(base_complexity):
+            available, availability_reason = self._codegen_attempt_available(attempt)
+            if not available:
+                record = {
+                    "status": "model_not_available",
+                    "route": {"attempt": attempt, "availability_reason": availability_reason},
+                    "attempt": attempt,
+                    "error": availability_reason,
+                    "content_excerpt": "",
+                }
+                attempts.append(record)
+                self._emit_generation_progress(
+                    run_id=run_id,
+                    tool_id=tool_id,
+                    status="running",
+                    phase="llm_attempt_skipped_model_not_available",
+                    attempt=attempt,
+                    error=availability_reason,
+                )
+                self._emit_generation_attempt_failed(
+                    run_id=run_id,
+                    tool_id=tool_id,
+                    attempt=attempt,
+                    record=record,
+                    attempts_so_far=attempts,
+                )
+                continue
             messages = self._generation_messages(
                 tool_id=tool_id,
                 entrypoint=entrypoint,
@@ -443,6 +470,52 @@ class RuntimeBlueprintArtifactGenerator:
             "generation_error": str(last.get("error") or "LLM did not produce a registerable runtime artifact."),
             "generation_attempts": attempts,
         }
+
+
+    def _codegen_attempt_available(self, attempt: dict[str, Any]) -> tuple[bool, str]:
+        """Preflight one code-generation model attempt before starting a long LLM call.
+
+        This is infrastructure-only validation. It does not inspect capability
+        names or task domains. It prevents a model-escalation route from waiting
+        for the full stage timeout when the selected local model is not actually
+        available in the runtime provider.
+        """
+        override = attempt.get("route_override") if isinstance(attempt, dict) else None
+        if not isinstance(override, dict):
+            return True, ""
+        provider = str(override.get("provider") or "").strip().casefold()
+        model = str(override.get("model") or "").strip()
+        if not model:
+            return False, "missing_model_in_codegen_route_override"
+        if provider != "ollama":
+            return True, ""
+        # By default acquisition must not spend minutes auto-pulling or waiting
+        # for a missing escalation model. Operators can disable this preflight
+        # with AI_RUNTIME_CODEGEN_SKIP_MODEL_PREFLIGHT=1 when they intentionally
+        # want provider-level auto preparation.
+        if str(os.getenv("AI_RUNTIME_CODEGEN_SKIP_MODEL_PREFLIGHT", "")).strip().lower() in {"1", "true", "yes", "on"}:
+            return True, ""
+        base_url = str(override.get("base_url") or os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434").rstrip("/")
+        try:
+            with urllib.request.urlopen(base_url + "/api/tags", timeout=2.5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            return False, f"ollama_service_unavailable_for_codegen_model:{model}: {str(exc)[:160]}"
+        names: set[str] = set()
+        for item in data.get("models", []) if isinstance(data, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            model_name = str(item.get("model") or "").strip()
+            if name:
+                names.add(name)
+                names.add(name.split(":", 1)[0] if ":" in name else name)
+            if model_name:
+                names.add(model_name)
+                names.add(model_name.split(":", 1)[0] if ":" in model_name else model_name)
+        if model in names or model.split(":", 1)[0] in names:
+            return True, ""
+        return False, f"ollama_codegen_model_not_installed:{model}. Run `ollama pull {model}` or choose an available code-generation model."
 
     def _generation_messages(
         self,
