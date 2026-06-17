@@ -150,10 +150,6 @@ class RuntimeBlueprintArtifactGenerator:
                 generation_status = "provided_blueprint_files_used"
                 provided_files_accepted = True
         if not provided_files_accepted:
-            # Capability behavior must be generated from the user-derived
-            # artifact contract.  The deterministic path is limited to
-            # artifact-envelope normalization/validation; it must never invent
-            # executable tool behavior for a capability class.
             if self._should_request_llm_generation(blueprint, identity_contract):
                 llm_artifact = self._generate_with_llm(
                     tool_id=tool_id,
@@ -218,15 +214,11 @@ class RuntimeBlueprintArtifactGenerator:
                     capability_contract = self._capability_contract(tool_id=tool_id, blueprint={**blueprint, **llm_artifact})
                     artifact_kind = "real_runtime_implementation"
                 else:
-                    generation_status = str(llm_artifact.get("generation_status") or "llm_generation_failed")
-                    generation_error = str(llm_artifact.get("generation_error") or "LLM did not produce executable artifact files after repair/escalation.")
-                    generation_route = llm_artifact.get("generation_route") if isinstance(llm_artifact.get("generation_route"), dict) else generation_route
                     files = self._neutral_files(tool_id=tool_id, entrypoint=entrypoint, reason=generation_error or generation_status)
             else:
                 generation_status = "llm_generation_not_allowed_by_policy"
-                generation_error = "Executable capability behavior was not generated because LLM code generation is disabled by acquisition policy."
-                generation_route = {"route": "no_executable_behavior_generated"}
-                files = self._neutral_files(tool_id=tool_id, entrypoint=entrypoint, reason=generation_error)
+                generation_error = "LLM code generation was not allowed by the acquisition policy."
+                files = self._neutral_files(tool_id=tool_id, entrypoint=entrypoint, reason="llm_generation_not_allowed_by_policy")
 
         final_boundary = self.schema_boundary.normalize(
             input_schema=input_schema,
@@ -387,9 +379,26 @@ class RuntimeBlueprintArtifactGenerator:
                     secret_schema=secret_schema,
                     verification_input=verification_input,
                 )
+                if not self._valid_generated_artifact(repaired):
+                    repaired = self._repair_artifact_with_llm(
+                        raw_content=str(result.content or ""),
+                        raw_artifact=parsed,
+                        tool_id=tool_id,
+                        run_id=run_id,
+                        attempt=attempt,
+                        entrypoint=entrypoint,
+                        blueprint=blueprint,
+                        identity_contract=identity_contract,
+                        input_schema=input_schema,
+                        output_schema=output_schema,
+                        connection_schema=connection_schema,
+                        secret_schema=secret_schema,
+                        verification_input=verification_input,
+                        specification_contract=specification_contract,
+                    )
                 if self._valid_generated_artifact(repaired):
                     parsed = repaired
-                    record["repair_status"] = "artifact_files_normalized"
+                    record["repair_status"] = "artifact_files_repaired"
                 else:
                     record["status"] = "invalid_generated_artifact"
                     record["error"] = "LLM JSON did not contain executable artifact files."
@@ -460,6 +469,7 @@ class RuntimeBlueprintArtifactGenerator:
             "tool_id": tool_id,
             "entrypoint": self._compact_entrypoint(entrypoint),
             "identity": self._compact_identity_contract(identity_contract, blueprint=blueprint, tool_id=tool_id),
+            "behavior_contract": self._compact_behavior_contract(blueprint, tool_id=tool_id),
             "schemas": {
                 "input": self._schema_for_codegen(input_schema),
                 "output": self._schema_for_codegen(output_schema),
@@ -483,18 +493,55 @@ class RuntimeBlueprintArtifactGenerator:
 
         system = (
             "You are a runtime artifact generator. Materialize ONLY the supplied compact contract. "
-            "Do not reinterpret requirements. Do not plan. Do not research. Do not explain. "
-            "Return JSON only. Required top-level keys: files,input_schema,output_schema,connection_schema,secret_schema,dependencies,verification_input,verification_expectations,capability_match_contract. "
-            "files must contain exactly executable tool.py and sandbox-safe test_tool.py. "
-            "tool.py must define the requested entrypoint accepting payload: dict|None and returning a JSON-serializable dict. "
+            "Do not plan, research, or explain. Return one JSON object only. No markdown. "
+            "The JSON object MUST include these top-level keys exactly: files,input_schema,output_schema,connection_schema,secret_schema,dependencies,verification_input,verification_expectations,capability_match_contract. "
+            "files MUST be a non-empty array of objects with path and content. It MUST include path='tool.py' and path='test_tool.py'. "
+            "tool.py MUST contain executable Python source, define the requested entrypoint, accept payload: dict|None, and return a JSON-serializable dict. "
+            "test_tool.py MUST import tool.py, run only dry-run/mock/local sandbox tests, and avoid external network or live side effects. "
+            "If schemas are empty or underspecified, derive a minimal schema from behavior_contract, then implement that schema. "
+            "Implement the behavior_contract in tool.py. Do not return placeholders, blueprint_generated, todo, not_implemented, or requires_runtime_implementation. "
             "Read input only from payload['input'], connection only from payload['connection'], secrets only from payload['secrets'], runtime flags only from payload['_runtime']. "
             "Never copy secrets into code, tests, logs, manifests, input schema, or connection schema. "
-            "Use Python standard library when possible. Dependencies must be [] unless truly required. "
-            "Tests must use dry_run/mocks and must not perform external network calls or live side effects. "
-            "Keep code compact, deterministic, and directly aligned with schemas. No markdown."
+            "Use Python standard library when possible. dependencies must be [] unless truly required."
         )
         user = json.dumps(contract, ensure_ascii=False, separators=(",", ":"), default=str)
         return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+    def _compact_behavior_contract(self, blueprint: dict[str, Any], *, tool_id: str) -> dict[str, Any]:
+        """Return bounded behavior requirements for artifact generation.
+
+        This is not a template and does not contain capability-specific code.
+        It preserves the user's requested behavior after blueprint/specification
+        stages so the code model can implement the capability instead of merely
+        generating an empty file envelope.
+        """
+        if not isinstance(blueprint, dict):
+            blueprint = {}
+        text_parts: list[str] = []
+        for key in ("behavior_contract", "runtime_behavior_requirements", "description", "summary"):
+            value = blueprint.get(key)
+            if isinstance(value, str) and value.strip():
+                text_parts.append(value.strip())
+            elif isinstance(value, (dict, list)) and value:
+                try:
+                    text_parts.append(json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str))
+                except Exception:
+                    text_parts.append(str(value))
+        # Preserve declared capability identity and interface hints without
+        # relying on business/domain words.  Values are opaque request data.
+        for key in ("capabilities", "required_terms", "match_terms"):
+            value = blueprint.get(key)
+            if isinstance(value, list) and value:
+                text_parts.append(f"{key}=" + json.dumps(value[:20], ensure_ascii=False, default=str))
+        joined = "\n".join(part for part in text_parts if part)
+        if len(joined) > 6000:
+            joined = joined[:6000] + "\n[truncated]"
+        return {
+            "tool_id": tool_id,
+            "requirements": joined,
+            "must_generate_executable_files": True,
+            "must_not_generate_placeholder": True,
+        }
 
     def _compact_entrypoint(self, entrypoint: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(entrypoint, dict):
@@ -780,15 +827,50 @@ class RuntimeBlueprintArtifactGenerator:
             normalized["files"] = converted
             return normalized
         # Some models put files inside a nested artifact/package object.
-        for key in ("artifact", "package", "runtime_artifact", "tool_artifact"):
+        for key in ("artifact", "package", "runtime_artifact", "tool_artifact", "implementation"):
             nested = normalized.get(key)
             if isinstance(nested, dict):
-                nested_files = self._coerce_files(nested.get("files") or nested.get("artifact_files") or nested.get("source_files"))
+                nested_files = self._coerce_files(
+                    nested.get("files")
+                    or nested.get("artifact_files")
+                    or nested.get("source_files")
+                    or nested.get("runtime_files")
+                    or nested.get("generated_files")
+                )
                 if nested_files:
                     merged = dict(nested)
                     merged.update(normalized)
                     merged["files"] = nested_files
                     return merged
+
+        # Generic salvage for models that return code under common scalar keys
+        # instead of the canonical file envelope.  This does not invent behavior;
+        # it only wraps model-provided source text into files.
+        files_from_scalars: list[dict[str, str]] = []
+        source_candidates = [
+            normalized.get("tool_py"),
+            normalized.get("tool_code"),
+            normalized.get("runtime_code"),
+            normalized.get("implementation_code"),
+            normalized.get("code"),
+        ]
+        for candidate in source_candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                files_from_scalars.append({"path": "tool.py", "content": candidate})
+                break
+        test_candidates = [
+            normalized.get("test_tool_py"),
+            normalized.get("test_code"),
+            normalized.get("tests"),
+            normalized.get("sandbox_test"),
+        ]
+        for candidate in test_candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                files_from_scalars.append({"path": "test_tool.py", "content": candidate})
+                break
+        if files_from_scalars:
+            normalized["files"] = files_from_scalars
+            return normalized
         return normalized
 
     def _coerce_files(self, value: Any) -> list[dict[str, str]]:
@@ -814,6 +896,103 @@ class RuntimeBlueprintArtifactGenerator:
                     result.append({"path": path_s, "content": str(content)})
             return result
         return []
+
+    def _repair_artifact_with_llm(
+        self,
+        *,
+        raw_content: str,
+        raw_artifact: dict[str, Any],
+        tool_id: str,
+        run_id: str | None,
+        attempt: dict[str, Any],
+        entrypoint: dict[str, Any],
+        blueprint: dict[str, Any],
+        identity_contract: dict[str, Any],
+        input_schema: dict[str, Any],
+        output_schema: dict[str, Any],
+        connection_schema: dict[str, Any],
+        secret_schema: dict[str, Any],
+        verification_input: dict[str, Any],
+        specification_contract: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Ask the selected code model to convert its invalid output into files.
+
+        The repair prompt is generic: it does not add behavior or use a hidden
+        template.  It gives the model the same compact contract plus its own
+        previous output and requires a canonical artifact envelope.
+        """
+        repair_contract = {
+            "tool_id": tool_id,
+            "entrypoint": self._compact_entrypoint(entrypoint),
+            "identity": self._compact_identity_contract(identity_contract, blueprint=blueprint, tool_id=tool_id),
+            "behavior_contract": self._compact_behavior_contract(blueprint, tool_id=tool_id),
+            "schemas": {
+                "input": self._schema_for_codegen(input_schema),
+                "output": self._schema_for_codegen(output_schema),
+                "connection": self._schema_for_codegen(connection_schema),
+                "secret": self._schema_for_codegen(secret_schema),
+            },
+            "verification_input": self._compact_json(verification_input, limit=1800),
+            "specification": self._compact_specification_contract(specification_contract),
+            "previous_output_excerpt": str(raw_content or json.dumps(raw_artifact, ensure_ascii=False, default=str))[:4000],
+            "repair_instruction": "Return only canonical JSON with files array containing executable tool.py and test_tool.py. Do not explain.",
+        }
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You repair invalid runtime artifact generation output. "
+                    "Do not invent a new plan. Use the supplied contract and previous output. "
+                    "Return one JSON object only with keys files,input_schema,output_schema,connection_schema,secret_schema,dependencies,verification_input,verification_expectations,capability_match_contract. "
+                    "files must be an array with path/content entries for tool.py and test_tool.py. No markdown."
+                ),
+            },
+            {"role": "user", "content": json.dumps(repair_contract, ensure_ascii=False, separators=(",", ":"), default=str)},
+        ]
+        repair_attempt = {**(attempt or {}), "repair": True, "force_json": True, "compact": True}
+        self._emit_generation_progress(
+            run_id=run_id,
+            tool_id=tool_id,
+            status="running",
+            phase="llm_artifact_repair_started",
+            attempt=repair_attempt,
+        )
+        result = self._complete_sync_with_heartbeat(
+            run_id=run_id,
+            tool_id=tool_id,
+            attempt=repair_attempt,
+            brain="auxiliary_brain",
+            task_type="runtime_tool_code_generation",
+            complexity=str((attempt or {}).get("complexity") or "high"),
+            messages=messages,
+            context={"tool_id": tool_id, "generation_attempt": repair_attempt, "repair": True},
+            response_format={"type": "json_object"},
+        )
+        self._emit_generation_progress(
+            run_id=run_id,
+            tool_id=tool_id,
+            status=str(result.status or "completed"),
+            phase="llm_artifact_repair_response_received",
+            attempt=repair_attempt,
+            route=result.route if isinstance(result.route, dict) else {},
+            error=result.error,
+        )
+        if result.status != "completed":
+            return {"generation_status": "invalid_generated_artifact", "generation_error": str(result.error or "artifact repair failed")}
+        parsed = self._parse_json_object(str(result.content or ""))
+        if not isinstance(parsed, dict):
+            return {"generation_status": "invalid_generated_artifact", "generation_error": "artifact repair did not return JSON object"}
+        parsed = self._normalize_llm_artifact_payload(parsed, tool_id=tool_id)
+        if self._valid_generated_artifact(parsed):
+            parsed.setdefault("input_schema", input_schema)
+            parsed.setdefault("output_schema", output_schema)
+            parsed.setdefault("connection_schema", connection_schema)
+            parsed.setdefault("secret_schema", secret_schema)
+            parsed.setdefault("verification_input", verification_input)
+            parsed.setdefault("verification_expectations", {"status": "completed"})
+            parsed.setdefault("dependencies", [])
+            return parsed
+        return {"generation_status": "invalid_generated_artifact", "generation_error": "artifact repair JSON still missing executable files"}
 
     def _repair_missing_artifact_files(
         self,
@@ -1737,13 +1916,6 @@ def {function_name}(payload=None):
         if typ == "object":
             return {}
         return "sample"
-
-    # Deterministic executable capability fallbacks were intentionally removed.
-    # The only deterministic work allowed in this generator is artifact-envelope
-    # normalization, schema boundary normalization, validation, staging, and
-    # atomic registry-safe metadata preparation.  Executable capability behavior
-    # must come from supplied files or LLM-generated files based on the
-    # user-derived artifact contract.
 
     def _neutral_files(self, *, tool_id: str, entrypoint: dict[str, Any], reason: str = "implementation_not_generated") -> list[dict[str, str]]:
         module = str(entrypoint.get("module") or "tool.py")
