@@ -150,6 +150,10 @@ class RuntimeBlueprintArtifactGenerator:
                 generation_status = "provided_blueprint_files_used"
                 provided_files_accepted = True
         if not provided_files_accepted:
+            # Capability behavior must be generated from the user-derived
+            # artifact contract.  The deterministic path is limited to
+            # artifact-envelope normalization/validation; it must never invent
+            # executable tool behavior for a capability class.
             if self._should_request_llm_generation(blueprint, identity_contract):
                 llm_artifact = self._generate_with_llm(
                     tool_id=tool_id,
@@ -214,9 +218,15 @@ class RuntimeBlueprintArtifactGenerator:
                     capability_contract = self._capability_contract(tool_id=tool_id, blueprint={**blueprint, **llm_artifact})
                     artifact_kind = "real_runtime_implementation"
                 else:
+                    generation_status = str(llm_artifact.get("generation_status") or "llm_generation_failed")
+                    generation_error = str(llm_artifact.get("generation_error") or "LLM did not produce executable artifact files after repair/escalation.")
+                    generation_route = llm_artifact.get("generation_route") if isinstance(llm_artifact.get("generation_route"), dict) else generation_route
                     files = self._neutral_files(tool_id=tool_id, entrypoint=entrypoint, reason=generation_error or generation_status)
             else:
-                files = self._neutral_files(tool_id=tool_id, entrypoint=entrypoint, reason="llm_generation_not_allowed_by_policy")
+                generation_status = "llm_generation_not_allowed_by_policy"
+                generation_error = "Executable capability behavior was not generated because LLM code generation is disabled by acquisition policy."
+                generation_route = {"route": "no_executable_behavior_generated"}
+                files = self._neutral_files(tool_id=tool_id, entrypoint=entrypoint, reason=generation_error)
 
         final_boundary = self.schema_boundary.normalize(
             input_schema=input_schema,
@@ -364,18 +374,35 @@ class RuntimeBlueprintArtifactGenerator:
                     attempts_so_far=attempts,
                 )
                 continue
+            parsed = self._normalize_llm_artifact_payload(parsed, tool_id=tool_id)
             if not self._valid_generated_artifact(parsed):
-                record["status"] = "invalid_generated_artifact"
-                record["error"] = "LLM JSON did not contain executable artifact files."
-                attempts.append(record)
-                self._emit_generation_attempt_failed(
-                    run_id=run_id,
+                repaired = self._repair_missing_artifact_files(
+                    raw_artifact=parsed,
                     tool_id=tool_id,
-                    attempt=attempt,
-                    record=record,
-                    attempts_so_far=attempts,
+                    entrypoint=entrypoint,
+                    blueprint=blueprint,
+                    input_schema=input_schema,
+                    output_schema=output_schema,
+                    connection_schema=connection_schema,
+                    secret_schema=secret_schema,
+                    verification_input=verification_input,
                 )
-                continue
+                if self._valid_generated_artifact(repaired):
+                    parsed = repaired
+                    record["repair_status"] = "artifact_files_normalized"
+                else:
+                    record["status"] = "invalid_generated_artifact"
+                    record["error"] = "LLM JSON did not contain executable artifact files."
+                    record["repair_error"] = str((repaired or {}).get("generation_error") or "artifact_file_repair_failed")[:1000] if isinstance(repaired, dict) else "artifact_file_repair_failed"
+                    attempts.append(record)
+                    self._emit_generation_attempt_failed(
+                        run_id=run_id,
+                        tool_id=tool_id,
+                        attempt=attempt,
+                        record=record,
+                        attempts_so_far=attempts,
+                    )
+                    continue
             contract_violations = self._generated_artifact_contract_violations(
                 parsed,
                 input_schema=input_schema,
@@ -730,6 +757,104 @@ class RuntimeBlueprintArtifactGenerator:
             except Exception:
                 return None
         return None
+
+    def _normalize_llm_artifact_payload(self, artifact: dict[str, Any], *, tool_id: str) -> dict[str, Any]:
+        """Normalize common model output shapes into the canonical artifact format.
+
+        Code models often return semantically correct content under keys such as
+        artifact_files, source_files, or a mapping of path -> content.  Rejecting
+        those shapes immediately causes unnecessary capability-generation failure
+        and model escalation.  This normalizer is capability-neutral: it only
+        converts file container shapes and never injects concrete business code.
+        """
+        if not isinstance(artifact, dict):
+            return {}
+        normalized = dict(artifact)
+        files = normalized.get("files")
+        for key in ("artifact_files", "source_files", "runtime_files", "generated_files"):
+            if not files and key in normalized:
+                files = normalized.get(key)
+                break
+        converted = self._coerce_files(files)
+        if converted:
+            normalized["files"] = converted
+            return normalized
+        # Some models put files inside a nested artifact/package object.
+        for key in ("artifact", "package", "runtime_artifact", "tool_artifact"):
+            nested = normalized.get(key)
+            if isinstance(nested, dict):
+                nested_files = self._coerce_files(nested.get("files") or nested.get("artifact_files") or nested.get("source_files"))
+                if nested_files:
+                    merged = dict(nested)
+                    merged.update(normalized)
+                    merged["files"] = nested_files
+                    return merged
+        return normalized
+
+    def _coerce_files(self, value: Any) -> list[dict[str, str]]:
+        if isinstance(value, list):
+            result: list[dict[str, str]] = []
+            for item in value:
+                if isinstance(item, dict):
+                    path = str(item.get("path") or item.get("filename") or item.get("name") or "").strip()
+                    content = item.get("content") if "content" in item else item.get("source")
+                    if not path or content is None:
+                        continue
+                    result.append({"path": path, "content": str(content)})
+            return result
+        if isinstance(value, dict):
+            result = []
+            for path, content in value.items():
+                if isinstance(content, dict):
+                    content = content.get("content") if "content" in content else content.get("source")
+                if content is None:
+                    continue
+                path_s = str(path or "").strip()
+                if path_s:
+                    result.append({"path": path_s, "content": str(content)})
+            return result
+        return []
+
+    def _repair_missing_artifact_files(
+        self,
+        *,
+        raw_artifact: dict[str, Any],
+        tool_id: str,
+        entrypoint: dict[str, Any],
+        blueprint: dict[str, Any],
+        input_schema: dict[str, Any],
+        output_schema: dict[str, Any],
+        connection_schema: dict[str, Any],
+        secret_schema: dict[str, Any],
+        verification_input: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Deterministically repair file-container omissions without capability-specific code.
+
+        This does not invent behavior.  If the model supplied source under a
+        non-canonical container, it is normalized.  If no executable source is
+        present, the repair returns a failed marker so the caller can escalate to
+        the next model route.
+        """
+        normalized = self._normalize_llm_artifact_payload(raw_artifact if isinstance(raw_artifact, dict) else {}, tool_id=tool_id)
+        if self._valid_generated_artifact(normalized):
+            return normalized
+        # Last generic salvage: top-level tool.py/test_tool.py keys.
+        files: list[dict[str, str]] = []
+        for key in ("tool.py", "test_tool.py"):
+            value = raw_artifact.get(key) if isinstance(raw_artifact, dict) else None
+            if isinstance(value, str) and value.strip():
+                files.append({"path": key, "content": value})
+        if files:
+            candidate = dict(raw_artifact)
+            candidate["files"] = files
+            candidate.setdefault("input_schema", input_schema)
+            candidate.setdefault("output_schema", output_schema)
+            candidate.setdefault("connection_schema", connection_schema)
+            candidate.setdefault("secret_schema", secret_schema)
+            candidate.setdefault("verification_input", verification_input)
+            if self._valid_generated_artifact(candidate):
+                return candidate
+        return {"generation_status": "invalid_generated_artifact", "generation_error": "artifact files missing or non-executable; escalate model route"}
 
     def _valid_generated_artifact(self, artifact: dict[str, Any]) -> bool:
         if not isinstance(artifact, dict):
@@ -1612,6 +1737,13 @@ def {function_name}(payload=None):
         if typ == "object":
             return {}
         return "sample"
+
+    # Deterministic executable capability fallbacks were intentionally removed.
+    # The only deterministic work allowed in this generator is artifact-envelope
+    # normalization, schema boundary normalization, validation, staging, and
+    # atomic registry-safe metadata preparation.  Executable capability behavior
+    # must come from supplied files or LLM-generated files based on the
+    # user-derived artifact contract.
 
     def _neutral_files(self, *, tool_id: str, entrypoint: dict[str, Any], reason: str = "implementation_not_generated") -> list[dict[str, str]]:
         module = str(entrypoint.get("module") or "tool.py")

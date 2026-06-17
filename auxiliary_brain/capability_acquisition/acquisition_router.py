@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1345,12 +1347,29 @@ class RuntimeCapabilityGapImplementer:
         dependency_resolution: dict[str, Any],
     ) -> dict[str, Any]:
         safe_id = self._safe_name(str(template.get("template_id") or "generated_capability"))
+        with self._capability_write_lock(safe_id, run_id=run_id):
+            return self._write_artifact_locked(
+                safe_id=safe_id,
+                template=template,
+                run_id=run_id,
+                evidence=evidence,
+                dependency_resolution=dependency_resolution,
+            )
+
+    def _write_artifact_locked(
+        self,
+        *,
+        safe_id: str,
+        template: dict[str, Any],
+        run_id: str,
+        evidence: dict[str, Any],
+        dependency_resolution: dict[str, Any],
+    ) -> dict[str, Any]:
         tool_dir = self.generated_dir / safe_id
-        # A capability acquisition run must be isolated.  Never reuse files,
-        # schemas, or manifests left by a previous capability with the same id.
-        if tool_dir.exists():
-            shutil.rmtree(tool_dir)
-        tool_dir.mkdir(parents=True, exist_ok=True)
+        staging_dir = self.generated_dir / f".{safe_id}.{self._safe_name(run_id or 'run')}.staging"
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+        staging_dir.mkdir(parents=True, exist_ok=True)
         files = template.get("files") if isinstance(template.get("files"), list) else []
         written: list[str] = []
         for item in files:
@@ -1359,15 +1378,16 @@ class RuntimeCapabilityGapImplementer:
             rel = self._safe_relative_path(str(item.get("path") or ""))
             if not rel:
                 continue
-            target = tool_dir / rel
+            target = staging_dir / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             content = str(item.get("content") or "")
             target.write_text(content, encoding="utf-8")
             written.append(str(target))
         tests_dir = self.generated_tests_dir / safe_id
-        if tests_dir.exists():
-            shutil.rmtree(tests_dir)
-        tests_dir.mkdir(parents=True, exist_ok=True)
+        tests_staging_dir = self.generated_tests_dir / f".{safe_id}.{self._safe_name(run_id or 'run')}.staging"
+        if tests_staging_dir.exists():
+            shutil.rmtree(tests_staging_dir)
+        tests_staging_dir.mkdir(parents=True, exist_ok=True)
         test_files: list[str] = []
         manifest = {
             "tool_id": safe_id,
@@ -1394,15 +1414,65 @@ class RuntimeCapabilityGapImplementer:
             "test_dir": str(tests_dir),
             "test_files": test_files,
         }
-        manifest_path = tool_dir / "manifest.json"
+        manifest_path = staging_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        generated_test = self._generic_contract_test_source(tool_dir=tool_dir, manifest_path=manifest_path)
-        test_target = tests_dir / "test_contract_smoke.py"
+        generated_test = self._generic_contract_test_source(tool_dir=staging_dir, manifest_path=manifest_path)
+        test_target = tests_staging_dir / "test_contract_smoke.py"
         test_target.write_text(generated_test, encoding="utf-8")
         test_files.append(str(test_target))
         manifest["test_files"] = test_files
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"tool_id": safe_id, "tool_dir": str(tool_dir), "test_dir": str(tests_dir), "manifest_path": str(manifest_path), "written_files": written, "test_files": test_files}
+        if tool_dir.exists():
+            shutil.rmtree(tool_dir)
+        staging_dir.rename(tool_dir)
+        if tests_dir.exists():
+            shutil.rmtree(tests_dir)
+        tests_staging_dir.rename(tests_dir)
+        final_written = [str(tool_dir / Path(path).relative_to(staging_dir)) if str(path).startswith(str(staging_dir)) else str(path) for path in written]
+        final_test_files = [str(tests_dir / Path(path).relative_to(tests_staging_dir)) if str(path).startswith(str(tests_staging_dir)) else str(path) for path in test_files]
+        final_manifest_path = tool_dir / "manifest.json"
+        final_manifest = json.loads(final_manifest_path.read_text(encoding="utf-8"))
+        final_manifest["written_files"] = final_written
+        final_manifest["test_files"] = final_test_files
+        final_manifest["test_dir"] = str(tests_dir)
+        final_manifest_path.write_text(json.dumps(final_manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"tool_id": safe_id, "tool_dir": str(tool_dir), "test_dir": str(tests_dir), "manifest_path": str(final_manifest_path), "written_files": final_written, "test_files": final_test_files}
+
+    @contextmanager
+    def _capability_write_lock(self, capability_id: str, *, run_id: str = ""):
+        """Serialize writes for the same capability id while allowing different ids in parallel."""
+        lock_root = RUNTIME_GENERATED / "locks"
+        lock_root.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_root / f"{self._safe_name(capability_id or 'generated_capability')}.lock"
+        timeout = int(os.getenv("AI_RUNTIME_CAPABILITY_WRITE_LOCK_TIMEOUT_SECONDS") or "60")
+        started = time.time()
+        fd: int | None = None
+        while fd is None:
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, json.dumps({"run_id": run_id, "created_at": datetime.now(timezone.utc).isoformat()}).encode("utf-8"))
+            except FileExistsError:
+                try:
+                    if time.time() - lock_path.stat().st_mtime > max(timeout, 1):
+                        lock_path.unlink(missing_ok=True)
+                        continue
+                except Exception:
+                    pass
+                if time.time() - started > timeout:
+                    raise TimeoutError(f"capability_write_lock_timeout:{capability_id}")
+                time.sleep(0.2)
+        try:
+            yield
+        finally:
+            try:
+                if fd is not None:
+                    os.close(fd)
+            except Exception:
+                pass
+            try:
+                lock_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _generic_contract_test_source(self, *, tool_dir: Path, manifest_path: Path) -> str:
         return """import importlib.util
@@ -2692,9 +2762,33 @@ def test_runtime_contract_smoke():
             return report
 
         RUNTIME_REGISTRY.mkdir(parents=True, exist_ok=True)
+        tool_id = str(artifact.get("tool_id") or template.get("template_id") or "generated_capability")
+        with self._registry_write_lock(tool_id):
+            return self._register_artifact_locked(
+                template=template,
+                artifact=artifact,
+                validation=validation,
+                verification_run=verification_run,
+                dependency_resolution=dependency_resolution,
+                evidence=evidence,
+                acquisition_gate=acquisition_gate,
+                tool_id=tool_id,
+            )
+
+    def _register_artifact_locked(
+        self,
+        *,
+        template: dict[str, Any],
+        artifact: dict[str, Any],
+        validation: dict[str, Any],
+        verification_run: dict[str, Any],
+        dependency_resolution: dict[str, Any],
+        evidence: dict[str, Any],
+        acquisition_gate: dict[str, Any] | None,
+        tool_id: str,
+    ) -> dict[str, Any]:
         registry = self._load_registry(self.registry_path)
         module_registry = self._load_registry(self.module_registry_path)
-        tool_id = str(artifact.get("tool_id") or template.get("template_id") or "generated_capability")
         entrypoint = template.get("entrypoint") if isinstance(template.get("entrypoint"), dict) else {}
         tool_record = {
             "tool_id": tool_id,
@@ -2752,9 +2846,50 @@ def test_runtime_contract_smoke():
         }
         registry[tool_id] = tool_record
         module_registry[tool_id] = module_record
-        self.registry_path.write_text(json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
-        self.module_registry_path.write_text(json.dumps(module_registry, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._atomic_json_write(self.registry_path, registry)
+        self._atomic_json_write(self.module_registry_path, module_registry)
         return {"status": "registered", "registry_path": str(self.registry_path), "module_registry_path": str(self.module_registry_path), "tool_record": tool_record, "module_record": module_record}
+
+    @contextmanager
+    def _registry_write_lock(self, capability_id: str):
+        lock_root = RUNTIME_REGISTRY / "locks"
+        lock_root.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_root / "tool_registry.lock"
+        timeout = int(os.getenv("AI_RUNTIME_REGISTRY_WRITE_LOCK_TIMEOUT_SECONDS") or "60")
+        started = time.time()
+        fd: int | None = None
+        while fd is None:
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, json.dumps({"capability_id": capability_id, "created_at": datetime.now(timezone.utc).isoformat()}).encode("utf-8"))
+            except FileExistsError:
+                try:
+                    if time.time() - lock_path.stat().st_mtime > max(timeout, 1):
+                        lock_path.unlink(missing_ok=True)
+                        continue
+                except Exception:
+                    pass
+                if time.time() - started > timeout:
+                    raise TimeoutError("registry_write_lock_timeout")
+                time.sleep(0.2)
+        try:
+            yield
+        finally:
+            try:
+                if fd is not None:
+                    os.close(fd)
+            except Exception:
+                pass
+            try:
+                lock_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _atomic_json_write(self, path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
 
     def _build_live_verification_interaction_request(self, *, registration: dict[str, Any], run_id: str = "", session_id: str = "") -> dict[str, Any] | None:
         """Ask Agent Studio for real runtime values after sandbox registration.
