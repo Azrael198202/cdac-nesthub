@@ -34,6 +34,8 @@ from auxiliary_brain.runtime.observability.model_prompt_registry import ModelPro
 from auxiliary_brain.runtime.self_repair.repair_orchestrator import FeedbackRepairOrchestrator
 from auxiliary_brain.runtime.scheduler import ScheduledTaskRunner
 from ai_core.runtime.async_jobs import RuntimeAsyncJobStore
+from ai_core.runtime.lifecycle_settings import RuntimeLifecycleSettingsStore
+from ai_core.runtime.task_runtime_policy import TaskRuntimePolicyResolver
 from ai_core.runtime.state import runtime_state_manager, capability_scoped_state_store
 
 import traceback
@@ -55,6 +57,8 @@ verification_brain_settings_store = VerificationBrainSettingsStore()
 feedback_repair_orchestrator = FeedbackRepairOrchestrator()
 scheduled_task_runner = ScheduledTaskRunner()
 async_job_store = RuntimeAsyncJobStore()
+runtime_lifecycle_settings_store = RuntimeLifecycleSettingsStore()
+task_runtime_policy_resolver = TaskRuntimePolicyResolver(runtime_lifecycle_settings_store)
 model_prompt_registry = ModelPromptRegistry()
 
 @app.on_event("startup")
@@ -160,11 +164,17 @@ async def _execute_due_task(task_name: str, task_graph: dict[str, Any] | None = 
         payload_ids = [x for x in selected_ids if x not in controller_ids]
     schedule_instance_id = str(policy.get("schedule_instance_id") or (task_graph.get("scheduled_execution_scope") or {}).get("schedule_instance_id") or f"schedule_{task_name}")
     worker_id = str(policy.get("worker_id") or (task_graph.get("scheduled_execution_scope") or {}).get("worker_id") or "")
+    runtime_policy = task_runtime_policy_resolver.resolve_for_graph(task_graph, fallback_family="scheduled_execution")
+    runtime_policy.setdefault("schedule_instance_id", schedule_instance_id)
+    runtime_policy.setdefault("task_name", str(task_name or ""))
     safe_schedule = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in schedule_instance_id)[:80]
     dispatch_run_id = f"scheduled_{safe_schedule}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
     return await worker_studio_service.execute_task(
         task_name,
         provided_inputs={
+            "_job_family": "scheduled_execution",
+            "_runtime_policy": runtime_policy,
+            "_scheduled_execution": True,
             "_scheduled_payload_dispatch": True,
             "_automated_runtime_dispatch": True,
             "_runtime_state_run_id": dispatch_run_id,
@@ -174,6 +184,7 @@ async def _execute_due_task(task_name: str, task_graph: dict[str, Any] | None = 
                 "schedule_instance_id": schedule_instance_id,
                 "worker_id": worker_id,
                 "isolation": "fresh_service_private_worker",
+                "runtime_policy": runtime_policy,
             },
             "_payload_only_selected_participant_ids": payload_ids,
         },
@@ -818,6 +829,50 @@ async def graph_runtime_resume_schedule(task_name: str):
 async def graph_runtime_schedule_history(task_name: str, limit: int = 80):
     return JSONResponse({"ok": True, "task_name": task_name, "history": studio_service.task_execution_history(task_name, limit=limit)})
 
+@app.get("/api/graph-runtime/tasks/{task_name}/runtime-policy")
+async def graph_runtime_get_task_runtime_policy(task_name: str):
+    resolved, graph, _path = studio_service._read_task_graph_record(task_name)
+    if not graph:
+        return JSONResponse({"ok": False, "status": "not_found", "task_name": task_name}, status_code=404)
+    policy = task_runtime_policy_resolver.resolve_for_graph(graph, fallback_family="task_execution")
+    return JSONResponse({
+        "ok": True,
+        "task_name": resolved or task_name,
+        "runtime_policy": graph.get("runtime_policy") if isinstance(graph.get("runtime_policy"), dict) else {},
+        "effective_policy": policy,
+        "schedule_policy": graph.get("schedule_policy") if isinstance(graph.get("schedule_policy"), dict) else {},
+    })
+
+
+@app.put("/api/graph-runtime/tasks/{task_name}/runtime-policy")
+async def graph_runtime_update_task_runtime_policy(task_name: str, payload: dict[str, Any]):
+    resolved, graph, graph_path = studio_service._read_task_graph_record(task_name)
+    if not graph:
+        return JSONResponse({"ok": False, "status": "not_found", "task_name": task_name}, status_code=404)
+    runtime_policy = payload.get("runtime_policy") if isinstance(payload.get("runtime_policy"), dict) else dict(payload or {})
+    allowed = {
+        "timeout_seconds", "max_run_seconds", "max_runtime_seconds",
+        "stale_after_seconds", "heartbeat_interval_seconds",
+        "stale_watchdog_enabled", "overlap_policy", "retry_policy",
+    }
+    cleaned = {k: v for k, v in runtime_policy.items() if k in allowed and v not in (None, "")}
+    graph["runtime_policy"] = cleaned
+    if isinstance(graph.get("schedule_policy"), dict):
+        schedule_policy = dict(graph.get("schedule_policy") or {})
+        schedule_policy["runtime_policy"] = cleaned
+        graph["schedule_policy"] = schedule_policy
+    graph["updated_at"] = datetime.now(timezone.utc).isoformat()
+    written = studio_service._write_task_graph_record(str(resolved or task_name), graph, graph_path)
+    effective = task_runtime_policy_resolver.resolve_for_graph(graph, fallback_family="task_execution")
+    return JSONResponse({
+        "ok": True,
+        "status": "updated",
+        "task_name": resolved or task_name,
+        "runtime_policy": cleaned,
+        "effective_policy": effective,
+        "path": str(written),
+    })
+
 
 
 @app.get("/api/verification/failure-reports")
@@ -1176,12 +1231,19 @@ async def runtime_settings():
         "approval_policies": approval_policy_store.list_policies(),
         "source_retrieval": source_retrieval_settings_store.as_api_payload(),
         "verification_brain": verification_brain_settings_store.as_api_payload(),
+        "runtime_lifecycle": runtime_lifecycle_settings_store.as_api_payload(),
     })
 
 
 
 
 
+
+
+@app.post("/api/runtime/settings/runtime-lifecycle")
+async def runtime_settings_runtime_lifecycle(payload: dict[str, Any]):
+    saved = runtime_lifecycle_settings_store.save(payload if isinstance(payload, dict) else {})
+    return JSONResponse({"ok": True, "runtime_lifecycle": runtime_lifecycle_settings_store.as_api_payload(), "saved": saved})
 
 @app.post("/api/runtime/settings/verification-brain")
 async def runtime_settings_verification_brain(payload: dict[str, Any]):
@@ -1524,90 +1586,122 @@ def _agent_studio_message_should_run_isolated(req: AgentStudioRequest) -> bool:
     return True
 
 
-def _agent_studio_message_job_policy(req: AgentStudioRequest) -> dict[str, Any]:
-    """Return generic job lifecycle policy for Agent Studio messages.
+def _infer_agent_studio_job_family(req: AgentStudioRequest) -> str:
+    """Infer generic runtime execution family from execution metadata.
 
-    The policy is lifecycle-based, not capability-name based.  Local Mac mini
-    class machines may spend many minutes in model, web, graph, sandbox, or
-    generated-tool stages.  Stale recovery must therefore use different windows
-    for capability acquisition, ordinary task execution, scheduled execution,
-    and dynamic refresh work instead of a single short 300 second default.
+    This is intentionally not task-name based.  A generated task becomes a
+    scheduled execution when its compiled contract carries schedule/trigger
+    metadata.  Users and generated capabilities may also pass an explicit
+    internal _job_family from the runtime layer.
     """
     text = str(req.message or "").casefold()
     provided = req.provided_inputs if isinstance(req.provided_inputs, dict) else {}
     explicit_family = str(provided.get("_job_family") or "").strip()
+    if explicit_family in {"capability_acquisition", "task_execution", "scheduled_execution", "dynamic_refresh"}:
+        return explicit_family
 
-    def _int_env(name: str, default: int) -> int:
-        try:
-            return max(30, int(os.getenv(name, str(default)) or default))
-        except Exception:
-            return default
+    scope = provided.get("_runtime_execution_scope") if isinstance(provided.get("_runtime_execution_scope"), dict) else {}
+    scope_kind = str(scope.get("kind") or "").strip().lower()
+    if scope_kind in {"scheduled_task", "scheduled_execution"}:
+        return "scheduled_execution"
 
-    def _policy(family: str, *, timeout_env: str, timeout_default: int, stale_env: str, stale_default: int, watchdog: bool = True) -> dict[str, Any]:
-        return {
-            "job_family": family,
-            "timeout_seconds": _int_env(timeout_env, timeout_default),
-            "stale_after_seconds": _int_env(stale_env, stale_default),
-            "heartbeat_interval_seconds": _int_env("AI_RUNTIME_ASYNC_JOB_HEARTBEAT_SECONDS", 30),
-            "stale_watchdog_enabled": watchdog,
-        }
+    if bool(provided.get("_scheduled_execution")) or bool(provided.get("_scheduled_payload_dispatch")):
+        return "scheduled_execution"
+    if isinstance(provided.get("schedule_policy"), dict) or isinstance(provided.get("trigger_policy"), dict):
+        return "scheduled_execution"
 
-    is_acquisition = explicit_family == "capability_acquisition" or (
+    is_acquisition = (
         "acquire runtime capability" in text
         or "runtime autonomous acquisition mode" in text
         or "capability acquisition" in text
     )
     if is_acquisition:
-        return _policy(
-            "capability_acquisition",
-            timeout_env="AI_RUNTIME_CAPABILITY_ACQUISITION_TIMEOUT_SECONDS",
-            timeout_default=7200,
-            stale_env="AI_RUNTIME_CAPABILITY_ACQUISITION_STALE_SECONDS",
-            stale_default=1800,
-            watchdog=False,
-        )
+        return "capability_acquisition"
 
-    is_scheduled_execution = explicit_family == "scheduled_execution" or bool(provided.get("_scheduled_execution")) or (
-        "scheduled execution" in text
-        or "scheduled task" in text
-        or "schedule_instance_id" in text
-    )
-    if is_scheduled_execution:
-        return _policy(
-            "scheduled_execution",
-            timeout_env="AI_RUNTIME_SCHEDULED_EXECUTION_TIMEOUT_SECONDS",
-            timeout_default=7200,
-            stale_env="AI_RUNTIME_SCHEDULED_EXECUTION_STALE_SECONDS",
-            stale_default=1800,
-            watchdog=True,
-        )
+    if bool(provided.get("_dynamic_refresh")) or bool(provided.get("_requires_external_refresh")):
+        return "dynamic_refresh"
+    if "dynamic_refresh" in text or "external information" in text or "web search" in text:
+        return "dynamic_refresh"
+    return "task_execution"
 
-    is_dynamic_refresh = explicit_family == "dynamic_refresh" or bool(provided.get("_dynamic_refresh")) or (
-        "dynamic_refresh" in text
-        or "web search" in text
-        or "external information" in text
-        or "latest" in text
-        or "today" in text
-        or "search" in text
-    )
-    if is_dynamic_refresh:
-        return _policy(
-            "dynamic_refresh",
-            timeout_env="AI_RUNTIME_DYNAMIC_REFRESH_TIMEOUT_SECONDS",
-            timeout_default=7200,
-            stale_env="AI_RUNTIME_DYNAMIC_REFRESH_STALE_SECONDS",
-            stale_default=1800,
-            watchdog=True,
-        )
 
-    return _policy(
-        "task_execution",
-        timeout_env="AI_RUNTIME_TASK_EXECUTION_TIMEOUT_SECONDS",
-        timeout_default=3600,
-        stale_env="AI_RUNTIME_TASK_EXECUTION_STALE_SECONDS",
-        stale_default=1200,
-        watchdog=True,
-    )
+def _task_graph_from_identity(identity: str | None) -> dict[str, Any] | None:
+    """Load a task graph by identity without interpreting the task name.
+
+    Names are task identities. They are used only to find the durable graph so
+    the runtime can read structural schedule/trigger/runtime_policy metadata.
+    They are not used to decide whether a task is scheduled.
+    """
+    name = str(identity or "").strip()
+    if not name:
+        return None
+    try:
+        loaded, _compiled = studio_service._load_authoritative_task_graph_for_execution(name)
+        if isinstance(loaded, dict):
+            return loaded
+    except Exception:
+        pass
+    try:
+        path = Path("runtime") / "generated" / "tasks" / f"{name}.json"
+        if path.exists():
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(value, dict):
+                return value
+    except Exception:
+        pass
+    return None
+
+
+def _task_graph_from_request(req: AgentStudioRequest) -> dict[str, Any] | None:
+    provided = req.provided_inputs if isinstance(req.provided_inputs, dict) else {}
+    for key in ("task_name", "task_id", "graph_id", "_task_name", "_task_id"):
+        graph = _task_graph_from_identity(provided.get(key))
+        if isinstance(graph, dict):
+            return graph
+    # Direct natural-language task execution requests may only carry the task
+    # name in text.  Scanning durable task identities is generic: it discovers
+    # the selected task graph, then classification uses its schedule_policy or
+    # trigger_policy instead of the name itself.
+    message = str(req.message or "")
+    if not message.strip():
+        return None
+    tasks_dir = Path("runtime") / "generated" / "tasks"
+    candidates: list[tuple[str, Path]] = []
+    try:
+        for path in tasks_dir.glob("*.json"):
+            candidates.append((path.stem, path))
+        for path in tasks_dir.glob("*/source_task_graph.json"):
+            candidates.append((path.parent.name, path))
+    except Exception:
+        return None
+    lowered = message.casefold()
+    # Longest identity first avoids matching a short prefix when tasks share a
+    # naming scheme.  This still does not encode task semantics.
+    for identity, path in sorted(candidates, key=lambda x: len(x[0]), reverse=True):
+        if not identity or identity.casefold() not in lowered:
+            continue
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _agent_studio_message_job_policy(req: AgentStudioRequest) -> dict[str, Any]:
+    """Return generic job lifecycle policy from settings plus task overrides."""
+    provided = req.provided_inputs if isinstance(req.provided_inputs, dict) else {}
+    explicit_policy = provided.get("_runtime_policy") if isinstance(provided.get("_runtime_policy"), dict) else None
+    if explicit_policy:
+        return task_runtime_policy_resolver.merge_into_metadata(
+            metadata=runtime_lifecycle_settings_store.policy_for_family(_infer_agent_studio_job_family(req)),
+            policy=explicit_policy,
+        )
+    task_graph = _task_graph_from_request(req)
+    if isinstance(task_graph, dict):
+        return task_runtime_policy_resolver.resolve_for_graph(task_graph, fallback_family=_infer_agent_studio_job_family(req))
+    return runtime_lifecycle_settings_store.policy_for_family(_infer_agent_studio_job_family(req))
 
 
 @app.post("/api/agent-studio/message")

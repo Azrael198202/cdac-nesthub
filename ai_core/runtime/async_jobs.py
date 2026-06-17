@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from ai_core.runtime.state import runtime_state_manager
+from ai_core.runtime.lifecycle_settings import RuntimeLifecycleSettingsStore
 
 
 class RuntimeAsyncJobStore:
@@ -24,6 +25,7 @@ class RuntimeAsyncJobStore:
         self.state_dir = Path(state_dir)
         self._jobs: dict[str, dict[str, Any]] = {}
         self._tasks: dict[str, asyncio.Task[Any]] = {}
+        self.lifecycle_settings_store = RuntimeLifecycleSettingsStore()
 
     def submit(self, *, name: str, runner: Callable[[], Awaitable[dict[str, Any]]], metadata: dict[str, Any] | None = None, job_id: str | None = None, timeout_seconds: int | None = None) -> dict[str, Any]:
         job_id = str(job_id or f"job_{uuid4().hex[:16]}").strip() or f"job_{uuid4().hex[:16]}"
@@ -323,9 +325,13 @@ class RuntimeAsyncJobStore:
                 except Exception:
                     continue
         try:
-            return max(5, int(os.getenv("AI_RUNTIME_ASYNC_JOB_HEARTBEAT_SECONDS") or "30"))
+            settings = self.lifecycle_settings_store.load()
+            return max(5, int(settings.heartbeat_interval_seconds))
         except Exception:
-            return 30
+            try:
+                return max(5, int(os.getenv("AI_RUNTIME_ASYNC_JOB_HEARTBEAT_SECONDS") or "30"))
+            except Exception:
+                return 30
 
     def _run_runner_in_private_loop(self, runner: Callable[[], Awaitable[dict[str, Any]]]) -> Any:
         value = runner()
@@ -346,10 +352,14 @@ class RuntimeAsyncJobStore:
                     return max(0, int(meta.get(key) or 0))
                 except Exception:
                     continue
+        family = str(meta.get("job_family") or "task_execution").strip() or "task_execution"
         try:
-            return max(0, int(os.getenv("AI_RUNTIME_ASYNC_JOB_TIMEOUT_SECONDS") or "3600"))
+            return int(self.lifecycle_settings_store.policy_for_family(family).get("timeout_seconds") or 3600)
         except Exception:
-            return 3600
+            try:
+                return max(0, int(os.getenv("AI_RUNTIME_ASYNC_JOB_TIMEOUT_SECONDS") or "3600"))
+            except Exception:
+                return 3600
 
     def _resolve_stale_seconds(self, *, metadata: dict[str, Any] | None = None) -> int:
         meta = metadata if isinstance(metadata, dict) else {}
@@ -359,10 +369,14 @@ class RuntimeAsyncJobStore:
                     return max(30, int(meta.get(key) or 0))
                 except Exception:
                     continue
+        family = str(meta.get("job_family") or "task_execution").strip() or "task_execution"
         try:
-            return max(30, int(os.getenv("AI_RUNTIME_ASYNC_JOB_STALE_SECONDS") or "1200"))
+            return int(self.lifecycle_settings_store.policy_for_family(family).get("stale_after_seconds") or 1200)
         except Exception:
-            return 1200
+            try:
+                return max(30, int(os.getenv("AI_RUNTIME_ASYNC_JOB_STALE_SECONDS") or "1200"))
+            except Exception:
+                return 1200
 
     def _timeout_from_record(self, record: dict[str, Any]) -> int:
         try:
