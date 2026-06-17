@@ -24,7 +24,6 @@ from auxiliary_brain.runtime.observability.stage_observer import RuntimeStageObs
 from auxiliary_brain.capability_acquisition.code_generator import RuntimeBlueprintArtifactGenerator
 from auxiliary_brain.capability_acquisition.classification import CapabilityClassifier
 from auxiliary_brain.capability_acquisition.trace_logger import CapabilityAcquisitionTraceLogger
-from auxiliary_brain.capability_acquisition.capability_formation import CapabilityFormationContractBuilder
 
 
 @dataclass(frozen=True)
@@ -56,7 +55,6 @@ class RuntimeCapabilityGapImplementer:
         self.blueprint_artifact_generator = RuntimeBlueprintArtifactGenerator()
         self.trace_logger = CapabilityAcquisitionTraceLogger()
         self.capability_classifier = CapabilityClassifier()
-        self.formation_builder = CapabilityFormationContractBuilder()
 
     def implement_if_requested(
         self,
@@ -249,11 +247,6 @@ class RuntimeCapabilityGapImplementer:
         # schemas, identity, approval policy, and match requirements.
         template = self._augment_blueprint_from_user_request(dict(template), user_input=user_input)
         template = self._merge_identity_contract_into_template(template, identity_contract)
-
-        formation_preview = self._build_blueprint_formation_preview(template=template, identity_contract=identity_contract)
-        formation_assessment = formation_preview.get("assessment") if isinstance(formation_preview.get("assessment"), dict) else {}
-        mark("CapabilityFormation", str(formation_assessment.get("level") or "unknown"), assessment=formation_assessment)
-        mark("DevilFormationValidator", "passed" if formation_assessment.get("passed") else "warning", missing_contracts=formation_assessment.get("missing_contracts") or [])
 
         dependency_resolution = self._resolve_dependencies(template)
         mark("DependencyResolver", "completed" if dependency_resolution.get("passed") else str(dependency_resolution.get("status") or "failed"), result=dependency_resolution)
@@ -527,63 +520,6 @@ class RuntimeCapabilityGapImplementer:
 
 
 
-
-    def _build_blueprint_formation_preview(self, *, template: dict[str, Any], identity_contract: dict[str, Any]) -> dict[str, Any]:
-        """Build a pre-artifact formation preview from normalized blueprint contracts.
-
-        The preview is only for state visibility and devil validation.  The
-        ArtifactGenerator rebuilds the authoritative formation contract after
-        schema boundary normalization.
-        """
-        try:
-            from auxiliary_brain.capability_acquisition.code_generator import RuntimeBlueprintArtifactGenerator
-
-            generator = RuntimeBlueprintArtifactGenerator()
-            input_schema = generator._schema_or_default(template.get("input_schema"), "input")
-            output_schema = generator._schema_or_default(template.get("output_schema"), "output")
-            connection_schema = generator._closed_schema(template.get("connection_schema"))
-            secret_schema = generator._closed_schema(template.get("secret_schema"))
-            boundary = generator.schema_boundary.normalize(
-                input_schema=input_schema,
-                connection_schema=connection_schema,
-                secret_schema=secret_schema,
-                verification_input=template.get("verification_input") if isinstance(template.get("verification_input"), dict) else None,
-            )
-            verification_input = boundary.get("verification_input") or generator._generic_verification_input(boundary["input_schema"], boundary["connection_schema"], boundary["secret_schema"])
-            verification_expectations = template.get("verification_expectations") if isinstance(template.get("verification_expectations"), dict) else {"status": "completed"}
-            dependencies = generator._drop_stdlib_dependencies(generator._normalized_dependencies(template.get("dependencies")))
-            runtime_execution_policy = generator._runtime_execution_policy_or_default(
-                template.get("runtime_execution_policy"),
-                input_schema=boundary["input_schema"],
-                connection_schema=boundary["connection_schema"],
-                secret_schema=boundary["secret_schema"],
-                dependencies=dependencies,
-            )
-            approval_policy = generator._approval_policy_or_default(template.get("approval_policy"), runtime_execution_policy=runtime_execution_policy)
-            specification_contract = generator.contract_compiler.compile(
-                blueprint=template,
-                input_schema=boundary["input_schema"],
-                output_schema=output_schema,
-                connection_schema=boundary["connection_schema"],
-                secret_schema=boundary["secret_schema"],
-                verification_input=verification_input,
-                verification_expectations=verification_expectations,
-            )
-            return self.formation_builder.build(
-                blueprint=template,
-                identity_contract=identity_contract,
-                input_schema=boundary["input_schema"],
-                output_schema=output_schema,
-                connection_schema=boundary["connection_schema"],
-                secret_schema=boundary["secret_schema"],
-                runtime_execution_policy=runtime_execution_policy,
-                approval_policy=approval_policy,
-                verification_input=verification_input,
-                verification_expectations=verification_expectations,
-                specification_contract=specification_contract,
-            )
-        except Exception as exc:
-            return {"assessment": {"status": "preview_failed", "passed": False, "level": "unknown", "missing_contracts": [str(exc)]}}
 
     def _runtime_state_stage_step(self, stage: str) -> str:
         value = str(stage or "capability_stage")

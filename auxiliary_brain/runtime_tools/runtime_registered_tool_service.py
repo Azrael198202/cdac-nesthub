@@ -54,7 +54,38 @@ class RuntimeRegisteredToolService:
         out.setdefault("tool_id", str(tool_id))
         return out
 
-    def _approval_required(self, spec: dict[str, Any], approval: dict[str, Any]) -> bool:
+    def _effective_approval_mode(self, *, spec: dict[str, Any], approval: dict[str, Any], approval_settings: dict[str, Any]) -> str:
+        """Resolve the active approval mode without capability-specific rules.
+
+        The generated capability declares a default approval contract, while the
+        Agent Studio settings page stores a profile-level operator override.  A
+        missing settings entry must not accidentally become ``always`` merely
+        because RuntimeApprovalPolicyStore has a conservative default.  Therefore
+        a persisted settings entry only wins when it has durable metadata such as
+        updated_at/trusted_at/last_confirmed_at.
+        """
+        valid = {"always", "once", "never"}
+        settings_has_entry = any(
+            key in approval_settings and approval_settings.get(key) not in (None, "")
+            for key in ("updated_at", "trusted_at", "last_confirmed_at")
+        )
+        if settings_has_entry:
+            mode = str(approval_settings.get("mode") or "always").strip().lower()
+            return mode if mode in valid else "always"
+        mode = str(approval.get("mode") or approval.get("default_mode") or "").strip().lower()
+        if mode in valid:
+            return mode
+        return "always" if bool(approval.get("required")) else "never"
+
+    def _approval_required(self, spec: dict[str, Any], approval: dict[str, Any], approval_settings: dict[str, Any] | None = None) -> bool:
+        approval_settings = approval_settings if isinstance(approval_settings, dict) else {}
+        mode = self._effective_approval_mode(spec=spec, approval=approval, approval_settings=approval_settings)
+        if mode == "never":
+            return False
+        if mode == "once" and bool(approval_settings.get("trusted")):
+            return False
+        if mode in {"always", "once"}:
+            return True
         if not bool(approval.get("required")):
             return False
         runtime_policy = spec.get("runtime_execution_policy") if isinstance(spec.get("runtime_execution_policy"), dict) else {}
@@ -134,8 +165,8 @@ class RuntimeRegisteredToolService:
             remember_approval = True
 
         approval = spec.get("approval_policy") if isinstance(spec.get("approval_policy"), dict) else {}
-        approval_required = self._approval_required(spec, approval)
         approval_settings = self.approval_policy_store.get_tool_policy(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id)
+        approval_required = self._approval_required(spec, approval, approval_settings)
         if approval_required and not approval_confirmed and self.approval_policy_store.is_auto_approved(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id):
             approval_confirmed = True
         if approval_required and not approval_confirmed:

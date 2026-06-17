@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import sys
 import time
 import threading
+import concurrent.futures
 from datetime import datetime, timezone
 from typing import Any
 
@@ -21,7 +23,6 @@ except Exception:  # pragma: no cover - optional runtime integration
 from ai_core.model_orchestration import LiteLLMBrainClient
 from auxiliary_brain.capability_acquisition.specification_contract_compiler import CapabilitySpecificationContractCompiler
 from auxiliary_brain.capability_acquisition.schema_boundary import CapabilitySchemaBoundary
-from auxiliary_brain.capability_acquisition.capability_formation import CapabilityFormationContractBuilder
 
 
 class RuntimeBlueprintArtifactGenerator:
@@ -41,7 +42,6 @@ class RuntimeBlueprintArtifactGenerator:
         self.llm_client = llm_client or LiteLLMBrainClient()
         self.contract_compiler = CapabilitySpecificationContractCompiler()
         self.schema_boundary = CapabilitySchemaBoundary()
-        self.formation_builder = CapabilityFormationContractBuilder()
 
     def materialize(self, blueprint: dict[str, Any], *, identity_contract: dict[str, Any] | None = None, run_id: str | None = None) -> dict[str, Any]:
         if not isinstance(blueprint, dict):
@@ -107,42 +107,6 @@ class RuntimeBlueprintArtifactGenerator:
             dependencies=dependencies,
         )
         approval_policy = self._approval_policy_or_default(blueprint.get("approval_policy"), runtime_execution_policy=runtime_execution_policy)
-        formation = self.formation_builder.build(
-            blueprint=blueprint,
-            identity_contract=identity_contract,
-            input_schema=input_schema,
-            output_schema=output_schema,
-            connection_schema=connection_schema,
-            secret_schema=secret_schema,
-            runtime_execution_policy=runtime_execution_policy,
-            approval_policy=approval_policy,
-            verification_input=verification_input,
-            verification_expectations=verification_expectations,
-            specification_contract=specification_contract,
-        )
-        # Formation Contract is the only source of required/optional decisions.
-        # Schemas are mechanically regenerated from the contract before any
-        # code generation or validation.
-        normalized_from_contract = self.formation_builder.normalize_schemas_from_field_contracts(formation.get("contract") if isinstance(formation.get("contract"), dict) else {})
-        input_schema = normalized_from_contract.get("input_schema", input_schema)
-        output_schema = normalized_from_contract.get("output_schema", output_schema)
-        connection_schema = normalized_from_contract.get("connection_schema", connection_schema)
-        secret_schema = normalized_from_contract.get("secret_schema", secret_schema)
-        declared_input_schema = input_schema
-        declared_output_schema = output_schema
-        declared_connection_schema = connection_schema
-        declared_secret_schema = secret_schema
-        verification_input = self._verification_input_with_schema_sample(verification_input, input_schema, connection_schema, secret_schema)
-        specification_contract = self.contract_compiler.compile(
-            blueprint=blueprint,
-            input_schema=input_schema,
-            output_schema=output_schema,
-            connection_schema=connection_schema,
-            secret_schema=secret_schema,
-            verification_input=verification_input,
-            verification_expectations=verification_expectations,
-        )
-        self._emit_formation_progress(run_id=run_id, tool_id=tool_id, formation=formation)
         capability_contract = self._capability_contract(tool_id=tool_id, blueprint=blueprint)
         files = blueprint.get("files") if isinstance(blueprint.get("files"), list) else []
         artifact_kind = "blueprint_only_not_registerable"
@@ -165,8 +129,9 @@ class RuntimeBlueprintArtifactGenerator:
                 files = []
             else:
                 files = candidate_files
-                # Requiredness is already fixed by Formation Contract.  Source
-                # code is validated against it; it must not rewrite schema.required.
+                input_schema = self._reconcile_required_fields_from_source(input_schema, files, scope="input")
+                connection_schema = self._reconcile_required_fields_from_source(connection_schema, files, scope="connection")
+                secret_schema = self._reconcile_required_fields_from_source(secret_schema, files, scope="secrets")
                 input_schema = self._merge_declared_schema(declared_input_schema, input_schema, default_name="input")
                 output_schema = self._merge_declared_schema(declared_output_schema, output_schema, default_name="output")
                 connection_schema = self._merge_declared_schema(declared_connection_schema, connection_schema, default_name="connection")
@@ -198,7 +163,6 @@ class RuntimeBlueprintArtifactGenerator:
                     secret_schema=secret_schema,
                     verification_input=verification_input,
                     specification_contract=specification_contract,
-                    formation=formation,
                 )
                 generation_status = str(llm_artifact.get("generation_status") or "failed")
                 generation_route = llm_artifact.get("generation_route") if isinstance(llm_artifact.get("generation_route"), dict) else {}
@@ -221,22 +185,6 @@ class RuntimeBlueprintArtifactGenerator:
                     input_schema = boundary["input_schema"]
                     connection_schema = boundary["connection_schema"]
                     secret_schema = boundary["secret_schema"]
-                    # Re-apply Formation Contract requiredness after merging any
-                    # LLM-returned schema properties.  LLM may enrich properties,
-                    # but must not make a second required/optional decision.
-                    normalized_from_contract = self.formation_builder.normalize_schemas_from_field_contracts({
-                        **(formation.get("contract") if isinstance(formation.get("contract"), dict) else {}),
-                        "schemas": {
-                            "input_schema": input_schema,
-                            "output_schema": output_schema,
-                            "connection_schema": connection_schema,
-                            "secret_schema": secret_schema,
-                        },
-                    })
-                    input_schema = normalized_from_contract.get("input_schema", input_schema)
-                    output_schema = normalized_from_contract.get("output_schema", output_schema)
-                    connection_schema = normalized_from_contract.get("connection_schema", connection_schema)
-                    secret_schema = normalized_from_contract.get("secret_schema", secret_schema)
                     verification_input = self._verification_input_with_schema_sample(boundary["verification_input"], input_schema, connection_schema, secret_schema)
                     specification_contract = self.contract_compiler.compile(
                         blueprint={**blueprint, **llm_artifact},
@@ -248,8 +196,9 @@ class RuntimeBlueprintArtifactGenerator:
                         verification_expectations=verification_expectations,
                     )
                     files = self._stabilize_standard_library_runtime_files(files, blueprint=blueprint)
-                    # Requiredness is already fixed by Formation Contract.  Source
-                    # code is validated against it; it must not rewrite schema.required.
+                    input_schema = self._reconcile_required_fields_from_source(input_schema, files, scope="input")
+                    connection_schema = self._reconcile_required_fields_from_source(connection_schema, files, scope="connection")
+                    secret_schema = self._reconcile_required_fields_from_source(secret_schema, files, scope="secrets")
                     boundary = self.schema_boundary.normalize(
                         input_schema=input_schema,
                         connection_schema=connection_schema,
@@ -310,7 +259,6 @@ class RuntimeBlueprintArtifactGenerator:
             "specification_contract": specification_contract,
             "acquisition_policy": blueprint.get("acquisition_policy") if isinstance(blueprint.get("acquisition_policy"), dict) else {"allow_llm_code_generation": True},
             "capability_match_contract": capability_contract,
-            "formation": formation,
             "artifact_kind": artifact_kind,
             "blueprint_source": blueprint.get("blueprint_source") or "runtime_blueprint_planner",
             "code_generation": {
@@ -336,13 +284,10 @@ class RuntimeBlueprintArtifactGenerator:
         secret_schema: dict[str, Any],
         verification_input: dict[str, Any],
         specification_contract: dict[str, Any],
-        formation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        formation = formation if isinstance(formation, dict) else {}
-        assessment = formation.get("assessment") if isinstance(formation.get("assessment"), dict) else {}
         base_complexity = self._generation_complexity(blueprint=blueprint, identity_contract=identity_contract)
         attempts: list[dict[str, Any]] = []
-        for attempt in self._generation_attempts(base_complexity, formation_assessment=assessment):
+        for attempt in self._generation_attempts(base_complexity):
             messages = self._generation_messages(
                 tool_id=tool_id,
                 entrypoint=entrypoint,
@@ -354,7 +299,6 @@ class RuntimeBlueprintArtifactGenerator:
                 secret_schema=secret_schema,
                 verification_input=verification_input,
                 specification_contract=specification_contract,
-                formation=formation,
                 compact=bool(attempt.get("compact")),
             )
             self._emit_generation_progress(
@@ -399,17 +343,38 @@ class RuntimeBlueprintArtifactGenerator:
             }
             if result.status != "completed":
                 attempts.append(record)
+                self._emit_generation_attempt_failed(
+                    run_id=run_id,
+                    tool_id=tool_id,
+                    attempt=attempt,
+                    record=record,
+                    attempts_so_far=attempts,
+                )
                 continue
             parsed = self._parse_json_object(result.content)
             if not isinstance(parsed, dict):
                 record["status"] = "invalid_llm_json"
                 record["error"] = "LLM did not return a JSON object."
                 attempts.append(record)
+                self._emit_generation_attempt_failed(
+                    run_id=run_id,
+                    tool_id=tool_id,
+                    attempt=attempt,
+                    record=record,
+                    attempts_so_far=attempts,
+                )
                 continue
             if not self._valid_generated_artifact(parsed):
                 record["status"] = "invalid_generated_artifact"
                 record["error"] = "LLM JSON did not contain executable artifact files."
                 attempts.append(record)
+                self._emit_generation_attempt_failed(
+                    run_id=run_id,
+                    tool_id=tool_id,
+                    attempt=attempt,
+                    record=record,
+                    attempts_so_far=attempts,
+                )
                 continue
             contract_violations = self._generated_artifact_contract_violations(
                 parsed,
@@ -421,6 +386,13 @@ class RuntimeBlueprintArtifactGenerator:
                 record["status"] = "schema_contract_violation"
                 record["error"] = "; ".join(contract_violations[:8])
                 attempts.append(record)
+                self._emit_generation_attempt_failed(
+                    run_id=run_id,
+                    tool_id=tool_id,
+                    attempt=attempt,
+                    record=record,
+                    attempts_so_far=attempts,
+                )
                 continue
             parsed["generation_status"] = "completed"
             parsed["generation_route"] = route
@@ -447,76 +419,126 @@ class RuntimeBlueprintArtifactGenerator:
         secret_schema: dict[str, Any],
         verification_input: dict[str, Any],
         specification_contract: dict[str, Any],
-        formation: dict[str, Any] | None = None,
         compact: bool = False,
     ) -> list[dict[str, str]]:
-        """Build a compact, contract-only code generation prompt.
+        """Build a minimal, contract-only code generation prompt.
 
-        Code generation must not re-interpret the original user request.  The
-        planner/specification stages have already made the authoritative
-        decisions.  Keeping this prompt small reduces local-model latency and
-        avoids repeated intent/planning work during capability acquisition.
+        The prompt is intentionally small and generic.  It never passes the full
+        user request or verbose blueprint into the code-generation model.  Earlier
+        stages already produced the authoritative contract; this stage only
+        materializes that contract into a runtime artifact.  This improves local
+        model latency and prevents repeated intent/planning work.
         """
-        required_return_shape = {
-            "files": [
-                {"path": "tool.py", "content": "Python source code"},
-                {"path": "test_tool.py", "content": "plain Python test source code"},
-            ],
-            "input_schema": "JSON schema object",
-            "output_schema": "JSON schema object",
-            "connection_schema": "JSON schema object",
-            "secret_schema": "JSON schema object",
-            "dependencies": [
-                {"package": "pip package name", "import_name": "python import name", "auto_install": True}
-            ],
-            "verification_input": "JSON object used by sandbox validation",
-            "verification_expectations": "JSON object",
-            "capability_match_contract": "JSON object",
-        }
-        # Only pass normalized execution contracts.  Description is truncated and
-        # used as background text, not as a source for re-planning.
-        formation = formation if isinstance(formation, dict) else {}
-        formation_contract = formation.get("contract") if isinstance(formation.get("contract"), dict) else {}
-        formation_assessment = formation.get("assessment") if isinstance(formation.get("assessment"), dict) else {}
-        # Prefer the already validated formation contract.  The fallback below is
-        # still contract-only and does not include raw user text.
         contract = {
-            "formation_contract": formation_contract or {
-                "tool_id": tool_id,
-                "entrypoint": entrypoint,
-                "identity_contract": identity_contract,
-                "schemas": {
-                    "input_schema": input_schema,
-                    "output_schema": output_schema,
-                    "connection_schema": connection_schema,
-                    "secret_schema": secret_schema,
-                },
-                "verification": {"verification_input": verification_input},
+            "tool_id": tool_id,
+            "entrypoint": self._compact_entrypoint(entrypoint),
+            "identity": self._compact_identity_contract(identity_contract, blueprint=blueprint, tool_id=tool_id),
+            "schemas": {
+                "input": self._schema_for_codegen(input_schema),
+                "output": self._schema_for_codegen(output_schema),
+                "connection": self._schema_for_codegen(connection_schema),
+                "secret": self._schema_for_codegen(secret_schema),
             },
-            "formation_assessment": formation_assessment,
-            "capability_summary": str(blueprint.get("description") or "")[:800 if compact else 1200],
-            "capability_match_contract": blueprint.get("capability_match_contract") if isinstance(blueprint.get("capability_match_contract"), dict) else {},
-            "required_return_shape": required_return_shape,
+            "verification": {
+                "input": self._compact_json(verification_input, limit=1800 if compact else 2600),
+                "expectations": self._compact_json(blueprint.get("verification_expectations") if isinstance(blueprint.get("verification_expectations"), dict) else {}, limit=1200),
+            },
+            "runtime_policy": self._compact_json(blueprint.get("runtime_execution_policy") if isinstance(blueprint.get("runtime_execution_policy"), dict) else {}, limit=1200),
+            "approval_policy": self._compact_json(blueprint.get("approval_policy") if isinstance(blueprint.get("approval_policy"), dict) else {}, limit=800),
+            "match_contract": self._compact_json(blueprint.get("capability_match_contract") if isinstance(blueprint.get("capability_match_contract"), dict) else {}, limit=1200),
+            "required_files": ["tool.py", "test_tool.py"],
+            "return_shape": "JSON object with files, input_schema, output_schema, connection_schema, secret_schema, dependencies, verification_input, verification_expectations, capability_match_contract",
         }
         if not compact:
             compact_spec = self._compact_specification_contract(specification_contract)
             if compact_spec:
-                contract["specification_contract"] = compact_spec
+                contract["specification"] = compact_spec
+
         system = (
-            "You are a runtime artifact generator. Use only the supplied artifact contract. "
-            "Do not reinterpret the original user request. Do not perform intent recognition, planning, research, or explanation. "
-            "Return only one JSON object matching required_return_shape. "
-            "Generate real executable Python code for the entrypoint. The entrypoint accepts one optional dict payload and returns a JSON-serializable dict. "
-            "Payload sections are strict: input fields from payload['input'], connection fields from payload['connection'], secret fields from payload['secrets'], runtime flags from payload['_runtime']. "
-            "Required/optional status is defined only by formation_contract.field_contracts. Do not infer new required fields from code and do not change schema.required independently. "
-            "Do not duplicate connection or secret fields into input. Do not store secrets in code, manifests, tests, logs, or ordinary input fields. "
-            "Prefer Python standard library. Declare dependencies only when required by the supplied contract. "
-            "Sandbox tests must not perform external network calls or live side effects; use dry_run or mocks when side effects require external services. "
-            "Do not hardcode dynamic output values except fake values used inside tests or dry-run mock branches. "
-            "No markdown. No prose. JSON only."
+            "You are a runtime artifact generator. Materialize ONLY the supplied compact contract. "
+            "Do not reinterpret requirements. Do not plan. Do not research. Do not explain. "
+            "Return JSON only. Required top-level keys: files,input_schema,output_schema,connection_schema,secret_schema,dependencies,verification_input,verification_expectations,capability_match_contract. "
+            "files must contain exactly executable tool.py and sandbox-safe test_tool.py. "
+            "tool.py must define the requested entrypoint accepting payload: dict|None and returning a JSON-serializable dict. "
+            "Read input only from payload['input'], connection only from payload['connection'], secrets only from payload['secrets'], runtime flags only from payload['_runtime']. "
+            "Never copy secrets into code, tests, logs, manifests, input schema, or connection schema. "
+            "Use Python standard library when possible. Dependencies must be [] unless truly required. "
+            "Tests must use dry_run/mocks and must not perform external network calls or live side effects. "
+            "Keep code compact, deterministic, and directly aligned with schemas. No markdown."
         )
         user = json.dumps(contract, ensure_ascii=False, separators=(",", ":"), default=str)
         return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+    def _compact_entrypoint(self, entrypoint: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(entrypoint, dict):
+            return {"module": "tool.py", "function": "run"}
+        return {
+            "module": str(entrypoint.get("module") or "tool.py"),
+            "function": str(entrypoint.get("function") or "run"),
+        }
+
+    def _compact_identity_contract(self, identity_contract: dict[str, Any], *, blueprint: dict[str, Any], tool_id: str) -> dict[str, Any]:
+        raw = identity_contract if isinstance(identity_contract, dict) else {}
+        keep: dict[str, Any] = {}
+        for key in (
+            "requested_capability_id",
+            "requested_capability_name",
+            "capability_id",
+            "capability_name",
+            "required_artifact_dir_name",
+            "expected_tool_id",
+            "expected_template_id",
+        ):
+            value = raw.get(key) if key in raw else blueprint.get(key)
+            if value not in (None, "", [], {}):
+                keep[key] = value
+        keep.setdefault("capability_id", tool_id)
+        keep.setdefault("expected_tool_id", tool_id)
+        return keep
+
+    def _schema_for_codegen(self, schema: dict[str, Any]) -> dict[str, Any]:
+        """Reduce JSON Schema to fields needed for code generation.
+
+        Field names and required/optional status are contract data.  Verbose
+        descriptions, examples, and UI metadata are not needed by the code model
+        and slow down local generation, so they are bounded or removed here.
+        """
+        if not isinstance(schema, dict):
+            return {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        compact_props: dict[str, Any] = {}
+        for name, spec in props.items():
+            if not isinstance(spec, dict):
+                compact_props[str(name)] = {"type": "string"}
+                continue
+            item: dict[str, Any] = {}
+            for key in ("type", "format", "enum", "items", "additionalProperties"):
+                if key in spec:
+                    item[key] = spec[key]
+            if "default" in spec:
+                item["default"] = spec.get("default")
+            description = str(spec.get("description") or "").strip()
+            if description:
+                item["description"] = description[:160]
+            compact_props[str(name)] = item or {"type": "string"}
+        required = [str(x) for x in schema.get("required", []) if isinstance(x, str)] if isinstance(schema.get("required"), list) else []
+        return {
+            "type": "object",
+            "properties": compact_props,
+            "required": [x for x in required if x in compact_props],
+            "additionalProperties": bool(schema.get("additionalProperties", False)),
+        }
+
+    def _compact_json(self, value: Any, *, limit: int = 2000) -> Any:
+        if value in (None, "", [], {}):
+            return {} if isinstance(value, dict) or value is None else value
+        try:
+            text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+        except Exception:
+            text = str(value)
+        if len(text) <= limit:
+            return value
+        return {"truncated_json": text[:limit], "truncated": True}
 
     def _compact_specification_contract(self, specification_contract: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(specification_contract, dict):
@@ -536,61 +558,93 @@ class RuntimeBlueprintArtifactGenerator:
         return compact
 
     def _complete_sync_with_heartbeat(self, *, run_id: str | None, tool_id: str, attempt: dict[str, Any], **kwargs: Any) -> Any:
+        """Run a blocking LLM request with progress heartbeats and a stage timeout.
+
+        Capability acquisition is allowed to take longer than ordinary task
+        execution, but one model call must not leave the whole acquisition job
+        in an endless running state.  This timeout is stage-scoped and generic:
+        it applies to any runtime artifact code-generation request, regardless
+        of capability name or domain.
+        """
         stop = threading.Event()
         started = time.time()
+        timeout_seconds = self._code_generation_timeout_seconds(attempt=attempt)
 
         def beat() -> None:
             while not stop.wait(15.0):
+                elapsed = round(time.time() - started, 1)
                 self._emit_generation_progress(
                     run_id=run_id,
                     tool_id=tool_id,
                     status="running",
                     phase="llm_request_waiting",
-                    attempt=attempt,
-                    elapsed_seconds=round(time.time() - started, 1),
+                    attempt={**(attempt or {}), "stage_timeout_seconds": timeout_seconds},
+                    elapsed_seconds=elapsed,
                 )
 
         thread = threading.Thread(target=beat, name=f"capability-codegen-heartbeat-{tool_id}", daemon=True)
         thread.start()
         try:
-            return self.llm_client.complete_sync(**kwargs)
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"capability-codegen-{tool_id}")
+            future = executor.submit(lambda: self.llm_client.complete_sync(**kwargs))
+            try:
+                return future.result(timeout=timeout_seconds)
+            except concurrent.futures.TimeoutError:
+                future.cancel()
+                elapsed = round(time.time() - started, 1)
+                message = (
+                    f"Runtime artifact code generation exceeded stage_timeout_seconds={timeout_seconds}. "
+                    "The attempt was stopped so acquisition can retry or fail visibly."
+                )
+                self._emit_generation_progress(
+                    run_id=run_id,
+                    tool_id=tool_id,
+                    status="failed",
+                    phase="llm_request_timeout",
+                    attempt={**(attempt or {}), "stage_timeout_seconds": timeout_seconds},
+                    elapsed_seconds=elapsed,
+                    error=message,
+                )
+                # Do not wait for a stuck provider thread during shutdown; the
+                # worker is isolated and daemon-like for this abandoned attempt.
+                executor.shutdown(wait=False, cancel_futures=True)
+                return self._llm_timeout_result(message=message, attempt=attempt, elapsed_seconds=elapsed)
+            finally:
+                if future.done():
+                    executor.shutdown(wait=False, cancel_futures=True)
         finally:
             stop.set()
 
-    def _emit_formation_progress(self, *, run_id: str | None, tool_id: str, formation: dict[str, Any]) -> None:
-        if not run_id:
-            return
-        assessment = formation.get("assessment") if isinstance(formation, dict) and isinstance(formation.get("assessment"), dict) else {}
-        payload = {"tool_id": tool_id, "formation_assessment": assessment}
+    def _code_generation_timeout_seconds(self, *, attempt: dict[str, Any] | None = None) -> int:
+        raw = os.getenv("AI_RUNTIME_CODE_GENERATION_TIMEOUT_SECONDS") or os.getenv("AI_RUNTIME_LLM_CODEGEN_TIMEOUT_SECONDS") or "240"
         try:
-            if emit_console_event is not None:
-                emit_console_event(
-                    area="capability_acquisition",
-                    event="CapabilityFormation",
-                    status=str(assessment.get("status") or "unknown"),
-                    message=f"CapabilityFormation: {assessment.get('level') or 'unknown'}",
-                    data=payload,
-                )
+            base = max(1, int(raw))
         except Exception:
-            pass
+            base = 240
+        attempt = attempt if isinstance(attempt, dict) else {}
+        # Compact retry prompts should not wait longer than the primary prompt.
+        # This keeps a stuck local model from holding the acquisition job for the
+        # full outer async timeout while still allowing slower machines to work.
+        if attempt.get("compact"):
+            return max(1, min(base, int(os.getenv("AI_RUNTIME_COMPACT_CODEGEN_TIMEOUT_SECONDS") or "180")))
+        return base
+
+    def _llm_timeout_result(self, *, message: str, attempt: dict[str, Any] | None = None, elapsed_seconds: float | None = None) -> Any:
         try:
-            if runtime_state_manager is not None:
-                runtime_state_manager.emit(
-                    run_id=run_id,
-                    step_id="workflow.capability_formation",
-                    level="developer",
-                    kind="output" if assessment.get("passed") else "lifecycle",
-                    status="completed" if assessment.get("passed") else "running",
-                    title="Capability formation",
-                    message=f"formation {assessment.get('status') or 'unknown'} / {assessment.get('level') or 'unknown'}",
-                    output=payload,
-                    method="capability_acquisition",
-                    progress=66.0,
-                    trace={"heartbeat_at": datetime.now(timezone.utc).isoformat()},
-                    next_action="generate_runtime_artifact",
-                )
+            from ai_core.model_orchestration.litellm_brain_client import LiteLLMBrainResult
+            return LiteLLMBrainResult(
+                status="timeout",
+                content="",
+                error=message,
+                route={"timeout": True, "elapsed_seconds": elapsed_seconds, "attempt": attempt or {}},
+            )
         except Exception:
-            pass
+            class _Result:
+                status = "timeout"
+                content = ""
+                error = message
+                route = {"timeout": True, "elapsed_seconds": elapsed_seconds, "attempt": attempt or {}}
+            return _Result()
 
     def _emit_generation_progress(self, *, run_id: str | None, tool_id: str, status: str, phase: str, attempt: dict[str, Any] | None = None, **data: Any) -> None:
         if not run_id:
@@ -625,6 +679,35 @@ class RuntimeBlueprintArtifactGenerator:
                 )
         except Exception:
             pass
+
+
+    def _emit_generation_attempt_failed(self, *, run_id: str | None, tool_id: str, attempt: dict[str, Any], record: dict[str, Any], attempts_so_far: list[dict[str, Any]]) -> None:
+        """Publish a generic escalation event after a code-generation attempt fails.
+
+        The decision is based only on generation outcome categories such as
+        timeout, invalid JSON, missing files, or contract violations.  It does
+        not inspect capability names or business terms.  Model choice remains
+        policy-driven through complexity routes in configs/brain_model_policy.yaml.
+        """
+        next_attempt = self._next_generation_attempt(attempt, attempts_so_far=attempts_so_far)
+        self._emit_generation_progress(
+            run_id=run_id,
+            tool_id=tool_id,
+            status="running",
+            phase="llm_attempt_failed_escalating" if next_attempt else "llm_attempt_failed_no_more_routes",
+            attempt=attempt,
+            failed_status=str(record.get("status") or "failed"),
+            failed_error=str(record.get("error") or "")[:1000],
+            next_attempt=next_attempt or {},
+            attempts_completed=len(attempts_so_far),
+        )
+
+    def _next_generation_attempt(self, current_attempt: dict[str, Any], *, attempts_so_far: list[dict[str, Any]]) -> dict[str, Any] | None:
+        attempts = self._generation_attempts(str(current_attempt.get("base_complexity") or current_attempt.get("complexity") or "default"))
+        completed = len(attempts_so_far)
+        if completed < len(attempts):
+            return attempts[completed]
+        return None
 
     def _parse_json_object(self, content: str) -> dict[str, Any] | None:
         text = str(content or "").strip()
@@ -1237,38 +1320,21 @@ def {function_name}(payload=None):
             return "medium"
         return "default"
 
-    def _generation_attempts(self, base_complexity: str, *, formation_assessment: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        """Choose generic generation attempts from formation completeness.
-
-        This is not capability-name routing.  A mail sender, schedule recorder,
-        file transformer, or any other runtime capability may take the fast path
-        only when its formation contract is complete enough for generation.
-        """
-        formation_assessment = formation_assessment if isinstance(formation_assessment, dict) else {}
-        strategy = formation_assessment.get("generation_strategy") if isinstance(formation_assessment.get("generation_strategy"), dict) else {}
-        max_attempts = int(strategy.get("llm_attempts") or 0) if str(strategy.get("llm_attempts") or "").isdigit() else 0
-        level = str(formation_assessment.get("level") or "").strip()
-        base = str(base_complexity or "default").strip().lower()
-        if level == "level_1_contract_complete":
-            complexity = "basic" if base in {"basic", "default", "medium"} else base
-            return [{"complexity": complexity, "force_json": True, "compact": True, "formation_level": level}]
-        if level == "level_2_contract_partial":
-            complexity = "medium" if base in {"default", "basic"} else base
-            attempts = [
-                {"complexity": complexity, "force_json": True, "compact": True, "formation_level": level},
-                {"complexity": complexity, "force_json": False, "compact": True, "formation_level": level},
-            ]
-            return attempts[:max_attempts or 2]
+    def _generation_attempts(self, base_complexity: str) -> list[dict[str, Any]]:
         order = ["basic", "medium", "high", "critical"]
+        base = str(base_complexity or "default").strip().lower()
         if base not in order:
             base = "medium" if base == "default" else "high"
         start = order.index(base)
         complexities = order[start:]
         attempts: list[dict[str, Any]] = []
         for complexity in complexities:
-            attempts.append({"complexity": complexity, "force_json": True, "compact": True, "formation_level": level or "unknown"})
-            attempts.append({"complexity": complexity, "force_json": False, "compact": True, "formation_level": level or "unknown"})
-        return attempts[:max_attempts or 4]
+            # First try the policy route for this complexity with strict JSON.
+            # If that fails because the provider cannot follow JSON mode, retry
+            # once without response_format before escalating to the next route.
+            attempts.append({"base_complexity": base, "complexity": complexity, "force_json": True, "compact": True})
+            attempts.append({"base_complexity": base, "complexity": complexity, "force_json": False, "compact": True})
+        return attempts
 
     def _capability_contract(self, *, tool_id: str, blueprint: dict[str, Any]) -> dict[str, Any]:
         declared = blueprint.get("capability_match_contract") if isinstance(blueprint.get("capability_match_contract"), dict) else {}

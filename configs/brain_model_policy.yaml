@@ -58,37 +58,52 @@ brains:
                 reason: local_general_model_fallback
           medium:
             provider: ollama
-            model: qwen2.5-coder:7b
+            model: deepseek-coder-v2:lite
             options:
               temperature: 0
             fallback:
+              - provider: ollama
+                model: qwen2.5-coder:7b
+                options:
+                  temperature: 0
+                reason: local_fast_code_model_fallback
               - provider: ollama
                 model: qwen3.5:4b-q4_k_m
                 options:
                   temperature: 0
                 reason: local_general_model_fallback
           high:
-            provider: openai
-            model: gpt-5.5-thinking
+            provider: ollama
+            model: deepseek-coder-v2:16b
             options:
               temperature: 0
             fallback:
               - provider: ollama
-                model: qwen3.5:4b-q4_k_m
+                model: deepseek-coder-v2:lite
                 options:
                   temperature: 0
-                reason: local_code_generation_fallback
+                reason: local_code_model_fallback
+              - provider: ollama
+                model: qwen2.5-coder:7b
+                options:
+                  temperature: 0
+                reason: local_fast_code_model_fallback
           critical:
-            provider: openai
-            model: gpt-5.5-thinking
+            provider: ollama
+            model: deepseek-coder-v2:16b
             options:
               temperature: 0
             fallback:
               - provider: ollama
-                model: qwen3.5:4b-q4_k_m
+                model: deepseek-coder-v2:lite
                 options:
                   temperature: 0
-                reason: local_code_generation_fallback
+                reason: local_code_model_fallback
+              - provider: ollama
+                model: qwen2.5-coder:7b
+                options:
+                  temperature: 0
+                reason: local_fast_code_model_fallback
 
   repair_brain:
     default:

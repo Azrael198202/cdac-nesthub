@@ -566,7 +566,9 @@ async function sendMessage(){
     }
     if(!accepted || !accepted.job_id){ throw new Error((accepted&&accepted.message)||'async job was not accepted'); }
     let data=null;
-    for(let i=0;i<720;i++){
+    const isCapabilityAcquisitionRequest = /acquire\s+runtime\s+capability|runtime\s+autonomous\s+acquisition\s+mode|capability\s+acquisition/i.test(String(text||''));
+    const maxPolls = isCapabilityAcquisitionRequest ? 3600 : 720;
+    for(let i=0;i<maxPolls;i++){
       await new Promise(resolve=>setTimeout(resolve, 1000));
       let jobData=null;
       try{
@@ -594,7 +596,7 @@ async function sendMessage(){
         status:'running',
         run_id:accepted.job_id,
         runtime_state:{run_id:accepted.job_id,state_url:'/runtime-state?run_id='+encodeURIComponent(accepted.job_id)},
-        final_answer:'Runtime job is still running or did not publish a terminal result yet. Please check Runtime State Console for durable progress. The backend watchdog will convert stale jobs into a visible failed result automatically.'
+        final_answer:'Runtime job is still running. This is not a terminal failure. Please keep the Runtime State Console open for live progress, or check the job again later.'
       };
     }
     if(data.durable_recovered){ addProgressMessage('recovered visible result from durable runtime state'); }

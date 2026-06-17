@@ -798,42 +798,6 @@ class AgentStudioService:
         runs.sort(key=lambda item: str(item.get("completed_at") or item.get("started_at") or ""), reverse=True)
         return runs[0]
 
-    def _latest_continuable_run_for_task(self, task_name: str) -> dict[str, Any] | None:
-        """Return the newest paused run that can continue without rerunning predecessors.
-
-        Manual task execution is often used after the user fixes an external
-        runtime profile or secret.  A paused task already has durable upstream
-        results, so a fresh execution would repeat dynamic steps and can feed a
-        later side-effect step with unrelated failure material.  This lookup is
-        task-name based and checks only generic runtime-interaction kinds; it
-        does not depend on any business capability name.
-        """
-        resolved = self._resolve_task_name(task_name) or task_name
-        continuable_kinds = {
-            "runtime_tool_human_confirmation",
-            "profile_secret_update_required",
-            "profile_configuration_update_required",
-            "runtime_input_update_required",
-            "feedback_repair_confirmation",
-        }
-        candidates = []
-        for run in self.store.list_json("generated/results"):
-            if str(run.get("task_name") or "") != resolved:
-                continue
-            status = str(run.get("status") or "").strip().casefold()
-            if status not in {"requires_input", "paused", "requires_key"}:
-                continue
-            pending = run.get("pending_action") if isinstance(run.get("pending_action"), dict) else {}
-            if str(pending.get("kind") or "").strip() not in continuable_kinds:
-                continue
-            if not isinstance(run.get("agent_results"), list) or not run.get("agent_results"):
-                continue
-            candidates.append(run)
-        if not candidates:
-            return None
-        candidates.sort(key=lambda item: str(item.get("completed_at") or item.get("started_at") or ""), reverse=True)
-        return candidates[0]
-
 
     def delete_participant(self, participant_id: str) -> dict[str, Any]:
         participant_id = str(participant_id or "").strip()
@@ -2333,34 +2297,6 @@ class AgentStudioService:
                 progress=100,
             )
             return activation_response
-        auto_continuation = None
-        if not bool(provided_inputs.get("_force_fresh_task_run") or provided_inputs.get("_scheduled_payload_dispatch") or provided_inputs.get("_run_scheduled_payload_now")):
-            auto_continuation = self._latest_continuable_run_for_task(task_name)
-        if auto_continuation is not None:
-            runtime_state_manager.emit(
-                run_id=state_run_id,
-                step_id="execution.continuation",
-                level="developer",
-                kind="lifecycle",
-                status="running",
-                title="Task continuation",
-                message="Continuing a paused task run without rerunning completed upstream steps.",
-                output={"previous_run_id": auto_continuation.get("run_id"), "task_name": task_name},
-                progress=20,
-            )
-            continuation_result = await self.resume_run(str(auto_continuation.get("run_id") or ""), provided_inputs=provided_inputs)
-            runtime_state_manager.emit(
-                run_id=state_run_id,
-                step_id="execution.continuation",
-                level="developer",
-                kind="output",
-                status=str(continuation_result.get("status") or "completed"),
-                title="Task continuation result",
-                message=str(continuation_result.get("status") or "completed"),
-                output={"previous_run_id": auto_continuation.get("run_id"), "continued_run_id": continuation_result.get("run_id")},
-                progress=100,
-            )
-            return continuation_result
         payload_only_ids = self._execution_payload_only_ids(task_graph, provided_inputs)
         payload_only_execution = bool(payload_only_ids)
         if payload_only_ids:
@@ -2407,7 +2343,6 @@ class AgentStudioService:
                 return reuse_response
             task_graph = dict(task_graph)
             task_graph["runtime_parameters"] = runtime_parameters
-            task_graph["_runtime_state_run_id"] = state_run_id
             runtime_state_manager.emit(run_id=state_run_id, step_id="execution.graph", level="user", kind="lifecycle", status="running", title="Graph execution", message="Executing the locked task graph.", method="delegation_runtime", progress=20)
             result = await self.delegation_runtime.execute_task(task_graph, participants)
             runtime_state_manager.emit(run_id=state_run_id, step_id="execution.graph", level="developer", kind="output", status=str(result.get("status") or "completed"), title="Graph execution result", message=str(result.get("status") or "completed"), output={"run_id": result.get("run_id"), "status": result.get("status")}, progress=100)
@@ -2445,13 +2380,6 @@ class AgentStudioService:
                 "schedule_state": response.get("schedule_state"),
             }
             response["message"] = self._paused_message(response["missing_inputs"], pending_action)
-            # A waiting runtime interaction is a valid terminal state for the
-            # current async job, but the user-visible final answer must explain
-            # what is required next.  Do not leave final_answer empty, otherwise
-            # the async job layer can only display the generic phrase
-            # "Runtime job paused".
-            if not str(response.get("final_answer") or "").strip():
-                response["final_answer"] = response["message"]
         if status in {"requires_key", "requires_input", "paused"}:
             runtime_state_manager.emit(
                 run_id=state_run_id,
@@ -2596,13 +2524,6 @@ class AgentStudioService:
                 "message": self._paused_message(response["missing_inputs"], pending_action),
             }
             response["message"] = self._paused_message(response["missing_inputs"], pending_action)
-            # A waiting runtime interaction is a valid terminal state for the
-            # current async job, but the user-visible final answer must explain
-            # what is required next.  Do not leave final_answer empty, otherwise
-            # the async job layer can only display the generic phrase
-            # "Runtime job paused".
-            if not str(response.get("final_answer") or "").strip():
-                response["final_answer"] = response["message"]
         self._attach_verification_report(task_graph=task_graph, participants=participants, run_payload=result, response=response, stage="resume_task")
         return response
 
