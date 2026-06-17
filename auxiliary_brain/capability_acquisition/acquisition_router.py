@@ -1416,7 +1416,11 @@ class RuntimeCapabilityGapImplementer:
         }
         manifest_path = staging_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        generated_test = self._generic_contract_test_source(tool_dir=staging_dir, manifest_path=manifest_path)
+        # Write a temporary smoke test into staging so the artifact envelope is
+        # complete while it is being assembled. The test is rewritten with final
+        # paths after the atomic directory move below. This prevents a generated
+        # test from keeping absolute references to the transient staging path.
+        generated_test = self._generic_contract_test_source(tool_dir=staging_dir, manifest_path=manifest_path, tool_id=safe_id)
         test_target = tests_staging_dir / "test_contract_smoke.py"
         test_target.write_text(generated_test, encoding="utf-8")
         test_files.append(str(test_target))
@@ -1429,8 +1433,13 @@ class RuntimeCapabilityGapImplementer:
             shutil.rmtree(tests_dir)
         tests_staging_dir.rename(tests_dir)
         final_written = [str(tool_dir / Path(path).relative_to(staging_dir)) if str(path).startswith(str(staging_dir)) else str(path) for path in written]
-        final_test_files = [str(tests_dir / Path(path).relative_to(tests_staging_dir)) if str(path).startswith(str(tests_staging_dir)) else str(path) for path in test_files]
         final_manifest_path = tool_dir / "manifest.json"
+        final_test_path = tests_dir / "test_contract_smoke.py"
+        final_test_path.write_text(
+            self._generic_contract_test_source(tool_dir=tool_dir, manifest_path=final_manifest_path, tool_id=safe_id),
+            encoding="utf-8",
+        )
+        final_test_files = [str(final_test_path)]
         final_manifest = json.loads(final_manifest_path.read_text(encoding="utf-8"))
         final_manifest["written_files"] = final_written
         final_manifest["test_files"] = final_test_files
@@ -1474,19 +1483,46 @@ class RuntimeCapabilityGapImplementer:
             except Exception:
                 pass
 
-    def _generic_contract_test_source(self, *, tool_dir: Path, manifest_path: Path) -> str:
+    def _generic_contract_test_source(self, *, tool_dir: Path, manifest_path: Path, tool_id: str = "") -> str:
+        """Return a relocatable smoke test for a generated runtime capability.
+
+        The artifact writer uses staging directories and then atomically moves
+        them into the final runtime/generated/tools/{capability_id} location.
+        Therefore the generated smoke test must not depend on a transient
+        staging path. It keeps the final absolute path for normal execution and
+        also contains a relative fallback derived from the test file location.
+        """
         return """import importlib.util
 import json
 from pathlib import Path
 
+TOOL_ID = %r
 TOOL_DIR = Path(%r)
 MANIFEST_PATH = Path(%r)
 
 
+def _resolve_manifest_path():
+    if MANIFEST_PATH.exists():
+        return MANIFEST_PATH
+    # Fallback for artifacts moved after test generation:
+    # runtime/generated/tests/{tool_id}/test_contract_smoke.py
+    # -> runtime/generated/tools/{tool_id}/manifest.json
+    try:
+        generated_root = Path(__file__).resolve().parents[2]
+        candidate = generated_root / "tools" / TOOL_ID / "manifest.json"
+        if candidate.exists():
+            return candidate
+    except Exception:
+        pass
+    return MANIFEST_PATH
+
+
 def test_runtime_contract_smoke():
-    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    manifest_path = _resolve_manifest_path()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     entrypoint = manifest.get("entrypoint") or {}
-    module_path = TOOL_DIR / str(entrypoint.get("module") or "tool.py")
+    resolved_tool_dir = manifest_path.parent if manifest_path.exists() else TOOL_DIR
+    module_path = resolved_tool_dir / str(entrypoint.get("module") or "tool.py")
     function_name = str(entrypoint.get("function") or "run")
     payload = manifest.get("verification_input") if isinstance(manifest.get("verification_input"), dict) else {}
     runtime = payload.setdefault("_runtime", {})
@@ -1502,7 +1538,7 @@ def test_runtime_contract_smoke():
     json.dumps(result, ensure_ascii=False)
     status = str(result.get("status") or "").lower()
     assert status not in {"error", "failure", "failed"}, result
-""" % (str(tool_dir), str(manifest_path))
+""" % (str(tool_id), str(tool_dir), str(manifest_path))
 
     def _retry_artifact_after_validation_failure(
         self,
