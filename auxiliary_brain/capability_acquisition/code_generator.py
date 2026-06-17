@@ -463,6 +463,45 @@ class RuntimeBlueprintArtifactGenerator:
             parsed["generation_route"] = route
             parsed["generation_attempts"] = attempts + [record]
             return parsed
+        # If no model returned a complete artifact envelope, try a generic
+        # progressive generation pass.  This is still LLM-based and uses only the
+        # user-derived contract.  It does not inject capability-specific logic;
+        # it simply asks the selected model to emit smaller files one at a time
+        # so large/complex capabilities can complete on local models without a
+        # single huge response timing out.
+        progressive = self._generate_progressive_artifact_with_llm(
+            tool_id=tool_id,
+            run_id=run_id,
+            entrypoint=entrypoint,
+            blueprint=blueprint,
+            identity_contract=identity_contract,
+            input_schema=input_schema,
+            output_schema=output_schema,
+            connection_schema=connection_schema,
+            secret_schema=secret_schema,
+            verification_input=verification_input,
+            specification_contract=specification_contract,
+            previous_attempts=attempts,
+        )
+        if self._valid_generated_artifact(progressive):
+            contract_violations = self._generated_artifact_contract_violations(
+                progressive,
+                input_schema=input_schema,
+                connection_schema=connection_schema,
+                secret_schema=secret_schema,
+            )
+            if not contract_violations:
+                progressive["generation_status"] = "completed"
+                progressive["generation_route"] = progressive.get("generation_route") if isinstance(progressive.get("generation_route"), dict) else {"mode": "progressive_file_generation"}
+                progressive["generation_attempts"] = attempts + list(progressive.get("generation_attempts") or [])
+                return progressive
+            progressive["generation_error"] = "; ".join(contract_violations[:8])
+            attempts.append({
+                "status": "progressive_schema_contract_violation",
+                "error": progressive["generation_error"],
+                "route": progressive.get("generation_route") if isinstance(progressive.get("generation_route"), dict) else {},
+            })
+
         last = attempts[-1] if attempts else {}
         return {
             "generation_status": str(last.get("status") or "llm_generation_failed"),
@@ -471,6 +510,244 @@ class RuntimeBlueprintArtifactGenerator:
             "generation_attempts": attempts,
         }
 
+
+
+    def _generate_progressive_artifact_with_llm(
+        self,
+        *,
+        tool_id: str,
+        run_id: str | None,
+        entrypoint: dict[str, Any],
+        blueprint: dict[str, Any],
+        identity_contract: dict[str, Any],
+        input_schema: dict[str, Any],
+        output_schema: dict[str, Any],
+        connection_schema: dict[str, Any],
+        secret_schema: dict[str, Any],
+        verification_input: dict[str, Any],
+        specification_contract: dict[str, Any],
+        previous_attempts: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Generate artifact files in smaller generic LLM calls.
+
+        This is a capability-neutral recovery path.  It never uses a hidden
+        implementation template and never branches on capability names or domain
+        words.  The model still writes the executable behavior from the compact
+        contract; the runtime only controls the envelope and asks for one file at
+        a time to avoid local-model timeout on one very large response.
+        """
+        attempts = previous_attempts if isinstance(previous_attempts, list) else []
+        progressive_attempts: list[dict[str, Any]] = []
+        routes = [attempt for attempt in self._generation_attempts("critical") if isinstance(attempt, dict)]
+        # Prefer higher-capacity routes for the progressive pass, but preserve
+        # the policy-defined order and availability checks.
+        if len(routes) > 1:
+            routes = list(reversed(routes))
+        self._emit_generation_progress(
+            run_id=run_id,
+            tool_id=tool_id,
+            status="running",
+            phase="progressive_artifact_generation_started",
+            previous_attempt_count=len(attempts),
+        )
+        for attempt in routes:
+            available, availability_reason = self._codegen_attempt_available(attempt)
+            if not available:
+                record = {
+                    "status": "model_not_available",
+                    "attempt": attempt,
+                    "error": availability_reason,
+                    "progressive": True,
+                }
+                progressive_attempts.append(record)
+                self._emit_generation_progress(
+                    run_id=run_id,
+                    tool_id=tool_id,
+                    status="running",
+                    phase="progressive_attempt_skipped_model_not_available",
+                    attempt=attempt,
+                    error=availability_reason,
+                )
+                continue
+            files: list[dict[str, str]] = []
+            for path in ["tool.py", "test_tool.py"]:
+                file_result = self._generate_progressive_file_with_llm(
+                    tool_id=tool_id,
+                    run_id=run_id,
+                    attempt=attempt,
+                    path=path,
+                    entrypoint=entrypoint,
+                    blueprint=blueprint,
+                    identity_contract=identity_contract,
+                    input_schema=input_schema,
+                    output_schema=output_schema,
+                    connection_schema=connection_schema,
+                    secret_schema=secret_schema,
+                    verification_input=verification_input,
+                    specification_contract=specification_contract,
+                    existing_files=files,
+                )
+                progressive_attempts.append(file_result.get("attempt_record") if isinstance(file_result.get("attempt_record"), dict) else {"status": file_result.get("status"), "attempt": attempt, "path": path})
+                if file_result.get("status") != "completed":
+                    files = []
+                    break
+                files.append({"path": path, "content": str(file_result.get("content") or "")})
+            if not files:
+                continue
+            artifact = {
+                "tool_id": tool_id,
+                "files": files,
+                "input_schema": input_schema,
+                "output_schema": output_schema,
+                "connection_schema": connection_schema,
+                "secret_schema": secret_schema,
+                "dependencies": self._drop_stdlib_dependencies(self._normalized_dependencies(blueprint.get("dependencies"))),
+                "verification_input": verification_input,
+                "verification_expectations": blueprint.get("verification_expectations") if isinstance(blueprint.get("verification_expectations"), dict) else {"status": "completed"},
+                "capability_match_contract": self._capability_contract(tool_id=tool_id, blueprint=blueprint),
+                "generation_route": {"mode": "progressive_file_generation", "attempt": attempt},
+                "generation_attempts": progressive_attempts,
+            }
+            artifact = self._normalize_llm_artifact_payload(artifact, tool_id=tool_id)
+            if self._valid_generated_artifact(artifact):
+                self._emit_generation_progress(
+                    run_id=run_id,
+                    tool_id=tool_id,
+                    status="completed",
+                    phase="progressive_artifact_generation_completed",
+                    attempt=attempt,
+                )
+                return artifact
+        self._emit_generation_progress(
+            run_id=run_id,
+            tool_id=tool_id,
+            status="failed",
+            phase="progressive_artifact_generation_failed",
+            error="No progressive model route produced executable artifact files.",
+        )
+        return {
+            "generation_status": "progressive_generation_failed",
+            "generation_error": "No progressive model route produced executable artifact files.",
+            "generation_attempts": progressive_attempts,
+        }
+
+    def _generate_progressive_file_with_llm(
+        self,
+        *,
+        tool_id: str,
+        run_id: str | None,
+        attempt: dict[str, Any],
+        path: str,
+        entrypoint: dict[str, Any],
+        blueprint: dict[str, Any],
+        identity_contract: dict[str, Any],
+        input_schema: dict[str, Any],
+        output_schema: dict[str, Any],
+        connection_schema: dict[str, Any],
+        secret_schema: dict[str, Any],
+        verification_input: dict[str, Any],
+        specification_contract: dict[str, Any],
+        existing_files: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        contract = {
+            "tool_id": tool_id,
+            "target_file": path,
+            "entrypoint": self._compact_entrypoint(entrypoint),
+            "identity": self._compact_identity_contract(identity_contract, blueprint=blueprint, tool_id=tool_id),
+            "behavior_contract": self._compact_behavior_contract(blueprint, tool_id=tool_id),
+            "schemas": {
+                "input": self._schema_for_codegen(input_schema),
+                "output": self._schema_for_codegen(output_schema),
+                "connection": self._schema_for_codegen(connection_schema),
+                "secret": self._schema_for_codegen(secret_schema),
+            },
+            "verification_input": self._compact_json(verification_input, limit=1400),
+            "specification": self._compact_specification_contract(specification_contract),
+            "existing_files": [{"path": item.get("path"), "content_excerpt": str(item.get("content") or "")[:1800]} for item in existing_files if isinstance(item, dict)],
+        }
+        if path == "tool.py":
+            file_instruction = (
+                "Generate only executable Python source for tool.py. Define run(payload: dict | None = None) -> dict. "
+                "Implement behavior_contract from payload input/connection/secrets/_runtime. No placeholders. "
+                "Use standard library when possible. Do not perform external side effects when payload['_runtime']['dry_run'] is true."
+            )
+        else:
+            file_instruction = (
+                "Generate only Python source for test_tool.py. It must import tool.py from the same directory, call run() with dry_run/mock/local payload, "
+                "assert a JSON-serializable dict is returned, and avoid live external network or secrets."
+            )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You generate one runtime artifact file from a compact contract. "
+                    "Return one JSON object only with keys path and content. No markdown, no explanation. "
+                    "The content value must be complete source code for the requested file. " + file_instruction
+                ),
+            },
+            {"role": "user", "content": json.dumps(contract, ensure_ascii=False, separators=(",", ":"), default=str)},
+        ]
+        file_attempt = {**attempt, "progressive_file": path, "force_json": True, "compact": True}
+        self._emit_generation_progress(
+            run_id=run_id,
+            tool_id=tool_id,
+            status="running",
+            phase="progressive_file_generation_started",
+            attempt=file_attempt,
+            path=path,
+        )
+        result = self._complete_sync_with_heartbeat(
+            run_id=run_id,
+            tool_id=tool_id,
+            attempt=file_attempt,
+            brain="auxiliary_brain",
+            task_type="runtime_tool_code_generation",
+            complexity=str(attempt.get("complexity") or "critical"),
+            messages=messages,
+            context={
+                "tool_id": tool_id,
+                "generation_attempt": file_attempt,
+                "progressive_file": path,
+                "route_override": attempt.get("route_override") if isinstance(attempt.get("route_override"), dict) else None,
+            },
+            response_format={"type": "json_object"},
+        )
+        route = result.route if isinstance(result.route, dict) else {}
+        if result.status != "completed":
+            self._emit_generation_progress(
+                run_id=run_id,
+                tool_id=tool_id,
+                status="running",
+                phase="progressive_file_generation_retry_or_escalate",
+                attempt=file_attempt,
+                path=path,
+                route=route,
+                error=result.error,
+            )
+            return {"status": result.status, "error": result.error, "route": route, "attempt_record": {"status": result.status, "error": result.error, "route": route, "attempt": file_attempt, "path": path}}
+        parsed = self._parse_json_object(str(result.content or ""))
+        parsed = parsed if isinstance(parsed, dict) else {}
+        content = parsed.get("content") if isinstance(parsed.get("content"), str) else None
+        if not content:
+            # Generic salvage for models that return the file source under the
+            # file name or common code keys.
+            content = parsed.get(path) if isinstance(parsed.get(path), str) else None
+        if not content:
+            content = parsed.get("code") if isinstance(parsed.get("code"), str) else None
+        if not isinstance(content, str) or not content.strip():
+            error = "progressive file generation did not return source content"
+            self._emit_generation_progress(
+                run_id=run_id,
+                tool_id=tool_id,
+                status="running",
+                phase="progressive_file_generation_invalid_output",
+                attempt=file_attempt,
+                path=path,
+                route=route,
+                error=error,
+            )
+            return {"status": "invalid_output", "error": error, "route": route, "attempt_record": {"status": "invalid_output", "error": error, "route": route, "attempt": file_attempt, "path": path}}
+        return {"status": "completed", "content": content, "route": route, "attempt_record": {"status": "completed", "route": route, "attempt": file_attempt, "path": path}}
 
     def _codegen_attempt_available(self, attempt: dict[str, Any]) -> tuple[bool, str]:
         """Preflight one code-generation model attempt before starting a long LLM call.
@@ -765,18 +1042,39 @@ class RuntimeBlueprintArtifactGenerator:
             stop.set()
 
     def _code_generation_timeout_seconds(self, *, attempt: dict[str, Any] | None = None) -> int:
-        raw = os.getenv("AI_RUNTIME_CODE_GENERATION_TIMEOUT_SECONDS") or os.getenv("AI_RUNTIME_LLM_CODEGEN_TIMEOUT_SECONDS") or "240"
+        """Return a model-aware stage timeout for runtime artifact generation.
+
+        The timeout policy is generic infrastructure policy.  It does not branch
+        on capability names or domains.  Larger local code models and
+        progressive per-file generation need longer than ordinary planning
+        calls, while unavailable models are still skipped before this point by
+        availability preflight.
+        """
+        raw = os.getenv("AI_RUNTIME_CODE_GENERATION_TIMEOUT_SECONDS") or os.getenv("AI_RUNTIME_LLM_CODEGEN_TIMEOUT_SECONDS")
         try:
-            base = max(1, int(raw))
+            configured = int(raw) if raw not in (None, "") else 0
         except Exception:
-            base = 240
+            configured = 0
         attempt = attempt if isinstance(attempt, dict) else {}
-        # Compact retry prompts should not wait longer than the primary prompt.
-        # This keeps a stuck local model from holding the acquisition job for the
-        # full outer async timeout while still allowing slower machines to work.
-        if attempt.get("compact"):
-            return max(1, min(base, int(os.getenv("AI_RUNTIME_COMPACT_CODEGEN_TIMEOUT_SECONDS") or "180")))
-        return base
+        override = attempt.get("route_override") if isinstance(attempt.get("route_override"), dict) else {}
+        model = str(override.get("model") or "").casefold()
+        if configured > 0:
+            base = configured
+        elif "16b" in model or "32b" in model or "70b" in model:
+            base = int(os.getenv("AI_RUNTIME_LARGE_CODEGEN_TIMEOUT_SECONDS") or "900")
+        elif "deepseek" in model:
+            base = int(os.getenv("AI_RUNTIME_DEEPSEEK_CODEGEN_TIMEOUT_SECONDS") or "600")
+        else:
+            base = int(os.getenv("AI_RUNTIME_DEFAULT_CODEGEN_TIMEOUT_SECONDS") or "300")
+        if attempt.get("repair"):
+            return max(1, int(os.getenv("AI_RUNTIME_CODEGEN_REPAIR_TIMEOUT_SECONDS") or str(min(base, 300))))
+        if attempt.get("progressive_file"):
+            # Per-file prompts are smaller, but local 16b models still need
+            # enough time to return complete source code.
+            return max(1, int(os.getenv("AI_RUNTIME_PROGRESSIVE_FILE_CODEGEN_TIMEOUT_SECONDS") or str(min(max(base, 420), 900))))
+        if attempt.get("compact") and not any(marker in model for marker in ["16b", "32b", "70b"]):
+            return max(1, int(os.getenv("AI_RUNTIME_COMPACT_CODEGEN_TIMEOUT_SECONDS") or str(min(base, 360))))
+        return max(1, base)
 
     def _llm_timeout_result(self, *, message: str, attempt: dict[str, Any] | None = None, elapsed_seconds: float | None = None) -> Any:
         try:
