@@ -1527,34 +1527,87 @@ def _agent_studio_message_should_run_isolated(req: AgentStudioRequest) -> bool:
 def _agent_studio_message_job_policy(req: AgentStudioRequest) -> dict[str, Any]:
     """Return generic job lifecycle policy for Agent Studio messages.
 
-    Capability acquisition is a runtime-generation lifecycle, not a normal task
-    execution lifecycle.  It may write artifacts, validate code, and register
-    runtime contracts after the blueprint stage.  Therefore stale no-progress
-    recovery must not terminate it merely because a single acquisition phase is
-    quiet.  It still keeps an absolute timeout so truly abandoned jobs recover
-    with a visible result.
+    The policy is lifecycle-based, not capability-name based.  Local Mac mini
+    class machines may spend many minutes in model, web, graph, sandbox, or
+    generated-tool stages.  Stale recovery must therefore use different windows
+    for capability acquisition, ordinary task execution, scheduled execution,
+    and dynamic refresh work instead of a single short 300 second default.
     """
     text = str(req.message or "").casefold()
     provided = req.provided_inputs if isinstance(req.provided_inputs, dict) else {}
     explicit_family = str(provided.get("_job_family") or "").strip()
+
+    def _int_env(name: str, default: int) -> int:
+        try:
+            return max(30, int(os.getenv(name, str(default)) or default))
+        except Exception:
+            return default
+
+    def _policy(family: str, *, timeout_env: str, timeout_default: int, stale_env: str, stale_default: int, watchdog: bool = True) -> dict[str, Any]:
+        return {
+            "job_family": family,
+            "timeout_seconds": _int_env(timeout_env, timeout_default),
+            "stale_after_seconds": _int_env(stale_env, stale_default),
+            "heartbeat_interval_seconds": _int_env("AI_RUNTIME_ASYNC_JOB_HEARTBEAT_SECONDS", 30),
+            "stale_watchdog_enabled": watchdog,
+        }
+
     is_acquisition = explicit_family == "capability_acquisition" or (
         "acquire runtime capability" in text
         or "runtime autonomous acquisition mode" in text
         or "capability acquisition" in text
     )
     if is_acquisition:
-        return {
-            "job_family": "capability_acquisition",
-            "timeout_seconds": int(os.getenv("AI_RUNTIME_CAPABILITY_ACQUISITION_TIMEOUT_SECONDS", "3600") or "3600"),
-            "stale_after_seconds": int(os.getenv("AI_RUNTIME_CAPABILITY_ACQUISITION_STALE_SECONDS", "1800") or "1800"),
-            "stale_watchdog_enabled": False,
-        }
-    return {
-        "job_family": "task_execution",
-        "timeout_seconds": int(os.getenv("AI_RUNTIME_AGENT_STUDIO_TIMEOUT_SECONDS", "900") or "900"),
-        "stale_after_seconds": int(os.getenv("AI_RUNTIME_AGENT_STUDIO_STALE_SECONDS", "300") or "300"),
-        "stale_watchdog_enabled": True,
-    }
+        return _policy(
+            "capability_acquisition",
+            timeout_env="AI_RUNTIME_CAPABILITY_ACQUISITION_TIMEOUT_SECONDS",
+            timeout_default=7200,
+            stale_env="AI_RUNTIME_CAPABILITY_ACQUISITION_STALE_SECONDS",
+            stale_default=1800,
+            watchdog=False,
+        )
+
+    is_scheduled_execution = explicit_family == "scheduled_execution" or bool(provided.get("_scheduled_execution")) or (
+        "scheduled execution" in text
+        or "scheduled task" in text
+        or "schedule_instance_id" in text
+    )
+    if is_scheduled_execution:
+        return _policy(
+            "scheduled_execution",
+            timeout_env="AI_RUNTIME_SCHEDULED_EXECUTION_TIMEOUT_SECONDS",
+            timeout_default=7200,
+            stale_env="AI_RUNTIME_SCHEDULED_EXECUTION_STALE_SECONDS",
+            stale_default=1800,
+            watchdog=True,
+        )
+
+    is_dynamic_refresh = explicit_family == "dynamic_refresh" or bool(provided.get("_dynamic_refresh")) or (
+        "dynamic_refresh" in text
+        or "web search" in text
+        or "external information" in text
+        or "latest" in text
+        or "today" in text
+        or "search" in text
+    )
+    if is_dynamic_refresh:
+        return _policy(
+            "dynamic_refresh",
+            timeout_env="AI_RUNTIME_DYNAMIC_REFRESH_TIMEOUT_SECONDS",
+            timeout_default=7200,
+            stale_env="AI_RUNTIME_DYNAMIC_REFRESH_STALE_SECONDS",
+            stale_default=1800,
+            watchdog=True,
+        )
+
+    return _policy(
+        "task_execution",
+        timeout_env="AI_RUNTIME_TASK_EXECUTION_TIMEOUT_SECONDS",
+        timeout_default=3600,
+        stale_env="AI_RUNTIME_TASK_EXECUTION_STALE_SECONDS",
+        stale_default=1200,
+        watchdog=True,
+    )
 
 
 @app.post("/api/agent-studio/message")

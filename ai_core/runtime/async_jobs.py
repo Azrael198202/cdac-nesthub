@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import os
@@ -171,12 +172,14 @@ class RuntimeAsyncJobStore:
             method="async_worker",
             progress=15,
         )
+        heartbeat_task: asyncio.Task[Any] | None = None
         try:
             # Run the supplied runtime operation outside the FastAPI event loop.
             # Some runtime layers perform local model calls, filesystem work,
             # sandbox validation, installs, or other blocking operations.  If
             # those operations run directly inside the server loop, other pages
             # such as Runtime State Console cannot load until the job ends.
+            heartbeat_task = asyncio.create_task(self._heartbeat_loop(job_id))
             timeout_seconds = self._timeout_from_record(record)
             worker_future = asyncio.to_thread(self._run_runner_in_private_loop, runner)
             if timeout_seconds > 0:
@@ -258,7 +261,71 @@ class RuntimeAsyncJobStore:
                 progress=100,
             )
             runtime_state_manager.finish_run(job_id, status="failed", summary=message, error=record["error"], output={"timeout_seconds": timeout_seconds} if timeout_type else None)
+        finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await heartbeat_task
         self._write(record)
+
+    async def _heartbeat_loop(self, job_id: str) -> None:
+        """Keep the async job watchdog alive while a private worker is busy.
+
+        Long local-model, graph, web, sandbox, or generated-tool operations may
+        be legitimately quiet for many minutes on small local machines.  The
+        worker-owned heartbeat is generic lifecycle metadata; it does not mark a
+        step as successful and it does not hide terminal failures from the
+        runner.
+        """
+        interval = self._resolve_heartbeat_interval_seconds(job_id=job_id)
+        while True:
+            await asyncio.sleep(interval)
+            record = self._jobs.get(job_id) or self._read(job_id)
+            if not isinstance(record, dict) or str(record.get("status") or "") not in {"queued", "running"}:
+                return
+            now = self._now()
+            watchdog = record.get("watchdog") if isinstance(record.get("watchdog"), dict) else {}
+            watchdog = dict(watchdog)
+            watchdog["last_heartbeat_at"] = now
+            record["watchdog"] = watchdog
+            record["updated_at"] = now
+            self._jobs[job_id] = record
+            self._write(record)
+            try:
+                runtime_state_manager.emit(
+                    run_id=job_id,
+                    step_id="job.heartbeat",
+                    level="developer",
+                    kind="lifecycle",
+                    status="running",
+                    title="Job heartbeat",
+                    message="Async worker is still running; watchdog heartbeat refreshed.",
+                    method="async_worker",
+                    progress=None,
+                    output={
+                        "heartbeat_at": now,
+                        "job_family": (record.get("metadata") or {}).get("job_family") if isinstance(record.get("metadata"), dict) else None,
+                    },
+                )
+            except Exception:
+                pass
+
+    def _resolve_heartbeat_interval_seconds(self, *, job_id: str | None = None, metadata: dict[str, Any] | None = None) -> int:
+        meta = metadata if isinstance(metadata, dict) else {}
+        if job_id:
+            record = self._jobs.get(job_id) or self._read(job_id)
+            if isinstance(record, dict) and isinstance(record.get("metadata"), dict):
+                meta = record.get("metadata") or {}
+        for key in ("heartbeat_interval_seconds", "watchdog_heartbeat_interval_seconds"):
+            if key in meta:
+                try:
+                    return max(5, int(meta.get(key) or 0))
+                except Exception:
+                    continue
+        try:
+            return max(5, int(os.getenv("AI_RUNTIME_ASYNC_JOB_HEARTBEAT_SECONDS") or "30"))
+        except Exception:
+            return 30
 
     def _run_runner_in_private_loop(self, runner: Callable[[], Awaitable[dict[str, Any]]]) -> Any:
         value = runner()
@@ -280,9 +347,9 @@ class RuntimeAsyncJobStore:
                 except Exception:
                     continue
         try:
-            return max(0, int(os.getenv("AI_RUNTIME_ASYNC_JOB_TIMEOUT_SECONDS") or "900"))
+            return max(0, int(os.getenv("AI_RUNTIME_ASYNC_JOB_TIMEOUT_SECONDS") or "3600"))
         except Exception:
-            return 900
+            return 3600
 
     def _resolve_stale_seconds(self, *, metadata: dict[str, Any] | None = None) -> int:
         meta = metadata if isinstance(metadata, dict) else {}
@@ -293,9 +360,9 @@ class RuntimeAsyncJobStore:
                 except Exception:
                     continue
         try:
-            return max(30, int(os.getenv("AI_RUNTIME_ASYNC_JOB_STALE_SECONDS") or "300"))
+            return max(30, int(os.getenv("AI_RUNTIME_ASYNC_JOB_STALE_SECONDS") or "1200"))
         except Exception:
-            return 300
+            return 1200
 
     def _timeout_from_record(self, record: dict[str, Any]) -> int:
         try:
