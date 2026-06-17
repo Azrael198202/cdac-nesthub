@@ -9,6 +9,7 @@ import time
 import threading
 import concurrent.futures
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 try:
@@ -323,6 +324,7 @@ class RuntimeBlueprintArtifactGenerator:
                     "acquisition_policy": blueprint.get("acquisition_policy") if isinstance(blueprint.get("acquisition_policy"), dict) else {},
                     "dependencies": blueprint.get("dependencies") if isinstance(blueprint.get("dependencies"), list) else [],
                     "generation_attempt": attempt,
+                    "route_override": attempt.get("route_override") if isinstance(attempt.get("route_override"), dict) else None,
                 },
                 response_format={"type": "json_object"} if attempt.get("force_json") else None,
             )
@@ -965,7 +967,12 @@ class RuntimeBlueprintArtifactGenerator:
             task_type="runtime_tool_code_generation",
             complexity=str((attempt or {}).get("complexity") or "high"),
             messages=messages,
-            context={"tool_id": tool_id, "generation_attempt": repair_attempt, "repair": True},
+            context={
+                "tool_id": tool_id,
+                "generation_attempt": repair_attempt,
+                "repair": True,
+                "route_override": repair_attempt.get("route_override") if isinstance(repair_attempt.get("route_override"), dict) else None,
+            },
             response_format={"type": "json_object"},
         )
         self._emit_generation_progress(
@@ -1625,20 +1632,93 @@ def {function_name}(payload=None):
         return "default"
 
     def _generation_attempts(self, base_complexity: str) -> list[dict[str, Any]]:
+        """Build explicit one-model code-generation attempts.
+
+        Previous versions escalated only the abstract complexity value.  The
+        model router could still keep the same provider/model inside each call
+        or spend the whole stage timeout in hidden fallbacks.  Runtime artifact
+        generation needs visible, deterministic escalation: one attempt equals
+        one provider/model route, and the next attempt is a real model change.
+        The route list is read from model policy and remains capability-neutral.
+        """
         order = ["basic", "medium", "high", "critical"]
         base = str(base_complexity or "default").strip().lower()
         if base not in order:
             base = "medium" if base == "default" else "high"
         start = order.index(base)
-        complexities = order[start:]
+
+        routes = self._code_generation_escalation_routes()
         attempts: list[dict[str, Any]] = []
-        for complexity in complexities:
-            # First try the policy route for this complexity with strict JSON.
-            # If that fails because the provider cannot follow JSON mode, retry
-            # once without response_format before escalating to the next route.
-            attempts.append({"base_complexity": base, "complexity": complexity, "force_json": True, "compact": True})
-            attempts.append({"base_complexity": base, "complexity": complexity, "force_json": False, "compact": True})
-        return attempts
+        seen: set[tuple[str, str]] = set()
+        for route in routes:
+            provider = str(route.get("provider") or "").strip()
+            model = str(route.get("model") or "").strip()
+            if not provider and not model:
+                continue
+            key = (provider, model)
+            if key in seen:
+                continue
+            seen.add(key)
+            complexity = str(route.get("complexity") or "medium").strip().lower()
+            if complexity in order and order.index(complexity) < start:
+                continue
+            attempts.append({
+                "base_complexity": base,
+                "complexity": complexity if complexity in order else "medium",
+                "force_json": True,
+                "compact": True,
+                "route_override": {
+                    "provider": provider,
+                    "model": model,
+                    "options": route.get("options") if isinstance(route.get("options"), dict) else {"temperature": 0},
+                    "reason": "explicit_codegen_model_escalation",
+                },
+            })
+
+        if attempts:
+            return attempts
+        # Safe fallback: keep the old policy route if no explicit model policy is
+        # available.  This still does not encode any capability-specific logic.
+        return [{"base_complexity": base, "complexity": order[start], "force_json": True, "compact": True}]
+
+    def _code_generation_escalation_routes(self) -> list[dict[str, Any]]:
+        """Read code-generation model escalation routes from policy.
+
+        The function intentionally reads infrastructure model policy only.  It
+        does not branch on capability id, agent name, task name, or business
+        vocabulary.
+        """
+        policy_path = Path(os.getenv("AI_BRAIN_MODEL_POLICY_PATH") or "configs/brain_model_policy.yaml")
+        if not policy_path.is_absolute():
+            for root in [Path.cwd(), Path(__file__).resolve().parents[2]]:
+                candidate = root / policy_path
+                if candidate.exists():
+                    policy_path = candidate
+                    break
+        try:
+            import yaml  # type: ignore
+            policy = yaml.safe_load(policy_path.read_text(encoding="utf-8")) if policy_path.exists() else {}
+        except Exception:
+            policy = {}
+        routes: list[dict[str, Any]] = []
+        try:
+            task = policy["brains"]["auxiliary_brain"]["tasks"]["runtime_tool_code_generation"]
+            complexities = task.get("complexities") if isinstance(task.get("complexities"), dict) else {}
+            for complexity in ["basic", "medium", "high", "critical"]:
+                item = complexities.get(complexity) if isinstance(complexities.get(complexity), dict) else {}
+                if item:
+                    routes.append({"complexity": complexity, **item})
+            if not routes and isinstance(task, dict):
+                routes.append({"complexity": "medium", **task})
+        except Exception:
+            routes = []
+        if routes:
+            return routes
+        return [
+            {"complexity": "basic", "provider": "ollama", "model": "qwen2.5-coder:7b", "options": {"temperature": 0}},
+            {"complexity": "medium", "provider": "ollama", "model": "deepseek-coder-v2:lite", "options": {"temperature": 0}},
+            {"complexity": "high", "provider": "ollama", "model": "deepseek-coder-v2:16b", "options": {"temperature": 0}},
+        ]
 
     def _capability_contract(self, *, tool_id: str, blueprint: dict[str, Any]) -> dict[str, Any]:
         declared = blueprint.get("capability_match_contract") if isinstance(blueprint.get("capability_match_contract"), dict) else {}
@@ -1921,6 +2001,7 @@ def {function_name}(payload=None):
         module = str(entrypoint.get("module") or "tool.py")
         function = str(entrypoint.get("function") or "run")
         code = f'''from __future__ import annotations
+from pathlib import Path
 from typing import Any
 TOOL_ID = {tool_id!r}
 def {function}(payload: dict[str, Any] | None = None) -> dict[str, Any]:

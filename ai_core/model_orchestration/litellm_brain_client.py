@@ -44,7 +44,10 @@ class LiteLLMBrainClient:
         response_format: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> LiteLLMBrainResult:
-        route = self.router.select(brain=brain, task_type=task_type, complexity=complexity, context=context or {})
+        context = context or {}
+        route = self._route_from_override(brain=brain, task_type=task_type, complexity=complexity, context=context)
+        if route is None:
+            route = self.router.select(brain=brain, task_type=task_type, complexity=complexity, context=context)
         return await self.complete_with_route(route=route, messages=messages, response_format=response_format, **kwargs)
 
     def complete_sync(
@@ -58,8 +61,42 @@ class LiteLLMBrainClient:
         response_format: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> LiteLLMBrainResult:
-        route = self.router.select(brain=brain, task_type=task_type, complexity=complexity, context=context or {})
+        context = context or {}
+        route = self._route_from_override(brain=brain, task_type=task_type, complexity=complexity, context=context)
+        if route is None:
+            route = self.router.select(brain=brain, task_type=task_type, complexity=complexity, context=context)
         return self.complete_with_route_sync(route=route, messages=messages, response_format=response_format, **kwargs)
+
+    def _route_from_override(self, *, brain: str, task_type: str, complexity: str, context: dict[str, Any]) -> BrainModelRoute | None:
+        """Return an explicit one-model route for controlled escalation attempts.
+
+        This is used by runtime artifact generation when a previous model attempt
+        failed or timed out.  The override is still policy data supplied by the
+        caller, not capability/domain logic.  Fallbacks are intentionally removed
+        so one attempt maps to exactly one provider/model and the next attempt can
+        visibly escalate instead of spending the entire timeout inside a hidden
+        fallback chain.
+        """
+        override = context.get("route_override") if isinstance(context, dict) else None
+        if not isinstance(override, dict):
+            return None
+        provider = str(override.get("provider") or "").strip()
+        model = str(override.get("model") or "").strip()
+        if not provider and not model:
+            return None
+        options = override.get("options") if isinstance(override.get("options"), dict) else {}
+        return BrainModelRoute(
+            brain=str(brain or "generic_brain"),
+            task_type=str(task_type or "default"),
+            complexity=str(complexity or "default"),
+            provider=provider,
+            model=model,
+            model_alias=str(override.get("model_alias") or override.get("alias") or ""),
+            source="explicit_generation_attempt_route",
+            options=options,
+            fallback=[],
+            decision_reason=str(override.get("reason") or "explicit_codegen_escalation_route"),
+        )
 
     def _attempt_allowed(self, route: BrainModelRoute) -> tuple[bool, str]:
         """Preflight a LiteLLM route before calling the library.
