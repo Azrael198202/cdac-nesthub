@@ -482,6 +482,7 @@ class RuntimeBlueprintArtifactGenerator:
             verification_input=verification_input,
             specification_contract=specification_contract,
             previous_attempts=attempts,
+            route_floor=self._last_attempted_route_floor(attempts),
         )
         if self._valid_generated_artifact(progressive):
             contract_violations = self._generated_artifact_contract_violations(
@@ -527,6 +528,7 @@ class RuntimeBlueprintArtifactGenerator:
         verification_input: dict[str, Any],
         specification_contract: dict[str, Any],
         previous_attempts: list[dict[str, Any]] | None = None,
+        route_floor: int = 0,
     ) -> dict[str, Any]:
         """Generate artifact files in smaller generic LLM calls.
 
@@ -538,11 +540,14 @@ class RuntimeBlueprintArtifactGenerator:
         """
         attempts = previous_attempts if isinstance(previous_attempts, list) else []
         progressive_attempts: list[dict[str, Any]] = []
-        routes = [attempt for attempt in self._generation_attempts("critical") if isinstance(attempt, dict)]
-        # Prefer higher-capacity routes for the progressive pass, but preserve
-        # the policy-defined order and availability checks.
-        if len(routes) > 1:
-            routes = list(reversed(routes))
+        routes = [attempt for attempt in self._generation_attempts("basic") if isinstance(attempt, dict)]
+        # Progressive generation is already split into smaller file-level calls.
+        # Keep the policy-defined escalation order so a usable mid-sized model
+        # can finish before falling through to the largest local model.  The
+        # route_floor skips models already proven unsuitable in full-artifact
+        # generation without relying on capability names or business words.
+        if route_floor > 0:
+            routes = routes[min(route_floor, len(routes)):] or routes[-1:]
         self._emit_generation_progress(
             run_id=run_id,
             tool_id=tool_id,
@@ -1061,17 +1066,20 @@ class RuntimeBlueprintArtifactGenerator:
         if configured > 0:
             base = configured
         elif "16b" in model or "32b" in model or "70b" in model:
-            base = int(os.getenv("AI_RUNTIME_LARGE_CODEGEN_TIMEOUT_SECONDS") or "900")
+            base = int(os.getenv("AI_RUNTIME_LARGE_CODEGEN_TIMEOUT_SECONDS") or "1200")
         elif "deepseek" in model:
-            base = int(os.getenv("AI_RUNTIME_DEEPSEEK_CODEGEN_TIMEOUT_SECONDS") or "600")
+            base = int(os.getenv("AI_RUNTIME_DEEPSEEK_CODEGEN_TIMEOUT_SECONDS") or "720")
         else:
-            base = int(os.getenv("AI_RUNTIME_DEFAULT_CODEGEN_TIMEOUT_SECONDS") or "300")
+            base = int(os.getenv("AI_RUNTIME_DEFAULT_CODEGEN_TIMEOUT_SECONDS") or "360")
         if attempt.get("repair"):
             return max(1, int(os.getenv("AI_RUNTIME_CODEGEN_REPAIR_TIMEOUT_SECONDS") or str(min(base, 300))))
         if attempt.get("progressive_file"):
-            # Per-file prompts are smaller, but local 16b models still need
-            # enough time to return complete source code.
-            return max(1, int(os.getenv("AI_RUNTIME_PROGRESSIVE_FILE_CODEGEN_TIMEOUT_SECONDS") or str(min(max(base, 420), 900))))
+            # Per-file prompts are smaller, but local large code models still
+            # need enough time to return complete source code.  Do not cap the
+            # timeout below the model-aware base; otherwise a 16b route can still
+            # be killed by an old 180/900 second ceiling while it is making
+            # progress.
+            return max(1, int(os.getenv("AI_RUNTIME_PROGRESSIVE_FILE_CODEGEN_TIMEOUT_SECONDS") or str(max(base, 600))))
         if attempt.get("compact") and not any(marker in model for marker in ["16b", "32b", "70b"]):
             return max(1, int(os.getenv("AI_RUNTIME_COMPACT_CODEGEN_TIMEOUT_SECONDS") or str(min(base, 360))))
         return max(1, base)
@@ -1148,6 +1156,37 @@ class RuntimeBlueprintArtifactGenerator:
             next_attempt=next_attempt or {},
             attempts_completed=len(attempts_so_far),
         )
+
+    def _last_attempted_route_floor(self, attempts: list[dict[str, Any]]) -> int:
+        """Return a conservative route index for progressive recovery.
+
+        Full-artifact generation may fail because one large JSON response is too
+        slow or too brittle.  Progressive generation should not blindly repeat
+        every failed route forever, but it should still preserve policy order and
+        leave at least one route available.  This helper is infrastructure-only:
+        it only looks at completed attempt records and route order, never at
+        capability ids or business words.
+        """
+        if not isinstance(attempts, list) or not attempts:
+            return 0
+        ordered = self._generation_attempts("basic")
+        route_keys: list[tuple[str, str]] = []
+        for attempt in ordered:
+            override = attempt.get("route_override") if isinstance(attempt, dict) else {}
+            override = override if isinstance(override, dict) else {}
+            route_keys.append((str(override.get("provider") or ""), str(override.get("model") or "")))
+        max_seen = -1
+        for record in attempts:
+            attempt = record.get("attempt") if isinstance(record, dict) else None
+            override = attempt.get("route_override") if isinstance(attempt, dict) else {}
+            override = override if isinstance(override, dict) else {}
+            key = (str(override.get("provider") or ""), str(override.get("model") or ""))
+            if key in route_keys:
+                max_seen = max(max_seen, route_keys.index(key))
+        if max_seen < 0:
+            return 0
+        # Keep at least the strongest configured route for recovery.
+        return min(max_seen + 1, max(len(route_keys) - 1, 0))
 
     def _next_generation_attempt(self, current_attempt: dict[str, Any], *, attempts_so_far: list[dict[str, Any]]) -> dict[str, Any] | None:
         attempts = self._generation_attempts(str(current_attempt.get("base_complexity") or current_attempt.get("complexity") or "default"))
