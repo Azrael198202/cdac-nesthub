@@ -135,12 +135,16 @@ class CompiledTaskLoader:
                 binding_contract = {**binding_contract, "bindings": node_bindings, "template_parsing_enabled": False}
             name = str(node.get("label") or original.get("participant_display_name") or original.get("display_name") or original.get("name") or sid).strip()
             instruction = str(node.get("instruction") or step.get("instruction") or original.get("source_instruction_fragment") or original.get("execution_objective") or original.get("instruction") or "").strip()
+            original_participant_id = str(original.get("participant_id") or original.get("id") or "").strip()
             out.append({
                 **original,
                 "id": sid,
                 "step_id": sid,
                 "compiled_step_id": sid,
                 "source_step_id": sid,
+                "original_participant_id": original_participant_id,
+                "durable_participant_id": original_participant_id,
+                "declared_participant_id": original_participant_id,
                 "participant_id": sid,
                 "participant_display_name": name,
                 "display_name": name,

@@ -158,10 +158,23 @@ class ParameterResolutionPipeline:
         return keys
 
     def field_key(self, field: dict[str, Any]) -> str:
-        raw = str(field.get("field") or field.get("name") or field.get("parameter_name") or "").strip()
-        participant = str(field.get("participant_id") or "").strip()
+        """Return a stable user-facing parameter identity.
+
+        Runtime input can be emitted by more than one layer with scoped and plain
+        names for the same callable parameter, for example ``step_001.city_name``
+        and ``city_name``.  The input form must show that parameter once.  Use
+        the declared parameter name or the tail of a scoped field as the primary
+        identity.  Keep layer/participant only as a fallback for generic unnamed
+        prompts so unrelated fields are not accidentally merged.
+        """
+        declared = str(field.get("parameter_name") or field.get("source_field") or "").strip()
+        raw = str(field.get("field") or field.get("name") or "").strip()
+        primary = declared or (raw.rsplit(".", 1)[-1] if "." in raw else raw)
+        normalized = re.sub(r"[^a-z0-9]+", "_", primary.casefold()).strip("_")
+        if normalized and normalized not in {"input", "value", "parameter", "field"}:
+            return normalized
+        participant = str(field.get("participant_id") or field.get("participant_name") or "").strip()
         layer = str(field.get("resolution_layer") or field.get("source") or field.get("kind") or "").strip()
-        normalized = re.sub(r"[^a-z0-9]+", "_", raw.casefold()).strip("_")
         return "|".join(part for part in (layer, participant, normalized) if part)
 
     def _clean_mapping(self, values: dict[str, Any]) -> dict[str, Any]:

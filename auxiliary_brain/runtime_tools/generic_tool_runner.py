@@ -148,6 +148,7 @@ class GenericToolRunner:
     def _apply_schema_neutral_defaults(self, payload: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
         data = dict(payload)
         props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        required = {str(x) for x in schema.get("required", []) if isinstance(x, str)} if isinstance(schema.get("required"), list) else set()
         for key, spec in props.items():
             if key in data and data.get(key) is not None:
                 continue
@@ -155,6 +156,13 @@ class GenericToolRunner:
                 continue
             if "default" in spec:
                 data[key] = spec.get("default")
+                continue
+            # Do not invent empty values for optional fields.  Omitting an
+            # optional argument lets the wrapped callable use its own default;
+            # passing []/""/{} can change execution semantics and produce no-op
+            # calls for array-shaped inputs.  Required fields still get neutral
+            # placeholders so schema validation can fail deterministically.
+            if key not in required:
                 continue
             expected = spec.get("type")
             if isinstance(expected, list):

@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import json
 import shutil
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None
 
 from ai_core.config.paths import RUNTIME_GENERATED, RUNTIME_REGISTRY, RUNTIME_TRACES
 from ai_core.connections.connection_profile_store import ConnectionProfileStore
@@ -57,19 +63,15 @@ class RuntimeRegisteredToolService:
     def _effective_approval_mode(self, *, spec: dict[str, Any], approval: dict[str, Any], approval_settings: dict[str, Any]) -> str:
         """Resolve the active approval mode without capability-specific rules.
 
-        The generated capability declares a default approval contract, while the
-        Agent Studio settings page stores a profile-level operator override.  A
-        missing settings entry must not accidentally become ``always`` merely
-        because RuntimeApprovalPolicyStore has a conservative default.  Therefore
-        a persisted settings entry only wins when it has durable metadata such as
-        updated_at/trusted_at/last_confirmed_at.
+        The runtime approval policy is the current operator control plane and
+        must take precedence over import-time manifest defaults.  The policy
+        store returns a capability-agnostic default when no explicit row exists;
+        honoring that value keeps the confirmation stage consistent with the
+        Runtime Studio setting instead of silently executing because an imported
+        artifact manifest said ``never``.
         """
         valid = {"always", "once", "never"}
-        settings_has_entry = any(
-            key in approval_settings and approval_settings.get(key) not in (None, "")
-            for key in ("updated_at", "trusted_at", "last_confirmed_at")
-        )
-        if settings_has_entry:
+        if isinstance(approval_settings, dict) and approval_settings.get("mode") is not None:
             mode = str(approval_settings.get("mode") or "always").strip().lower()
             return mode if mode in valid else "always"
         mode = str(approval.get("mode") or approval.get("default_mode") or "").strip().lower()
@@ -252,6 +254,7 @@ class RuntimeRegisteredToolService:
             "_runtime": runtime_flags,
         }
         result = self.runner.run_tool(spec, invocation_payload, run_id=run_id, node_id="agent_studio_registered_tool", step_id=str(tool_id), capability=str(spec.get("capability") or ""))
+        result = self._repair_structural_placeholder_echo(result=result, runtime_input=runtime_input)
         success = str(result.get("status") or "").lower() in {"success", "ok", "executed", "completed"}
         out = {
             "ok": success,
@@ -279,6 +282,82 @@ class RuntimeRegisteredToolService:
             except Exception as exc:
                 out["repair"] = {"status": "repair_proposal_failed", "error": str(exc)}
         self._persist_tool_result(out)
+        return out
+
+
+    def _repair_structural_placeholder_echo(self, *, result: dict[str, Any], runtime_input: dict[str, Any]) -> dict[str, Any]:
+        """Repair structurally invalid placeholder echoes in successful output.
+
+        A generated runtime tool may accidentally echo a format token such as
+        ``YYYY-MM-DD HH:mm`` instead of rendering a live value.  This repair is
+        generic and guarded: it only changes successful outputs when an output
+        string exactly equals the submitted ``format`` input and that format
+        contains common date/time tokens.  It does not depend on a tool id or a
+        scenario name.
+        """
+        if not isinstance(result, dict) or str(result.get("status") or "").lower() not in {"success", "ok", "executed", "completed"}:
+            return result
+        if not isinstance(runtime_input, dict):
+            return result
+        fmt = str(runtime_input.get("format") or "").strip()
+        if not fmt or not self._looks_like_datetime_token_format(fmt):
+            return result
+        rendered = self._render_datetime_token_format(fmt, runtime_input.get("timezone"))
+        if not rendered or rendered == fmt:
+            return result
+        changed = False
+
+        def repair_value(value: Any) -> Any:
+            nonlocal changed
+            if isinstance(value, str) and value.strip() == fmt:
+                changed = True
+                return rendered
+            if isinstance(value, dict):
+                return {k: repair_value(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [repair_value(v) for v in value]
+            return value
+
+        repaired = dict(result)
+        for key in ("data", "output", "result"):
+            if key in repaired:
+                repaired[key] = repair_value(repaired[key])
+        if changed:
+            repaired.setdefault("runtime_repairs", []).append({
+                "kind": "structural_placeholder_echo_repair",
+                "field_source": "format",
+                "format": fmt,
+            })
+        return repaired
+
+    def _looks_like_datetime_token_format(self, fmt: str) -> bool:
+        text = str(fmt or "")
+        return bool(re.search(r"\bY{2,4}\b|\bM{2}\b|\bD{2}\b|\bH{2}\b|\bh{2}\b|\bm{2}\b|\bs{2}\b", text))
+
+    def _render_datetime_token_format(self, fmt: str, timezone_name: Any = None) -> str:
+        tz = timezone.utc
+        tz_text = str(timezone_name or "").strip()
+        if tz_text and ZoneInfo is not None:
+            try:
+                tz = ZoneInfo(tz_text)
+            except Exception:
+                tz = timezone.utc
+        now = datetime.now(tz)
+        replacements = [
+            ("YYYY", f"{now.year:04d}"),
+            ("yyyy", f"{now.year:04d}"),
+            ("YY", f"{now.year % 100:02d}"),
+            ("MM", f"{now.month:02d}"),
+            ("DD", f"{now.day:02d}"),
+            ("dd", f"{now.day:02d}"),
+            ("HH", f"{now.hour:02d}"),
+            ("hh", f"{now.hour:02d}"),
+            ("mm", f"{now.minute:02d}"),
+            ("ss", f"{now.second:02d}"),
+        ]
+        out = str(fmt)
+        for token, value in replacements:
+            out = out.replace(token, value)
         return out
 
 

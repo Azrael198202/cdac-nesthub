@@ -207,10 +207,8 @@ class RegisteredToolParameterBridge:
             aliases.append(field_name[: -len("_seconds")])
         if field_name.endswith("_parameters"):
             aliases.append(field_name[: -len("_parameters")])
-        pid = self._participant_id(participant)
-        pname = self._participant_name(participant)
-        safe_pname = self._safe_key(pname)
-        for prefix in (pid, pname, safe_pname):
+        prefixes = self._participant_alias_prefixes(participant)
+        for prefix in prefixes:
             if prefix:
                 aliases.extend([f"{prefix}.{field_name}", f"{prefix}_{field_name}"])
         # Prefer scoped values over plain names when both exist in submitted UI data.
@@ -223,6 +221,35 @@ class RegisteredToolParameterBridge:
             if key is not None:
                 return values[key]
         return None
+
+
+    def _participant_alias_prefixes(self, participant: dict[str, Any]) -> list[str]:
+        prefixes: list[str] = []
+        def add(value: Any) -> None:
+            text = str(value or "").strip()
+            if not text:
+                return
+            for candidate in (text, self._safe_key(text)):
+                if candidate and candidate not in prefixes:
+                    prefixes.append(candidate)
+        for key in (
+            "participant_id",
+            "id",
+            "original_participant_id",
+            "durable_participant_id",
+            "declared_participant_id",
+            "step_id",
+            "compiled_step_id",
+            "source_step_id",
+            "declared_step_id",
+            "display_name",
+            "participant_display_name",
+            "agent_name",
+            "name",
+            "role_name",
+        ):
+            add(participant.get(key) if isinstance(participant, dict) else None)
+        return prefixes
 
     def _normalize_for_schema(self, raw: Any, prop: dict[str, Any]) -> Any:
         schema_type = str(prop.get("type") or "string").strip().lower()

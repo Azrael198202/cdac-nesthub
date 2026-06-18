@@ -693,11 +693,13 @@ function normalizeInteractionItem(raw, idx){
 
 function canonicalRuntimeInputKey(item){
   const it = item || {};
-  const participant = String(it.participant_id || it.participant_name || '').trim().toLowerCase();
-  let name = String(it.parameter_name || it.name || it.field || '').trim();
+  let name = String(it.parameter_name || it.source_field || it.name || it.field || '').trim();
   if(name.includes('.')){ name = name.split('.').pop(); }
   name = name.replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase();
-  return (participant ? participant + ':' : '') + name;
+  if(name && !['input','value','parameter','field'].includes(name)){ return name; }
+  const participant = String(it.participant_id || it.participant_name || '').trim().toLowerCase();
+  const layer = String(it.resolution_layer || it.kind || '').trim().toLowerCase();
+  return [layer, participant, name].filter(Boolean).join(':');
 }
 function mergeRuntimeInputItems(base, incoming){
   const out = {...base};
@@ -802,7 +804,7 @@ function openMissingInputModal(items, runId){
     }
     const descriptionText = (normalizedDescription && normalizedDescription !== normalizedMessage) ? ('\n' + description) : '';
     const inputType=String(it.input_type||'');
-    const area = inputType==='textarea' || (kind==='validation_recovery' && field==='corrected_json');
+    const area = inputType==='textarea' || inputType==='list' || (kind==='validation_recovery' && field==='corrected_json');
     const isBoolean = ['boolean','checkbox','bool'].includes(inputType.toLowerCase());
     if(isBoolean){
       hint.textContent = sourceText ? sourceText.trim() : '';
@@ -826,7 +828,7 @@ function openMissingInputModal(items, runId){
     input.dataset.scope=String(it.scope||'');
     input.dataset.toolId=String(it.tool_id||'');
     input.dataset.profileId=String(it.profile_id||'default');
-    input.placeholder=inputType==='list' ? 'Enter values separated by comma/new line, or add one by one' : String(it.placeholder||field);
+    input.placeholder=inputType==='list' ? 'Enter one or more values separated by comma or new line. Leave blank if optional.' : String(it.placeholder||field);
     if(isBoolean){
       const check=document.createElement('label');
       check.className='booleanField';
@@ -841,30 +843,8 @@ function openMissingInputModal(items, runId){
       wrap.appendChild(hint);
       wrap.appendChild(input);
     }
-    if(inputType==='list'){
-      const chips=document.createElement('div');
-      chips.className='small';
-      chips.id='missing_values_'+idx;
-      chips.style.marginTop='6px';
-      const actions=document.createElement('div');
-      actions.className='row';
-      const addBtn=document.createElement('button');
-      addBtn.type='button';
-      addBtn.className='btn';
-      addBtn.textContent='Continue / add value';
-      addBtn.onclick=()=>addListValue(input, chips);
-      const doneBtn=document.createElement('button');
-      doneBtn.type='button';
-      doneBtn.className='btn primary';
-      doneBtn.textContent='Done for this parameter';
-      doneBtn.onclick=()=>addListValue(input, chips);
-      actions.appendChild(addBtn);
-      actions.appendChild(doneBtn);
-      wrap.appendChild(chips);
-      wrap.appendChild(actions);
-    }
     fields.appendChild(wrap);
-    if(!area && !isBoolean){ input.addEventListener('keydown', (event)=>{ if(event.key==='Enter'){ event.preventDefault(); if(inputType==='list'){ addListValue(input, document.getElementById('missing_values_'+idx)); } else { submitMissingInputs(); } }}); }
+    if(!area && !isBoolean){ input.addEventListener('keydown', (event)=>{ if(event.key==='Enter'){ event.preventDefault(); submitMissingInputs(); } }); }
   });
   modal.classList.add('show');
 }
@@ -1836,9 +1816,28 @@ function requestScopeMatchesPayload(payload, req){
 
 function collectMissingInputs(payload){
   if(!payload || typeof payload !== 'object'){ return []; }
-  if(Array.isArray(payload.missing_inputs) && payload.missing_inputs.length){ return normalizeInteractionItems(payload.missing_inputs); }
+
+  // Prefer the active interaction request/pending action contract over
+  // missing_inputs. missing_inputs is often the blocking subset only, while
+  // the interaction request can include optional fields that must be shown in
+  // the same form. This keeps required/optional collection one-shot and avoids
+  // reopening the same required field after the user expected confirmation.
+  if(payload.interaction_request && typeof payload.interaction_request === 'object'){
+    const req = payload.interaction_request;
+    const mode = String(req.input_mode || (req.request && req.request.input_mode) || '').trim();
+    const kind = String(req.kind || req.type || '').trim();
+    if(kind==='runtime_tool_human_confirmation' || kind==='requires_human_confirmation' || mode==='confirmation'){ return []; }
+    if(requestScopeMatchesPayload(payload, req)){
+      if(Array.isArray(req.fields) && req.fields.length){ return normalizeInteractionItems(req.fields.map(f=>({...f, kind:f.kind||req.kind||req.type||'human_information_required'}))); }
+      if(Array.isArray(req.config_fields) && req.config_fields.length){ return normalizeInteractionItems(req.config_fields.map(f=>({kind:req.kind||req.type||'runtime_config_input', field:f.name||f.env, label:f.name||f.env, message:req.message||'Please provide this runtime configuration value.', input_type:f.interaction_type==='secret'?'password':'text', required:f.required!==false}))); }
+    }
+  }
+
   if(payload.pending_action && typeof payload.pending_action === 'object'){
     const pa = payload.pending_action;
+    const mode = String(pa.input_mode || (pa.request && pa.request.input_mode) || '').trim();
+    const kind = String(pa.kind || pa.type || '').trim();
+    if(kind==='runtime_tool_human_confirmation' || kind==='requires_human_confirmation' || mode==='confirmation'){ return []; }
     if(!requestScopeMatchesPayload(payload, pa)){ return []; }
     if(Array.isArray(pa.fields) && pa.fields.length){ return normalizeInteractionItems(pa.fields.map(f=>({...f, kind:f.kind||pa.kind||pa.type||'human_information_required'}))); }
     if(pa.request && Array.isArray(pa.request.fields) && pa.request.fields.length){ return normalizeInteractionItems(pa.request.fields.map(f=>({...f, kind:f.kind||pa.kind||pa.type||'human_information_required'}))); }

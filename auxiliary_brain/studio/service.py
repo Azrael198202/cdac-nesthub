@@ -2849,7 +2849,9 @@ class AgentStudioService:
                 "api_source": api_source,
                 "api_sources": api_sources,
             }]
-        if kind in {"collect_runtime_parameters", "runtime_parameter_input", "uploaded_artifact_parameters", "studio_pre_execution_uploaded_artifact_parameters", "studio_pre_execution_runtime_parameters", "agent_parameter_collection", "runtime_tool_configuration", "runtime_tool_human_confirmation"}:
+        if kind == "runtime_tool_human_confirmation":
+            return []
+        if kind in {"collect_runtime_parameters", "runtime_parameter_input", "uploaded_artifact_parameters", "studio_pre_execution_uploaded_artifact_parameters", "studio_pre_execution_runtime_parameters", "agent_parameter_collection", "runtime_tool_configuration"}:
             request = pending.get("request") if isinstance(pending.get("request"), dict) else {}
             fields = request.get("fields") if isinstance(request.get("fields"), list) else []
             normalized = []
@@ -2900,7 +2902,8 @@ class AgentStudioService:
     def _expand_runtime_parameter_aliases(self, values: dict[str, Any], *, participants: list[dict[str, Any]] | None = None, exclude_keys: set[str] | None = None, exclude_prefixes: tuple[str, ...] = ()) -> dict[str, Any]:
         expanded: dict[str, Any] = {}
         exclude_keys = exclude_keys or set()
-        participant_ids = {str((p or {}).get("participant_id") or (p or {}).get("id") or "").strip() for p in (participants or []) if isinstance(p, dict)}
+        participant_id_keys = ("participant_id", "id", "original_participant_id", "durable_participant_id", "declared_participant_id", "step_id", "compiled_step_id", "source_step_id", "declared_step_id")
+        participant_ids = {str((p or {}).get(k) or "").strip() for p in (participants or []) if isinstance(p, dict) for k in participant_id_keys}
         participant_names = {str((p or {}).get(k) or "").strip() for p in (participants or []) if isinstance(p, dict) for k in ("display_name", "agent_name", "name", "role_name", "participant_display_name")}
         safe_names = {re.sub(r"[^A-Za-z0-9_]+", "_", x).strip("_") for x in participant_names if x}
         prefixes = {x for x in (participant_ids | participant_names | safe_names) if x}
@@ -3584,14 +3587,83 @@ class AgentStudioService:
             runtime_parameters=runtime_parameters,
         )
         agent_fields = self._filter_deferred_execution_control_fields(agent_fields)
+        should_show_optional = bool(agent_fields or resource_missing)
+        optional_fields = self._collect_optional_runtime_parameter_fields(
+            participants=selected,
+            runtime_parameters=runtime_parameters,
+            dependency_plan=dependency_plan,
+        ) if should_show_optional else []
+        all_fields = list(agent_fields) + list(optional_fields)
 
         return self.parameter_resolution_pipeline.build_context(
             runtime_inputs=runtime_parameters,
             resource_reports=resource_reports,
-            agent_fields=agent_fields,
+            agent_fields=all_fields,
             policy_values=self._collect_execution_policy_values(task_graph),
             bound_resources=self._collect_bound_resource_refs(task_graph, participants),
         )
+
+    def _collect_optional_runtime_parameter_fields(
+        self,
+        *,
+        participants: list[dict[str, Any]],
+        runtime_parameters: dict[str, Any],
+        dependency_plan: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Expose optional callable inputs in the same pre-execution form.
+
+        Optional values are not blocking.  They are shown only when the task is
+        already pausing for runtime input, and blank optional values are omitted
+        by the UI/backend.  This is generic schema behavior: it reads declared
+        parameter contracts and does not depend on capability names or domains.
+        """
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for participant in participants or []:
+            if not isinstance(participant, dict):
+                continue
+            contract = participant.get("parameter_contract") if isinstance(participant.get("parameter_contract"), dict) else {}
+            params = contract.get("parameters") if isinstance(contract.get("parameters"), list) else []
+            pid = self.delegation_runtime._participant_identity(participant)
+            pname = self.delegation_runtime._participant_name(participant)
+            self.delegation_runtime._apply_task_runtime_parameters_to_selected([participant], runtime_parameters or {})
+            for param in params:
+                if not isinstance(param, dict):
+                    continue
+                if param.get("required") is True or param.get("runtime_required") is True or param.get("blocking") is True or param.get("execution_required") is True:
+                    continue
+                name = str(param.get("name") or param.get("field") or param.get("key") or "").strip()
+                if not name:
+                    continue
+                if self.delegation_runtime._runtime_field_already_bound(participant, {"parameter_name": name, "field": name, "name": name}):
+                    continue
+                if self.delegation_runtime._can_defer_field_to_dependency_output(participant, {"parameter_name": name, "field": name, "name": name}, dependency_plan or {}):
+                    continue
+                key = name.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                source_type = str(param.get("source_schema_type") or param.get("type") or "string").strip()
+                input_type = "textarea" if source_type in {"array", "object"} else "text"
+                out.append({
+                    "kind": "agent_parameter_optional",
+                    "field": f"{pid}.{name}" if pid else name,
+                    "name": f"{pid}.{name}" if pid else name,
+                    "parameter_name": name,
+                    "participant_id": pid,
+                    "participant_name": pname,
+                    "label": f"{pname} / {param.get('label') or name}" if pname else str(param.get("label") or name),
+                    "message": str(param.get("description") or f"Optional value for {name}. Leave blank to use the capability default."),
+                    "input_type": input_type,
+                    "schema_type": source_type,
+                    "required": False,
+                    "runtime_required": False,
+                    "blocking": False,
+                    "execution_required": False,
+                    "resolution_layer": "execution_input_optional",
+                    "aliases": [name, f"{pid}.{name}" if pid else name, f"{pid}_{name}" if pid else name],
+                })
+        return out
 
     def _collect_bound_resource_refs(self, task_graph: dict[str, Any], participants: list[dict[str, Any]]) -> dict[str, Any]:
         resources: dict[str, Any] = {}
