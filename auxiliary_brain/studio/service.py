@@ -30,6 +30,7 @@ from auxiliary_brain.studio.instruction_workflow_planner import InstructionWorkf
 from auxiliary_brain.studio.structural_step_planner import StructuralStepPlanner
 from auxiliary_brain.studio.runtime_semantic_planner import RuntimeSemanticPlanner
 from auxiliary_brain.runtime.capability.registered_tool_agent_binder import RegisteredToolAgentBinder
+from auxiliary_brain.runtime.capability.python_file_capability_importer import PythonFileCapabilityImporter
 from verification_brain import RuntimeVerificationFoundation
 from presentation_brain import FailureMessageRenderer, PresentationProfileRegistry
 from ai_core.runtime.state import runtime_state_manager
@@ -60,6 +61,7 @@ class AgentStudioService:
         self.runtime_semantic_planner = RuntimeSemanticPlanner()
         self.registered_tool_service = RuntimeRegisteredToolService()
         self.registered_tool_agent_binder = RegisteredToolAgentBinder()
+        self.python_file_capability_importer = PythonFileCapabilityImporter()
         self.verification_foundation = RuntimeVerificationFoundation()
         self.task_graph_compiler = TaskGraphCompiler()
         self.compiled_task_loader = CompiledTaskLoader()
@@ -1023,6 +1025,142 @@ class AgentStudioService:
             "traces": agent_traces + conversation_runs + runtime_execution_traces,
         }
 
+
+    def _maybe_import_python_file_capability(self, *, instruction: str, participant_name: str, artifact_refs: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+        """Convert an explicitly referenced Python program into a runtime capability.
+
+        This is a generic file-to-capability bridge.  It does not know the
+        program domain.  It only runs when the agent definition explicitly names
+        a Python file that is present in the uploaded artifact registry.  The
+        executable behavior remains in the user supplied file; the generated
+        wrapper only provides the standard runtime envelope.
+        """
+        source = self._resolve_python_file_reference(instruction=instruction, artifact_refs=artifact_refs)
+        if source is None:
+            return None
+        imported = self.python_file_capability_importer.import_file(
+            source_path=source,
+            participant_name=participant_name,
+            instruction=instruction,
+        )
+        if not imported.get("ok"):
+            return {
+                "binding_status": "python_file_capability_import_failed",
+                "participant_name": participant_name,
+                "tool_id": "",
+                "capability": "",
+                "capabilities": [],
+                "match_score": 0,
+                "match_basis": "explicit_python_file_reference",
+                "error": imported.get("error") or {"message": "Python file capability import failed."},
+                "tool_summary": {},
+                "parameter_contract": {
+                    "contract_type": "registered_tool_parameter_contract",
+                    "source": "python_file_import_failed",
+                    "parameters": [],
+                    "missing_information": [],
+                    "runtime_scope": "task_run",
+                },
+                "execution_policy": {"execution_method": "runtime_registered_tool", "binding_error": imported.get("error")},
+            }
+        tool_id = str(imported.get("tool_id") or "").strip()
+        input_schema = imported.get("input_schema") if isinstance(imported.get("input_schema"), dict) else {}
+        record = imported.get("registry_record") if isinstance(imported.get("registry_record"), dict) else {}
+        return {
+            "binding_status": "bound_to_imported_python_file_capability",
+            "participant_name": participant_name,
+            "tool_id": tool_id,
+            "capability": imported.get("capability") or tool_id,
+            "capabilities": imported.get("capabilities") or [tool_id],
+            "match_score": 100,
+            "match_basis": "explicit_python_file_reference",
+            "tool_summary": {
+                "tool_id": tool_id,
+                "name": record.get("name") or tool_id,
+                "capability": record.get("capability") or tool_id,
+                "capabilities": record.get("capabilities") if isinstance(record.get("capabilities"), list) else [tool_id],
+                "status": record.get("status") or "enabled",
+                "input_schema": input_schema,
+                "connection_schema": record.get("connection_schema") if isinstance(record.get("connection_schema"), dict) else {},
+                "secret_schema": record.get("secret_schema") if isinstance(record.get("secret_schema"), dict) else {},
+                "approval_policy": record.get("approval_policy") if isinstance(record.get("approval_policy"), dict) else {},
+            },
+            "parameter_contract": self._parameter_contract_from_input_schema(tool_id=tool_id, input_schema=input_schema, source="imported_python_file_input_schema"),
+            "execution_policy": {
+                "execution_method": "runtime_registered_tool",
+                "tool_id": tool_id,
+                "source": "explicit_python_file_reference",
+            },
+            "imported_python_file": {
+                "source_file": imported.get("source_file"),
+                "artifact_dir": imported.get("artifact_dir"),
+                "manifest_path": imported.get("manifest_path"),
+                "callable": imported.get("callable"),
+            },
+        }
+
+    def _resolve_python_file_reference(self, *, instruction: str, artifact_refs: list[dict[str, Any]] | None) -> Path | None:
+        text = str(instruction or "")
+        referenced_names = {m.group(1) for m in re.finditer(r"(?i)(?:file|program|code|script)\s+([A-Za-z0-9_.-]+\.py)\b", text)}
+        referenced_names.update(m.group(1) for m in re.finditer(r"(?i)\b([A-Za-z0-9_.-]+\.py)\b", text))
+        candidates: list[dict[str, Any]] = []
+        for item in artifact_refs or []:
+            if isinstance(item, dict):
+                candidates.append(item)
+        for item in self.artifact_registry.resolve_from_text(text):
+            if isinstance(item, dict):
+                candidates.append(item)
+        seen: set[str] = set()
+        for item in candidates:
+            path_text = str(item.get("path") or "").strip()
+            filename = str(item.get("filename") or item.get("name") or Path(path_text).name).strip()
+            if not path_text or not filename.lower().endswith(".py"):
+                continue
+            if referenced_names and filename not in referenced_names and filename.lower() not in {x.lower() for x in referenced_names}:
+                continue
+            key = str(Path(path_text))
+            if key in seen:
+                continue
+            seen.add(key)
+            path = Path(path_text).expanduser()
+            if path.exists() and path.is_file():
+                return path
+        # Allow explicit local paths only when they are present in the agent text.
+        for raw in referenced_names:
+            path = Path(raw).expanduser()
+            if path.exists() and path.is_file() and path.suffix.lower() == ".py":
+                return path
+        return None
+
+    def _parameter_contract_from_input_schema(self, *, tool_id: str, input_schema: dict[str, Any], source: str) -> dict[str, Any]:
+        properties = input_schema.get("properties") if isinstance(input_schema.get("properties"), dict) else {}
+        required = {str(x) for x in input_schema.get("required", []) if str(x).strip()} if isinstance(input_schema.get("required"), list) else set()
+        params: list[dict[str, Any]] = []
+        for name, prop in properties.items():
+            prop = prop if isinstance(prop, dict) else {}
+            schema_type = str(prop.get("type") or "string")
+            params.append({
+                "name": str(name),
+                "label": str(prop.get("title") or name),
+                "description": str(prop.get("description") or f"Provide {name}."),
+                "required": str(name) in required,
+                "type": "list" if schema_type == "array" else schema_type,
+                "values": [],
+                "collection_mode": "repeat_until_done" if schema_type == "array" else "single_value",
+                "runtime_required": str(name) in required,
+                "blocking": str(name) in required,
+                "execution_required": str(name) in required,
+                "source_schema_type": schema_type,
+            })
+        return {
+            "contract_type": "registered_tool_parameter_contract",
+            "source": source,
+            "tool_id": tool_id,
+            "parameters": params,
+            "missing_information": [p for p in params if p.get("required")],
+            "runtime_scope": "task_run",
+        }
+
     async def create_participant(self, instruction: str, name: str | None = None, uploaded_artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         participant_id = new_id("participant")
         participant_name = name or participant_id
@@ -1039,7 +1177,24 @@ class AgentStudioService:
         # so each task execution must collect fresh runtime parameters unless
         # the task instruction explicitly supplies them.
         schema_contract = self._parameter_contract_schema_only(parameter_contract)
-        capability_binding = self.registered_tool_agent_binder.bind(
+        file_capability_binding = self._maybe_import_python_file_capability(
+            instruction=instruction,
+            participant_name=participant_name,
+            artifact_refs=artifact_refs,
+        )
+        if file_capability_binding and not str(file_capability_binding.get("tool_id") or "").strip():
+            err = file_capability_binding.get("error") if isinstance(file_capability_binding.get("error"), dict) else {"message": "Python file capability import failed."}
+            return {
+                "action": "create_participant",
+                "origin": "auxiliary_brain",
+                "status": "failed",
+                "failure_class": "python_file_capability_import_failed",
+                "participant_id": participant_id,
+                "agent_name": participant_name,
+                "final_answer": str(err.get("message") or "Python file capability import failed."),
+                "error": err,
+            }
+        capability_binding = file_capability_binding or self.registered_tool_agent_binder.bind(
             instruction=instruction,
             participant_name=participant_name,
         )
