@@ -272,14 +272,32 @@ class AgentDelegationRuntime:
                     for_input_parsing=True,
                 ),
             )
-            result = await self._execute_workflow_step_through_ai_core_with_progress(
-                request,
-                self._build_primary_runtime_progress_bridge(
-                    run_payload,
-                    participant_index=index + 1,
-                    participant_name=participant_name,
-                ),
-            )
+            if self._is_generated_dataflow_step(participant, task_graph):
+                material_return = self._try_return_dependency_material(
+                    participant=participant,
+                    completed_results=agent_results,
+                    dependency_plan=dependency_plan,
+                )
+                if material_return is not None:
+                    result = material_return
+                else:
+                    result = await self._execute_intermediate_step_with_progress(
+                        request,
+                        self._build_primary_runtime_progress_bridge(
+                            run_payload,
+                            participant_index=index + 1,
+                            participant_name=participant_name,
+                        ),
+                    )
+            else:
+                result = await self._execute_workflow_step_through_ai_core_with_progress(
+                    request,
+                    self._build_primary_runtime_progress_bridge(
+                        run_payload,
+                        participant_index=index + 1,
+                        participant_name=participant_name,
+                    ),
+                )
             result_payload = self._sanitize_result_payload(result.__dict__)
             agent_results.append(result)
             run_payload["agent_results"].append(result_payload)
@@ -1459,14 +1477,32 @@ class AgentDelegationRuntime:
                     for_input_parsing=True,
                 ),
             )
-            result = await self._execute_workflow_step_through_ai_core_with_progress(
-                request,
-                self._build_primary_runtime_progress_bridge(
-                    run_payload,
-                    participant_index=index + 1,
-                    participant_name=participant_name,
-                ),
-            )
+            if self._is_generated_dataflow_step(participant, task_graph):
+                material_return = self._try_return_dependency_material(
+                    participant=participant,
+                    completed_results=agent_results,
+                    dependency_plan=dependency_plan,
+                )
+                if material_return is not None:
+                    result = material_return
+                else:
+                    result = await self._execute_intermediate_step_with_progress(
+                        request,
+                        self._build_primary_runtime_progress_bridge(
+                            run_payload,
+                            participant_index=index + 1,
+                            participant_name=participant_name,
+                        ),
+                    )
+            else:
+                result = await self._execute_workflow_step_through_ai_core_with_progress(
+                    request,
+                    self._build_primary_runtime_progress_bridge(
+                        run_payload,
+                        participant_index=index + 1,
+                        participant_name=participant_name,
+                    ),
+                )
             payload = self._sanitize_result_payload(result.__dict__)
             existing_results.append(payload)
             agent_results.append(result)
@@ -4177,15 +4213,21 @@ class AgentDelegationRuntime:
 
 
     async def _execute_intermediate_step_with_progress(self, request, progress_callback):
-        """Execute a generated workflow step as an isolated primary-runtime request.
+        """Execute a generated dataflow step through the lean step executor.
 
-        Generated/intermediate steps are not participants with durable runtime
-        inputs.  They are decomposed user requests.  Therefore this path must
-        never fall back to the generic AGENT_REQUEST envelope, because that
-        envelope can carry task-level coordination values into ai_core and
-        corrupt the step's intent/planning.
+        A compiled intermediate step is already part of an approved task graph.
+        It must not re-enter the full input_parsing -> intent_recognition ->
+        workflow_planning pipeline, otherwise a transform/final-return step can
+        be treated as a brand-new task and leave the durable job running for a
+        long time.  The primary client exposes a small dataflow executor that
+        consumes only the step objective plus verified upstream material.
         """
         try:
+            return await self.primary_client.execute_intermediate_step(
+                request,
+                progress_callback=progress_callback,
+            )
+        except AttributeError:
             return await self.primary_client.execute_workflow_step_request(
                 request,
                 progress_callback=progress_callback,
@@ -4193,7 +4235,10 @@ class AgentDelegationRuntime:
         except TypeError as exc:
             if "progress_callback" not in str(exc):
                 raise
-            return await self.primary_client.execute_workflow_step_request(request)
+            try:
+                return await self.primary_client.execute_intermediate_step(request)
+            except AttributeError:
+                return await self.primary_client.execute_workflow_step_request(request)
 
     async def _execute_agent_request_with_progress(self, request, progress_callback):
         try:
