@@ -71,7 +71,12 @@ class RuntimeRegisteredToolService:
         artifact manifest said ``never``.
         """
         valid = {"always", "once", "never"}
-        if isinstance(approval_settings, dict) and approval_settings.get("mode") is not None:
+        # A stored Runtime Studio policy overrides the artifact only when the
+        # policy row is explicit.  The policy store's default must not turn a
+        # manifest-level ``never`` into an ``always`` approval gate; otherwise
+        # no-parameter read-only tasks pause once and only run on a second
+        # resume command.
+        if isinstance(approval_settings, dict) and bool(approval_settings.get("explicit")):
             mode = str(approval_settings.get("mode") or "always").strip().lower()
             return mode if mode in valid else "always"
         mode = str(approval.get("mode") or approval.get("default_mode") or "").strip().lower()

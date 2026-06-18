@@ -67,7 +67,13 @@ class RuntimeApprovalPolicyStore:
         profiles = tools.get(clean_tool) if isinstance(tools, dict) else {}
         entry = profiles.get(clean_profile) if isinstance(profiles, dict) else None
         if not isinstance(entry, dict):
-            return {"tool_id": clean_tool, "profile_id": clean_profile, "mode": "always", "trusted": False}
+            return {
+                "tool_id": clean_tool,
+                "profile_id": clean_profile,
+                "mode": None,
+                "trusted": False,
+                "explicit": False,
+            }
         mode = str(entry.get("mode") or "always").strip().lower()
         if mode not in self.VALID_MODES:
             mode = "always"
@@ -76,6 +82,7 @@ class RuntimeApprovalPolicyStore:
             "profile_id": clean_profile,
             "mode": mode,
             "trusted": bool(entry.get("trusted")),
+            "explicit": True,
             "updated_at": entry.get("updated_at"),
             "trusted_at": entry.get("trusted_at"),
         }
@@ -95,7 +102,7 @@ class RuntimeApprovalPolicyStore:
 
     def is_auto_approved(self, *, tool_id: str, profile_id: str = "default") -> bool:
         policy = self.get_tool_policy(tool_id=tool_id, profile_id=profile_id)
-        mode = str(policy.get("mode") or "always").lower()
+        mode = str(policy.get("mode") or "").lower()
         if mode == "never":
             return True
         if mode == "once" and bool(policy.get("trusted")):
