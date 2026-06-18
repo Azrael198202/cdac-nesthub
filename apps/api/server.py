@@ -1558,7 +1558,7 @@ async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any
             )
             payload["session_boundary"] = session_store.boundary_status(active_session_id)
     final_status = str(payload.get("status") or "completed") if isinstance(payload, dict) else "completed"
-    waiting_statuses = {"requires_input", "requires_key", "waiting_input", "paused", "blocked_waiting_input"}
+    waiting_statuses = {"requires_input", "requires_key", "waiting_input", "paused", "blocked_waiting_input", "requires_human_confirmation"}
     terminal_status = "failed" if final_status in {"failed", "error"} else ("paused" if final_status in waiting_statuses else "completed")
     runtime_state_manager.finish_run(
         state_run_id,

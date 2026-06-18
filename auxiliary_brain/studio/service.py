@@ -2507,6 +2507,7 @@ class AgentStudioService:
                 self.execution_reuse_store.register_success(task_graph=task_graph, participants=participants, run_payload=result)
             except Exception:
                 pass
+        final_answer_value = self._extract_user_facing_final_answer(result)
         response = {
             "action": "execute_task_graph",
             "origin": "auxiliary_brain",
@@ -2516,7 +2517,7 @@ class AgentStudioService:
             "execution_type": execution_type,
             "schedule_policy": schedule_policy if execution_type == "scheduled" else {"enabled": False, "mode": "none", "state": "none"},
             "schedule_state": str((schedule_policy or {}).get("state") or "none") if execution_type == "scheduled" else "none",
-            "final_answer": self._compact_final_answer((result.get("synthesis") or {}).get("final_answer")),
+            "final_answer": self._compact_final_answer(final_answer_value),
             "delivery": result.get("delivery"),
         }
         if status in {"requires_key", "requires_input", "paused"}:
@@ -2563,6 +2564,40 @@ class AgentStudioService:
                 runtime_state_manager.emit(run_id=state_run_id, step_id="result.verify", level="developer", kind="verification", status="completed", title="Result verification completed", message=str((response.get("verification") or {}).get("status") or "completed"), output={"verification": response.get("verification")}, progress=100)
         runtime_state_manager.emit(run_id=state_run_id, step_id="final.synthesis", level="user", kind="output", status=status, title="Final synthesis", message="Final response prepared for the user.", output={"status": status, "has_final_answer": bool(response.get("final_answer"))}, progress=100)
         return response
+
+    def _extract_user_facing_final_answer(self, run_payload: dict[str, Any]) -> str:
+        """Extract final user-facing material from a run without returning job labels.
+
+        Async job completion is transport state.  The answer should come from
+        final synthesis, delivery, or terminal agent/capability outputs.  This
+        helper is structural and does not depend on agent, task, or capability
+        names.
+        """
+        if not isinstance(run_payload, dict):
+            return ""
+        synthesis = run_payload.get("synthesis") if isinstance(run_payload.get("synthesis"), dict) else {}
+        for key in ("final_answer", "answer", "text", "output", "result", "message"):
+            value = synthesis.get(key)
+            if value not in (None, "", [], {}):
+                return str(value)
+        for item in reversed(run_payload.get("agent_results") if isinstance(run_payload.get("agent_results"), list) else []):
+            if not isinstance(item, dict):
+                continue
+            for key in ("final_answer", "answer", "output", "result", "text", "message"):
+                value = item.get(key)
+                if value not in (None, "", [], {}):
+                    return str(value)
+            wf = item.get("workflow_results") if isinstance(item.get("workflow_results"), dict) else {}
+            for key in ("final_answer", "answer", "output", "result", "text", "message"):
+                value = wf.get(key)
+                if value not in (None, "", [], {}):
+                    return str(value)
+            data = wf.get("data") if isinstance(wf.get("data"), dict) else {}
+            for key in ("final_answer", "answer", "output", "result", "text", "stdout", "value"):
+                value = data.get(key)
+                if value not in (None, "", [], {}):
+                    return str(value)
+        return ""
 
     def _should_use_lightweight_result_verification(self, task_graph: dict[str, Any], provided_inputs: dict[str, Any] | None) -> bool:
         if not isinstance(task_graph, dict):

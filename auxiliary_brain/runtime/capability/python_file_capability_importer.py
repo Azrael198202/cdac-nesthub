@@ -227,6 +227,8 @@ class PythonFileCapabilityImporter:
 
 import importlib.util
 import inspect
+import io
+import contextlib
 from pathlib import Path
 from typing import Any
 
@@ -272,13 +274,24 @@ def _invoke(fn, data: dict[str, Any]):
 def run(payload: Any) -> dict[str, Any]:
     data = _runtime_input(payload)
     fn = _load_callable()
-    result = _invoke(fn, data)
+    stdout_buffer = io.StringIO()
+    with contextlib.redirect_stdout(stdout_buffer):
+        result = _invoke(fn, data)
+    stdout_text = stdout_buffer.getvalue().strip()
     if isinstance(result, dict):
+        result = dict(result)
+        final = result.get("final_answer") or result.get("answer") or result.get("summary") or result.get("output") or result.get("result") or stdout_text
         if str(result.get("status") or "").lower() in {{"success", "ok", "completed", "executed"}}:
-            result.setdefault("final_answer", str(result.get("final_answer") or result.get("answer") or result.get("summary") or result.get("data") or ""))
+            result.setdefault("final_answer", str(final or ""))
+            if stdout_text:
+                result.setdefault("stdout", stdout_text)
             return result
-        return {{"status": "success", "data": result, "final_answer": str(result.get("final_answer") or result.get("answer") or result.get("summary") or result)}}
-    return {{"status": "success", "data": {{"value": result}}, "final_answer": str(result)}}
+        payload_data = dict(result)
+        if stdout_text:
+            payload_data.setdefault("stdout", stdout_text)
+        return {{"status": "success", "data": payload_data, "stdout": stdout_text, "final_answer": str(final or result)}}
+    final = result if result not in (None, "", [], {{}}) else stdout_text
+    return {{"status": "success" if final not in (None, "", [], {{}}) else "failed", "data": {{"value": result, "stdout": stdout_text}}, "stdout": stdout_text, "final_answer": str(final or "")}}
 '''
 
     def _smoke_test_code(self, wrapper_path: Path, manifest_path: Path) -> str:

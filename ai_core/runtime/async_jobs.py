@@ -220,6 +220,7 @@ class RuntimeAsyncJobStore:
                 method="async_worker",
                 progress=100,
             )
+            user_summary = self._extract_visible_final_answer(record.get("result")) or f"Async job {record['status']}"
             runtime_state_manager.emit(
                 run_id=job_id,
                 step_id="job.result",
@@ -227,11 +228,11 @@ class RuntimeAsyncJobStore:
                 kind="output",
                 status=record["status"],
                 title="Job result",
-                message=f"Async job finished with status={record['status']}.",
-                output={"result_status": result_status},
+                message=user_summary,
+                output={"result_status": result_status, "has_final_answer": bool(self._extract_visible_final_answer(record.get("result")))},
                 progress=100,
             )
-            runtime_state_manager.finish_run(job_id, status=record["status"], summary=f"Async job {record['status']}", output={"result_status": result_status})
+            runtime_state_manager.finish_run(job_id, status=record["status"], summary=user_summary, output={"result_status": result_status})
         except Exception as exc:
             timeout_type = isinstance(exc, asyncio.TimeoutError)
             timeout_seconds = self._timeout_from_record(record)
@@ -269,6 +270,23 @@ class RuntimeAsyncJobStore:
                 with contextlib.suppress(BaseException):
                     await heartbeat_task
         self._write(record)
+
+    def _extract_visible_final_answer(self, value: Any) -> str:
+        """Return the user-facing answer from a job result, not transport state."""
+        if not isinstance(value, dict):
+            return ""
+        for key in ("final_answer", "answer", "message", "text", "output", "result"):
+            item = value.get(key)
+            if item not in (None, "", [], {}):
+                text = str(item).strip()
+                if text and text.lower() not in {"completed", "async job completed", "async job completed."}:
+                    return text
+        synthesis = value.get("synthesis") if isinstance(value.get("synthesis"), dict) else {}
+        for key in ("final_answer", "answer", "message", "text", "output", "result"):
+            item = synthesis.get(key)
+            if item not in (None, "", [], {}):
+                return str(item).strip()
+        return ""
 
     async def _heartbeat_loop(self, job_id: str) -> None:
         """Keep the async job watchdog alive while a private worker is busy.
