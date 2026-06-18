@@ -2981,13 +2981,29 @@ class AgentStudioService:
         return aliases
 
     def _expand_runtime_parameter_aliases(self, values: dict[str, Any], *, participants: list[dict[str, Any]] | None = None, exclude_keys: set[str] | None = None, exclude_prefixes: tuple[str, ...] = ()) -> dict[str, Any]:
+        """Return canonical runtime values without leaking them to unrelated steps.
+
+        Earlier versions expanded every plain key to every participant prefix.
+        In multi-step graphs this made an input collected for one step visible to
+        all downstream steps and could overwrite later bindings.  The generic
+        rule is conservative:
+
+        * keep the exact submitted key;
+        * when a key is already scoped (``scope.field``), expose the plain tail
+          only as a convenience alias for schema matching;
+        * when a key is plain, do not manufacture participant-scoped copies.
+
+        The frontend already submits the concrete scoped aliases that belong to
+        the field being collected.  Backend expansion must not invent additional
+        scopes.
+        """
         expanded: dict[str, Any] = {}
         exclude_keys = exclude_keys or set()
         participant_id_keys = ("participant_id", "id", "original_participant_id", "durable_participant_id", "declared_participant_id", "step_id", "compiled_step_id", "source_step_id", "declared_step_id")
         participant_ids = {str((p or {}).get(k) or "").strip() for p in (participants or []) if isinstance(p, dict) for k in participant_id_keys}
         participant_names = {str((p or {}).get(k) or "").strip() for p in (participants or []) if isinstance(p, dict) for k in ("display_name", "agent_name", "name", "role_name", "participant_display_name")}
         safe_names = {re.sub(r"[^A-Za-z0-9_]+", "_", x).strip("_") for x in participant_names if x}
-        prefixes = {x for x in (participant_ids | participant_names | safe_names) if x}
+        known_prefixes = {x for x in (participant_ids | participant_names | safe_names) if x}
         for key, value in (values or {}).items():
             skey = str(key or "").strip()
             if not skey or value in (None, "", [], {}):
@@ -2997,13 +3013,22 @@ class AgentStudioService:
             expanded[skey] = value
             if "." in skey:
                 prefix, tail = skey.rsplit(".", 1)
-                if prefix in prefixes and tail and tail not in expanded:
+                if tail and tail not in expanded:
                     expanded[tail] = value
-            else:
-                for prefix in prefixes:
-                    expanded.setdefault(f"{prefix}.{skey}", value)
-                    expanded.setdefault(f"{prefix}_{skey}", value)
+                if prefix in known_prefixes and tail:
+                    expanded.setdefault(f"{prefix}_{tail}", value)
+            elif "_" in skey:
+                # Convert known ``scope_field`` keys back to ``scope.field`` and
+                # plain ``field``.  Do not generate unrelated scopes.
+                for prefix in sorted(known_prefixes, key=len, reverse=True):
+                    marker = prefix + "_"
+                    if skey.startswith(marker) and len(skey) > len(marker):
+                        tail = skey[len(marker):]
+                        expanded.setdefault(f"{prefix}.{tail}", value)
+                        expanded.setdefault(tail, value)
+                        break
         return expanded
+
 
         if kind == "human_information_required":
             request = pending.get("request") if isinstance(pending.get("request"), dict) else {}

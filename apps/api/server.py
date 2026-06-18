@@ -1879,7 +1879,47 @@ async def agent_studio_client_error(req: ClientErrorRequest):
 
 @app.post("/api/agent-studio/resume-run")
 async def agent_studio_resume_run(req: AgentStudioResumeRunRequest):
-    return JSONResponse(await studio_service.resume_run(req.run_id, provided_inputs=req.provided_inputs))
+    """Resume a paused Studio run without blocking the HTTP request.
+
+    A resume may continue an entire task graph after collecting parameters or
+    approval.  Running that graph synchronously can keep the browser request
+    open until local model/tool execution finishes, which causes frontend
+    ``Failed to fetch`` errors and hides durable Runtime State progress.  The
+    endpoint therefore uses the same generic async job lifecycle as new Studio
+    messages: accept quickly, write a durable job/run id, and let the frontend
+    poll /api/runtime/jobs/{job_id}.
+    """
+    try:
+        job_id = f"job_{uuid4().hex[:16]}"
+        provided_inputs = dict(req.provided_inputs or {})
+        provided_inputs.setdefault("_runtime_state_run_id", job_id)
+        job_policy = runtime_lifecycle_settings_store.policy_for_family("task_execution")
+        accepted = async_job_store.submit(
+            name="agent_studio_resume_run",
+            runner=lambda: studio_service.resume_run(req.run_id, provided_inputs=provided_inputs),
+            metadata={
+                "surface": "agent_studio",
+                "resume_run_id": req.run_id,
+                **(job_policy if isinstance(job_policy, dict) else {}),
+            },
+            job_id=job_id,
+            timeout_seconds=int((job_policy or {}).get("timeout_seconds") or 0) if isinstance(job_policy, dict) else 0,
+        )
+        accepted["runtime_state"] = {"run_id": job_id, "state_url": f"/runtime-state?run_id={job_id}"}
+        accepted["resuming_run_id"] = req.run_id
+        return JSONResponse(accepted, status_code=202)
+    except Exception as exc:
+        _write_api_error_log(area="agent_studio_resume_run", exc=exc, context={"run_id": req.run_id})
+        return JSONResponse(
+            {
+                "ok": False,
+                "status": "failed",
+                "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                "diagnostic_log": "runtime/logs/api_errors.jsonl",
+                "traceback": traceback.format_exc(limit=8),
+            },
+            status_code=500,
+        )
 
 
 @app.get("/api/version")

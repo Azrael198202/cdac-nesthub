@@ -524,6 +524,11 @@ async function uploadArtifacts(){
 
 async function recoverAsyncJobResult(jobId){
   try{
+    const jobData=await fetchJsonWithRetry('/api/runtime/jobs/'+encodeURIComponent(jobId),{cache:'no-store'},2,700);
+    const job=jobData.job||{};
+    if(job && job.result && typeof job.result==='object'){ return job.result; }
+  }catch(e){ addProgressMessage('job result recovery retry: '+String(e.message||e)); }
+  try{
     const runData=await fetchJsonWithRetry('/api/runtime-state/runs/'+encodeURIComponent(jobId),{cache:'no-store'},2,700);
     const run=runData.run||{};
     const st=String(run.status||'');
@@ -532,6 +537,44 @@ async function recoverAsyncJobResult(jobId){
     }
   }catch(e){ addProgressMessage('durable state recovery retry: '+String(e.message||e)); }
   return null;
+}
+
+async function waitForRuntimeJobResult(jobId, options){
+  const opts=options||{};
+  const maxPolls=Number(opts.maxPolls||720);
+  const intervalMs=Number(opts.intervalMs||1000);
+  let data=null;
+  for(let i=0;i<maxPolls;i++){
+    await new Promise(resolve=>setTimeout(resolve, intervalMs));
+    let jobData=null;
+    try{
+      jobData=await fetchJsonWithRetry('/api/runtime/jobs/'+encodeURIComponent(jobId),{cache:'no-store'},3,1200);
+    }catch(fetchErr){
+      addProgressMessage('job poll retry: '+String(fetchErr.message||fetchErr));
+      await refreshState();
+      continue;
+    }
+    const job=jobData.job||{};
+    addProgressMessage('job status: '+(job.status||'unknown'));
+    await refreshState();
+    if(['completed','paused','failed','cancelled','interrupted'].includes(String(job.status||''))){
+      data=(job.result||{});
+      if(String(job.status||'')==='interrupted' && (!data || !data.final_answer)){ data = await recoverAsyncJobResult(jobId) || data; }
+      if(job.error && !data.error){ data={ok:false,status:'failed',error:job.error,message:job.error.message}; }
+      break;
+    }
+  }
+  if(!data){ data = await recoverAsyncJobResult(jobId); }
+  if(!data){
+    data = {
+      ok:false,
+      status:'running',
+      run_id:jobId,
+      runtime_state:{run_id:jobId,state_url:'/runtime-state?run_id='+encodeURIComponent(jobId)},
+      final_answer:'Runtime job is still running. This is not a terminal failure. Please keep the Runtime State Console open for live progress, or check the job again later.'
+    };
+  }
+  return data;
 }
 
 async function sendMessage(){
@@ -1103,17 +1146,15 @@ async function resumePendingRun(runId, providedInputs){
     if(providedInputs){ await saveVideoGenerationSetup(providedInputs); }
     addProgressMessage('resuming suspended delegated run');
     pollTimer=setInterval(()=>refreshState(), 1200);
-    const data=await apiFetchJson('/api/agent-studio/resume-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_id:runId, provided_inputs:providedInputs||null})});
-    addMessage(renderJson(data), data.status==='completed'?'item':'item error');
-    if(isRuntimeConfirmationPayload(data || {})){
-      lastPendingRunId=data.run_id||runId;
-      openRuntimeConfirmationModal(data || {}, lastPendingRunId);
-      await refreshState();
-      return;
+    const accepted=await apiFetchJson('/api/agent-studio/resume-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_id:runId, provided_inputs:providedInputs||null})});
+    let data=accepted;
+    if(accepted && accepted.runtime_state && accepted.runtime_state.state_url){
+      addProgressMessage('resume runtime state available: '+accepted.runtime_state.state_url);
     }
-    const pendingItems = collectMissingInputs(data);
-    if(pendingItems.length){ lastMissingInputs=pendingItems; lastPendingRunId=data.run_id||runId; addMissingInputs(pendingItems, lastPendingInstruction, lastPendingRunId); }
-    if(data.final_answer){ addFinalAnswer(data.final_answer, data.status==='completed' ? 'item final' : 'item error'); }
+    if(accepted && accepted.job_id){
+      data=await waitForRuntimeJobResult(accepted.job_id, {maxPolls:720, intervalMs:1000});
+    }
+    renderStudioResponse(data || {}, lastPendingInstruction || lastSubmittedInstruction);
     await refreshState();
   }catch(e){ addMessage('Resume failed: '+e,'item error'); }
   finally{
@@ -1123,6 +1164,7 @@ async function resumePendingRun(runId, providedInputs){
     setStudioStatus('ready', false);
   }
 }
+
 async function copyText(text){
   try{
     await navigator.clipboard.writeText(text);
