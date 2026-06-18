@@ -108,6 +108,7 @@ class RuntimeAsyncJobStore:
         terminal = {"completed", "paused", "failed", "cancelled"}
         if run_status not in terminal:
             return record
+        recovered_result = self._recover_result_from_runtime_events(job_id)
         current = str(record.get("status") or "")
         if current in {"queued", "running", "interrupted"} or not record.get("result"):
             recovered = dict(record)
@@ -115,7 +116,7 @@ class RuntimeAsyncJobStore:
             recovered["updated_at"] = run.get("updated_at") or recovered.get("updated_at")
             recovered["finished_at"] = recovered.get("finished_at") or run.get("ended_at") or run.get("updated_at")
             recovered["error"] = run.get("last_error") if run_status == "failed" else None
-            recovered["result"] = recovered.get("result") or {
+            recovered["result"] = recovered.get("result") or recovered_result or {
                 "ok": run_status in {"completed", "paused"},
                 "status": run_status,
                 "run_id": job_id,
@@ -123,10 +124,33 @@ class RuntimeAsyncJobStore:
                 "final_answer": run.get("summary") or f"Runtime job {run_status}. See Runtime State Console for details.",
                 "durable_recovered": True,
             }
+            if isinstance(recovered.get("result"), dict):
+                recovered["result"].setdefault("durable_recovered", True)
             self._jobs[job_id] = recovered
             self._write(recovered)
             return recovered
         return record
+
+    def _recover_result_from_runtime_events(self, job_id: str) -> dict[str, Any] | None:
+        """Recover the full async result from durable runtime-state events.
+
+        The process-local async snapshot can be lost during a local reload while
+        runtime_state already contains the full job result.  This method keeps
+        paused interaction payloads recoverable so the UI can reopen the input
+        or confirmation dialog instead of showing a generic completion line.
+        """
+        try:
+            events = runtime_state_manager.list_events(job_id, limit=500)
+        except Exception:
+            return None
+        for event in reversed(events or []):
+            if not isinstance(event, dict):
+                continue
+            output = event.get("output") if isinstance(event.get("output"), dict) else {}
+            result = output.get("result") if isinstance(output.get("result"), dict) else None
+            if isinstance(result, dict):
+                return dict(result)
+        return None
 
     def list(self, *, limit: int = 50) -> list[dict[str, Any]]:
         items = list(self._jobs.values())
@@ -232,7 +256,7 @@ class RuntimeAsyncJobStore:
                 output={"result_status": result_status, "has_final_answer": bool(self._extract_visible_final_answer(record.get("result")))},
                 progress=100,
             )
-            runtime_state_manager.finish_run(job_id, status=record["status"], summary=user_summary, output={"result_status": result_status})
+            runtime_state_manager.finish_run(job_id, status=record["status"], summary=user_summary, output={"result_status": result_status, "result": record.get("result")})
         except Exception as exc:
             timeout_type = isinstance(exc, asyncio.TimeoutError)
             timeout_seconds = self._timeout_from_record(record)

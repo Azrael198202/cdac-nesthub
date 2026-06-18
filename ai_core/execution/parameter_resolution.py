@@ -106,16 +106,56 @@ class ParameterResolutionPipeline:
     def _dedupe_fields(self, fields: list[dict[str, Any]], resolved_inputs: dict[str, Any]) -> list[dict[str, Any]]:
         deduped: list[dict[str, Any]] = []
         seen: set[str] = set()
+        resolved = self._clean_mapping(resolved_inputs or {})
+        resolved_lc = {str(k).casefold(): k for k in resolved.keys()}
         for field in fields:
             key = self.field_key(field)
-            raw_name = str(field.get("field") or field.get("name") or "").strip()
             if not key or key in seen:
                 continue
-            if raw_name and resolved_inputs.get(raw_name) not in _EMPTY_VALUES:
+            if self._field_has_resolved_value(field, resolved, resolved_lc):
                 continue
             seen.add(key)
             deduped.append(field)
         return deduped
+
+    def _field_has_resolved_value(self, field: dict[str, Any], resolved: dict[str, Any], resolved_lc: dict[str, str]) -> bool:
+        for candidate in self._field_candidate_keys(field):
+            if not candidate:
+                continue
+            if candidate in resolved and resolved[candidate] not in _EMPTY_VALUES:
+                return True
+            matched = resolved_lc.get(candidate.casefold())
+            if matched is not None and resolved.get(matched) not in _EMPTY_VALUES:
+                return True
+        return False
+
+    def _field_candidate_keys(self, field: dict[str, Any]) -> list[str]:
+        keys: list[str] = []
+        def add(value: Any) -> None:
+            text = str(value or "").strip()
+            if text and text not in keys:
+                keys.append(text)
+        add(field.get("field"))
+        add(field.get("name"))
+        add(field.get("parameter_name"))
+        add(field.get("source_field"))
+        raw = str(field.get("field") or field.get("name") or "").strip()
+        if "." in raw:
+            add(raw.rsplit(".", 1)[-1])
+        participant = str(field.get("participant_id") or "").strip()
+        parameter = str(field.get("parameter_name") or "").strip()
+        if participant and parameter:
+            add(f"{participant}.{parameter}")
+            add(f"{participant}_{parameter}")
+        for alias in field.get("aliases") or []:
+            add(alias)
+        for target in field.get("merge_targets") or []:
+            if isinstance(target, dict):
+                add(target.get("source_field"))
+                add(target.get("field"))
+            else:
+                add(target)
+        return keys
 
     def field_key(self, field: dict[str, Any]) -> str:
         raw = str(field.get("field") or field.get("name") or field.get("parameter_name") or "").strip()

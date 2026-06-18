@@ -2093,11 +2093,12 @@ class AgentStudioService:
         # only receives a boolean confirmation.
         runtime_parameters.update(self._structural_source_runtime_context(task_graph={"instruction": str(message or "")}, instruction=message))
         if isinstance(provided_inputs, dict):
-            runtime_parameters.update({
-                k: v
-                for k, v in provided_inputs.items()
-                if v not in (None, "", [], {}) and not str(k).startswith("_scheduled_") and str(k) not in {"_payload_only_selected_participant_ids", "_runtime_state_run_id", "_state_run_id", "_perception_package"}
-            })
+            runtime_parameters.update(self._expand_runtime_parameter_aliases(
+                provided_inputs,
+                participants=participants,
+                exclude_keys={"_payload_only_selected_participant_ids", "_runtime_state_run_id", "_state_run_id", "_perception_package"},
+                exclude_prefixes=("_scheduled_",),
+            ))
         artifact_refs = uploaded_artifacts if isinstance(uploaded_artifacts, list) else []
         task_graph = {
             "graph_id": graph_id,
@@ -2661,7 +2662,7 @@ class AgentStudioService:
             if isinstance(run_payload.get("runtime_parameters"), dict):
                 runtime_parameters.update(run_payload.get("runtime_parameters") or {})
             if isinstance(provided_inputs, dict):
-                runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+                runtime_parameters.update(self._expand_runtime_parameter_aliases(provided_inputs, participants=participants))
             reuse_response = await self._try_reused_task_execution(task_name, task_graph, participants, runtime_parameters)
             if reuse_response is not None:
                 reuse_response["action"] = "resume_task_graph"
@@ -2677,7 +2678,7 @@ class AgentStudioService:
             if isinstance(run_payload.get("runtime_parameters"), dict):
                 runtime_parameters.update(run_payload.get("runtime_parameters") or {})
             if isinstance(provided_inputs, dict):
-                runtime_parameters.update({k: v for k, v in provided_inputs.items() if v not in (None, "", [], {})})
+                runtime_parameters.update(self._expand_runtime_parameter_aliases(provided_inputs, participants=participants))
             preflight = self._preflight_runtime_parameters(task_graph, participants, runtime_parameters)
             if preflight.get("status") == "requires_input":
                 run_payload.update({
@@ -2848,7 +2849,7 @@ class AgentStudioService:
                 "api_source": api_source,
                 "api_sources": api_sources,
             }]
-        if kind in {"collect_runtime_parameters", "runtime_parameter_input", "uploaded_artifact_parameters", "studio_pre_execution_uploaded_artifact_parameters"}:
+        if kind in {"collect_runtime_parameters", "runtime_parameter_input", "uploaded_artifact_parameters", "studio_pre_execution_uploaded_artifact_parameters", "studio_pre_execution_runtime_parameters", "agent_parameter_collection", "runtime_tool_configuration", "runtime_tool_human_confirmation"}:
             request = pending.get("request") if isinstance(pending.get("request"), dict) else {}
             fields = request.get("fields") if isinstance(request.get("fields"), list) else []
             normalized = []
@@ -2863,12 +2864,62 @@ class AgentStudioService:
                         "placeholder": str(field.get("placeholder") or ""),
                         "description": str(field.get("description") or ""),
                         "required": bool(field.get("required", True)),
-                        "aliases": field.get("aliases") if isinstance(field.get("aliases"), list) else [],
+                        "aliases": self._runtime_input_aliases_for_field(field),
                         "merge_targets": field.get("merge_targets") if isinstance(field.get("merge_targets"), list) else [],
+                        "parameter_name": str(field.get("parameter_name") or ""),
+                        "participant_id": str(field.get("participant_id") or ""),
                     })
             if normalized:
                 return normalized
             return [{"kind": kind, "field": "input", "message": str(request.get("message") or pending.get("message") or "Please provide runtime values required by the uploaded artifact."), "required": True}]
+
+    def _runtime_input_aliases_for_field(self, field: dict[str, Any]) -> list[str]:
+        aliases: list[str] = []
+        def add(value: Any) -> None:
+            text = str(value or "").strip()
+            if text and text not in aliases:
+                aliases.append(text)
+        if not isinstance(field, dict):
+            return aliases
+        raw = str(field.get("field") or field.get("name") or field.get("source_field") or "").strip()
+        param = str(field.get("parameter_name") or "").strip()
+        participant = str(field.get("participant_id") or "").strip()
+        add(raw)
+        if "." in raw:
+            add(raw.rsplit(".", 1)[-1])
+        add(param)
+        add(field.get("name"))
+        add(field.get("source_field"))
+        if participant and param:
+            add(f"{participant}.{param}")
+            add(f"{participant}_{param}")
+        for alias in field.get("aliases") or []:
+            add(alias)
+        return aliases
+
+    def _expand_runtime_parameter_aliases(self, values: dict[str, Any], *, participants: list[dict[str, Any]] | None = None, exclude_keys: set[str] | None = None, exclude_prefixes: tuple[str, ...] = ()) -> dict[str, Any]:
+        expanded: dict[str, Any] = {}
+        exclude_keys = exclude_keys or set()
+        participant_ids = {str((p or {}).get("participant_id") or (p or {}).get("id") or "").strip() for p in (participants or []) if isinstance(p, dict)}
+        participant_names = {str((p or {}).get(k) or "").strip() for p in (participants or []) if isinstance(p, dict) for k in ("display_name", "agent_name", "name", "role_name", "participant_display_name")}
+        safe_names = {re.sub(r"[^A-Za-z0-9_]+", "_", x).strip("_") for x in participant_names if x}
+        prefixes = {x for x in (participant_ids | participant_names | safe_names) if x}
+        for key, value in (values or {}).items():
+            skey = str(key or "").strip()
+            if not skey or value in (None, "", [], {}):
+                continue
+            if skey in exclude_keys or any(skey.startswith(prefix) for prefix in exclude_prefixes):
+                continue
+            expanded[skey] = value
+            if "." in skey:
+                prefix, tail = skey.rsplit(".", 1)
+                if prefix in prefixes and tail and tail not in expanded:
+                    expanded[tail] = value
+            else:
+                for prefix in prefixes:
+                    expanded.setdefault(f"{prefix}.{skey}", value)
+                    expanded.setdefault(f"{prefix}_{skey}", value)
+        return expanded
 
         if kind == "human_information_required":
             request = pending.get("request") if isinstance(pending.get("request"), dict) else {}

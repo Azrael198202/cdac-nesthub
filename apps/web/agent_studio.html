@@ -657,6 +657,15 @@ function normalizeInteractionItem(raw, idx){
   const message = String(it.question || it.prompt || it.message || it.description || ('Please provide this information: '+label+'.')).trim();
   let inputType = String(it.input_type || it.type || it.ui_type || 'text').trim();
   if(['array','list','multi','multiple'].includes(inputType.toLowerCase())){ inputType='list'; }
+  const parameterName = String(it.parameter_name || '').trim();
+  const participantId = String(it.participant_id || '').trim();
+  const aliases=[];
+  function addAlias(v){ const text=String(v||'').trim(); if(text && !aliases.includes(text)){ aliases.push(text); } }
+  if(Array.isArray(it.aliases)){ it.aliases.forEach(addAlias); }
+  addAlias(field);
+  if(field.includes('.')){ addAlias(field.split('.').pop()); }
+  addAlias(parameterName);
+  if(participantId && parameterName){ addAlias(participantId+'.'+parameterName); addAlias(participantId+'_'+parameterName); }
   return {
     ...it,
     kind: String(it.kind || it.type_kind || 'human_information_required'),
@@ -667,7 +676,9 @@ function normalizeInteractionItem(raw, idx){
     placeholder: String(it.placeholder || ('Enter '+(label || field || 'value'))),
     description: String(it.description || it.help_text || ''),
     required: it.required !== false,
-    aliases: Array.isArray(it.aliases) ? it.aliases : [],
+    aliases,
+    parameter_name: parameterName,
+    participant_id: participantId,
     merge_targets: Array.isArray(it.merge_targets) ? it.merge_targets : []
   };
 }
@@ -730,6 +741,8 @@ function openMissingInputModal(items, runId){
     input.dataset.inputType=inputType;
     input.dataset.values='[]';
     input.dataset.aliases=JSON.stringify(it.aliases||[]);
+    input.dataset.parameterName=String(it.parameter_name||'');
+    input.dataset.participantId=String(it.participant_id||'');
     input.dataset.mergeTargets=JSON.stringify(it.merge_targets||[]);
     input.dataset.required=it.required===false ? 'false' : 'true';
     input.dataset.scope=String(it.scope||'');
@@ -938,6 +951,15 @@ async function submitMissingInputs(){
       provided.value=Array.isArray(value) ? value.join(',') : value;
     } else {
       provided[field]=value;
+      const parameterName=String(input.dataset.parameterName||'').trim();
+      const participantId=String(input.dataset.participantId||'').trim();
+      if(parameterName && provided[parameterName]===undefined){ provided[parameterName]=value; }
+      if(field.indexOf('.')>=0){ const tail=field.split('.').pop(); if(tail && provided[tail]===undefined){ provided[tail]=value; } }
+      if(participantId && parameterName){
+        const dot=participantId+'.'+parameterName; const under=participantId+'_'+parameterName;
+        if(provided[dot]===undefined){ provided[dot]=value; }
+        if(provided[under]===undefined){ provided[under]=value; }
+      }
       try{
         const aliases=JSON.parse(input.dataset.aliases||'[]');
         aliases.forEach(alias=>{ const k=String(alias||'').trim(); if(k && provided[k]===undefined){ provided[k]=value; } });
@@ -1717,6 +1739,12 @@ function requestScopeMatchesPayload(payload, req){
   const requestCap=String(scope.capability_id || req.capability_id || req.tool_id || '').trim();
   const payloadRun=String((payload && (payload.run_id || payload.source_run_id)) || '').trim();
   const payloadCap=String((payload && (payload.capability_id || payload.tool_id)) || '').trim();
+  const status=String((payload && payload.status) || '').toLowerCase();
+  const waiting=['requires_input','requires_key','paused','waiting_input','blocked_waiting_input','requires_human_confirmation'];
+  // The request is already embedded in this payload.  Async jobs and delegated
+  // runs can have different transport run ids, so do not suppress the modal
+  // for a waiting payload only because source_run_id != payload.run_id.
+  if(waiting.includes(status)){ return true; }
   if(payloadRun && requestRun && payloadRun !== requestRun){ return false; }
   if(payloadCap && requestCap && payloadCap !== requestCap){ return false; }
   return true;
@@ -1781,7 +1809,7 @@ function deriveMissingInputs(run){
     const fieldName = firstSecret.name || apiSource.secret_key || pending.secret_key || 'runtime_access_key';
     return [{kind:kind, field:String(fieldName), message:String(pending.message||request.message||'A credential-protected method is available. Enter a key to use it, or continue without this key to try another allowed method.'), input_type:'password', provider:String(provider), source_url:String(sourceUrl), api_source:apiSource, api_sources:apiSources}];
   }
-  if(kind==='collect_runtime_parameters' || kind==='runtime_parameter_input' || kind==='uploaded_artifact_parameters' || kind==='studio_pre_execution_uploaded_artifact_parameters'){
+  if(kind==='collect_runtime_parameters' || kind==='runtime_parameter_input' || kind==='uploaded_artifact_parameters' || kind==='studio_pre_execution_uploaded_artifact_parameters' || kind==='studio_pre_execution_runtime_parameters' || kind==='runtime_tool_configuration' || kind==='runtime_tool_human_confirmation'){
     const request = pending.request || {};
     const fields = Array.isArray(request.fields) ? request.fields : [];
     if(fields.length){
