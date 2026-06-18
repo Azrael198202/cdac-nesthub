@@ -195,11 +195,15 @@ class AgentStudioService:
         if routed.action == "feedback_adaptation" and core_pipeline_requested:
             return await self.natural_conversation.reply(message, latest_task=self._latest_task_name(), session_id=session_id, runtime_state_run_id=state_run_id)
 
-        if routed.action == "feedback_adaptation":
-            return await self.handle_feedback(message, routed.name)
+        # File/artifact edit requests must be routed before generic feedback.
+        # The decision is based only on command shape and uploaded-artifact
+        # references, not on any domain-specific filename or capability name.
         artifact_edit = await self._maybe_handle_artifact_edit_message(message, uploaded_artifacts=uploaded_artifacts)
         if artifact_edit is not None:
             return artifact_edit
+
+        if routed.action == "feedback_adaptation":
+            return await self.handle_feedback(message, routed.name)
         if not core_pipeline_requested:
             feedback = self.feedback_classifier.classify(message, fallback_target=self._latest_task_name())
             if feedback.get("matched"):
@@ -2681,20 +2685,40 @@ class AgentStudioService:
                 runtime_parameters.update(self._expand_runtime_parameter_aliases(provided_inputs, participants=participants))
             preflight = self._preflight_runtime_parameters(task_graph, participants, runtime_parameters)
             if preflight.get("status") == "requires_input":
-                run_payload.update({
-                    "status": "requires_input",
-                    "current_stage": "waiting_for_runtime_parameters",
-                    "pending_action": preflight.get("pending_action"),
-                    "missing_inputs": preflight.get("missing_inputs") or [],
-                    "runtime_parameters": runtime_parameters,
-                    "completed_at": self._now(),
-                })
-                self.store.write_json(f"generated/results/{run_id}.json", run_payload)
-                result = run_payload
+                filtered_missing = self._filter_unsatisfied_runtime_fields(runtime_parameters, preflight.get("missing_inputs") or [])
+                if filtered_missing:
+                    pending_action = preflight.get("pending_action") if isinstance(preflight.get("pending_action"), dict) else {}
+                    if isinstance(pending_action, dict):
+                        request = pending_action.get("request") if isinstance(pending_action.get("request"), dict) else {}
+                        if isinstance(request, dict):
+                            request = dict(request)
+                            request["fields"] = filtered_missing
+                            pending_action = dict(pending_action)
+                            pending_action["request"] = request
+                    run_payload.update({
+                        "status": "requires_input",
+                        "current_stage": "waiting_for_runtime_parameters",
+                        "pending_action": pending_action or preflight.get("pending_action"),
+                        "missing_inputs": filtered_missing,
+                        "runtime_parameters": runtime_parameters,
+                        "completed_at": self._now(),
+                    })
+                    self.store.write_json(f"generated/results/{run_id}.json", run_payload)
+                    result = run_payload
+                else:
+                    task_graph = dict(task_graph)
+                    task_graph["runtime_parameters"] = runtime_parameters
+                    result = await self.delegation_runtime.execute_task(task_graph, participants)
             else:
                 task_graph = dict(task_graph)
                 task_graph["runtime_parameters"] = runtime_parameters
                 result = await self.delegation_runtime.execute_task(task_graph, participants)
+                if (
+                    isinstance(result, dict)
+                    and str(result.get("status") or "") == "requires_input"
+                    and self._runtime_parameters_satisfy_fields(runtime_parameters, result.get("missing_inputs") or [])
+                ):
+                    result = await self.delegation_runtime.resume_task(result, task_graph, participants, provided_inputs=runtime_parameters)
         else:
             result = await self.delegation_runtime.resume_task(run_payload, task_graph, participants, provided_inputs=provided_inputs)
         status = result.get("status", "completed")
@@ -2726,6 +2750,63 @@ class AgentStudioService:
             response["message"] = self._paused_message(response["missing_inputs"], pending_action)
         self._attach_verification_report(task_graph=task_graph, participants=participants, run_payload=result, response=response, stage="resume_task")
         return response
+
+
+    def _runtime_parameters_satisfy_fields(self, runtime_parameters: dict[str, Any], fields: list[dict[str, Any]] | None) -> bool:
+        """Return True when every blocking field is already present in run state.
+
+        This is a generic stale-prompt guard used after resume.  It treats
+        scoped, plain, and underscored aliases as equivalent and ignores
+        optional fields.  It prevents the UI from receiving the same parameter
+        form again after a user has already submitted a complete form.
+        """
+        if not isinstance(runtime_parameters, dict):
+            runtime_parameters = {}
+        lowered = {str(k).casefold(): k for k in runtime_parameters.keys()}
+
+        def present(alias: str) -> bool:
+            alias = str(alias or "").strip()
+            if not alias:
+                return False
+            if alias in runtime_parameters and runtime_parameters.get(alias) not in (None, "", [], {}):
+                return True
+            matched = lowered.get(alias.casefold())
+            return matched is not None and runtime_parameters.get(matched) not in (None, "", [], {})
+
+        for field in fields or []:
+            if not isinstance(field, dict):
+                continue
+            required = (
+                field.get("required") is not False
+                and (field.get("blocking") is True or field.get("runtime_required") is True or field.get("execution_required") is True or field.get("required") is True)
+            )
+            if not required:
+                continue
+            pname = str(field.get("parameter_name") or field.get("name") or field.get("field") or "").strip()
+            if "." in pname:
+                pname = pname.rsplit(".", 1)[-1]
+            participant_id = str(field.get("participant_id") or "").strip()
+            aliases = [str(field.get("field") or "").strip(), str(field.get("name") or "").strip(), pname]
+            if participant_id and pname:
+                aliases.extend([f"{participant_id}.{pname}", f"{participant_id}_{pname}"])
+            for alias in field.get("aliases") or []:
+                aliases.append(str(alias or "").strip())
+            if not any(present(alias) for alias in aliases):
+                return False
+        return True
+
+    def _filter_unsatisfied_runtime_fields(self, runtime_parameters: dict[str, Any], fields: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        """Remove stale required/optional fields that are already in run state."""
+        if not isinstance(runtime_parameters, dict):
+            runtime_parameters = {}
+        out: list[dict[str, Any]] = []
+        for field in fields or []:
+            if not isinstance(field, dict):
+                continue
+            if self._runtime_parameters_satisfy_fields(runtime_parameters, [field]):
+                continue
+            out.append(field)
+        return out
 
     def _execution_payload_only_ids(self, task_graph: dict[str, Any], provided_inputs: dict[str, Any] | None) -> list[str]:
         """Return executable payload participants for control-plane task graphs.

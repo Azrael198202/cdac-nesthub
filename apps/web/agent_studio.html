@@ -243,6 +243,8 @@ let lastMissingInputs = [];
 let lastPendingRunId = '';
 let lastPendingInstruction = '';
 let lastRuntimeConfirmation = null;
+let activeMissingInputSignature = '';
+let lastSubmittedInputSignature = '';
 let modelSelectionState = null;
 let suppressModelSave = false;
 let uploadedArtifacts = [];
@@ -768,12 +770,24 @@ async function submitRuntimeConfirmation(){
   await resumePendingRun(runId, {approval_confirmed:true, confirm:true, confirmed:true, remember_approval:remember});
 }
 
+function missingInputSignature(items, runId){
+  const safe=normalizeInteractionItems(items);
+  const fields=safe.map(it=>String(it.field||it.name||'')+':'+String(it.required!==false)).sort().join('|');
+  return String(runId||lastPendingRunId||'')+'::'+fields;
+}
 function openMissingInputModal(items, runId){
   const modal=document.getElementById('missingInputModal');
   const fields=document.getElementById('missingInputFields');
   const summary=document.getElementById('missingInputSummary');
-  fields.innerHTML='';
   const safeItems=normalizeInteractionItems(items);
+  const sig=missingInputSignature(safeItems, runId);
+  if(sig && sig===activeMissingInputSignature && modal.classList.contains('show')){ return; }
+  if(sig && sig===lastSubmittedInputSignature){
+    addMessage('The runtime returned the same input request after values were submitted. This stale request was suppressed; check Runtime State Console for the current run state.', 'item error');
+    return;
+  }
+  activeMissingInputSignature=sig;
+  fields.innerHTML='';
   const hasCredentialChoice = safeItems.some(it => ['secret_input','optional_credential_choice'].includes(String(it.kind||'')));
   const skipBtn=document.getElementById('skipCredentialBtn');
   if(skipBtn){ skipBtn.style.display = hasCredentialChoice ? 'inline-block' : 'none'; }
@@ -862,7 +876,7 @@ function addListValue(input, chips){
   if(chips){ chips.textContent = values.length ? ('Values: ' + values.join(' | ')) : 'No values added yet.'; }
 }
 
-function closeMissingInputModal(){ document.getElementById('missingInputModal').classList.remove('show'); }
+function closeMissingInputModal(){ document.getElementById('missingInputModal').classList.remove('show'); activeMissingInputSignature=''; }
 
 async function apiFetchJson(url, options){
   const started = Date.now();
@@ -1029,6 +1043,7 @@ async function submitMissingInputs(){
     }
   });
   if(missingRequired.length){ addMessage('Please enter required value(s): '+missingRequired.join(', '),'item error'); return; }
+  lastSubmittedInputSignature = missingInputSignature(lastMissingInputs, lastPendingRunId);
   closeMissingInputModal();
   try{
     if(hasLiveVerify){
