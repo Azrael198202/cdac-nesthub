@@ -698,17 +698,74 @@ class LLMJsonExecutor:
             state=state,
             slim_user_input=slim_user_input,
         )
+        normalized = self._sanitize_action_planning_record(normalized)
         normalized["planner_llm_role"] = "action_selection_only"
         normalized["agent_action_prompt_contract"] = AGENT_ACTION_PROMPT_CONTRACT
         normalized["planner_output_can_enter_final_synthesis"] = False
         normalized["status"] = normalized.get("status") or "action_planned"
         return {
+            "stage_meta": {
+                "status": "planned",
+                "stage_id": "agent_action_planning",
+                "planner_output_can_enter_final_synthesis": False,
+            },
             "action_planning_record": normalized,
             "planned_steps": normalized.get("planned_steps", []),
             "execution_plan": normalized.get("execution_plan", {}),
             "status": "planned",
             "message": "Agent actions and substeps planned with locked fixed execution options.",
         }
+
+    def _sanitize_action_planning_record(self, value: dict) -> dict:
+        """Keep planner output as shallow planning material only.
+
+        Local models can accidentally copy the whole previous planner envelope
+        into a new ``action_planning_record``. Re-wrapping that object during
+        repair creates recursive JSON, very long prompts, and eventually broken
+        JSON such as ``Expecting ':' delimiter``. This guard is structural and
+        domain-neutral: it removes nested planner envelopes and strips generic
+        runtime result fields from planner material before the stage output is
+        stored.
+        """
+        if not isinstance(value, dict):
+            return {}
+
+        forbidden_keys = {
+            "action_planning_record",
+            "final_answer",
+            "answer",
+            "result_artifact",
+            "verified_result_material",
+            "runtime_result",
+            "raw_execution",
+        }
+
+        def clean(item, depth: int = 0):
+            if depth > 8:
+                return None
+            if isinstance(item, dict):
+                out = {}
+                for key, nested in item.items():
+                    key_s = str(key)
+                    if key_s in forbidden_keys:
+                        continue
+                    cleaned = clean(nested, depth + 1)
+                    if cleaned not in (None, "", [], {}):
+                        out[key_s] = cleaned
+                return out
+            if isinstance(item, list):
+                out = []
+                for nested in item[:50]:
+                    cleaned = clean(nested, depth + 1)
+                    if cleaned not in (None, "", [], {}):
+                        out.append(cleaned)
+                return out
+            if isinstance(item, str):
+                return item[:4000]
+            return item
+
+        cleaned = clean(value)
+        return cleaned if isinstance(cleaned, dict) else {}
 
     def _merge_detected_structural_entities(self, existing: dict, detected: dict) -> dict:
         """Merge structurally detected entities without domain assumptions.

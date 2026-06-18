@@ -972,6 +972,14 @@ class AgentDelegationRuntime:
             "blocked step details",
             "generated workflow step did not produce",
             "required upstream results were unavailable",
+            "expecting ':' delimiter",
+            "json validation failed",
+            "provider failed",
+            "provider_error",
+            "no real llm provider is available",
+            "unverified failure material",
+            "source retrieval did not produce",
+            "unresolved workflow output references",
         )
         if any(fragment in lowered for fragment in blocked_fragments):
             return False
@@ -2633,8 +2641,10 @@ class AgentDelegationRuntime:
     def _is_locked_intermediate_step(self, participant: dict[str, Any]) -> bool:
         if not isinstance(participant, dict):
             return False
-        if not participant.get("compiled_graph_node"):
-            return False
+        # The locked execution method itself is the authority.  Older task
+        # records may not carry compiled_graph_node even though they already
+        # carry execution_contract/task_metadata.  Do not route such steps back
+        # through primary planning.
         profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
         if str(profile.get("capability_type") or "").strip().casefold() == "runtime_registered_tool" or str(profile.get("tool_id") or "").strip():
             return False
@@ -3093,6 +3103,17 @@ class AgentDelegationRuntime:
         tool_id = str(profile.get("tool_id") or "").strip()
         if not tool_id:
             return None
+        blocked_by = self._blocked_dependency_ids(
+            participant_id=self._participant_identity(participant),
+            completed_results=completed_results or [],
+            dependency_plan=dependency_plan or {},
+        )
+        if blocked_by:
+            return self._dependency_blocked_result(
+                participant_id=self._participant_identity(participant),
+                participant_name=self._participant_name(participant),
+                blocked_by=blocked_by,
+            )
         self._ensure_task_runtime_parameters_for_participant(participant=participant, task_name=task_name)
         task_graph_for_templates = self._binding_task_graph_for_name(task_name) if task_name else None
         self._resolve_task_variable_placeholders_for_participant(
