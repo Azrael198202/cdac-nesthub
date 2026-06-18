@@ -17,6 +17,7 @@ def json_safe_string(value: Any) -> str:
         return str(value)
 
 from .query_planner import SearchQueryPlanner
+from .query_verification import SearchQueryVerificationGate
 
 try:  # Optional dependency path. Core still works without these packages.
     from bs4 import BeautifulSoup  # type: ignore
@@ -54,9 +55,13 @@ class WebEvidenceOptimizer:
 
     def __init__(self) -> None:
         self.query_planner = SearchQueryPlanner()
+        self.query_verification_gate = SearchQueryVerificationGate()
 
     def plan_queries(self, *, user_input: str, capability: str = "", objective: str = "", known: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         return self.query_planner.plan(user_input=user_input, capability=capability, objective=objective, known=known)
+
+    def verify_query_plan(self, *, query: str, user_input: str, objective: str = "", source_contract: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.query_verification_gate.verify_and_rewrite(query=query, user_input=user_input, objective=objective, source_contract=source_contract)
 
     def optimize(
         self,

@@ -1482,10 +1482,27 @@ class ToolCallExecutor:
         web = resource.get("web_collection") if isinstance(resource.get("web_collection"), dict) else {}
         query_contract = web.get("query_contract") if isinstance(web.get("query_contract"), dict) else {}
         query = str(query_contract.get("query") or "").strip()
-        if query:
-            return query
         objective = str(step.get("objective") or state.get("input") or "").strip()
-        return " ".join(objective.split())
+        if not query:
+            query = " ".join(objective.split())
+        source_contract = step.get("source_contract") if isinstance(step.get("source_contract"), dict) else ((state.get("source_contract") if isinstance(state.get("source_contract"), dict) else {}))
+        verifier = getattr(getattr(self, "web_evidence_optimizer", None), "verify_query_plan", None)
+        if callable(verifier):
+            try:
+                report = verifier(
+                    query=query,
+                    user_input=str(state.get("input") or state.get("original_input") or objective),
+                    objective=objective,
+                    source_contract=source_contract,
+                )
+                checked = str((report or {}).get("query") or "").strip()
+                if checked:
+                    query = checked
+                if isinstance(state, dict):
+                    state.setdefault("query_verification", {})[str(step_id)] = report
+            except Exception:
+                pass
+        return " ".join(query.split())
 
     async def _execute_prepared_query_web_search(
         self,
