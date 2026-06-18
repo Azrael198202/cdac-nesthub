@@ -183,11 +183,14 @@ class RuntimeRegisteredToolService:
             self.approval_policy_store.record_confirmation(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id, remember=remember_approval)
 
         runtime_input = self._coerce_by_schema(runtime_input, input_schema)
+        runtime_input = self._drop_empty_optional_fields(payload=runtime_input, schema=input_schema)
         runtime_input = self._apply_runtime_invocation_defaults(spec=spec, payload=runtime_input, approval_confirmed=approval_confirmed)
         runtime_input, _ = self._split_execution_controls_from_payload(runtime_input, input_schema=input_schema)
+        runtime_input = self._drop_empty_optional_fields(payload=runtime_input, schema=input_schema)
         runtime_input = self._apply_schema_invocation_defaults(payload=runtime_input, schema=input_schema)
         runtime_input, _ = self._split_execution_controls_from_payload(runtime_input, input_schema=input_schema)
         runtime_input = self._coerce_by_schema(runtime_input, input_schema)
+        runtime_input = self._drop_empty_optional_fields(payload=runtime_input, schema=input_schema)
         runtime_input = self._project_payload_to_schema(runtime_input, input_schema)
 
         input_validation = self.runner.schema_validator.validate_input(input_schema, runtime_input)
@@ -545,18 +548,23 @@ class RuntimeRegisteredToolService:
 
 
     def _apply_schema_invocation_defaults(self, *, payload: Any, schema: dict[str, Any] | None) -> dict[str, Any]:
-        """Materialize neutral defaults for missing optional input fields.
+        """Apply schema-declared defaults without inventing optional values.
 
-        This is contract-driven and capability-agnostic. Generated tools often
-        call methods on optional values. When a JSON schema declares a field
-        type, the runtime can safely provide the neutral value for a missing
-        optional field before invoking the tool, instead of letting generated
-        code choose an incompatible default.
+        The runtime must not turn an omitted optional field into an empty string,
+        empty object, or empty array just because the JSON Schema declares a
+        type.  For wrapped Python callables, an omitted optional argument often
+        means "use the function default" while an empty value can mean "execute
+        a no-op".  Therefore this method is contract-driven:
+
+        * explicit ``default`` values in schema are materialized;
+        * required fields may receive neutral runtime values when absent;
+        * optional fields without explicit defaults are left absent.
         """
         data = dict(payload) if isinstance(payload, dict) else {"value": payload}
         if not isinstance(schema, dict):
             return data
         props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        required = {str(x) for x in schema.get("required", []) if isinstance(x, str)}
         for key, spec in props.items():
             if key in data and data.get(key) is not None:
                 continue
@@ -565,6 +573,8 @@ class RuntimeRegisteredToolService:
             if "default" in spec:
                 data[key] = spec.get("default")
                 continue
+            if key not in required:
+                continue
             expected = spec.get("type")
             if isinstance(expected, list):
                 expected = next((x for x in expected if x != "null"), expected[0] if expected else None)
@@ -572,6 +582,36 @@ class RuntimeRegisteredToolService:
             if neutral is not _NO_DEFAULT:
                 data[key] = neutral
         return data
+
+    def _drop_empty_optional_fields(self, *, payload: Any, schema: dict[str, Any] | None) -> dict[str, Any]:
+        """Remove empty submitted values for optional schema fields.
+
+        UI forms often submit optional fields as ``""`` or ``[]``. Passing those
+        values to a generated wrapper is not equivalent to omitting the field:
+        the wrapped function's own default value is bypassed.  This method keeps
+        required fields intact so validation can still catch missing required
+        input, and drops only optional fields that are effectively blank.
+        """
+        data = dict(payload) if isinstance(payload, dict) else {"value": payload}
+        if not isinstance(schema, dict):
+            return data
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        required = {str(x) for x in schema.get("required", []) if isinstance(x, str)}
+        out: dict[str, Any] = {}
+        for key, value in data.items():
+            if key in props and key not in required and self._is_blank_optional_value(value):
+                continue
+            out[key] = value
+        return out
+
+    def _is_blank_optional_value(self, value: Any) -> bool:
+        if value is None:
+            return True
+        if value == "":
+            return True
+        if isinstance(value, (list, tuple, set, dict)) and len(value) == 0:
+            return True
+        return False
 
     def _neutral_value_for_json_type(self, expected: Any) -> Any:
         return {

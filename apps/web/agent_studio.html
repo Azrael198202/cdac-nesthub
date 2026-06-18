@@ -46,7 +46,8 @@
 </main>
 
 <div id="runtimeSchemaModal" class="modalBackdrop"><div class="modal"><h3 id="runtimeSchemaTitle">Runtime setup</h3><div class="small" id="runtimeSchemaSummary"></div><div id="runtimeSchemaFields"></div><div class="modalActions"><button class="btn" onclick="closeRuntimeSchemaModal()">Cancel</button><button class="btn primary" onclick="submitRuntimeSchemaModal()">Submit</button></div></div></div>
-<div id="missingInputModal" class="modalBackdrop"><div class="modal"><h3>Required input</h3><div class="small" id="missingInputSummary"></div><div id="missingInputFields"></div><div class="modalActions"><button class="btn" onclick="closeMissingInputModal()">Cancel</button><button id="skipCredentialBtn" class="btn" style="display:none" onclick="skipCredentialAndContinue()">Continue without this key</button><button class="btn primary" onclick="submitMissingInputs()">Submit & Continue</button></div></div></div>
+<div id="missingInputModal" class="modalBackdrop"><div class="modal"><h3>Runtime input</h3><div class="small" id="missingInputSummary"></div><div id="missingInputFields"></div><div class="modalActions"><button class="btn" onclick="closeMissingInputModal()">Cancel</button><button id="skipCredentialBtn" class="btn" style="display:none" onclick="skipCredentialAndContinue()">Continue without this key</button><button class="btn primary" onclick="submitMissingInputs()">Submit & Continue</button></div></div></div>
+<div id="runtimeConfirmModal" class="modalBackdrop"><div class="modal"><h3>Confirm execution</h3><div class="small" id="runtimeConfirmSummary"></div><div id="runtimeConfirmPreview" class="pre compact" style="margin-top:10px;max-height:260px"></div><label class="booleanField"><input id="runtimeConfirmRemember" type="checkbox" /><span>Do not ask again for this tool/profile</span></label><div class="modalActions"><button class="btn" onclick="closeRuntimeConfirmModal()">Cancel</button><button class="btn primary" onclick="submitRuntimeConfirmation()">Confirm & Execute</button></div></div></div>
 
 <div id="artifactEditModal" class="modalBackdrop"><div class="modal"><h3 id="artifactEditTitle">Edit uploaded artifact</h3><div class="small" id="artifactEditSummary"></div><label class="fieldLabel">Modification request / feedback</label><textarea id="artifactEditInstruction" class="fieldInput area" placeholder="Describe how the uploaded file should be modified."></textarea><div id="artifactEditPreviewWrap" style="display:none"><label class="fieldLabel">Draft preview</label><textarea id="artifactEditPreview" class="fieldInput area" style="min-height:260px" spellcheck="false"></textarea><div class="row"><a id="artifactEditDownload" class="btn" href="#" target="_blank">Download draft</a></div></div><div class="modalActions"><button class="btn" onclick="cancelArtifactEdit()">Cancel</button><button class="btn" id="artifactEditReviseBtn" style="display:none" onclick="reviseArtifactEdit()">Modify again</button><button class="btn primary" id="artifactEditConfirmBtn" style="display:none" onclick="confirmArtifactEdit()">Confirm replacement</button><button class="btn primary" id="artifactEditCreateBtn" onclick="createArtifactEditProposal()">Generate modified file</button></div></div></div>
 
@@ -149,6 +150,13 @@ function renderStudioResponse(data, originalText){
     addMessage(data.message || 'Please select an uploaded artifact.', 'item error');
     return;
   }
+  if(isRuntimeConfirmationPayload(data || {})){
+    lastPendingRunId = (data && data.run_id) || lastPendingRunId || '';
+    lastPendingInstruction = originalText || lastSubmittedInstruction;
+    addMessage((data.final_answer || data.message || 'Execution confirmation is required.') + '\nConfirm execution to continue.', 'item error');
+    openRuntimeConfirmationModal(data || {}, lastPendingRunId);
+    return;
+  }
   const pendingItemsTop = collectMissingInputs(data || {});
   if(pendingItemsTop.length){
     lastMissingInputs = pendingItemsTop;
@@ -234,6 +242,7 @@ let lastSubmittedInstruction = '';
 let lastMissingInputs = [];
 let lastPendingRunId = '';
 let lastPendingInstruction = '';
+let lastRuntimeConfirmation = null;
 let modelSelectionState = null;
 let suppressModelSave = false;
 let uploadedArtifacts = [];
@@ -601,8 +610,7 @@ async function sendMessage(){
     }
     if(data.durable_recovered){ addProgressMessage('recovered visible result from durable runtime state'); }
     renderStudioResponse(data, text);
-    const pendingItems = collectMissingInputs(data);
-    if(pendingItems.length){ lastMissingInputs=pendingItems; lastPendingRunId=data.run_id||''; lastPendingInstruction=text; addMissingInputs(pendingItems, text, lastPendingRunId); }
+    // Pending input and confirmation modals are owned by renderStudioResponse; do not open them twice here.
     // Final answers are rendered by renderStudioResponse; do not duplicate or show raw runtime JSON here.
     await refreshState();
   }catch(e){
@@ -683,9 +691,79 @@ function normalizeInteractionItem(raw, idx){
   };
 }
 
+function canonicalRuntimeInputKey(item){
+  const it = item || {};
+  const participant = String(it.participant_id || it.participant_name || '').trim().toLowerCase();
+  let name = String(it.parameter_name || it.name || it.field || '').trim();
+  if(name.includes('.')){ name = name.split('.').pop(); }
+  name = name.replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase();
+  return (participant ? participant + ':' : '') + name;
+}
+function mergeRuntimeInputItems(base, incoming){
+  const out = {...base};
+  out.required = (base.required !== false) || (incoming.required !== false);
+  const aliases=[];
+  function addAlias(v){ const text=String(v||'').trim(); if(text && !aliases.includes(text)){ aliases.push(text); } }
+  (Array.isArray(base.aliases)?base.aliases:[]).forEach(addAlias);
+  (Array.isArray(incoming.aliases)?incoming.aliases:[]).forEach(addAlias);
+  addAlias(base.field); addAlias(incoming.field); addAlias(base.name); addAlias(incoming.name);
+  if(incoming.parameter_name && !out.parameter_name){ out.parameter_name = incoming.parameter_name; }
+  if(incoming.participant_id && !out.participant_id){ out.participant_id = incoming.participant_id; }
+  out.aliases = aliases;
+  return out;
+}
 function normalizeInteractionItems(items){
   const raw = Array.isArray(items) ? items : [];
-  return raw.map((it, idx)=>normalizeInteractionItem(it, idx));
+  const deduped=[];
+  const byKey=new Map();
+  raw.map((it, idx)=>normalizeInteractionItem(it, idx)).forEach(it=>{
+    const key = canonicalRuntimeInputKey(it) || String(it.field||it.name||deduped.length);
+    if(byKey.has(key)){
+      const merged = mergeRuntimeInputItems(byKey.get(key), it);
+      byKey.set(key, merged);
+      const pos = deduped.findIndex(x=>canonicalRuntimeInputKey(x)===key);
+      if(pos>=0){ deduped[pos]=merged; }
+    } else {
+      byKey.set(key, it);
+      deduped.push(it);
+    }
+  });
+  return deduped;
+}
+
+function isRuntimeConfirmationPayload(payload){
+  if(!payload || typeof payload !== 'object'){ return false; }
+  const candidates=[payload.pending_action, payload.interaction_request];
+  for(const c of candidates){
+    if(!c || typeof c !== 'object'){ continue; }
+    const kind=String(c.kind || c.type || '').trim();
+    const inputMode=String((c.request && c.request.input_mode) || c.input_mode || '').trim();
+    if(kind==='runtime_tool_human_confirmation' || kind==='requires_human_confirmation' || inputMode==='confirmation'){ return true; }
+  }
+  const status=String(payload.status||'').trim();
+  return status==='requires_human_confirmation';
+}
+function openRuntimeConfirmationModal(payload, runId){
+  lastRuntimeConfirmation = {payload: payload || {}, run_id: runId || (payload && payload.run_id) || lastPendingRunId || ''};
+  if(lastRuntimeConfirmation.run_id){ lastPendingRunId = lastRuntimeConfirmation.run_id; }
+  const modal=document.getElementById('runtimeConfirmModal');
+  const summary=document.getElementById('runtimeConfirmSummary');
+  const preview=document.getElementById('runtimeConfirmPreview');
+  const pa=(payload && payload.pending_action) || {};
+  const ir=(payload && payload.interaction_request) || {};
+  const message=String(pa.message || ir.message || payload.message || 'This execution requires human confirmation before continuing.');
+  const toolId=String(pa.tool_id || ir.tool_id || payload.tool_id || '');
+  summary.innerHTML=`<span class="badge">run: ${escapeHtml(lastRuntimeConfirmation.run_id||'pending')}</span> ${escapeHtml(message)}${toolId ? '<br/>tool: '+escapeHtml(toolId) : ''}`;
+  const previewObj=pa.preview || ir.preview || (payload.workflow_results && payload.workflow_results.preview) || payload.preview || {};
+  preview.textContent = Object.keys(previewObj||{}).length ? renderJson(previewObj) : 'No additional preview was provided by the runtime.';
+  modal.classList.add('show');
+}
+function closeRuntimeConfirmModal(){ document.getElementById('runtimeConfirmModal').classList.remove('show'); }
+async function submitRuntimeConfirmation(){
+  const remember=!!document.getElementById('runtimeConfirmRemember').checked;
+  closeRuntimeConfirmModal();
+  const runId=(lastRuntimeConfirmation && lastRuntimeConfirmation.run_id) || lastPendingRunId;
+  await resumePendingRun(runId, {approval_confirmed:true, confirm:true, confirmed:true, remember_approval:remember});
 }
 
 function openMissingInputModal(items, runId){
@@ -1032,6 +1110,12 @@ async function resumePendingRun(runId, providedInputs){
     pollTimer=setInterval(()=>refreshState(), 1200);
     const data=await apiFetchJson('/api/agent-studio/resume-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_id:runId, provided_inputs:providedInputs||null})});
     addMessage(renderJson(data), data.status==='completed'?'item':'item error');
+    if(isRuntimeConfirmationPayload(data || {})){
+      lastPendingRunId=data.run_id||runId;
+      openRuntimeConfirmationModal(data || {}, lastPendingRunId);
+      await refreshState();
+      return;
+    }
     const pendingItems = collectMissingInputs(data);
     if(pendingItems.length){ lastMissingInputs=pendingItems; lastPendingRunId=data.run_id||runId; addMissingInputs(pendingItems, lastPendingInstruction, lastPendingRunId); }
     if(data.final_answer){ addFinalAnswer(data.final_answer, data.status==='completed' ? 'item final' : 'item error'); }

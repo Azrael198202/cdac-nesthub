@@ -3139,10 +3139,26 @@ class AgentDelegationRuntime:
             raw_fields = self.registered_tool_parameter_bridge.input_fields_from_schema(participant=participant)
             missing_set = {str(x).casefold() for x in missing}
             fields = []
+            seen_field_keys: set[str] = set()
             for field in raw_fields:
                 pname = str(field.get("parameter_name") or field.get("name") or field.get("field") or "").rsplit(".", 1)[-1]
-                if pname.casefold() in missing_set and not self._runtime_field_already_bound(participant, field):
-                    fields.append(field)
+                if not pname:
+                    continue
+                if self._runtime_field_already_bound(participant, field):
+                    continue
+                # When at least one required value blocks execution, present the
+                # full unbound schema surface in one form.  Required fields block;
+                # optional fields are offered but may be left blank and will not
+                # be submitted.  This keeps parameter collection capability-
+                # agnostic and prevents one-field-at-a-time prompts.
+                key = (str(field.get("participant_id") or self._participant_identity(participant)), pname.casefold())
+                if key in seen_field_keys:
+                    continue
+                seen_field_keys.add(key)
+                enriched = dict(field)
+                enriched["blocking"] = pname.casefold() in missing_set
+                enriched["execution_required"] = pname.casefold() in missing_set
+                fields.append(enriched)
             if not fields:
                 # Values were present but a stale contract still reported missing.
                 # Rebuild once from the now-normalized participant state before
@@ -3154,7 +3170,21 @@ class AgentDelegationRuntime:
                 if not missing:
                     pass
                 else:
-                    fields = [f for f in raw_fields if str(f.get("parameter_name") or "").casefold() in {str(x).casefold() for x in missing}]
+                    missing_set = {str(x).casefold() for x in missing}
+                    fields = []
+                    seen_field_keys = set()
+                    for f in raw_fields:
+                        pname = str(f.get("parameter_name") or f.get("name") or f.get("field") or "").rsplit(".", 1)[-1]
+                        if not pname or self._runtime_field_already_bound(participant, f):
+                            continue
+                        key = (str(f.get("participant_id") or self._participant_identity(participant)), pname.casefold())
+                        if key in seen_field_keys:
+                            continue
+                        seen_field_keys.add(key)
+                        enriched = dict(f)
+                        enriched["blocking"] = pname.casefold() in missing_set
+                        enriched["execution_required"] = pname.casefold() in missing_set
+                        fields.append(enriched)
             if fields:
                 return AgentExecutionResult(
                     participant_id=self._participant_identity(participant),
