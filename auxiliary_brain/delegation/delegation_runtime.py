@@ -150,10 +150,18 @@ class AgentDelegationRuntime:
                 result_payload = self._sanitize_result_payload(result.__dict__)
                 agent_results.append(result)
                 run_payload["agent_results"].append(result_payload)
+                run_payload.setdefault("verification_events", []).append({
+                    "kind": "dependency_gate_blocked",
+                    "participant_id": participant_id,
+                    "participant_name": participant_name,
+                    "blocked_by": blocked_by,
+                    "reason": "required_upstream_result_unavailable",
+                    "at": self._now(),
+                })
                 self._record_progress(
                     run_payload,
                     f"participant_{index + 1}_blocked",
-                    f"Participant blocked by failed dependency: {participant_name}",
+                    f"[Dependency] Step skipped because required upstream result was unavailable: {participant_name}",
                     "failed",
                 )
                 continue
@@ -3188,6 +3196,12 @@ class AgentDelegationRuntime:
                     "unsafe_material": unsafe_material,
                     "binding_debug": binding_debug,
                     "input_keys": sorted(executable_input_data.keys()),
+                    "verification_event": {
+                        "kind": "effectful_capability_blocked",
+                        "reason": "input_contains_unverified_failure_material",
+                        "tool_id": tool_id,
+                        "unsafe_material": unsafe_material,
+                    },
                 },
                 origin="auxiliary_brain",
             )

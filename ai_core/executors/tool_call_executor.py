@@ -1504,6 +1504,39 @@ class ToolCallExecutor:
                 pass
         return " ".join(query.split())
 
+    async def _emit_verification_trace(
+        self,
+        run_id: str,
+        *,
+        node_id: str,
+        step_id: str,
+        event_type: str,
+        title: str,
+        message: str,
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        """Publish compact verification/gate events to Runtime State Console.
+
+        These events are intentionally emitted only at gate boundaries.  Agent
+        and capability executions that are already locked are not repeatedly
+        re-verified here; the console only receives the decisions that can
+        change routing, source selection, dependency flow, or effectful calls.
+        """
+        try:
+            await event_bus.emit(run_id, {
+                "type": event_type,
+                "title": title,
+                "message": message,
+                "node_id": node_id,
+                "step_id": step_id,
+                "result": result or {},
+                "console_group": "verification",
+            })
+        except Exception:
+            # Runtime console tracing must never change execution outcome.
+            pass
+
+
     async def _execute_prepared_query_web_search(
         self,
         *,
@@ -1522,15 +1555,53 @@ class ToolCallExecutor:
         synthesize facts from model knowledge.
         """
         query = self._prepared_query_for_step(state=state, step_id=step_id, step=step)
+        query_verification = {}
+        if isinstance(state, dict):
+            qv = state.get("query_verification") if isinstance(state.get("query_verification"), dict) else {}
+            query_verification = qv.get(str(step_id)) if isinstance(qv.get(str(step_id)), dict) else {}
         if not query:
+            await self._emit_verification_trace(
+                run_id,
+                node_id=node_id,
+                step_id=step_id,
+                event_type="QUERY_PLAN_REJECTED",
+                title="Query plan rejected",
+                message="Search query plan was empty and could not be executed.",
+                result={"query": query, "verification": query_verification},
+            )
             return None
+        if query_verification:
+            original_query = str(query_verification.get("original_query") or query).strip()
+            reasons = query_verification.get("reasons") if isinstance(query_verification.get("reasons"), list) else []
+            rewrite_applied = bool(query_verification.get("rewrite_applied"))
+            passed = bool(query_verification.get("passed"))
+            if reasons and rewrite_applied:
+                await self._emit_verification_trace(
+                    run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    event_type="QUERY_PLAN_REWRITTEN",
+                    title="Query plan rewritten",
+                    message="Search query was rewritten after verification rejected the original plan.",
+                    result={"original_query": original_query, "query": query, "reasons": reasons, "passed": passed},
+                )
+            else:
+                await self._emit_verification_trace(
+                    run_id,
+                    node_id=node_id,
+                    step_id=step_id,
+                    event_type="QUERY_PLAN_VERIFIED" if passed else "QUERY_PLAN_REJECTED",
+                    title="Query plan verified" if passed else "Query plan rejected",
+                    message="Search query plan was checked before retrieval.",
+                    result={"original_query": original_query, "query": query, "reasons": reasons, "passed": passed},
+                )
         await event_bus.emit(run_id, {
             "type": "QUERY_WEB_SEARCH_EXECUTION_STARTED",
             "title": "Query web search execution started",
             "message": "Executing the locked query prepared by execution_preparation.",
             "node_id": node_id,
             "step_id": step_id,
-            "result": {"query": query},
+            "result": {"query": query, "query_verification": query_verification},
         })
         step_source_contract = step.get("source_contract") if isinstance(step.get("source_contract"), dict) else ((state.get("source_contract") if isinstance(state.get("source_contract"), dict) else {}))
         requested_count = self._requested_source_item_count(step=step, state=state, source_contract=step_source_contract)
@@ -1602,7 +1673,7 @@ class ToolCallExecutor:
                     break
             source_count = len([str(x.get("url") or "") for x in current_results if isinstance(x, dict) and x.get("url")])
             material_ok = bool(last_contract_check.get("passed"))
-            engine_attempts.append({
+            engine_report = {
                 "engine_id": engine_id,
                 "status": "success" if material_ok else "insufficient",
                 "result_count": len(current_results),
@@ -1611,7 +1682,24 @@ class ToolCallExecutor:
                 "fetched_count": len(current_fetched),
                 "url_attempts": url_attempts,
                 "source_output_contract_check": last_contract_check,
-            })
+            }
+            engine_attempts.append(engine_report)
+            await self._emit_verification_trace(
+                run_id,
+                node_id=node_id,
+                step_id=step_id,
+                event_type="SOURCE_VERIFIED" if material_ok else "SOURCE_REJECTED",
+                title="Source material verified" if material_ok else "Source material rejected",
+                message="Retrieved source material was checked against the compiled result contract.",
+                result={
+                    "query": query,
+                    "engine_id": engine_id,
+                    "status": engine_report["status"],
+                    "record_count": len(current_records),
+                    "fetched_count": len(current_fetched),
+                    "contract_check": last_contract_check,
+                },
+            )
             if material_ok or routing_settings.routing_mode == "fixed":
                 selected_engine = engine_id
                 results = current_results
