@@ -1444,6 +1444,57 @@ async def perception_normalize(req: AgentStudioRequest):
         return JSONResponse({"ok": False, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc)}}, status_code=500)
 
 
+def _extract_payload_public_answer(payload: Any) -> str:
+    """Extract user-facing material from a runtime payload.
+
+    This is intentionally structural. It never knows task, agent, or capability
+    names; it only prefers public answer fields and ignores lifecycle-only
+    labels such as "completed".
+    """
+    blocked = {"", "completed", "success", "ok", "async job completed", "async job completed."}
+
+    def text_of(value: Any) -> str:
+        if isinstance(value, str):
+            text = value.strip()
+            return "" if text.casefold() in blocked else text
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+        return ""
+
+    def visit(value: Any, depth: int = 0) -> str:
+        if depth > 8:
+            return ""
+        text = text_of(value)
+        if text:
+            return text
+        if isinstance(value, list):
+            for item in reversed(value):
+                found = visit(item, depth + 1)
+                if found:
+                    return found
+            return ""
+        if not isinstance(value, dict):
+            return ""
+        for key in ("final_answer", "answer", "answer_material", "generated_content", "final_content", "content", "text", "message", "stdout", "output", "result"):
+            if key in value:
+                found = visit(value.get(key), depth + 1)
+                if found:
+                    return found
+        for key in ("synthesis", "delivery", "presentation", "tool_execution", "execution", "workflow_results", "data"):
+            if key in value:
+                found = visit(value.get(key), depth + 1)
+                if found:
+                    return found
+        for key in ("agent_results", "step_results", "results", "items"):
+            if isinstance(value.get(key), list):
+                found = visit(value.get(key), depth + 1)
+                if found:
+                    return found
+        return ""
+
+    return visit(payload)
+
+
 async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any]:
     provided_inputs = dict(req.provided_inputs or {})
     state_run_id = str(provided_inputs.get("_runtime_state_run_id") or provided_inputs.get("_state_run_id") or "").strip()
@@ -1546,6 +1597,13 @@ async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any
             "confidence": perception_package.get("confidence"),
             "warnings": perception_package.get("warnings") or [],
         })
+        # Transport status is not a user answer.  If the runtime returned a rich
+        # payload with nested synthesis/agent/tool output, surface that material
+        # as final_answer before the async wrapper stores the result.
+        if not str(payload.get("final_answer") or "").strip():
+            nested_answer = _extract_payload_public_answer(payload)
+            if nested_answer:
+                payload["final_answer"] = nested_answer
         final_answer = str(payload.get("final_answer") or payload.get("message") or payload.get("status") or "")
         if final_answer.strip():
             session_store.append_turn(

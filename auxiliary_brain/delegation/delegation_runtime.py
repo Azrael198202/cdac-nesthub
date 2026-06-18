@@ -169,6 +169,23 @@ class AgentDelegationRuntime:
                 completed_results=agent_results,
                 dependency_plan=dependency_plan,
             )
+            structural_transform_result = self._try_execute_structural_transform_step(
+                participant=participant,
+                completed_results=agent_results,
+                dependency_plan=dependency_plan,
+            )
+            if structural_transform_result is not None:
+                result = structural_transform_result
+                result_payload = self._sanitize_result_payload(result.__dict__)
+                agent_results.append(result)
+                run_payload["agent_results"].append(result_payload)
+                self._record_progress(
+                    run_payload,
+                    f"participant_{index + 1}_complete",
+                    f"Participant finished: {participant_name}",
+                    "completed" if result.status == "completed" else result.status,
+                )
+                continue
             locked_result = await self._try_execute_locked_compiled_step(
                 participant=participant,
                 task_graph=task_graph,
@@ -871,30 +888,20 @@ class AgentDelegationRuntime:
         return False
 
     def _approval_trusted(self, *, participant: dict[str, Any], tool_id: str, profile_id: str = "default") -> bool:
-        """Return True when this run may execute without an approval pause.
+        """Return True only when the current runtime policy allows auto-run.
 
-        This method intentionally stays policy-driven.  It does not inspect
-        agent names, task names, or capability-specific vocabulary.  It first
-        respects the runtime tool/profile approval policy, then falls back to
-        durable participant-tool trust created by an earlier explicit approval.
+        Approval is decided by the current Runtime Approval Policy Store.  Old
+        participant-local trust records must not override a UI change from
+        ``never`` to ``always``; otherwise an always/once policy can be silently
+        bypassed during task execution.
         """
         tool_id = str(tool_id or "").strip()
         if not tool_id:
             return False
         try:
-            if self.registered_tool_service.approval_policy_store.is_auto_approved(tool_id=tool_id, profile_id=profile_id or "default"):
-                return True
+            return bool(self.registered_tool_service.approval_policy_store.is_auto_approved(tool_id=tool_id, profile_id=profile_id or "default"))
         except Exception:
-            pass
-        pid = self._participant_identity(participant)
-        if not pid:
             return False
-        record = self.store.read_json("configs/policies/approval_trust.json") or {}
-        if not isinstance(record, dict):
-            return False
-        trusted = record.get("trusted") if isinstance(record.get("trusted"), dict) else {}
-        entry = trusted.get(f"{pid}:{tool_id}") if isinstance(trusted, dict) else None
-        return isinstance(entry, dict) and entry.get("enabled") is True
 
     def _is_approval_parameter_field(self, field: dict[str, Any]) -> bool:
         """Detect generic approval/confirmation parameter fields.
@@ -2462,6 +2469,41 @@ class AgentDelegationRuntime:
                 return alias_to_pid[alias]
         return ""
 
+    def _try_execute_structural_transform_step(self, *, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> AgentExecutionResult | None:
+        """Execute a pure dataflow projection/copy step without re-entering ai_core.
+
+        A workflow step such as "extract the final answer from the previous
+        step" is not a new knowledge task. It is a deterministic transform over
+        verified upstream material.  This keeps intermediate dataflow steps from
+        producing generic failure text and prevents downstream capabilities from
+        receiving unverified failure material.
+        """
+        instruction = self._participant_objective(participant)
+        lowered = instruction.casefold()
+        transform_markers = ("extract", "copy", "use", "pass", "project", "forward", "take")
+        output_markers = ("final_answer", "final answer", "answer", "result", "output")
+        if not any(token in lowered for token in transform_markers):
+            return None
+        if not any(token in lowered for token in output_markers):
+            return None
+        material = self._dependency_material_text(participant, completed_results, dependency_plan)
+        if not material:
+            return None
+        return AgentExecutionResult(
+            participant_id=self._participant_identity(participant),
+            participant_name=self._participant_name(participant),
+            core_run_id=new_id("structural_transform"),
+            status="completed",
+            final_answer=material,
+            workflow_results={
+                "status": "completed",
+                "execution_mode": "deterministic_structural_transform",
+                "final_answer": material,
+                "source": "verified_upstream_result",
+            },
+            origin="auxiliary_brain",
+        )
+
     def _dependency_material_text(self, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> str:
         deps = self._participant_dependency_ids(participant, dependency_plan)
         materials: list[str] = []
@@ -2584,6 +2626,9 @@ class AgentDelegationRuntime:
         if not isinstance(participant, dict):
             return False
         if not participant.get("compiled_graph_node"):
+            return False
+        profile = participant.get("capability_profile") if isinstance(participant.get("capability_profile"), dict) else {}
+        if str(profile.get("capability_type") or "").strip().casefold() == "runtime_registered_tool" or str(profile.get("tool_id") or "").strip():
             return False
         step_type = str(participant.get("workflow_step_type") or participant.get("step_type") or "").strip().casefold()
         if step_type in {"runtime_capability", "registered_tool", "runtime_registered_tool"}:
@@ -3415,20 +3460,41 @@ class AgentDelegationRuntime:
         return f"Runtime capability execution failed: {tool_id}. {message}"
 
     def _registered_tool_success_material(self, result: dict[str, Any]) -> str:
+        """Extract public material from a registered tool result envelope."""
+        def visit(value: Any, depth: int = 0) -> str:
+            if depth > 8:
+                return ""
+            if isinstance(value, str):
+                text = value.strip()
+                if text and text.casefold() not in {"success", "ok", "completed"}:
+                    return text
+                return ""
+            if isinstance(value, (int, float, bool)):
+                return str(value)
+            if isinstance(value, list):
+                parts = [visit(item, depth + 1) for item in value]
+                return "\n".join(part for part in parts if part).strip()
+            if not isinstance(value, dict):
+                return ""
+            for key in ("final_answer", "answer", "answer_material", "generated_content", "final_content", "content", "text", "message", "stdout", "output", "result", "value"):
+                if key in value:
+                    found = visit(value.get(key), depth + 1)
+                    if found:
+                        return found
+            for key in ("data", "payload", "tool_execution", "execution", "result"):
+                if key in value:
+                    found = visit(value.get(key), depth + 1)
+                    if found:
+                        return found
+            return ""
+
+        material = visit(result)
+        if material:
+            return material
         nested = result.get("result") if isinstance(result.get("result"), dict) else {}
         data = nested.get("data") if isinstance(nested.get("data"), dict) else {}
         if not data:
             data = result.get("data") if isinstance(result.get("data"), dict) else {}
-        candidates = [
-            nested.get("final_answer"),
-            nested.get("message"),
-            result.get("final_answer"),
-            result.get("message"),
-        ]
-        for item in candidates:
-            text = str(item or "").strip()
-            if text and not text.casefold().startswith("runtime capability executed successfully"):
-                return text
         if not data:
             return ""
         lines = []
@@ -3438,7 +3504,6 @@ class AgentDelegationRuntime:
             label = str(key).replace("_", " ")
             lines.append(f"{label}: {value}")
         return "\n".join(lines)
-
 
 
     async def _execute_image_generation_capability(self, *, participant: dict[str, Any], completed_results: list[Any], dependency_plan: dict[str, Any]) -> AgentExecutionResult | None:

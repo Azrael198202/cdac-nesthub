@@ -272,21 +272,81 @@ class RuntimeAsyncJobStore:
         self._write(record)
 
     def _extract_visible_final_answer(self, value: Any) -> str:
-        """Return the user-facing answer from a job result, not transport state."""
-        if not isinstance(value, dict):
-            return ""
-        for key in ("final_answer", "answer", "message", "text", "output", "result"):
-            item = value.get(key)
-            if item not in (None, "", [], {}):
+        """Return the user-facing answer from a job result, not transport state.
+
+        Async wrappers often receive rich runtime payloads where the real answer
+        is nested under synthesis, delivery, agent_results, workflow_results, or
+        tool result envelopes.  This extractor walks those generic structures and
+        filters out lifecycle-only strings such as "completed" or "Async job
+        completed" so the UI sees the actual agent/capability output.
+        """
+        blocked = {
+            "",
+            "completed",
+            "success",
+            "ok",
+            "async job completed",
+            "async job completed.",
+            "runtime job completed",
+            "runtime job completed.",
+        }
+
+        def public_text(item: Any) -> str:
+            if item in (None, [], {}):
+                return ""
+            if isinstance(item, str):
+                text = item.strip()
+            elif isinstance(item, (int, float, bool)):
                 text = str(item).strip()
-                if text and text.lower() not in {"completed", "async job completed", "async job completed."}:
-                    return text
-        synthesis = value.get("synthesis") if isinstance(value.get("synthesis"), dict) else {}
-        for key in ("final_answer", "answer", "message", "text", "output", "result"):
-            item = synthesis.get(key)
-            if item not in (None, "", [], {}):
-                return str(item).strip()
-        return ""
+            else:
+                return ""
+            if not text or text.casefold() in blocked:
+                return ""
+            if text.casefold().startswith("runtime job ") and "state console" in text.casefold():
+                return ""
+            return text
+
+        def visit(item: Any, depth: int = 0) -> str:
+            if depth > 8:
+                return ""
+            text = public_text(item)
+            if text:
+                return text
+            if isinstance(item, list):
+                for child in reversed(item):
+                    found = visit(child, depth + 1)
+                    if found:
+                        return found
+                return ""
+            if not isinstance(item, dict):
+                return ""
+            # Prefer explicit public-answer fields before lifecycle/status fields.
+            preferred_keys = (
+                "final_answer", "answer", "answer_material", "generated_content",
+                "final_content", "content", "text", "message", "stdout", "output", "result",
+            )
+            containers = (
+                "synthesis", "delivery", "presentation", "tool_execution", "execution",
+                "result", "data", "workflow_results", "runtime_output",
+            )
+            for key in preferred_keys:
+                if key in item:
+                    found = visit(item.get(key), depth + 1)
+                    if found:
+                        return found
+            for key in containers:
+                if key in item:
+                    found = visit(item.get(key), depth + 1)
+                    if found:
+                        return found
+            for key in ("agent_results", "step_results", "results", "items"):
+                if isinstance(item.get(key), list):
+                    found = visit(item.get(key), depth + 1)
+                    if found:
+                        return found
+            return ""
+
+        return visit(value)
 
     async def _heartbeat_loop(self, job_id: str) -> None:
         """Keep the async job watchdog alive while a private worker is busy.

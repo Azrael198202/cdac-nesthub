@@ -2208,6 +2208,15 @@ class AgentStudioService:
             tail = text[match.end():].lstrip()
             if not tail:
                 continue
+            # Support generic assignment syntaxes used by task/agent prompts:
+            #   name: value, name = value, name - value
+            # This is field-name driven and does not depend on the capability.
+            if tail and tail[0] in {":", "=", "："}:
+                tail = tail[1:].lstrip()
+            elif tail.startswith("- "):
+                tail = tail[2:].lstrip()
+            if not tail:
+                continue
             if tail[0] in {"'", '"'}:
                 quote = tail[0]
                 closing = tail.find(quote, 1)

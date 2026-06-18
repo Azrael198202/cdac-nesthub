@@ -121,12 +121,18 @@ class StepCompiler:
         existing = raw.get("execution_contract") if isinstance(raw.get("execution_contract"), dict) else {}
         profile = raw.get("capability_profile") if isinstance(raw.get("capability_profile"), dict) else {}
         owner = str(existing.get("execution_owner") or raw.get("execution_owner") or profile.get("execution_owner") or "ai_core").strip()
+        capability_id = str(existing.get("capability_id") or profile.get("tool_id") or profile.get("capability") or "").strip()
+        capability_type = str(profile.get("capability_type") or "").strip().casefold()
+        if capability_id or capability_type == "runtime_registered_tool":
+            default_method = "runtime_registered_tool"
+        else:
+            default_method = "web_search" if (raw.get("source_contract") or {}).get("requires_source_material") is True else "locked_runtime_plan"
         return {
             **existing,
             "execution_owner": owner,
-            "execution_method": str(existing.get("execution_method") or raw.get("execution_method") or ("web_search" if (raw.get("source_contract") or {}).get("requires_source_material") is True else "locked_runtime_plan")),
+            "execution_method": str(existing.get("execution_method") or raw.get("execution_method") or default_method),
             "prompt_profile": prompt_profile.get("prompt_profile"),
-            "capability_id": str(existing.get("capability_id") or profile.get("tool_id") or profile.get("capability") or "").strip(),
+            "capability_id": capability_id,
             "runtime_prompt_guessing": False,
         }
 
