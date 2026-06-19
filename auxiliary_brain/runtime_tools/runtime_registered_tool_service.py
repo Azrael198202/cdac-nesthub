@@ -46,10 +46,35 @@ class RuntimeRegisteredToolService:
             item["executable"] = self._is_executable(item)
             item["configuration_status"] = self.connection_store.missing_requirements(tool_spec=item, profile_id="default")
             item["profiles"] = self.connection_store.list_profiles(str(item.get("tool_id") or tool_id))
-            item["approval_settings"] = self.approval_policy_store.get_tool_policy(tool_id=str(item.get("tool_id") or tool_id), profile_id="default")
+            item["approval_settings"] = self._effective_approval_settings_for_public_tool(item, profile_id="default")
             tools.append(item)
         tools.sort(key=lambda x: (not bool(x.get("executable")), str(x.get("tool_id") or "")))
         return tools
+
+    def _effective_approval_settings_for_public_tool(self, spec: dict[str, Any], profile_id: str = "default") -> dict[str, Any]:
+        """Return the exact approval mode that execution will use.
+
+        The policy store returns ``mode=None`` when the operator has not saved
+        a Runtime Studio policy for this tool/profile.  Older UI code rendered
+        that as ``always`` even though execution deliberately falls back to the
+        tool manifest, which can be ``never``.  That mismatch made users expect
+        a final confirmation after parameter entry while the executor correctly
+        auto-ran.  This public summary is capability-agnostic and mirrors
+        ``_effective_approval_mode`` so UI, preflight, and executor share one
+        policy interpretation.
+        """
+        tool_id = str(spec.get("tool_id") or spec.get("name") or "tool")
+        stored = self.approval_policy_store.get_tool_policy(tool_id=tool_id, profile_id=profile_id or "default")
+        approval = spec.get("approval_policy") if isinstance(spec.get("approval_policy"), dict) else {}
+        mode = self._effective_approval_mode(spec=spec, approval=approval, approval_settings=stored)
+        out = dict(stored) if isinstance(stored, dict) else {}
+        out.update({
+            "mode": mode,
+            "effective_mode": mode,
+            "source": "runtime_studio_policy" if bool(out.get("explicit")) else "tool_manifest",
+            "requires_confirmation": self._approval_required(spec, approval, stored),
+        })
+        return out
 
     def get_tool(self, tool_id: str) -> dict[str, Any] | None:
         registry = self._load_registry()

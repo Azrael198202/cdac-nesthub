@@ -1609,13 +1609,13 @@ function runtimeToolCard(t){
   const executable=!!t.executable;
   const cfg=t.configuration_status||{};
   const profiles=Array.isArray(t.profiles)?t.profiles:[];
-  const approval=t.approval_policy||{};
+  const approval=t.approval_policy||{}; const approvalSettings=t.approval_settings||{};
   el.innerHTML='<div class="cardHeader"><b>'+escapeHtml(t.tool_id||t.name||'runtime tool')+'</b><span class="pill">'+escapeHtml(executable?'executable':'not executable')+'</span></div>'+
     '<div class="small">capability: '+escapeHtml(t.capability||'')+'</div>'+
     '<div class="small">capabilities: '+escapeHtml(caps.join(', ')||'(none)')+'</div>'+
     '<div class="small">status: '+escapeHtml(t.status||'')+' / sandbox: '+escapeHtml((t.verification&&t.verification.sandbox_verification)||false)+'</div>'+
     '<div class="small">configuration: '+escapeHtml(cfg.configured?'ready':'needs setup')+'</div>'+
-    '<div class="small">approval required: '+escapeHtml(!!approval.required)+'</div>'+
+    '<div class="small">approval mode: '+escapeHtml(approvalSettings.effective_mode||approvalSettings.mode||approval.mode||approval.default_mode||'never')+' / source: '+escapeHtml(approvalSettings.source||'tool_manifest')+'</div>'+
     '<div class="small">profiles: '+escapeHtml(profiles.map(p=>p.profile_id).join(', ')||'(none)')+'</div>';
   const hasProfileFields=Object.keys(((t.connection_schema||{}).properties)||{}).length>0 || Object.keys(((t.secret_schema||{}).properties)||{}).length>0;
   if(hasProfileFields){
