@@ -51,30 +51,33 @@ class RuntimeRegisteredToolService:
         tools.sort(key=lambda x: (not bool(x.get("executable")), str(x.get("tool_id") or "")))
         return tools
 
-    def _effective_approval_settings_for_public_tool(self, spec: dict[str, Any], profile_id: str = "default") -> dict[str, Any]:
-        """Return the exact approval mode that execution will use.
+    def effective_approval_settings(self, *, spec: dict[str, Any], profile_id: str = "default") -> dict[str, Any]:
+        """Return the exact approval decision used by execution.
 
-        The policy store returns ``mode=None`` when the operator has not saved
-        a Runtime Studio policy for this tool/profile.  Older UI code rendered
-        that as ``always`` even though execution deliberately falls back to the
-        tool manifest, which can be ``never``.  That mismatch made users expect
-        a final confirmation after parameter entry while the executor correctly
-        auto-ran.  This public summary is capability-agnostic and mirrors
-        ``_effective_approval_mode`` so UI, preflight, and executor share one
-        policy interpretation.
+        This is the single authority for the approval UI and the executor.
+        It intentionally remains capability-agnostic: explicit Runtime Studio
+        policy wins; otherwise the imported manifest policy is used.
         """
         tool_id = str(spec.get("tool_id") or spec.get("name") or "tool")
         stored = self.approval_policy_store.get_tool_policy(tool_id=tool_id, profile_id=profile_id or "default")
         approval = spec.get("approval_policy") if isinstance(spec.get("approval_policy"), dict) else {}
         mode = self._effective_approval_mode(spec=spec, approval=approval, approval_settings=stored)
+        requires_confirmation = self._approval_required(spec, approval, stored)
         out = dict(stored) if isinstance(stored, dict) else {}
         out.update({
+            "tool_id": tool_id,
+            "profile_id": profile_id or "default",
             "mode": mode,
             "effective_mode": mode,
             "source": "runtime_studio_policy" if bool(out.get("explicit")) else "tool_manifest",
-            "requires_confirmation": self._approval_required(spec, approval, stored),
+            "requires_confirmation": requires_confirmation,
+            "trusted": bool(out.get("trusted")),
+            "explicit": bool(out.get("explicit")),
         })
         return out
+
+    def _effective_approval_settings_for_public_tool(self, spec: dict[str, Any], profile_id: str = "default") -> dict[str, Any]:
+        return self.effective_approval_settings(spec=spec, profile_id=profile_id)
 
     def get_tool(self, tool_id: str) -> dict[str, Any] | None:
         registry = self._load_registry()
@@ -197,8 +200,8 @@ class RuntimeRegisteredToolService:
             remember_approval = True
 
         approval = spec.get("approval_policy") if isinstance(spec.get("approval_policy"), dict) else {}
-        approval_settings = self.approval_policy_store.get_tool_policy(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id)
-        approval_required = self._approval_required(spec, approval, approval_settings)
+        approval_settings = self.effective_approval_settings(spec=spec, profile_id=profile_id)
+        approval_required = bool(approval_settings.get("requires_confirmation"))
         if approval_required and not approval_confirmed and self.approval_policy_store.is_auto_approved(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id):
             approval_confirmed = True
         if approval_required and not approval_confirmed:
@@ -208,6 +211,7 @@ class RuntimeRegisteredToolService:
                 "error": {"code": "human_confirmation_required", "message": "This runtime-generated capability requires confirmation before execution."},
                 "approval_policy": approval,
                 "approval_settings": approval_settings,
+                "effective_approval_policy": approval_settings,
                 "preview": self._approval_preview(runtime_input),
                 "tool": self._public_tool_summary(spec),
             }
@@ -293,7 +297,7 @@ class RuntimeRegisteredToolService:
             "profile_id": profile_id,
             "result": result,
             "tool": self._public_tool_summary(spec),
-            "approval_settings": self.approval_policy_store.get_tool_policy(tool_id=str(spec.get("tool_id") or tool_id), profile_id=profile_id),
+            "approval_settings": self.effective_approval_settings(spec=spec, profile_id=profile_id),
         }
         if not success:
             try:
@@ -781,6 +785,6 @@ class RuntimeRegisteredToolService:
             "connection_schema": spec.get("connection_schema") if isinstance(spec.get("connection_schema"), dict) else {},
             "secret_schema": spec.get("secret_schema") if isinstance(spec.get("secret_schema"), dict) else {},
             "approval_policy": spec.get("approval_policy") if isinstance(spec.get("approval_policy"), dict) else {},
-            "approval_settings": self.approval_policy_store.get_tool_policy(tool_id=str(spec.get("tool_id") or spec.get("name") or ""), profile_id="default"),
+            "approval_settings": self.effective_approval_settings(spec=spec, profile_id="default"),
             "verification": spec.get("verification") if isinstance(spec.get("verification"), dict) else {},
         }

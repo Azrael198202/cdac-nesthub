@@ -522,12 +522,37 @@ async function uploadArtifacts(){
   finally{ if(input) input.value=''; setStudioStatus('ready', false); }
 }
 
+function hasRuntimeInteractionPayload(data){
+  if(!data || typeof data !== 'object'){ return false; }
+  const keys=['pending_action','interaction_request','pending_interaction','approval_request'];
+  return keys.some(k => data[k] && typeof data[k] === 'object');
+}
+
 async function recoverAsyncJobResult(jobId){
   try{
     const jobData=await fetchJsonWithRetry('/api/runtime/jobs/'+encodeURIComponent(jobId),{cache:'no-store'},2,700);
     const job=jobData.job||{};
-    if(job && job.result && typeof job.result==='object'){ return job.result; }
+    if(job && job.result && typeof job.result==='object' && (!job.result.durable_recovered || hasRuntimeInteractionPayload(job.result))){
+      return job.result;
+    }
   }catch(e){ addProgressMessage('job result recovery retry: '+String(e.message||e)); }
+
+  // Runtime State stores the complete output on run.lifecycle / finish_run.
+  // Recover that result before falling back to a generic "Runtime job paused"
+  // summary, otherwise the input/confirmation modal cannot be reopened.
+  try{
+    const eventData=await fetchJsonWithRetry('/api/runtime-state/runs/'+encodeURIComponent(jobId)+'/events?limit=500',{cache:'no-store'},2,700);
+    const events=Array.isArray(eventData.events) ? eventData.events : [];
+    for(let i=events.length-1;i>=0;i--){
+      const ev=events[i]||{};
+      const out=(ev.output && typeof ev.output==='object') ? ev.output : {};
+      const result=(out.result && typeof out.result==='object') ? out.result : null;
+      if(result && (hasRuntimeInteractionPayload(result) || result.final_answer || result.status)){
+        return result;
+      }
+    }
+  }catch(e){ addProgressMessage('durable event recovery retry: '+String(e.message||e)); }
+
   try{
     const runData=await fetchJsonWithRetry('/api/runtime-state/runs/'+encodeURIComponent(jobId),{cache:'no-store'},2,700);
     const run=runData.run||{};
@@ -559,7 +584,11 @@ async function waitForRuntimeJobResult(jobId, options){
     await refreshState();
     if(['completed','paused','failed','cancelled','interrupted'].includes(String(job.status||''))){
       data=(job.result||{});
-      if(String(job.status||'')==='interrupted' && (!data || !data.final_answer)){ data = await recoverAsyncJobResult(jobId) || data; }
+      const jobStatus=String(job.status||'');
+      const genericPausedRecovery = jobStatus==='paused' && data && data.durable_recovered && !hasRuntimeInteractionPayload(data);
+      if((jobStatus==='interrupted' && (!data || !data.final_answer)) || genericPausedRecovery){
+        data = await recoverAsyncJobResult(jobId) || data;
+      }
       if(job.error && !data.error){ data={ok:false,status:'failed',error:job.error,message:job.error.message}; }
       break;
     }
@@ -1493,7 +1522,23 @@ function participantCard(p){
   const el=document.createElement('div');
   el.className='item';
   const pid=p.participant_id||p.id||'';
-  el.innerHTML=`<div class="cardHeader"><b>${escapeHtml(p.name||pid||'participant')}</b><span class="pill">${escapeHtml(p.status||'created')}</span></div><div class="small">${escapeHtml(pid||'')}</div><span class="pill">delegate_to_ai_core</span><div class="path">${escapeHtml(p._path||'')}</div>`;
+  const profile=(p&&p.capability_profile)||{};
+  const toolId=String(p.runtime_tool_id||profile.tool_id||'');
+  const approvalSettings=p.approval_settings||profile.approval_settings||((profile.tool_summary||{}).approval_settings)||{};
+  const effectiveMode=approvalSettings.effective_mode||approvalSettings.mode||'never';
+  const source=approvalSettings.source||'tool_manifest';
+  el.innerHTML=`<div class="cardHeader"><b>${escapeHtml(p.name||pid||'participant')}</b><span class="pill">${escapeHtml(p.status||'created')}</span></div><div class="small">${escapeHtml(pid||'')}</div><span class="pill">${escapeHtml(p.execution_policy||'delegate_to_ai_core')}</span><div class="path">${escapeHtml(p._path||'')}</div>`;
+  if(toolId){
+    const row=document.createElement('div');
+    row.className='small';
+    row.style.marginTop='8px';
+    row.innerHTML='runtime tool: '+escapeHtml(toolId)+'<br>Approval: <select class="miniInput"><option value="always">always</option><option value="once">once</option><option value="never">never</option></select> <button class="copyBtn" type="button">Save</button><div class="fieldHint">effective: '+escapeHtml(effectiveMode)+' / source: '+escapeHtml(source)+'</div>';
+    const select=row.querySelector('select');
+    if(select){ select.value=effectiveMode; }
+    const btn=row.querySelector('button');
+    if(btn){ btn.onclick=async()=>{ await saveRuntimeToolApprovalPolicy(toolId, select?select.value:'never'); }; }
+    el.appendChild(row);
+  }
   const del=document.createElement('button');
   del.className='btn danger';
   del.style.marginTop='8px';
@@ -1617,6 +1662,16 @@ function runtimeToolCard(t){
     '<div class="small">configuration: '+escapeHtml(cfg.configured?'ready':'needs setup')+'</div>'+
     '<div class="small">approval mode: '+escapeHtml(approvalSettings.effective_mode||approvalSettings.mode||approval.mode||approval.default_mode||'never')+' / source: '+escapeHtml(approvalSettings.source||'tool_manifest')+'</div>'+
     '<div class="small">profiles: '+escapeHtml(profiles.map(p=>p.profile_id).join(', ')||'(none)')+'</div>';
+  const policyRow=document.createElement('div');
+  policyRow.className='small';
+  policyRow.style.marginTop='8px';
+  const selectedMode=approvalSettings.effective_mode||approvalSettings.mode||approval.mode||approval.default_mode||'never';
+  policyRow.innerHTML='Approval: <select class="miniInput" data-tool-policy="'+escapeHtml(t.tool_id||t.name||'')+'"><option value="always">always</option><option value="once">once</option><option value="never">never</option></select> <button class="copyBtn" type="button">Save</button>';
+  const select=policyRow.querySelector('select');
+  if(select) select.value=selectedMode;
+  const saveBtn=policyRow.querySelector('button');
+  if(saveBtn){saveBtn.onclick=async()=>{await saveRuntimeToolApprovalPolicy(t.tool_id||t.name, select?select.value:'never');};}
+  el.appendChild(policyRow);
   const hasProfileFields=Object.keys(((t.connection_schema||{}).properties)||{}).length>0 || Object.keys(((t.secret_schema||{}).properties)||{}).length>0;
   if(hasProfileFields){
     const configureBtn=document.createElement('button');
@@ -1741,6 +1796,18 @@ async function configureRuntimeToolProfile(tool){
       refreshState();
     }
   );
+}
+
+
+async function saveRuntimeToolApprovalPolicy(toolId, mode){
+  if(!toolId){showToast('No runtime tool selected');return;}
+  try{
+    await apiFetchJson('/api/runtime/settings/tool-approval',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:toolId,profile_id:'default',mode})});
+    showToast('Approval policy saved: '+mode);
+    await refreshState();
+  }catch(e){
+    showToast('Failed to save approval policy: '+(e&&e.message?e.message:e));
+  }
 }
 
 async function executeRuntimeTool(tool){

@@ -110,13 +110,33 @@ class RuntimeAsyncJobStore:
             return record
         recovered_result = self._recover_result_from_runtime_events(job_id)
         current = str(record.get("status") or "")
-        if current in {"queued", "running", "interrupted"} or not record.get("result"):
+        current_result = record.get("result") if isinstance(record.get("result"), dict) else None
+        current_is_generic_recovery = bool(
+            isinstance(current_result, dict)
+            and current_result.get("durable_recovered")
+            and not any(
+                isinstance(current_result.get(key), dict)
+                for key in ("pending_action", "interaction_request", "pending_interaction")
+            )
+        )
+        recovered_has_interaction = bool(
+            isinstance(recovered_result, dict)
+            and any(
+                isinstance(recovered_result.get(key), dict)
+                for key in ("pending_action", "interaction_request", "pending_interaction")
+            )
+        )
+        if current in {"queued", "running", "interrupted"} or not record.get("result") or (current_is_generic_recovery and recovered_has_interaction):
             recovered = dict(record)
             recovered["status"] = run_status
             recovered["updated_at"] = run.get("updated_at") or recovered.get("updated_at")
             recovered["finished_at"] = recovered.get("finished_at") or run.get("ended_at") or run.get("updated_at")
             recovered["error"] = run.get("last_error") if run_status == "failed" else None
-            recovered["result"] = recovered.get("result") or recovered_result or {
+            # Prefer the full runtime-state event result over a generic durable
+            # summary.  Paused jobs must preserve pending_action /
+            # interaction_request so Studio can reopen the correct modal after
+            # async polling or reload.
+            recovered["result"] = recovered_result or recovered.get("result") or {
                 "ok": run_status in {"completed", "paused"},
                 "status": run_status,
                 "run_id": job_id,

@@ -3510,6 +3510,12 @@ class AgentDelegationRuntime:
             )
         execution_policy = profile.get("execution_policy") if isinstance(profile.get("execution_policy"), dict) else {}
         approval_policy = execution_policy.get("approval_policy") if isinstance(execution_policy.get("approval_policy"), dict) else {}
+        effective_approval_policy = {}
+        try:
+            spec_for_policy = self.registered_tool_service.get_tool(tool_id) or {"tool_id": tool_id, "approval_policy": approval_policy}
+            effective_approval_policy = self.registered_tool_service.effective_approval_settings(spec=spec_for_policy, profile_id=profile_id)
+        except Exception:
+            effective_approval_policy = {}
         approval_confirmed = bool(values.get("approval_confirmed") or values.get("confirm") or values.get("confirmed"))
         if not approval_confirmed and policy_auto_approved:
             approval_confirmed = True
@@ -3553,7 +3559,8 @@ class AgentDelegationRuntime:
                     "kind": "runtime_tool_human_confirmation",
                     "tool_id": tool_id,
                     "message": "This runtime-generated capability requires confirmation before execution.",
-                    "approval_policy": approval_policy or result.get("approval_policy"),
+                    "approval_policy": effective_approval_policy or result.get("effective_approval_policy") or result.get("approval_settings") or approval_policy or result.get("approval_policy"),
+                    "approval_settings": result.get("approval_settings") or effective_approval_policy,
                     "preview": preview,
                     "request": {"input_mode": "confirmation", "fields": [
                         {"field": f"{self._participant_identity(participant)}.approval_confirmed", "name": f"{self._participant_identity(participant)}.approval_confirmed", "label": "Confirm execution", "message": "Check to confirm execution.", "input_type": "boolean", "required": True},

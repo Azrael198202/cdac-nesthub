@@ -1014,10 +1014,11 @@ class AgentStudioService:
         agent_traces = self.store.list_json("traces/agent_delegation")
         runtime_tool_runs = self.registered_tool_service.list_tool_runs()
         runtime_execution_traces = self.registered_tool_service.list_execution_traces()
+        participants = self._with_effective_approval_settings(self.store.list_json("generated/agents"))
         return {
             "origin": "auxiliary_brain",
             "community_id": self.community_id,
-            "participants": self.store.list_json("generated/agents"),
+            "participants": participants,
             "task_graphs": self.store.list_json("generated/tasks"),
             "task_runs": self.store.list_json("generated/results"),
             "conversation_runs": conversation_runs,
@@ -1029,6 +1030,37 @@ class AgentStudioService:
             "traces": agent_traces + conversation_runs + runtime_execution_traces,
         }
 
+
+    def _with_effective_approval_settings(self, participants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Attach executable approval settings to participant cards.
+
+        Runtime approval is enforced by registered tool id, while users normally
+        operate through Agent cards.  Keeping this bridge in the snapshot makes
+        the displayed policy, the saved policy, and the executor decision use
+        the same capability-agnostic identity.
+        """
+        hydrated: list[dict[str, Any]] = []
+        for item in participants or []:
+            if not isinstance(item, dict):
+                continue
+            out = dict(item)
+            profile = out.get("capability_profile") if isinstance(out.get("capability_profile"), dict) else {}
+            tool_id = str(profile.get("tool_id") or "").strip()
+            if tool_id:
+                spec = self.registered_tool_service.get_tool(tool_id)
+                if isinstance(spec, dict):
+                    settings = self.registered_tool_service.effective_approval_settings(spec=spec, profile_id="default")
+                    profile = dict(profile)
+                    profile["approval_settings"] = settings
+                    summary = profile.get("tool_summary") if isinstance(profile.get("tool_summary"), dict) else {}
+                    summary = dict(summary)
+                    summary["approval_settings"] = settings
+                    profile["tool_summary"] = summary
+                    out["capability_profile"] = profile
+                    out["approval_settings"] = settings
+                    out["runtime_tool_id"] = tool_id
+            hydrated.append(out)
+        return hydrated
 
     def _maybe_import_python_file_capability(self, *, instruction: str, participant_name: str, artifact_refs: list[dict[str, Any]] | None) -> dict[str, Any] | None:
         """Convert an explicitly referenced Python program into a runtime capability.
