@@ -295,6 +295,53 @@ class RuntimeBlueprintArtifactGenerator:
     ) -> dict[str, Any]:
         base_complexity = self._generation_complexity(blueprint=blueprint, identity_contract=identity_contract)
         attempts: list[dict[str, Any]] = []
+
+        # Default code generation path: staged small generation.
+        # A timeout on a whole-artifact prompt usually means the prompt/output is
+        # too large for the local runtime, not that the runtime should jump to a
+        # much larger model.  Generate smaller artifact stages first, validate
+        # each stage, and repair only the failed stage.  This remains generic and
+        # capability-neutral: all behavior still comes from the supplied schemas,
+        # blueprint and specification contract.
+        if self._prefer_staged_codegen():
+            progressive = self._generate_progressive_artifact_with_llm(
+                tool_id=tool_id,
+                run_id=run_id,
+                entrypoint=entrypoint,
+                blueprint=blueprint,
+                identity_contract=identity_contract,
+                input_schema=input_schema,
+                output_schema=output_schema,
+                connection_schema=connection_schema,
+                secret_schema=secret_schema,
+                verification_input=verification_input,
+                specification_contract=specification_contract,
+                previous_attempts=[],
+                route_floor=0,
+            )
+            if self._valid_generated_artifact(progressive):
+                contract_violations = self._generated_artifact_contract_violations(
+                    progressive,
+                    input_schema=input_schema,
+                    connection_schema=connection_schema,
+                    secret_schema=secret_schema,
+                )
+                if not contract_violations:
+                    progressive["generation_status"] = "completed"
+                    progressive["generation_route"] = progressive.get("generation_route") if isinstance(progressive.get("generation_route"), dict) else {"mode": "staged_small_generation"}
+                    progressive["generation_attempts"] = list(progressive.get("generation_attempts") or [])
+                    return progressive
+                progressive["generation_error"] = "; ".join(contract_violations[:8])
+            attempts.extend(list(progressive.get("generation_attempts") or []) if isinstance(progressive, dict) else [])
+            if not self._allow_full_artifact_codegen_fallback():
+                last = attempts[-1] if attempts else {}
+                return {
+                    "generation_status": str((progressive or {}).get("generation_status") or last.get("status") or "staged_generation_failed") if isinstance(progressive, dict) else "staged_generation_failed",
+                    "generation_route": last.get("route") if isinstance(last.get("route"), dict) else {"mode": "staged_small_generation"},
+                    "generation_error": str((progressive or {}).get("generation_error") or last.get("error") or "Staged code generation did not produce a registerable runtime artifact."),
+                    "generation_attempts": attempts,
+                }
+
         for attempt in self._generation_attempts(base_complexity):
             available, availability_reason = self._codegen_attempt_available(attempt, run_id=run_id, tool_id=tool_id)
             if not available:
@@ -516,6 +563,41 @@ class RuntimeBlueprintArtifactGenerator:
         }
 
 
+    def _prefer_staged_codegen(self) -> bool:
+        raw = os.getenv("AI_RUNTIME_CODEGEN_STAGED_SMALL_GENERATION")
+        if raw is None:
+            return True
+        return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+    def _allow_full_artifact_codegen_fallback(self) -> bool:
+        raw = os.getenv("AI_RUNTIME_CODEGEN_ENABLE_FULL_ARTIFACT_FALLBACK")
+        if raw is None:
+            return False
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _allow_large_codegen_models(self) -> bool:
+        raw = os.getenv("AI_RUNTIME_CODEGEN_ALLOW_LARGE_MODELS")
+        if raw is None:
+            return False
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _small_model_generation_attempts(self, base_complexity: str) -> list[dict[str, Any]]:
+        attempts = [attempt for attempt in self._generation_attempts(base_complexity) if isinstance(attempt, dict)]
+        if self._allow_large_codegen_models():
+            return attempts
+        small: list[dict[str, Any]] = []
+        for attempt in attempts:
+            override = attempt.get("route_override") if isinstance(attempt.get("route_override"), dict) else {}
+            model = str(override.get("model") or "").casefold()
+            complexity = str(attempt.get("complexity") or override.get("policy_complexity") or "").casefold()
+            if complexity == "critical":
+                continue
+            if any(marker in model for marker in ["16b", "32b", "70b", "mixtral", "large"]):
+                continue
+            small.append(attempt)
+        return small or attempts[:1]
+
+
 
     def _generate_progressive_artifact_with_llm(
         self,
@@ -544,14 +626,14 @@ class RuntimeBlueprintArtifactGenerator:
         """
         attempts = previous_attempts if isinstance(previous_attempts, list) else []
         progressive_attempts: list[dict[str, Any]] = []
-        routes = [attempt for attempt in self._generation_attempts("basic") if isinstance(attempt, dict)]
-        # Progressive generation is already split into smaller file-level calls.
-        # Keep the policy-defined escalation order so a usable mid-sized model
-        # can finish before falling through to the largest local model.  The
-        # route_floor skips models already proven unsuitable in full-artifact
-        # generation without relying on capability names or business words.
-        if route_floor > 0:
-            routes = routes[min(route_floor, len(routes)):] or routes[-1:]
+        routes = self._small_model_generation_attempts("basic")
+        if not routes:
+            routes = [attempt for attempt in self._generation_attempts("basic") if isinstance(attempt, dict)]
+        # Progressive generation is split into smaller stage/file-level calls, so
+        # it should start again from the policy's lightweight routes.  A previous
+        # timeout on whole-artifact generation does not prove the small model is
+        # unusable for a short stage.  Large routes are excluded by default and
+        # may be enabled explicitly through runtime policy/environment.
         self._emit_generation_progress(
             run_id=run_id,
             tool_id=tool_id,
@@ -756,7 +838,146 @@ class RuntimeBlueprintArtifactGenerator:
                 error=error,
             )
             return {"status": "invalid_output", "error": error, "route": route, "attempt_record": {"status": "invalid_output", "error": error, "route": route, "attempt": file_attempt, "path": path}}
-        return {"status": "completed", "content": content, "route": route, "attempt_record": {"status": "completed", "route": route, "attempt": file_attempt, "path": path}}
+
+        valid, validation_error = self._validate_progressive_source(path=path, content=content)
+        if not valid:
+            repaired = self._repair_progressive_file_with_llm(
+                tool_id=tool_id,
+                run_id=run_id,
+                attempt=file_attempt,
+                path=path,
+                content=content,
+                validation_error=validation_error,
+                contract=contract,
+            )
+            if isinstance(repaired, str) and repaired.strip():
+                repaired_valid, repaired_error = self._validate_progressive_source(path=path, content=repaired)
+                if repaired_valid:
+                    content = repaired
+                    validation_error = ""
+                    self._emit_generation_progress(
+                        run_id=run_id,
+                        tool_id=tool_id,
+                        status="running",
+                        phase="progressive_file_stage_repaired",
+                        attempt=file_attempt,
+                        path=path,
+                        route=route,
+                    )
+                else:
+                    validation_error = repaired_error
+            if validation_error:
+                self._emit_generation_progress(
+                    run_id=run_id,
+                    tool_id=tool_id,
+                    status="running",
+                    phase="progressive_file_stage_validation_failed",
+                    attempt=file_attempt,
+                    path=path,
+                    route=route,
+                    error=validation_error,
+                )
+                return {"status": "stage_validation_failed", "error": validation_error, "route": route, "attempt_record": {"status": "stage_validation_failed", "error": validation_error, "route": route, "attempt": file_attempt, "path": path}}
+
+        return {"status": "completed", "content": content, "route": route, "attempt_record": {"status": "completed", "route": route, "attempt": file_attempt, "path": path, "stage_validated": True}}
+
+    def _validate_progressive_source(self, *, path: str, content: str) -> tuple[bool, str]:
+        """Validate one generated source stage before moving on.
+
+        The checks are intentionally generic: syntax, expected entrypoint shape
+        for the runtime tool file, and absence of markdown fences.  Semantic and
+        capability-match validation still happens later in the sandbox and
+        registry pipeline.
+        """
+        if not isinstance(content, str) or not content.strip():
+            return False, "empty source content"
+        stripped = content.strip()
+        if stripped.startswith("```") or "```" in stripped[:80]:
+            return False, "source contains markdown code fences"
+        try:
+            tree = ast.parse(content, filename=path)
+        except SyntaxError as exc:
+            return False, f"python syntax error in {path}: {exc}"
+        if path == "tool.py":
+            has_run = any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "run" for node in tree.body)
+            if not has_run:
+                return False, "tool.py must define run(payload: dict | None = None)"
+        return True, ""
+
+    def _repair_progressive_file_with_llm(
+        self,
+        *,
+        tool_id: str,
+        run_id: str | None,
+        attempt: dict[str, Any],
+        path: str,
+        content: str,
+        validation_error: str,
+        contract: dict[str, Any],
+    ) -> str | None:
+        repair_attempt = {**attempt, "repair": True, "progressive_file_repair": path, "force_json": True, "compact": True}
+        payload = {
+            "target_file": path,
+            "validation_error": validation_error,
+            "contract": self._compact_json(contract, limit=3000),
+            "current_content": content[:12000],
+        }
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Repair one generated runtime artifact file. Return one JSON object only with keys path and content. "
+                    "The content must be complete Python source code. Do not use markdown. Keep behavior aligned with the contract. "
+                    "Fix only the failed stage and do not invent external dependencies."
+                ),
+            },
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)},
+        ]
+        self._emit_generation_progress(
+            run_id=run_id,
+            tool_id=tool_id,
+            status="running",
+            phase="progressive_file_stage_repair_started",
+            attempt=repair_attempt,
+            path=path,
+            error=validation_error,
+        )
+        result = self._complete_sync_with_heartbeat(
+            run_id=run_id,
+            tool_id=tool_id,
+            attempt=repair_attempt,
+            brain="auxiliary_brain",
+            task_type="runtime_tool_code_generation",
+            complexity=str(attempt.get("complexity") or "medium"),
+            messages=messages,
+            context={
+                "tool_id": tool_id,
+                "generation_attempt": repair_attempt,
+                "progressive_file_repair": path,
+                "route_override": attempt.get("route_override") if isinstance(attempt.get("route_override"), dict) else None,
+            },
+            response_format={"type": "json_object"},
+        )
+        if getattr(result, "status", None) != "completed":
+            self._emit_generation_progress(
+                run_id=run_id,
+                tool_id=tool_id,
+                status="running",
+                phase="progressive_file_stage_repair_failed",
+                attempt=repair_attempt,
+                path=path,
+                error=getattr(result, "error", "repair failed"),
+            )
+            return None
+        parsed = self._parse_json_object(str(getattr(result, "content", "") or ""))
+        if not isinstance(parsed, dict):
+            return None
+        repaired = parsed.get("content") if isinstance(parsed.get("content"), str) else None
+        if not repaired:
+            repaired = parsed.get(path) if isinstance(parsed.get(path), str) else None
+        if not repaired:
+            repaired = parsed.get("code") if isinstance(parsed.get("code"), str) else None
+        return repaired if isinstance(repaired, str) and repaired.strip() else None
 
     def _codegen_attempt_available(self, attempt: dict[str, Any], *, run_id: str | None = None, tool_id: str | None = None) -> tuple[bool, str]:
         """Preflight and prepare one code-generation model attempt.
