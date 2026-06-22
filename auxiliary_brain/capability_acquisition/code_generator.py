@@ -29,6 +29,7 @@ except Exception:  # pragma: no cover - optional runtime integration
 from ai_core.model_orchestration import LiteLLMBrainClient
 from auxiliary_brain.capability_acquisition.specification_contract_compiler import CapabilitySpecificationContractCompiler
 from auxiliary_brain.capability_acquisition.schema_boundary import CapabilitySchemaBoundary
+from auxiliary_brain.capability_acquisition.prompt_engineer import build_generation_prompt_messages
 
 
 class RuntimeBlueprintArtifactGenerator:
@@ -467,6 +468,12 @@ class RuntimeBlueprintArtifactGenerator:
             parsed["generation_route"] = route
             parsed["generation_attempts"] = attempts + [record]
             return parsed
+        dependency_unavailable = self._dependency_unavailable_generation_result(
+            attempts=attempts,
+            stage="full_artifact_generation",
+        )
+        if dependency_unavailable:
+            return dependency_unavailable
         # If no model returned a complete artifact envelope, try a generic
         # progressive generation pass.  This is still LLM-based and uses only the
         # user-derived contract.  It does not inject capability-specific logic;
@@ -634,11 +641,105 @@ class RuntimeBlueprintArtifactGenerator:
             phase="progressive_artifact_generation_failed",
             error="No progressive model route produced executable artifact files.",
         )
+        dependency_unavailable = self._dependency_unavailable_generation_result(
+            attempts=progressive_attempts,
+            stage="progressive_artifact_generation",
+        )
+        if dependency_unavailable:
+            return dependency_unavailable
         return {
             "generation_status": "progressive_generation_failed",
             "generation_error": "No progressive model route produced executable artifact files.",
             "generation_attempts": progressive_attempts,
         }
+
+    def _dependency_unavailable_generation_result(self, *, attempts: list[dict[str, Any]], stage: str) -> dict[str, Any] | None:
+        """Return a generic dependency-resolution contract when all routes are unavailable.
+
+        This path is provider-agnostic. It only inspects attempt outcomes and
+        route metadata, then asks the runtime to resolve model-route dependency
+        availability before retrying code generation.
+        """
+        if not isinstance(attempts, list) or not attempts:
+            return None
+        unavailable: list[dict[str, Any]] = []
+        for record in attempts:
+            if not isinstance(record, dict):
+                return None
+            if str(record.get("status") or "") != "model_not_available":
+                return None
+            error_text = str(record.get("error") or "")
+            if not self._attempt_error_indicates_runtime_dependency_unavailable(error_text):
+                return None
+            unavailable.append(record)
+        if not unavailable:
+            return None
+        missing_routes = self._missing_codegen_routes_from_attempts(unavailable)
+        reason = str(unavailable[-1].get("error") or "runtime_codegen_dependency_unavailable")
+        interaction_request = {
+            "type": "runtime_codegen_dependency_resolution",
+            "kind": "runtime_codegen_dependency_resolution",
+            "message": "Runtime code generation is blocked because all configured model routes are currently unavailable.",
+            "required_actions": [
+                "Ensure at least one configured code-generation provider endpoint is reachable.",
+                "Ensure at least one configured code-generation model route is available.",
+                "Retry capability acquisition after dependency readiness is restored.",
+            ],
+            "missing_routes": missing_routes,
+            "blocked_stage": stage,
+        }
+        return {
+            "generation_status": "runtime_dependency_unavailable",
+            "generation_route": {"mode": "dependency_unavailable", "stage": stage},
+            "generation_error": reason,
+            "generation_attempts": attempts,
+            "interaction_request": interaction_request,
+            "dependency_unavailability": {
+                "stage": stage,
+                "route_count": len(missing_routes),
+            },
+        }
+
+    def _missing_codegen_routes_from_attempts(self, attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        routes: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for record in attempts:
+            attempt = record.get("attempt") if isinstance(record, dict) else None
+            override = attempt.get("route_override") if isinstance(attempt, dict) else {}
+            override = override if isinstance(override, dict) else {}
+            provider = str(override.get("provider") or "").strip()
+            model = str(override.get("model") or "").strip()
+            base_url = str(override.get("base_url") or "").strip()
+            if provider.casefold() == "ollama" and not base_url:
+                base_url = str(os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434").rstrip("/")
+            key = (provider, model, base_url)
+            if key in seen:
+                continue
+            seen.add(key)
+            routes.append(
+                {
+                    "provider": provider,
+                    "model": model,
+                    "base_url": base_url,
+                    "availability_reason": str(record.get("error") or "")[:240],
+                }
+            )
+        return routes
+
+    def _attempt_error_indicates_runtime_dependency_unavailable(self, error_text: str) -> bool:
+        text = str(error_text or "").casefold()
+        if not text:
+            return False
+        markers = (
+            "service_unavailable",
+            "connection refused",
+            "connection error",
+            "timed out",
+            "network is unreachable",
+            "failed to establish a new connection",
+            "max retries exceeded",
+        )
+        return any(marker in text for marker in markers)
 
     def _generate_progressive_file_with_llm(
         self,
@@ -782,11 +883,11 @@ class RuntimeBlueprintArtifactGenerator:
         ok, reason = self._ollama_model_visible(base_url, model)
         if ok:
             return True, ""
-        if reason.startswith("ollama_service_unavailable"):
-            return False, reason
 
         auto_prepare = str(os.getenv("AI_RUNTIME_CODEGEN_AUTO_PULL_MISSING_MODELS", "1")).strip().lower() not in {"0", "false", "no", "off"}
         if not auto_prepare:
+            if reason.startswith("ollama_service_unavailable"):
+                return False, reason
             return False, f"ollama_codegen_model_not_installed:{model}; auto_pull_disabled"
         if RuntimeModelDownloader is None:
             return False, f"ollama_codegen_model_not_installed:{model}; model_downloader_unavailable"
@@ -807,6 +908,7 @@ class RuntimeBlueprintArtifactGenerator:
                 {
                     "model_id": model,
                     "runtime": "ollama",
+                    "base_url": base_url,
                     "source": "policy_listed_codegen_route",
                     "download_strategy": {"preferred_runtime": "ollama"},
                 },
@@ -878,14 +980,15 @@ class RuntimeBlueprintArtifactGenerator:
         specification_contract: dict[str, Any],
         compact: bool = False,
     ) -> list[dict[str, str]]:
-        """Build a minimal, contract-only code generation prompt.
+        """Build a dynamic, context-aware code generation prompt.
 
-        The prompt is intentionally small and generic.  It never passes the full
-        user request or verbose blueprint into the code-generation model.  Earlier
-        stages already produced the authoritative contract; this stage only
-        materializes that contract into a runtime artifact.  This improves local
-        model latency and prevents repeated intent/planning work.
+        This method uses the PromptEngineer system to generate context-specific
+        guidance based on capability category, complexity, and schema structure.
+        Earlier stages already produced the authoritative contract; this stage
+        materializes that contract into a runtime artifact with intelligent
+        LLM guidance derived from capability metadata.
         """
+        # Build full contract with all components
         contract = {
             "tool_id": tool_id,
             "entrypoint": self._compact_entrypoint(entrypoint),
@@ -912,21 +1015,24 @@ class RuntimeBlueprintArtifactGenerator:
             if compact_spec:
                 contract["specification"] = compact_spec
 
-        system = (
-            "You are a runtime artifact generator. Materialize ONLY the supplied compact contract. "
-            "Do not plan, research, or explain. Return one JSON object only. No markdown. "
-            "The JSON object MUST include these top-level keys exactly: files,input_schema,output_schema,connection_schema,secret_schema,dependencies,verification_input,verification_expectations,capability_match_contract. "
-            "files MUST be a non-empty array of objects with path and content. It MUST include path='tool.py' and path='test_tool.py'. "
-            "tool.py MUST contain executable Python source, define the requested entrypoint, accept payload: dict|None, and return a JSON-serializable dict. "
-            "test_tool.py MUST import tool.py, run only dry-run/mock/local sandbox tests, and avoid external network or live side effects. "
-            "If schemas are empty or underspecified, derive a minimal schema from behavior_contract, then implement that schema. "
-            "Implement the behavior_contract in tool.py. Do not return placeholders, blueprint_generated, todo, not_implemented, or requires_runtime_implementation. "
-            "Read input only from payload['input'], connection only from payload['connection'], secrets only from payload['secrets'], runtime flags only from payload['_runtime']. "
-            "Never copy secrets into code, tests, logs, manifests, input schema, or connection schema. "
-            "Use Python standard library when possible. dependencies must be [] unless truly required."
+        # Use dynamic prompt engineering system for context-aware guidance
+        behavior_contract = blueprint.get("behavior_contract") or blueprint.get("description") or "Generic runtime capability"
+        complexity = blueprint.get("complexity_level", blueprint.get("complexity", "basic"))
+        runtime_policy = blueprint.get("runtime_execution_policy") if isinstance(blueprint.get("runtime_execution_policy"), dict) else None
+        
+        messages = build_generation_prompt_messages(
+            tool_id=tool_id,
+            complexity=complexity,
+            input_schema=input_schema,
+            output_schema=output_schema,
+            connection_schema=connection_schema,
+            secret_schema=secret_schema,
+            behavior_contract=behavior_contract,
+            runtime_policy=runtime_policy,
+            contract_json=contract,
         )
-        user = json.dumps(contract, ensure_ascii=False, separators=(",", ":"), default=str)
-        return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        
+        return messages
 
     def _compact_behavior_contract(self, blueprint: dict[str, Any], *, tool_id: str) -> dict[str, Any]:
         """Return bounded behavior requirements for artifact generation.
@@ -1263,23 +1369,85 @@ class RuntimeBlueprintArtifactGenerator:
         text = str(content or "").strip()
         if not text:
             return None
+        candidates = self._json_object_candidates(text)
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate)
+                if isinstance(data, dict):
+                    return data
+                if isinstance(data, list):
+                    first_dict = next((item for item in data if isinstance(item, dict)), None)
+                    if isinstance(first_dict, dict):
+                        return first_dict
+            except Exception:
+                pass
+            # Some routes still return Python dict literals instead of strict JSON.
+            try:
+                literal = ast.literal_eval(candidate)
+                if isinstance(literal, dict):
+                    return literal
+                if isinstance(literal, list):
+                    first_dict = next((item for item in literal if isinstance(item, dict)), None)
+                    if isinstance(first_dict, dict):
+                        return first_dict
+            except Exception:
+                pass
+        return None
+
+    def _json_object_candidates(self, text: str) -> list[str]:
+        candidates: list[str] = []
+
+        def add(value: str) -> None:
+            cleaned = str(value or "").strip()
+            if not cleaned:
+                return
+            if cleaned not in candidates:
+                candidates.append(cleaned)
+
+        add(text)
         if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-            text = re.sub(r"\s*```$", "", text)
-        try:
-            data = json.loads(text)
-            return data if isinstance(data, dict) else None
-        except Exception:
-            pass
+            stripped = re.sub(r"^```(?:json|python)?\s*", "", text, flags=re.IGNORECASE)
+            stripped = re.sub(r"\s*```$", "", stripped)
+            add(stripped)
+        for block in re.findall(r"```(?:json|python)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL):
+            add(block)
         start = text.find("{")
         end = text.rfind("}")
         if start >= 0 and end > start:
-            try:
-                data = json.loads(text[start : end + 1])
-                return data if isinstance(data, dict) else None
-            except Exception:
-                return None
-        return None
+            add(text[start : end + 1])
+        for obj in self._balanced_braced_objects(text):
+            add(obj)
+        return candidates
+
+    def _balanced_braced_objects(self, text: str) -> list[str]:
+        objects: list[str] = []
+        stack: list[int] = []
+        in_string = False
+        quote = ""
+        escaped = False
+        for index, ch in enumerate(text):
+            if in_string:
+                if escaped:
+                    escaped = False
+                    continue
+                if ch == "\\":
+                    escaped = True
+                    continue
+                if ch == quote:
+                    in_string = False
+                continue
+            if ch in {"\"", "'"}:
+                in_string = True
+                quote = ch
+                continue
+            if ch == "{":
+                stack.append(index)
+                continue
+            if ch == "}" and stack:
+                start = stack.pop()
+                if not stack:
+                    objects.append(text[start : index + 1])
+        return objects
 
     def _normalize_llm_artifact_payload(self, artifact: dict[str, Any], *, tool_id: str) -> dict[str, Any]:
         """Normalize common model output shapes into the canonical artifact format.
@@ -1419,7 +1587,7 @@ class RuntimeBlueprintArtifactGenerator:
                 "content": (
                     "You repair invalid runtime artifact generation output. "
                     "Do not invent a new plan. Use the supplied contract and previous output. "
-                    "Return one JSON object only with keys files,input_schema,output_schema,connection_schema,secret_schema,dependencies,verification_input,verification_expectations,capability_match_contract. "
+                    "Return one JSON object only. files is required; include any inferred or preserved schemas, verification fields, dependencies, and capability contract when available. "
                     "files must be an array with path/content entries for tool.py and test_tool.py. No markdown."
                 ),
             },
@@ -1522,11 +1690,27 @@ class RuntimeBlueprintArtifactGenerator:
         files = artifact.get("files")
         if not self._valid_files(files) or self._files_look_like_stub(files):
             return False
+        if not self._generated_python_sources_parse(files):
+            return False
         if not self._generated_tests_have_defined_names(files):
             return False
         text = "\n".join(str(item.get("content") or "") for item in files if isinstance(item, dict))
         if "def " not in text or "return" not in text:
             return False
+        return True
+
+    def _generated_python_sources_parse(self, files: list[dict[str, Any]]) -> bool:
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "")
+            if not path.endswith(".py"):
+                continue
+            content = str(item.get("content") or "")
+            try:
+                ast.parse(content)
+            except SyntaxError:
+                return False
         return True
 
     def _generated_artifact_contract_violations(
@@ -1580,7 +1764,7 @@ class RuntimeBlueprintArtifactGenerator:
         try:
             tree = ast.parse(source)
         except SyntaxError:
-            return ["generated source is not parseable for lifecycle validation"]
+            return []
         section_fields: dict[str, set[str]] = {}
         for section, schema in (("input", input_schema), ("connection", connection_schema), ("secrets", secret_schema)):
             props = schema.get("properties") if isinstance(schema, dict) and isinstance(schema.get("properties"), dict) else {}
@@ -1631,7 +1815,7 @@ class RuntimeBlueprintArtifactGenerator:
         try:
             tree = ast.parse(source)
         except SyntaxError:
-            return [f"{scope}: generated source is not parseable for contract validation"]
+            return []
         aliases = self._scope_aliases_from_source(source, scope=scope)
         variable_to_optional_field: dict[str, str] = {}
         variable_to_required_field: dict[str, str] = {}

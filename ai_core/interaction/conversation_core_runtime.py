@@ -1457,6 +1457,8 @@ class ConversationCoreRuntime:
             )
         if runtime_status in {"registered", "registered_verified"}:
             headline = "Capability gap resolution completed. Runtime capability was implemented, sandbox-tested, registered, and verified by execution."
+        elif runtime_status in {"runtime_dependency_unavailable"}:
+            headline = "Capability acquisition was blocked because runtime code-generation dependencies were unavailable."
         elif runtime_status in {"code_generation_failed", "planner_failed", "planner_low_confidence"}:
             headline = "Capability acquisition reached runtime code generation, but no registerable implementation artifact was produced."
         elif runtime_status in {"blocked", "generated_but_validation_failed"}:
@@ -1500,10 +1502,20 @@ class ConversationCoreRuntime:
                 lines.append(f"- reason: {str(reason)[:1000]}")
             if isinstance(runtime_impl.get("interaction_request"), dict):
                 request = runtime_impl["interaction_request"]
-                fields = request.get("fields") if isinstance(request.get("fields"), list) else []
-                lines.append("- live_verification: waiting_for_user_runtime_values")
-                if fields:
-                    lines.append(f"- live_verification_fields: {len(fields)}")
+                request_type = str(request.get("type") or request.get("kind") or "")
+                if request_type == "runtime_codegen_dependency_resolution":
+                    lines.append("- dependency_resolution: waiting_for_runtime_codegen_dependency_readiness")
+                    required_actions = request.get("required_actions") if isinstance(request.get("required_actions"), list) else []
+                    for action in required_actions[:5]:
+                        lines.append(f"- dependency_action: {str(action)[:180]}")
+                    missing_routes = request.get("missing_routes") if isinstance(request.get("missing_routes"), list) else []
+                    if missing_routes:
+                        lines.append(f"- unavailable_codegen_routes: {len(missing_routes)}")
+                else:
+                    fields = request.get("fields") if isinstance(request.get("fields"), list) else []
+                    lines.append("- live_verification: waiting_for_user_runtime_values")
+                    if fields:
+                        lines.append(f"- live_verification_fields: {len(fields)}")
             lines.append("")
         lines.append("Source URLs:")
         for url in urls:
@@ -1582,6 +1594,7 @@ class ConversationCoreRuntime:
             "generated_but_validation_failed",
             "generated_but_verification_failed",
             "dependency_resolution_failed",
+            "runtime_dependency_unavailable",
             "code_generation_failed",
             "planner_failed",
             "planner_low_confidence",

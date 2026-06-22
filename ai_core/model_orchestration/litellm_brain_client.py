@@ -226,15 +226,77 @@ class LiteLLMBrainClient:
         choices = getattr(raw, "choices", None) or []
         if choices:
             message = getattr(choices[0], "message", None)
-            content = getattr(message, "content", "") if message is not None else ""
+            content = self._message_content_to_text(getattr(message, "content", "") if message is not None else "")
             if isinstance(message, dict):
-                content = str(message.get("content") or content)
+                content = self._message_content_to_text(message.get("content") or content)
+            if not content:
+                content = self._tool_calls_arguments_to_text(getattr(message, "tool_calls", None))
+                if isinstance(message, dict) and not content:
+                    content = self._tool_calls_arguments_to_text(message.get("tool_calls"))
         if not content and isinstance(raw, dict):
             try:
-                content = str(raw["choices"][0]["message"].get("content") or "")
+                message = raw["choices"][0]["message"]
+                content = self._message_content_to_text(message.get("content") or "")
+                if not content:
+                    content = self._tool_calls_arguments_to_text(message.get("tool_calls"))
             except Exception:
                 content = ""
         return content
+
+    def _message_content_to_text(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    text = item.strip()
+                    if text:
+                        parts.append(text)
+                    continue
+                if isinstance(item, dict):
+                    text = str(item.get("text") or "").strip()
+                    if text:
+                        parts.append(text)
+                    continue
+                text = str(getattr(item, "text", "") or "").strip()
+                if text:
+                    parts.append(text)
+            if parts:
+                return "\n".join(parts)
+        if isinstance(content, dict):
+            text = str(content.get("text") or "").strip()
+            if text:
+                return text
+        text = str(getattr(content, "text", "") or "").strip()
+        if text:
+            return text
+        return ""
+
+    def _tool_calls_arguments_to_text(self, tool_calls: Any) -> str:
+        if not isinstance(tool_calls, list):
+            return ""
+        for call in tool_calls:
+            function: Any = None
+            if isinstance(call, dict):
+                function = call.get("function")
+            else:
+                function = getattr(call, "function", None)
+            arguments: Any = None
+            if isinstance(function, dict):
+                arguments = function.get("arguments")
+            elif function is not None:
+                arguments = getattr(function, "arguments", None)
+            if isinstance(arguments, str) and arguments.strip():
+                return arguments
+            if isinstance(arguments, (dict, list)):
+                try:
+                    import json
+
+                    return json.dumps(arguments, ensure_ascii=False, default=str)
+                except Exception:
+                    return str(arguments)
+        return ""
 
     def _litellm_model(self, route: BrainModelRoute) -> str:
         provider = str(route.provider or "").strip()

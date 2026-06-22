@@ -105,7 +105,7 @@ class RuntimeCapabilityGapImplementer:
                     state_status = "completed"
                 elif normalized_status in {"skipped", "not_required"}:
                     state_status = "skipped"
-                elif normalized_status in {"failed", "blocked", "planner_failed", "code_generation_failed"}:
+                elif normalized_status in {"failed", "blocked", "planner_failed", "code_generation_failed", "runtime_dependency_unavailable"}:
                     state_status = "failed"
                 else:
                     state_status = "completed" if stage_index > 1 else "running"
@@ -179,6 +179,9 @@ class RuntimeCapabilityGapImplementer:
                 else:
                     mark("TemplateFallback", "not_found", template_locations=[str(p) for p in self.template_store.candidate_paths()])
             if not match:
+                interaction_request = planner_record.get("interaction_request") if isinstance(planner_record.get("interaction_request"), dict) else None
+                if interaction_request:
+                    mark("RuntimeDependencyInteraction", "requested", request=interaction_request)
                 repair = self._runtime_self_repair(
                     run_id=run_id,
                     stage="BlueprintPlanner",
@@ -192,6 +195,7 @@ class RuntimeCapabilityGapImplementer:
                     "status": str(planner_record.get("status") or "planner_failed"),
                     "reason": str(planner_record.get("reason") or "blueprint_planner_failed"),
                     "requested_identity_contract": identity_contract,
+                    "interaction_request": interaction_request,
                     "pipeline": pipeline,
                     "self_repair": repair,
                     "evidence_present": bool(urls),
@@ -661,13 +665,26 @@ class RuntimeCapabilityGapImplementer:
                 pass
             code_generation = template.get("code_generation") if isinstance(template.get("code_generation"), dict) else {}
             if template.get("artifact_kind") != "real_runtime_implementation":
+                reason_text = str(code_generation.get("error") or code_generation.get("status") or "runtime_artifact_not_registerable")
+                dependency_unavailable = bool(
+                    str(code_generation.get("status") or "").strip() == "runtime_dependency_unavailable"
+                    or "service_unavailable" in reason_text.casefold()
+                    or "connection refused" in reason_text.casefold()
+                )
+                interaction_request = code_generation.get("interaction_request") if isinstance(code_generation.get("interaction_request"), dict) else None
+                if dependency_unavailable and not interaction_request:
+                    interaction_request = self._build_codegen_dependency_interaction_request(
+                        code_generation=code_generation,
+                        run_id=state_run_id,
+                    )
                 return {
-                    "status": "code_generation_failed",
-                    "reason": str(code_generation.get("error") or code_generation.get("status") or "runtime_artifact_not_registerable"),
+                    "status": "runtime_dependency_unavailable" if dependency_unavailable else "code_generation_failed",
+                    "reason": reason_text,
                     "confidence_score": confidence,
                     "needs_external_evidence": False,
                     "template": template,
                     "code_generation": code_generation,
+                    "interaction_request": interaction_request,
                 }
             validation = self._validate_runtime_template_shape(template)
             if not validation.get("passed"):
@@ -2973,6 +2990,55 @@ def test_runtime_contract_smoke():
             request=request,
         )
         return scoped.get("request") if isinstance(scoped, dict) else request
+
+    def _build_codegen_dependency_interaction_request(self, *, code_generation: dict[str, Any], run_id: str = "") -> dict[str, Any]:
+        """Create a schema-driven interaction contract for unavailable codegen routes.
+
+        This request is infrastructure-only. It does not encode capability
+        business logic; it asks the runtime operator to restore at least one
+        usable model route before retrying generation.
+        """
+        attempts = code_generation.get("generation_attempts") if isinstance(code_generation.get("generation_attempts"), list) else []
+        missing_routes: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for item in attempts:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("status") or "") != "model_not_available":
+                continue
+            attempt = item.get("attempt") if isinstance(item.get("attempt"), dict) else {}
+            override = attempt.get("route_override") if isinstance(attempt.get("route_override"), dict) else {}
+            provider = str(override.get("provider") or "").strip()
+            model = str(override.get("model") or "").strip()
+            base_url = str(override.get("base_url") or "").strip()
+            if provider.casefold() == "ollama" and not base_url:
+                base_url = str(os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434").rstrip("/")
+            key = (provider, model, base_url)
+            if key in seen:
+                continue
+            seen.add(key)
+            missing_routes.append(
+                {
+                    "provider": provider,
+                    "model": model,
+                    "base_url": base_url,
+                    "availability_reason": str(item.get("error") or "")[:240],
+                }
+            )
+
+        return {
+            "type": "runtime_codegen_dependency_resolution",
+            "kind": "runtime_codegen_dependency_resolution",
+            "source_run_id": run_id,
+            "message": "Runtime code generation dependency is unavailable. Restore at least one configured model route and retry acquisition.",
+            "required_actions": [
+                "Start or restore reachability of a configured model provider endpoint.",
+                "Ensure at least one configured model route is available to the runtime.",
+                "Retry capability acquisition after dependency readiness is confirmed.",
+            ],
+            "missing_routes": missing_routes,
+            "retry_hint": "retry_capability_acquisition_after_dependency_ready",
+        }
 
     def _interaction_fields_from_schema(self, *, schema: dict[str, Any], scope: str, tool_id: str, force_password: bool = False) -> list[dict[str, Any]]:
         properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}

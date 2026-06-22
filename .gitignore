@@ -705,6 +705,7 @@ ai_core/models/__pycache__/model_downloader.cpython-311.pyc
 runtime/external_runtimes/models/ollama_imports/qwen3.5_2b-q4_k_m/Modelfile
 runtime/external_runtimes/models/qwen3.5_2b-q4_k_m/Qwen3.5-2B-Q4_K_M.gguf
 runtime/external_runtimes/models/qwen3.5_2b-q4_k_m.download.json
+runtime/external_runtimes/models/*.download.json
 runtime_assets/seeds/capability_planners/__pycache__/default_capability_planner.cpython-313.pyc
 ai_core/runtime/observability/__pycache__/runtime_console.cpython-313.pyc
 ai_core/runtime/external_runtimes/__pycache__/__init__.cpython-313.pyc
