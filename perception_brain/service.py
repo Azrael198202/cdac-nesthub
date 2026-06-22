@@ -114,5 +114,10 @@ class PerceptionBrainService:
             "package": payload,
         }
         path = self.output_root / "perception_events.jsonl"
+        # Runtime cleanup or first boot can remove generated folders between
+        # service initialization and write time; recreate them defensively.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.touch()
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
