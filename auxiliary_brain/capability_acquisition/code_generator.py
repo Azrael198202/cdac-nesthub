@@ -2119,7 +2119,6 @@ def {function_name}(payload=None):
         base = str(base_complexity or "default").strip().lower()
         if base not in order:
             base = "medium" if base == "default" else "high"
-        start = order.index(base)
 
         routes = self._code_generation_escalation_routes()
         attempts: list[dict[str, Any]] = []
@@ -2134,8 +2133,6 @@ def {function_name}(payload=None):
                 continue
             seen.add(key)
             complexity = str(route.get("complexity") or "medium").strip().lower()
-            if complexity in order and order.index(complexity) < start:
-                continue
             attempts.append({
                 "base_complexity": base,
                 "complexity": complexity if complexity in order else "medium",
@@ -2145,7 +2142,9 @@ def {function_name}(payload=None):
                     "provider": provider,
                     "model": model,
                     "options": route.get("options") if isinstance(route.get("options"), dict) else {"temperature": 0},
-                    "reason": "explicit_codegen_model_escalation",
+                    "reason": "policy_ordered_codegen_model_escalation",
+                    "policy_complexity": complexity if complexity in order else "medium",
+                    "requested_base_complexity": base,
                 },
             })
 
@@ -2153,7 +2152,7 @@ def {function_name}(payload=None):
             return attempts
         # Safe fallback: keep the old policy route if no explicit model policy is
         # available.  This still does not encode any capability-specific logic.
-        return [{"base_complexity": base, "complexity": order[start], "force_json": True, "compact": True}]
+        return [{"base_complexity": base, "complexity": base if base in order else "medium", "force_json": True, "compact": True}]
 
     def _code_generation_escalation_routes(self) -> list[dict[str, Any]]:
         """Read code-generation model escalation routes from policy.
@@ -2175,15 +2174,39 @@ def {function_name}(payload=None):
         except Exception:
             policy = {}
         routes: list[dict[str, Any]] = []
+        def append_route(item: Any, complexity: str, reason: str) -> None:
+            if not isinstance(item, dict):
+                return
+            provider = item.get("provider")
+            model = item.get("model")
+            if provider or model:
+                route = {
+                    "complexity": complexity,
+                    "provider": provider,
+                    "model": model,
+                    "options": item.get("options") if isinstance(item.get("options"), dict) else {"temperature": 0},
+                    "policy_reason": reason,
+                }
+                routes.append(route)
+            fallbacks = item.get("fallback") if isinstance(item.get("fallback"), list) else []
+            for index, fallback in enumerate(fallbacks):
+                if isinstance(fallback, dict):
+                    append_route(fallback, complexity, f"{reason}.fallback.{index}")
+
         try:
-            task = policy["brains"]["auxiliary_brain"]["tasks"]["runtime_tool_code_generation"]
+            auxiliary = policy.get("brains", {}).get("auxiliary_brain", {}) if isinstance(policy, dict) else {}
+            task = auxiliary.get("tasks", {}).get("runtime_tool_code_generation", {}) if isinstance(auxiliary, dict) else {}
+            # Policy order is the only source of model escalation.  Start from
+            # the task/default route and then walk complexity routes from small
+            # to strong.  Do not jump directly to a high/critical model just
+            # because the request was classified as high complexity; failed
+            # lower routes are visible attempts and can auto-prepare missing
+            # listed models before escalating.
+            append_route(auxiliary.get("default"), "basic", "auxiliary_brain.default")
+            append_route(task, "basic", "runtime_tool_code_generation.default")
             complexities = task.get("complexities") if isinstance(task.get("complexities"), dict) else {}
             for complexity in ["basic", "medium", "high", "critical"]:
-                item = complexities.get(complexity) if isinstance(complexities.get(complexity), dict) else {}
-                if item:
-                    routes.append({"complexity": complexity, **item})
-            if not routes and isinstance(task, dict):
-                routes.append({"complexity": "medium", **task})
+                append_route(complexities.get(complexity), complexity, f"runtime_tool_code_generation.complexities.{complexity}")
         except Exception:
             routes = []
         if routes:
