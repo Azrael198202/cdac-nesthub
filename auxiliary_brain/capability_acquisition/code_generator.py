@@ -884,6 +884,25 @@ class RuntimeBlueprintArtifactGenerator:
         if ok:
             return True, ""
 
+        # Generic resilience: if the policy-preferred model is missing, switch
+        # to a locally installed Ollama model that best matches code generation
+        # intent instead of failing the whole acquisition pipeline.
+        fallback_model = self._select_local_codegen_fallback_model(base_url=base_url, preferred_model=model)
+        if isinstance(fallback_model, str) and fallback_model and fallback_model != model:
+            override["model"] = fallback_model
+            self._emit_generation_progress(
+                run_id=run_id,
+                tool_id=tool_id or "runtime_model_dependency",
+                status="running",
+                phase="codegen_model_local_fallback_selected",
+                attempt=attempt,
+                provider=provider,
+                model=model,
+                fallback_model=fallback_model,
+                reason=reason,
+            )
+            return True, ""
+
         auto_prepare = str(os.getenv("AI_RUNTIME_CODEGEN_AUTO_PULL_MISSING_MODELS", "1")).strip().lower() not in {"0", "false", "no", "off"}
         if not auto_prepare:
             if reason.startswith("ollama_service_unavailable"):
@@ -916,9 +935,39 @@ class RuntimeBlueprintArtifactGenerator:
                 timeout_seconds=timeout_seconds,
             )
         except Exception as exc:
+            fallback_model = self._select_local_codegen_fallback_model(base_url=base_url, preferred_model=model)
+            if isinstance(fallback_model, str) and fallback_model and fallback_model != model:
+                override["model"] = fallback_model
+                self._emit_generation_progress(
+                    run_id=run_id,
+                    tool_id=tool_id or "runtime_model_dependency",
+                    status="running",
+                    phase="codegen_model_local_fallback_selected_after_prepare_exception",
+                    attempt=attempt,
+                    provider=provider,
+                    model=model,
+                    fallback_model=fallback_model,
+                    error=str(exc)[:240],
+                )
+                return True, ""
             return False, f"ollama_codegen_model_auto_prepare_failed:{model}: {str(exc)[:240]}"
         if not isinstance(result, dict) or not bool(result.get("ready_for_benchmark")):
             reason_text = str(result.get("reason") if isinstance(result, dict) else result)[:240]
+            fallback_model = self._select_local_codegen_fallback_model(base_url=base_url, preferred_model=model)
+            if isinstance(fallback_model, str) and fallback_model and fallback_model != model:
+                override["model"] = fallback_model
+                self._emit_generation_progress(
+                    run_id=run_id,
+                    tool_id=tool_id or "runtime_model_dependency",
+                    status="running",
+                    phase="codegen_model_local_fallback_selected_after_prepare_failure",
+                    attempt=attempt,
+                    provider=provider,
+                    model=model,
+                    fallback_model=fallback_model,
+                    error=reason_text,
+                )
+                return True, ""
             return False, f"ollama_codegen_model_auto_prepare_failed:{model}: {reason_text}"
         ok, verify_reason = self._ollama_model_visible(base_url, model)
         if ok:
@@ -930,6 +979,21 @@ class RuntimeBlueprintArtifactGenerator:
                 attempt=attempt,
                 model=model,
                 provider=provider,
+            )
+            return True, ""
+        fallback_model = self._select_local_codegen_fallback_model(base_url=base_url, preferred_model=model)
+        if isinstance(fallback_model, str) and fallback_model and fallback_model != model:
+            override["model"] = fallback_model
+            self._emit_generation_progress(
+                run_id=run_id,
+                tool_id=tool_id or "runtime_model_dependency",
+                status="running",
+                phase="codegen_model_local_fallback_selected_after_prepare_unverified",
+                attempt=attempt,
+                provider=provider,
+                model=model,
+                fallback_model=fallback_model,
+                error=verify_reason,
             )
             return True, ""
         return False, f"ollama_codegen_model_auto_prepare_unverified:{model}: {verify_reason}"
@@ -957,6 +1021,76 @@ class RuntimeBlueprintArtifactGenerator:
         elif model in exact_names or model in base_names:
             return True, ""
         return False, f"ollama_codegen_model_not_installed:{model}"
+
+    def _ollama_installed_models(self, base_url: str) -> list[str]:
+        try:
+            with urllib.request.urlopen(base_url + "/api/tags", timeout=2.5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except Exception:
+            return []
+        models: list[str] = []
+        seen: set[str] = set()
+        for item in data.get("models", []) if isinstance(data, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            for value in (item.get("name"), item.get("model")):
+                text = str(value or "").strip()
+                if not text or text in seen:
+                    continue
+                seen.add(text)
+                models.append(text)
+        return models
+
+    def _select_local_codegen_fallback_model(self, *, base_url: str, preferred_model: str) -> str | None:
+        installed = self._ollama_installed_models(base_url)
+        if not installed:
+            return None
+
+        preferred = str(preferred_model or "").strip()
+        candidates: list[str] = []
+        raw_env = str(os.getenv("AI_RUNTIME_CODEGEN_OLLAMA_FALLBACK_MODELS") or "").strip()
+        if raw_env:
+            candidates.extend([part.strip() for part in raw_env.split(",") if part.strip()])
+
+        for route in self._code_generation_escalation_routes():
+            if not isinstance(route, dict):
+                continue
+            if str(route.get("provider") or "").strip().casefold() != "ollama":
+                continue
+            model = str(route.get("model") or "").strip()
+            if model:
+                candidates.append(model)
+
+        # Keep candidate order stable and remove current preferred model.
+        ordered_candidates: list[str] = []
+        seen_candidates: set[str] = set()
+        for candidate in candidates:
+            if not candidate or candidate == preferred or candidate in seen_candidates:
+                continue
+            seen_candidates.add(candidate)
+            ordered_candidates.append(candidate)
+
+        installed_exact = set(installed)
+        installed_base = {name.split(":", 1)[0] if ":" in name else name: name for name in installed}
+
+        for candidate in ordered_candidates:
+            if candidate in installed_exact:
+                return candidate
+            base = candidate.split(":", 1)[0] if ":" in candidate else candidate
+            if base in installed_base:
+                return installed_base[base]
+
+        # Heuristic generic fallback: prefer coder-oriented models when present.
+        for name in installed:
+            lower = name.casefold()
+            if "coder" in lower or "code" in lower:
+                if name != preferred:
+                    return name
+
+        for name in installed:
+            if name != preferred:
+                return name
+        return None
 
     def _codegen_model_prepare_timeout_seconds(self) -> int:
         raw = str(os.getenv("AI_RUNTIME_CODEGEN_MODEL_PULL_TIMEOUT_SECONDS") or os.getenv("AI_RUNTIME_MODEL_PULL_TIMEOUT_SECONDS") or "3600").strip()

@@ -5,6 +5,7 @@
       "name": "NestHub API (No Reload)",
       "type": "debugpy",
       "request": "launch",
+      "preLaunchTask": "Kill Port 8000 Listeners",
       "module": "uvicorn",
       "args": [
         "apps.api.server:app",
@@ -25,6 +26,7 @@
       "name": "NestHub Main - main.py",
       "type": "debugpy",
       "request": "launch",
+      "preLaunchTask": "Kill Port 8000 Listeners",
       "program": "${workspaceFolder}/main.py",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
