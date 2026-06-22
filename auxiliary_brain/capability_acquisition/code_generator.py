@@ -21,6 +21,10 @@ try:
     from auxiliary_brain.runtime.observability.runtime_console import emit_console_event
 except Exception:  # pragma: no cover - optional runtime integration
     emit_console_event = None
+try:
+    from auxiliary_brain.models.model_downloader import RuntimeModelDownloader
+except Exception:  # pragma: no cover - optional runtime integration
+    RuntimeModelDownloader = None
 
 from ai_core.model_orchestration import LiteLLMBrainClient
 from auxiliary_brain.capability_acquisition.specification_contract_compiler import CapabilitySpecificationContractCompiler
@@ -292,7 +296,7 @@ class RuntimeBlueprintArtifactGenerator:
         base_complexity = self._generation_complexity(blueprint=blueprint, identity_contract=identity_contract)
         attempts: list[dict[str, Any]] = []
         for attempt in self._generation_attempts(base_complexity):
-            available, availability_reason = self._codegen_attempt_available(attempt)
+            available, availability_reason = self._codegen_attempt_available(attempt, run_id=run_id, tool_id=tool_id)
             if not available:
                 record = {
                     "status": "model_not_available",
@@ -556,7 +560,7 @@ class RuntimeBlueprintArtifactGenerator:
             previous_attempt_count=len(attempts),
         )
         for attempt in routes:
-            available, availability_reason = self._codegen_attempt_available(attempt)
+            available, availability_reason = self._codegen_attempt_available(attempt, run_id=run_id, tool_id=tool_id)
             if not available:
                 record = {
                     "status": "model_not_available",
@@ -754,13 +758,14 @@ class RuntimeBlueprintArtifactGenerator:
             return {"status": "invalid_output", "error": error, "route": route, "attempt_record": {"status": "invalid_output", "error": error, "route": route, "attempt": file_attempt, "path": path}}
         return {"status": "completed", "content": content, "route": route, "attempt_record": {"status": "completed", "route": route, "attempt": file_attempt, "path": path}}
 
-    def _codegen_attempt_available(self, attempt: dict[str, Any]) -> tuple[bool, str]:
-        """Preflight one code-generation model attempt before starting a long LLM call.
+    def _codegen_attempt_available(self, attempt: dict[str, Any], *, run_id: str | None = None, tool_id: str | None = None) -> tuple[bool, str]:
+        """Preflight and prepare one code-generation model attempt.
 
         This is infrastructure-only validation. It does not inspect capability
-        names or task domains. It prevents a model-escalation route from waiting
-        for the full stage timeout when the selected local model is not actually
-        available in the runtime provider.
+        names or task domains. For policy-listed local models, absence from the
+        local provider is treated as a resolvable runtime dependency: the runtime
+        pulls the model, verifies that it became visible to the provider, and then
+        continues the same code-generation route.
         """
         override = attempt.get("route_override") if isinstance(attempt, dict) else None
         if not isinstance(override, dict):
@@ -771,33 +776,92 @@ class RuntimeBlueprintArtifactGenerator:
             return False, "missing_model_in_codegen_route_override"
         if provider != "ollama":
             return True, ""
-        # By default acquisition must not spend minutes auto-pulling or waiting
-        # for a missing escalation model. Operators can disable this preflight
-        # with AI_RUNTIME_CODEGEN_SKIP_MODEL_PREFLIGHT=1 when they intentionally
-        # want provider-level auto preparation.
         if str(os.getenv("AI_RUNTIME_CODEGEN_SKIP_MODEL_PREFLIGHT", "")).strip().lower() in {"1", "true", "yes", "on"}:
             return True, ""
         base_url = str(override.get("base_url") or os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434").rstrip("/")
+        ok, reason = self._ollama_model_visible(base_url, model)
+        if ok:
+            return True, ""
+        if reason.startswith("ollama_service_unavailable"):
+            return False, reason
+
+        auto_prepare = str(os.getenv("AI_RUNTIME_CODEGEN_AUTO_PULL_MISSING_MODELS", "1")).strip().lower() not in {"0", "false", "no", "off"}
+        if not auto_prepare:
+            return False, f"ollama_codegen_model_not_installed:{model}; auto_pull_disabled"
+        if RuntimeModelDownloader is None:
+            return False, f"ollama_codegen_model_not_installed:{model}; model_downloader_unavailable"
+
+        timeout_seconds = self._codegen_model_prepare_timeout_seconds()
+        self._emit_generation_progress(
+            run_id=run_id,
+            tool_id=tool_id or "runtime_model_dependency",
+            status="running",
+            phase="codegen_model_auto_prepare_started",
+            attempt=attempt,
+            model=model,
+            provider=provider,
+            timeout_seconds=timeout_seconds,
+        )
+        try:
+            result = RuntimeModelDownloader().download(
+                {
+                    "model_id": model,
+                    "runtime": "ollama",
+                    "source": "policy_listed_codegen_route",
+                    "download_strategy": {"preferred_runtime": "ollama"},
+                },
+                approved=True,
+                timeout_seconds=timeout_seconds,
+            )
+        except Exception as exc:
+            return False, f"ollama_codegen_model_auto_prepare_failed:{model}: {str(exc)[:240]}"
+        if not isinstance(result, dict) or not bool(result.get("ready_for_benchmark")):
+            reason_text = str(result.get("reason") if isinstance(result, dict) else result)[:240]
+            return False, f"ollama_codegen_model_auto_prepare_failed:{model}: {reason_text}"
+        ok, verify_reason = self._ollama_model_visible(base_url, model)
+        if ok:
+            self._emit_generation_progress(
+                run_id=run_id,
+                tool_id=tool_id or "runtime_model_dependency",
+                status="completed",
+                phase="codegen_model_auto_prepare_completed",
+                attempt=attempt,
+                model=model,
+                provider=provider,
+            )
+            return True, ""
+        return False, f"ollama_codegen_model_auto_prepare_unverified:{model}: {verify_reason}"
+
+    def _ollama_model_visible(self, base_url: str, model: str) -> tuple[bool, str]:
         try:
             with urllib.request.urlopen(base_url + "/api/tags", timeout=2.5) as response:
                 data = json.loads(response.read().decode("utf-8"))
         except Exception as exc:
             return False, f"ollama_service_unavailable_for_codegen_model:{model}: {str(exc)[:160]}"
-        names: set[str] = set()
+        exact_names: set[str] = set()
+        base_names: set[str] = set()
         for item in data.get("models", []) if isinstance(data, dict) else []:
             if not isinstance(item, dict):
                 continue
-            name = str(item.get("name") or "").strip()
-            model_name = str(item.get("model") or "").strip()
-            if name:
-                names.add(name)
-                names.add(name.split(":", 1)[0] if ":" in name else name)
-            if model_name:
-                names.add(model_name)
-                names.add(model_name.split(":", 1)[0] if ":" in model_name else model_name)
-        if model in names or model.split(":", 1)[0] in names:
+            for value in (item.get("name"), item.get("model")):
+                text = str(value or "").strip()
+                if not text:
+                    continue
+                exact_names.add(text)
+                base_names.add(text.split(":", 1)[0] if ":" in text else text)
+        if ":" in model:
+            if model in exact_names:
+                return True, ""
+        elif model in exact_names or model in base_names:
             return True, ""
-        return False, f"ollama_codegen_model_not_installed:{model}. Run `ollama pull {model}` or choose an available code-generation model."
+        return False, f"ollama_codegen_model_not_installed:{model}"
+
+    def _codegen_model_prepare_timeout_seconds(self) -> int:
+        raw = str(os.getenv("AI_RUNTIME_CODEGEN_MODEL_PULL_TIMEOUT_SECONDS") or os.getenv("AI_RUNTIME_MODEL_PULL_TIMEOUT_SECONDS") or "3600").strip()
+        try:
+            return max(60, int(float(raw)))
+        except Exception:
+            return 3600
 
     def _generation_messages(
         self,
