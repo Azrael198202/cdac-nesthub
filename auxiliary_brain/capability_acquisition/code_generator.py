@@ -1519,12 +1519,22 @@ def {fn}(payload: dict | None = None) -> dict:
         for field, spec in fields.items():
             if field == id_field:
                 continue
-            ftype = spec.get("type") if isinstance(spec, dict) else "string"
+            raw_ftype = spec.get("type") if isinstance(spec, dict) else "string"
+            # JSON Schema type may be a list, e.g. ["array", "null"].
+            # Never put raw schema values into set membership checks because
+            # nested lists/dicts are valid schema data but not hashable.
+            if isinstance(raw_ftype, list):
+                type_names = [str(x) for x in raw_ftype if isinstance(x, str)]
+                ftype = next((x for x in type_names if x != "null"), "string")
+            elif isinstance(raw_ftype, str):
+                ftype = raw_ftype
+            else:
+                ftype = "string"
             if ftype == "array":
                 sample[field] = ["value"]
             elif ftype == "object":
                 sample[field] = {"key": "value"}
-            elif ftype in {"integer", "number"}:
+            elif ftype == "integer" or ftype == "number":
                 sample[field] = 1
             else:
                 sample[field] = "value"
