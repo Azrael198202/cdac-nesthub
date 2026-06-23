@@ -30,9 +30,10 @@ from ai_core.model_orchestration import LiteLLMBrainClient
 from auxiliary_brain.capability_acquisition.specification_contract_compiler import CapabilitySpecificationContractCompiler
 from auxiliary_brain.capability_acquisition.schema_boundary import CapabilitySchemaBoundary
 from auxiliary_brain.capability_acquisition.prompt_engineer import build_generation_prompt_messages
+
 try:
     from ai_core.capability_task_graph import CapabilityTaskGraphCompiler
-except Exception:  # pragma: no cover - optional staged acquisition integration
+except Exception:  # pragma: no cover - optional staged generation integration
     CapabilityTaskGraphCompiler = None
 
 
@@ -53,6 +54,7 @@ class RuntimeBlueprintArtifactGenerator:
         self.llm_client = llm_client or LiteLLMBrainClient()
         self.contract_compiler = CapabilitySpecificationContractCompiler()
         self.schema_boundary = CapabilitySchemaBoundary()
+        self.capability_task_graph_compiler = CapabilityTaskGraphCompiler() if CapabilityTaskGraphCompiler is not None else None
 
     def materialize(self, blueprint: dict[str, Any], *, identity_contract: dict[str, Any] | None = None, run_id: str | None = None) -> dict[str, Any]:
         if not isinstance(blueprint, dict):
@@ -162,7 +164,7 @@ class RuntimeBlueprintArtifactGenerator:
                 provided_files_accepted = True
         if not provided_files_accepted:
             if self._should_request_llm_generation(blueprint, identity_contract):
-                llm_artifact = self._generate_with_capability_task_graph(
+                llm_artifact = self._generate_with_llm(
                     tool_id=tool_id,
                     run_id=run_id,
                     entrypoint=entrypoint,
@@ -175,20 +177,6 @@ class RuntimeBlueprintArtifactGenerator:
                     verification_input=verification_input,
                     specification_contract=specification_contract,
                 )
-                if not self._valid_generated_artifact(llm_artifact):
-                    llm_artifact = self._generate_with_llm(
-                        tool_id=tool_id,
-                        run_id=run_id,
-                        entrypoint=entrypoint,
-                        blueprint=blueprint,
-                        identity_contract=identity_contract,
-                        input_schema=input_schema,
-                        output_schema=output_schema,
-                        connection_schema=connection_schema,
-                        secret_schema=secret_schema,
-                        verification_input=verification_input,
-                        specification_contract=specification_contract,
-                    )
                 generation_status = str(llm_artifact.get("generation_status") or "failed")
                 generation_route = llm_artifact.get("generation_route") if isinstance(llm_artifact.get("generation_route"), dict) else {}
                 generation_error = str(llm_artifact.get("generation_error") or "")
@@ -296,496 +284,6 @@ class RuntimeBlueprintArtifactGenerator:
             },
             "generated_at": self._now_iso(),
         }
-
-    def _generate_with_capability_task_graph(
-        self,
-        *,
-        tool_id: str,
-        run_id: str | None,
-        entrypoint: dict[str, Any],
-        blueprint: dict[str, Any],
-        identity_contract: dict[str, Any],
-        input_schema: dict[str, Any],
-        output_schema: dict[str, Any],
-        connection_schema: dict[str, Any],
-        secret_schema: dict[str, Any],
-        verification_input: dict[str, Any],
-        specification_contract: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Materialize a capability through a generic TaskGraph first."""
-        enabled = str(os.getenv("AI_RUNTIME_CAPABILITY_TASKGRAPH_CODEGEN", "1")).strip().lower() not in {"0", "false", "no", "off"}
-        if not enabled:
-            return {"generation_status": "taskgraph_codegen_disabled", "generation_error": "Capability TaskGraph codegen disabled by environment."}
-        compiler = CapabilityTaskGraphCompiler() if CapabilityTaskGraphCompiler is not None else None
-        if compiler is None:
-            return {"generation_status": "taskgraph_compiler_unavailable", "generation_error": "CapabilityTaskGraphCompiler is unavailable."}
-        self._emit_generation_progress(run_id=run_id, tool_id=tool_id, status="running", phase="capability_task_graph_compile_started")
-        try:
-            graph = compiler.compile(
-                tool_id=tool_id,
-                blueprint=blueprint,
-                identity_contract=identity_contract,
-                input_schema=input_schema,
-                output_schema=output_schema,
-                connection_schema=connection_schema,
-                secret_schema=secret_schema,
-            )
-            files = self._deterministic_taskgraph_artifact_files(
-                tool_id=tool_id,
-                graph=graph,
-                entrypoint=entrypoint,
-                input_schema=input_schema,
-                output_schema=output_schema,
-                connection_schema=connection_schema,
-                secret_schema=secret_schema,
-                verification_input=verification_input,
-            )
-            artifact = {
-                "tool_id": tool_id,
-                "files": files,
-                "input_schema": input_schema,
-                "output_schema": output_schema,
-                "connection_schema": connection_schema,
-                "secret_schema": secret_schema,
-                "dependencies": [],
-                "verification_input": verification_input,
-                "verification_expectations": {"status": "completed"},
-                "capability_match_contract": self._capability_contract(tool_id=tool_id, blueprint=blueprint),
-                "generation_status": "completed",
-                "generation_route": {"mode": "capability_task_graph_deterministic_scaffold", "graph_id": graph.get("graph_id")},
-                "generation_attempts": [
-                    {"status": "completed", "stage": node.get("stage"), "node_id": node.get("id"), "route": {"mode": "task_graph"}}
-                    for node in graph.get("nodes", []) if isinstance(node, dict)
-                ],
-                "capability_task_graph": graph,
-            }
-            artifact = self._normalize_llm_artifact_payload(artifact, tool_id=tool_id)
-            if self._valid_generated_artifact(artifact):
-                self._emit_generation_progress(
-                    run_id=run_id,
-                    tool_id=tool_id,
-                    status="completed",
-                    phase="capability_task_graph_codegen_completed",
-                    graph_id=graph.get("graph_id"),
-                    generated_files=[item.get("path") for item in files],
-                )
-                return artifact
-            self._emit_generation_progress(run_id=run_id, tool_id=tool_id, status="failed", phase="capability_task_graph_codegen_invalid_artifact", graph_id=graph.get("graph_id"))
-            return {"generation_status": "taskgraph_codegen_invalid_artifact", "generation_error": "TaskGraph scaffold did not pass artifact validation.", "capability_task_graph": graph}
-        except Exception as exc:
-            self._emit_generation_progress(run_id=run_id, tool_id=tool_id, status="failed", phase="capability_task_graph_codegen_exception", error=str(exc)[:500])
-            return {"generation_status": "taskgraph_codegen_exception", "generation_error": str(exc)[:1000]}
-
-    def _deterministic_taskgraph_artifact_files(
-        self,
-        *,
-        tool_id: str,
-        graph: dict[str, Any],
-        entrypoint: dict[str, Any],
-        input_schema: dict[str, Any],
-        output_schema: dict[str, Any],
-        connection_schema: dict[str, Any],
-        secret_schema: dict[str, Any],
-        verification_input: dict[str, Any],
-    ) -> list[dict[str, str]]:
-        contract_json = json.dumps({
-            "tool_id": tool_id,
-            "entrypoint": entrypoint,
-            "graph": graph,
-            "input_schema": input_schema,
-            "output_schema": output_schema,
-            "connection_schema": connection_schema,
-            "secret_schema": secret_schema,
-            "verification_input": verification_input,
-        }, ensure_ascii=False, indent=2, default=str)
-        return [
-            {"path": "capability_task_graph.json", "content": json.dumps(graph, ensure_ascii=False, indent=2, default=str)},
-            {"path": "schemas.py", "content": self._schemas_py_source(contract_json)},
-            {"path": "storage.py", "content": self._storage_py_source()},
-            {"path": "operations.py", "content": self._operations_py_source()},
-            {"path": "tool.py", "content": self._tool_py_source(tool_id)},
-            {"path": "test_tool.py", "content": self._test_tool_py_source(tool_id, verification_input)},
-        ]
-
-    def _schemas_py_source(self, contract_json: str) -> str:
-        return 'from __future__ import annotations\n\nimport json\n\nCONTRACT = json.loads(' + repr(contract_json) + ')\n'
-
-    def _storage_py_source(self) -> str:
-        return '''from __future__ import annotations
-
-import json
-import sqlite3
-from pathlib import Path
-from typing import Any
-
-
-def _json_dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
-
-
-def _json_loads(text: str | None, fallback: Any = None) -> Any:
-    if not text:
-        return fallback
-    try:
-        return json.loads(text)
-    except Exception:
-        return fallback
-
-
-class RuntimeRecordStore:
-    def __init__(self, *, database_path: str, table_name: str, table_fields: list[dict[str, Any]] | None = None, timeout_seconds: int = 30) -> None:
-        self.database_path = str(database_path or "runtime/memory/memory_brain.db")
-        self.table_name = self._safe_identifier(table_name or "runtime_records")
-        self.table_fields = table_fields if isinstance(table_fields, list) else []
-        self.timeout_seconds = int(timeout_seconds or 30)
-        Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
-        self._ensure_table()
-
-    def _safe_identifier(self, value: str) -> str:
-        cleaned = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in str(value or "runtime_records"))
-        return cleaned.strip("_") or "runtime_records"
-
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.database_path, timeout=self.timeout_seconds)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def _column_defs(self) -> list[str]:
-        columns = ["record_id TEXT PRIMARY KEY", "record_json TEXT NOT NULL", "created_at TEXT NOT NULL", "updated_at TEXT NOT NULL", "deleted_at TEXT"]
-        seen = {"record_id", "record_json", "created_at", "updated_at", "deleted_at"}
-        for field in self.table_fields:
-            if not isinstance(field, dict):
-                continue
-            name = self._safe_identifier(str(field.get("name") or ""))
-            if not name or name in seen:
-                continue
-            sql_type = str(field.get("type") or "TEXT").upper()
-            if sql_type not in {"TEXT", "INTEGER", "REAL", "BLOB", "NUMERIC"}:
-                sql_type = "TEXT"
-            constraints = str(field.get("constraints") or "").replace("PRIMARY KEY", "").strip()
-            columns.append(f"{name} {sql_type} {constraints}".strip())
-            seen.add(name)
-        return columns
-
-    def _ensure_table(self) -> None:
-        columns = ", ".join(self._column_defs())
-        with self._connect() as conn:
-            conn.execute(f"CREATE TABLE IF NOT EXISTS {self.table_name} ({columns})")
-            conn.commit()
-
-    def _row_to_record(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
-        if row is None:
-            return None
-        data = _json_loads(row["record_json"], {})
-        if not isinstance(data, dict):
-            data = {"value": data}
-        data.setdefault("record_id", row["record_id"])
-        data.setdefault("created_at", row["created_at"])
-        data.setdefault("updated_at", row["updated_at"])
-        if row["deleted_at"]:
-            data.setdefault("deleted_at", row["deleted_at"])
-        return data
-
-    def create(self, *, record_id: str, record: dict[str, Any], now: str) -> dict[str, Any]:
-        record = dict(record)
-        record.setdefault("record_id", record_id)
-        record.setdefault("created_at", now)
-        record.setdefault("updated_at", now)
-        columns = ["record_id", "record_json", "created_at", "updated_at", "deleted_at"]
-        values: list[Any] = [record_id, _json_dumps(record), record.get("created_at"), record.get("updated_at"), None]
-        for field in self.table_fields:
-            name = self._safe_identifier(str(field.get("name") or "")) if isinstance(field, dict) else ""
-            if not name or name in columns:
-                continue
-            columns.append(name)
-            value = record.get(name)
-            if isinstance(value, (dict, list)):
-                value = _json_dumps(value)
-            values.append(value)
-        placeholders = ",".join("?" for _ in columns)
-        with self._connect() as conn:
-            conn.execute(f"INSERT OR REPLACE INTO {self.table_name} ({', '.join(columns)}) VALUES ({placeholders})", values)
-            conn.commit()
-        return record
-
-    def get(self, *, record_id: str, include_deleted: bool = False) -> dict[str, Any] | None:
-        sql = f"SELECT * FROM {self.table_name} WHERE record_id = ?"
-        params: list[Any] = [record_id]
-        if not include_deleted:
-            sql += " AND deleted_at IS NULL"
-        with self._connect() as conn:
-            row = conn.execute(sql, params).fetchone()
-        return self._row_to_record(row)
-
-    def list(self, *, limit: int = 50, offset: int = 0, include_deleted: bool = False) -> list[dict[str, Any]]:
-        sql = f"SELECT * FROM {self.table_name}"
-        if not include_deleted:
-            sql += " WHERE deleted_at IS NULL"
-        sql += " ORDER BY updated_at ASC LIMIT ? OFFSET ?"
-        with self._connect() as conn:
-            rows = conn.execute(sql, [limit, offset]).fetchall()
-        return [record for record in (self._row_to_record(row) for row in rows) if record is not None]
-
-    def search(self, *, query: str = "", filters: dict[str, Any] | None = None, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-        filters = filters if isinstance(filters, dict) else {}
-        records = self.list(limit=max(limit + offset, limit, 200), offset=0)
-        query_lower = str(query or "").casefold()
-        result = []
-        for record in records:
-            text = _json_dumps(record).casefold()
-            if query_lower and query_lower not in text:
-                continue
-            matched = True
-            for key, expected in filters.items():
-                if expected in (None, "", [], {}):
-                    continue
-                actual = record.get(key)
-                if isinstance(actual, list):
-                    if expected not in actual and str(expected) not in [str(x) for x in actual]:
-                        matched = False
-                        break
-                elif str(actual) != str(expected):
-                    matched = False
-                    break
-            if matched:
-                result.append(record)
-        return result[offset: offset + limit]
-
-    def update(self, *, record_id: str, update_fields: dict[str, Any], now: str) -> dict[str, Any] | None:
-        current = self.get(record_id=record_id, include_deleted=True)
-        if current is None:
-            return None
-        current.update(update_fields)
-        current["updated_at"] = now
-        return self.create(record_id=record_id, record=current, now=current.get("created_at") or now)
-
-    def soft_delete(self, *, record_id: str, now: str) -> bool:
-        current = self.get(record_id=record_id, include_deleted=True)
-        if current is None:
-            return False
-        current["updated_at"] = now
-        current.setdefault("status", "cancelled")
-        with self._connect() as conn:
-            conn.execute(f"UPDATE {self.table_name} SET record_json = ?, updated_at = ?, deleted_at = ? WHERE record_id = ?", [_json_dumps(current), now, now, record_id])
-            conn.commit()
-        return True
-
-    def hard_delete(self, *, record_id: str) -> bool:
-        with self._connect() as conn:
-            cur = conn.execute(f"DELETE FROM {self.table_name} WHERE record_id = ?", [record_id])
-            conn.commit()
-            return cur.rowcount > 0
-'''
-
-    def _operations_py_source(self) -> str:
-        return '''from __future__ import annotations
-
-from typing import Any
-
-
-def classify_operation(operation: str, operation_classes: dict[str, str] | None = None) -> str:
-    operation = str(operation or "").strip()
-    operation_classes = operation_classes if isinstance(operation_classes, dict) else {}
-    if operation in operation_classes:
-        return str(operation_classes[operation])
-    lower = operation.casefold()
-    if "create" in lower or "add" in lower or "insert" in lower:
-        return "create"
-    if "get" in lower or "read" in lower:
-        return "get"
-    if "list" in lower:
-        return "list"
-    if "search" in lower or "find" in lower or "query" in lower:
-        return "search"
-    if "update" in lower or "modify" in lower or "change" in lower:
-        return "update"
-    if "delete" in lower or "remove" in lower:
-        return "delete"
-    return operation or "unknown"
-
-
-def extract_input(payload: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
-    payload = payload if isinstance(payload, dict) else {}
-    data = payload.get("input") if isinstance(payload.get("input"), dict) else payload
-    connection = payload.get("connection") if isinstance(payload.get("connection"), dict) else {}
-    secrets = payload.get("secrets") if isinstance(payload.get("secrets"), dict) else {}
-    runtime = payload.get("_runtime") if isinstance(payload.get("_runtime"), dict) else {}
-    return data, connection, secrets, runtime
-
-
-def first_present(data: dict[str, Any], names: list[str], default: Any = None) -> Any:
-    for name in names:
-        if name in data and data[name] not in (None, ""):
-            return data[name]
-    return default
-'''
-
-    def _tool_py_source(self, tool_id: str) -> str:
-        return '''from __future__ import annotations
-
-import uuid
-from datetime import datetime, timezone
-from typing import Any
-
-from operations import classify_operation, extract_input, first_present
-from schemas import CONTRACT
-from storage import RuntimeRecordStore
-
-TOOL_ID = ''' + repr(tool_id) + '''
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _connection_value(connection: dict[str, Any], key_markers: list[str], default: Any) -> Any:
-    for key, value in connection.items():
-        lower = str(key).casefold()
-        if any(marker in lower for marker in key_markers) and value not in (None, ""):
-            return value
-    return default
-
-
-def _record_id_key(record_fields: list[str]) -> str:
-    for name in record_fields:
-        lower = name.casefold()
-        if lower.endswith("_id") or lower == "id" or "identifier" in lower:
-            return name
-    return "record_id"
-
-
-def _record_payload(data: dict[str, Any]) -> dict[str, Any]:
-    for holder in ("record", "item", "entity", "schedule", "data"):
-        value = data.get(holder)
-        if isinstance(value, dict):
-            return dict(value)
-    return {k: v for k, v in data.items() if k not in {"operation", "query", "filters", "update_fields", "limit", "offset"}}
-
-
-def _required_record_fields() -> list[str]:
-    schema = CONTRACT.get("input_schema") if isinstance(CONTRACT.get("input_schema"), dict) else {}
-    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
-    for holder in ("record", "item", "entity", "schedule", "data"):
-        child = props.get(holder)
-        if isinstance(child, dict) and isinstance(child.get("required"), list):
-            required = [str(x) for x in child.get("required", []) if isinstance(x, str)]
-            if required:
-                return required
-    storage = CONTRACT.get("graph", {}).get("contracts", {}).get("storage_contract", {})
-    fields = storage.get("record_fields") if isinstance(storage, dict) else []
-    return [str(x) for x in fields if isinstance(x, str) and x.endswith(("_user", "_id"))][:1]
-
-
-def _store(connection: dict[str, Any]) -> RuntimeRecordStore:
-    graph = CONTRACT.get("graph") if isinstance(CONTRACT.get("graph"), dict) else {}
-    storage = graph.get("contracts", {}).get("storage_contract", {}) if isinstance(graph.get("contracts"), dict) else {}
-    fields = storage.get("table_fields") if isinstance(storage, dict) and isinstance(storage.get("table_fields"), list) else []
-    database_path = _connection_value(connection, ["database_path", "db_path", "path"], "runtime/memory/memory_brain.db")
-    table_name = _connection_value(connection, ["table"], TOOL_ID)
-    timeout = _connection_value(connection, ["timeout"], 30)
-    return RuntimeRecordStore(database_path=str(database_path), table_name=str(table_name), table_fields=fields, timeout_seconds=int(timeout or 30))
-
-
-def run(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    data, connection, secrets, runtime = extract_input(payload)
-    operation = str(data.get("operation") or "").strip()
-    graph = CONTRACT.get("graph") if isinstance(CONTRACT.get("graph"), dict) else {}
-    op_contract = graph.get("contracts", {}).get("operation_contract", {}) if isinstance(graph.get("contracts"), dict) else {}
-    operation_class = classify_operation(operation, op_contract.get("operation_classes") if isinstance(op_contract, dict) else {})
-    now = _now()
-    store = _store(connection)
-    record_fields = graph.get("contracts", {}).get("storage_contract", {}).get("record_fields", []) if isinstance(graph.get("contracts"), dict) else []
-    record_fields = [str(x) for x in record_fields if isinstance(x, str)]
-    id_key = _record_id_key(record_fields)
-    record_id = str(first_present(data, [id_key, "record_id", "schedule_id", "id"], "") or "")
-    result: Any = None
-    affected_count = 0
-    try:
-        if operation_class == "create":
-            record = _record_payload(data)
-            missing = [field for field in _required_record_fields() if record.get(field) in (None, "")]
-            if missing:
-                raise ValueError("missing required record fields: " + ", ".join(missing))
-            record_id = str(record.get(id_key) or record.get("record_id") or record.get("schedule_id") or record.get("id") or uuid.uuid4())
-            record.setdefault(id_key, record_id)
-            result = store.create(record_id=record_id, record=record, now=now)
-            affected_count = 1
-        elif operation_class == "get":
-            if not record_id:
-                raise ValueError("record id is required")
-            result = store.get(record_id=record_id)
-            affected_count = 1 if result is not None else 0
-        elif operation_class == "list":
-            limit = int(data.get("limit") or 50)
-            offset = int(data.get("offset") or 0)
-            filters = data.get("filters") if isinstance(data.get("filters"), dict) else {}
-            result = store.search(query="", filters=filters, limit=limit, offset=offset) if filters else store.list(limit=limit, offset=offset)
-            affected_count = len(result)
-        elif operation_class == "search":
-            result = store.search(query=str(data.get("query") or ""), filters=data.get("filters") if isinstance(data.get("filters"), dict) else {}, limit=int(data.get("limit") or 50), offset=int(data.get("offset") or 0))
-            affected_count = len(result)
-        elif operation_class == "update":
-            if not record_id:
-                raise ValueError("record id is required")
-            update_fields = data.get("update_fields") if isinstance(data.get("update_fields"), dict) else {}
-            if not update_fields:
-                raise ValueError("update_fields is required")
-            result = store.update(record_id=record_id, update_fields=update_fields, now=now)
-            affected_count = 1 if result is not None else 0
-        elif operation_class == "delete":
-            if not record_id:
-                raise ValueError("record id is required")
-            meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
-            force = bool(meta.get("force_delete") or data.get("force_delete"))
-            success = store.hard_delete(record_id=record_id) if force else store.soft_delete(record_id=record_id, now=now)
-            result = {"deleted": success, "physical_delete": force}
-            affected_count = 1 if success else 0
-        else:
-            raise ValueError("unsupported operation: " + operation)
-        return {"operation": operation, "success": True, "schedule_id": record_id, "record_id": record_id, "result": result, "error": None, "affected_count": affected_count, "execution_time_utc": now, "tool_id": TOOL_ID}
-    except Exception as exc:
-        return {"operation": operation, "success": False, "schedule_id": record_id, "record_id": record_id, "result": result, "error": str(exc), "affected_count": affected_count, "execution_time_utc": now, "tool_id": TOOL_ID}
-'''
-
-    def _test_tool_py_source(self, tool_id: str, verification_input: dict[str, Any]) -> str:
-        return '''from __future__ import annotations
-
-import json
-import tempfile
-from pathlib import Path
-
-from tool import run
-
-
-def test_runtime_tool_basic_crud() -> None:
-    temp_dir = tempfile.TemporaryDirectory()
-    db_path = str(Path(temp_dir.name) / "memory.db")
-    connection = {"memory_database_path": db_path, "database_path": db_path, "table_name": "runtime_test_records", "timeout_seconds": 30}
-    create_payload = {
-        "input": {
-            "operation": "create_schedule",
-            "schedule": {"schedule_user": "tester", "title": "sample", "start_time": "2030-01-01T00:00:00+00:00"},
-        },
-        "connection": connection,
-        "secrets": {},
-        "_runtime": {"dry_run": True},
-    }
-    created = run(create_payload)
-    assert isinstance(created, dict)
-    assert created.get("success") is True, created
-    record_id = created.get("record_id") or created.get("schedule_id")
-    assert record_id
-    got = run({"input": {"operation": "get_schedule", "schedule_id": record_id}, "connection": connection, "secrets": {}, "_runtime": {"dry_run": True}})
-    assert got.get("success") is True, got
-    listed = run({"input": {"operation": "list_schedules", "filters": {"schedule_user": "tester"}}, "connection": connection, "secrets": {}, "_runtime": {"dry_run": True}})
-    assert listed.get("success") is True, listed
-    updated = run({"input": {"operation": "update_schedule", "schedule_id": record_id, "update_fields": {"title": "changed"}}, "connection": connection, "secrets": {}, "_runtime": {"dry_run": True}})
-    assert updated.get("success") is True, updated
-    deleted = run({"input": {"operation": "delete_schedule", "schedule_id": record_id}, "connection": connection, "secrets": {}, "_runtime": {"dry_run": True}})
-    assert deleted.get("success") is True, deleted
-    json.dumps(deleted, ensure_ascii=False)
-    temp_dir.cleanup()
-'''
 
     def _generate_with_llm(
         self,
@@ -1059,12 +557,29 @@ def test_runtime_tool_basic_crud() -> None:
         """
         attempts = previous_attempts if isinstance(previous_attempts, list) else []
         progressive_attempts: list[dict[str, Any]] = []
+        task_graph = self._compile_capability_task_graph(
+            tool_id=tool_id,
+            entrypoint=entrypoint,
+            blueprint=blueprint,
+            identity_contract=identity_contract,
+            input_schema=input_schema,
+            output_schema=output_schema,
+            connection_schema=connection_schema,
+            secret_schema=secret_schema,
+            verification_input=verification_input,
+            specification_contract=specification_contract,
+        )
+        graph_nodes = [node for node in task_graph.get("nodes", []) if isinstance(node, dict) and node.get("target_file")]
+        if not graph_nodes:
+            graph_nodes = [
+                {"node_id": "entrypoint_contract", "stage": "entrypoint_contract", "target_file": str(entrypoint.get("module") or "tool.py"), "depends_on": [], "contract": {}},
+                {"node_id": "validation_contract", "stage": "validation_contract", "target_file": "test_tool.py", "depends_on": ["entrypoint_contract"], "contract": {}},
+            ]
         routes = [attempt for attempt in self._generation_attempts("basic") if isinstance(attempt, dict)]
-        # Progressive generation is already split into smaller file-level calls.
-        # Keep the policy-defined escalation order so a usable mid-sized model
-        # can finish before falling through to the largest local model.  The
-        # route_floor skips models already proven unsuitable in full-artifact
-        # generation without relying on capability names or business words.
+        # Progressive generation is graph-driven and capability-neutral.  The
+        # graph comes from ai_core, while this auxiliary component only executes
+        # nodes and records traces.  Do not introduce capability-name branches or
+        # domain implementation templates here.
         if route_floor > 0:
             routes = routes[min(route_floor, len(routes)):] or routes[-1:]
         self._emit_generation_progress(
@@ -1073,6 +588,7 @@ def test_runtime_tool_basic_crud() -> None:
             status="running",
             phase="progressive_artifact_generation_started",
             previous_attempt_count=len(attempts),
+            task_graph=task_graph,
         )
         for attempt in routes:
             available, availability_reason = self._codegen_attempt_available(attempt, run_id=run_id, tool_id=tool_id)
@@ -1094,12 +610,18 @@ def test_runtime_tool_basic_crud() -> None:
                 )
                 continue
             files: list[dict[str, str]] = []
-            for path in ["tool.py", "test_tool.py"]:
+            for node in graph_nodes:
+                path = str(node.get("target_file") or "").strip()
+                if not path:
+                    continue
                 file_result = self._generate_progressive_file_with_llm(
                     tool_id=tool_id,
                     run_id=run_id,
                     attempt=attempt,
                     path=path,
+                    stage=str(node.get("stage") or node.get("node_id") or path),
+                    stage_contract=node.get("contract") if isinstance(node.get("contract"), dict) else {},
+                    task_graph=task_graph,
                     entrypoint=entrypoint,
                     blueprint=blueprint,
                     identity_contract=identity_contract,
@@ -1249,6 +771,103 @@ def test_runtime_tool_basic_crud() -> None:
         )
         return any(marker in text for marker in markers)
 
+    def _compile_capability_task_graph(
+        self,
+        *,
+        tool_id: str,
+        entrypoint: dict[str, Any],
+        blueprint: dict[str, Any],
+        identity_contract: dict[str, Any],
+        input_schema: dict[str, Any],
+        output_schema: dict[str, Any],
+        connection_schema: dict[str, Any],
+        secret_schema: dict[str, Any],
+        verification_input: dict[str, Any],
+        specification_contract: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.capability_task_graph_compiler is None:
+            return {
+                "graph_type": "capability_artifact_generation",
+                "tool_id": tool_id,
+                "policy": {"capability_neutral": True, "fallback": True},
+                "nodes": [
+                    {"node_id": "entrypoint_contract", "stage": "entrypoint_contract", "target_file": str(entrypoint.get("module") or "tool.py"), "depends_on": [], "contract": {}},
+                    {"node_id": "validation_contract", "stage": "validation_contract", "target_file": "test_tool.py", "depends_on": ["entrypoint_contract"], "contract": {}},
+                ],
+                "edges": [{"from": "entrypoint_contract", "to": "validation_contract"}],
+            }
+        try:
+            return self.capability_task_graph_compiler.compile(
+                tool_id=tool_id,
+                entrypoint=entrypoint,
+                blueprint=blueprint,
+                identity_contract=identity_contract,
+                input_schema=input_schema,
+                output_schema=output_schema,
+                connection_schema=connection_schema,
+                secret_schema=secret_schema,
+                verification_input=verification_input,
+                specification_contract=specification_contract,
+            )
+        except Exception as exc:
+            self._emit_generation_progress(
+                run_id=None,
+                tool_id=tool_id,
+                status="running",
+                phase="capability_task_graph_compile_failed_fallback",
+                error=str(exc)[:500],
+            )
+            return {
+                "graph_type": "capability_artifact_generation",
+                "tool_id": tool_id,
+                "policy": {"capability_neutral": True, "fallback": True},
+                "nodes": [
+                    {"node_id": "entrypoint_contract", "stage": "entrypoint_contract", "target_file": str(entrypoint.get("module") or "tool.py"), "depends_on": [], "contract": {}},
+                    {"node_id": "validation_contract", "stage": "validation_contract", "target_file": "test_tool.py", "depends_on": ["entrypoint_contract"], "contract": {}},
+                ],
+                "edges": [{"from": "entrypoint_contract", "to": "validation_contract"}],
+            }
+
+    def _progressive_file_instruction(self, *, path: str, stage: str, entrypoint: dict[str, Any]) -> str:
+        normalized_path = str(path or "").replace("\\", "/").rsplit("/", 1)[-1]
+        entry_module = str(entrypoint.get("module") or "tool.py").replace("\\", "/").rsplit("/", 1)[-1]
+        entry_function = str(entrypoint.get("function") or "run")
+        common = (
+            "Generate only one complete Python source file for the requested target_file. "
+            "Use only the supplied contracts and schemas. Do not branch on capability names or domain words. "
+            "Do not embed business data, credentials, fixed dates, or environment-specific absolute paths. "
+            "Use Python standard library when possible. Return code that is deterministic, importable, and JSON-serializable. "
+        )
+        if normalized_path == entry_module or normalized_path == "tool.py":
+            return common + (
+                f"This is the runtime entrypoint file. Define {entry_function}(payload: dict | None = None) -> dict. "
+                "Read input, connection, secrets, and runtime flags from payload only. "
+                "Delegate to generated helper modules when available. "
+                "When payload['_runtime']['dry_run'] is true, avoid live external side effects and return a mock-safe structured result."
+            )
+        if normalized_path == "test_tool.py" or stage == "validation_contract":
+            return common + (
+                "This is the sandbox validation file. Import the runtime entrypoint from the same directory, "
+                "construct a dry-run or local-only payload from the schemas, call the entrypoint, and assert that a dict is returned. "
+                "Avoid live network calls, real secrets, and external services."
+            )
+        if normalized_path == "schemas.py" or stage == "schema_contract":
+            return common + (
+                "This file should expose schema constants and lightweight validation helpers derived only from the supplied JSON schemas. "
+                "Do not add fields that are not present in the contracts."
+            )
+        if normalized_path == "state_adapter.py" or "adapter" in normalized_path:
+            return common + (
+                "This file should expose generic state or connection helper functions derived only from the supplied connection contract. "
+                "It must not create domain-specific tables, fields, or behavior unless such structure is present in the runtime contracts."
+            )
+        if normalized_path == "operations.py" or stage == "operation_contract":
+            return common + (
+                "This file should implement operation dispatch and operation handlers derived from the behavior contract and input schema. "
+                "Do not hard-code a business scenario; operation names and required fields must come from the contracts."
+            )
+        return common + "Implement only the stage_contract for this file and keep it capability-neutral."
+
     def _generate_progressive_file_with_llm(
         self,
         *,
@@ -1256,6 +875,9 @@ def test_runtime_tool_basic_crud() -> None:
         run_id: str | None,
         attempt: dict[str, Any],
         path: str,
+        stage: str,
+        stage_contract: dict[str, Any],
+        task_graph: dict[str, Any],
         entrypoint: dict[str, Any],
         blueprint: dict[str, Any],
         identity_contract: dict[str, Any],
@@ -1270,6 +892,10 @@ def test_runtime_tool_basic_crud() -> None:
         contract = {
             "tool_id": tool_id,
             "target_file": path,
+            "stage": stage,
+            "stage_contract": stage_contract if isinstance(stage_contract, dict) else {},
+            "task_graph_policy": task_graph.get("policy") if isinstance(task_graph, dict) else {},
+            "task_graph_edges": task_graph.get("edges") if isinstance(task_graph, dict) else [],
             "entrypoint": self._compact_entrypoint(entrypoint),
             "identity": self._compact_identity_contract(identity_contract, blueprint=blueprint, tool_id=tool_id),
             "behavior_contract": self._compact_behavior_contract(blueprint, tool_id=tool_id),
@@ -1283,17 +909,7 @@ def test_runtime_tool_basic_crud() -> None:
             "specification": self._compact_specification_contract(specification_contract),
             "existing_files": [{"path": item.get("path"), "content_excerpt": str(item.get("content") or "")[:1800]} for item in existing_files if isinstance(item, dict)],
         }
-        if path == "tool.py":
-            file_instruction = (
-                "Generate only executable Python source for tool.py. Define run(payload: dict | None = None) -> dict. "
-                "Implement behavior_contract from payload input/connection/secrets/_runtime. No placeholders. "
-                "Use standard library when possible. Do not perform external side effects when payload['_runtime']['dry_run'] is true."
-            )
-        else:
-            file_instruction = (
-                "Generate only Python source for test_tool.py. It must import tool.py from the same directory, call run() with dry_run/mock/local payload, "
-                "assert a JSON-serializable dict is returned, and avoid live external network or secrets."
-            )
+        file_instruction = self._progressive_file_instruction(path=path, stage=stage, entrypoint=entrypoint)
         messages = [
             {
                 "role": "system",
