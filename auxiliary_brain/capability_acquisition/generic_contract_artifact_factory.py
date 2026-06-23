@@ -76,6 +76,12 @@ class ContractDrivenArtifactFactory:
             operation_contracts = self._generic_operation_contracts(input_schema)
         if not operation_contracts:
             return {"generation_status": "contract_driven_generation_failed", "generation_error": "No declared operations were found in the runtime input schema."}
+        runtime_language = self._runtime_language(blueprint=blueprint, specification_contract=specification_contract)
+        if runtime_language != "python":
+            return {
+                "generation_status": "contract_driven_generation_failed",
+                "generation_error": f"Unsupported runtime language for this artifact factory: {runtime_language}. Expected python.",
+            }
         file_payloads = {
             "contract.json": json.dumps({
                 "tool_id": tool_id,
@@ -150,6 +156,35 @@ class ContractDrivenArtifactFactory:
         )
         return artifact
 
+
+    def _runtime_language(self, *, blueprint: dict[str, Any], specification_contract: dict[str, Any]) -> str:
+        """Resolve target runtime language from ai_core contracts.
+
+        The artifact renderer must emit language-specific literals and syntax.
+        JSON Schema values such as true/false/null and list-valued types are
+        valid contract data, but they must never be copied into Python source as
+        raw JSON text.
+        """
+        candidates = []
+        if isinstance(blueprint, dict):
+            candidates.extend([
+                blueprint.get("runtime_language"),
+                blueprint.get("language"),
+                blueprint.get("runtime", {}).get("language") if isinstance(blueprint.get("runtime"), dict) else None,
+            ])
+        if isinstance(specification_contract, dict):
+            candidates.extend([
+                specification_contract.get("runtime_language"),
+                specification_contract.get("language"),
+                specification_contract.get("runtime", {}).get("language") if isinstance(specification_contract.get("runtime"), dict) else None,
+            ])
+        for value in candidates:
+            text = str(value or "").strip().lower()
+            if text:
+                if text in {"py", "python3"}:
+                    return "python"
+                return text
+        return "python"
 
     def _safe_scalar_text(self, value: Any) -> str:
         if isinstance(value, str):
@@ -326,6 +361,7 @@ def row_to_dict(row) -> dict:
     def _contract_driven_operations_source(self) -> str:
         return """from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -441,6 +477,25 @@ def _id_from_payload(payload: dict) -> str | None:
     return None
 
 
+def _is_empty_filter_value(value: Any) -> bool:
+    # Python-specific safe empty check. Do not write constructs such as
+    # {None, "", []}; list/dict values are unhashable and valid runtime data.
+    return value is None or value == "" or value == [] or value == {}
+
+
+def _value_matches(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, list):
+        expected_items = [str(x) for x in expected]
+        if isinstance(actual, list):
+            return any(str(item) in expected_items for item in actual)
+        return str(actual) in expected_items
+    if isinstance(actual, list):
+        return str(expected) in [str(x) for x in actual]
+    if isinstance(expected, dict):
+        return json.dumps(actual, ensure_ascii=False, sort_keys=True, default=str) == json.dumps(expected, ensure_ascii=False, sort_keys=True, default=str)
+    return str(actual) == str(expected)
+
+
 def _apply_filters(rows: list[dict], filters: dict) -> list[dict]:
     if not isinstance(filters, dict) or not filters:
         return rows
@@ -448,15 +503,10 @@ def _apply_filters(rows: list[dict], filters: dict) -> list[dict]:
     for row in rows:
         ok = True
         for key, expected in filters.items():
-            if expected in (None, ''):
+            if _is_empty_filter_value(expected):
                 continue
             actual = row.get(key)
-            if isinstance(actual, list):
-                ok = any(item in actual for item in expected) if isinstance(expected, list) else expected in actual
-            elif isinstance(expected, list):
-                ok = actual in expected
-            else:
-                ok = str(actual) == str(expected)
+            ok = _value_matches(actual, expected)
             if not ok:
                 break
         if ok:

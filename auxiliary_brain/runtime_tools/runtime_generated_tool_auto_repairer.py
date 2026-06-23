@@ -322,20 +322,29 @@ class _Store:
                 out.append({{"value": row[0]}})
         return out
 
+    def _is_empty_filter_value(self, value: Any) -> bool:
+        # Never use a set containing [] here. The generated runtime is Python,
+        # and lists/dicts are unhashable but valid schema/runtime values.
+        return value is None or value == "" or value == [] or value == {{}}
+
+    def _value_matches(self, actual: Any, expected: Any) -> bool:
+        if isinstance(expected, list):
+            expected_items = [str(x) for x in expected]
+            if isinstance(actual, list):
+                return any(str(item) in expected_items for item in actual)
+            return str(actual) in expected_items
+        if isinstance(actual, list):
+            return str(expected) in [str(x) for x in actual]
+        if isinstance(expected, dict):
+            return json.dumps(actual, ensure_ascii=False, sort_keys=True, default=str) == json.dumps(expected, ensure_ascii=False, sort_keys=True, default=str)
+        return str(actual) == str(expected)
+
     def _matches_filters(self, record: dict[str, Any], filters: dict[str, Any]) -> bool:
         for key, value in filters.items():
-            if value in {{None, "", []}}:
+            if self._is_empty_filter_value(value):
                 continue
-            rv = record.get(key)
-            if isinstance(rv, list):
-                if value not in rv and str(value) not in [str(x) for x in rv]:
-                    return False
-            elif isinstance(value, list):
-                if rv not in value and str(rv) not in [str(x) for x in value]:
-                    return False
-            else:
-                if str(rv) != str(value):
-                    return False
+            if not self._value_matches(record.get(key), value):
+                return False
         return True
 
 
