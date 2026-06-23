@@ -4,7 +4,10 @@
     {
       "label": "Kill Port 8000 Listeners",
       "type": "shell",
-      "command": "pids=($(lsof -ti tcp:8000 -sTCP:LISTEN)); (( ${#pids[@]} )) && kill -9 $pids; echo port_8000_ready",
+      "command": "python",
+      "args": [
+        "${workspaceFolder}/.vscode/kill_port_8000.py"
+      ],
       "problemMatcher": []
     }
   ]
