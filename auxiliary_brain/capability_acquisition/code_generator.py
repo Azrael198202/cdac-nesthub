@@ -1437,8 +1437,20 @@ def execute(payload: dict | None = None) -> dict:
 from operations import execute
 
 
+def _normalize_runtime_payload(payload: dict | None = None) -> dict:
+    payload = payload if isinstance(payload, dict) else {{}}
+    if isinstance(payload.get('input'), dict):
+        merged = dict(payload.get('input') or {{}})
+        for key in ('connection', '_connection', 'profile', '_profile', 'secrets', '_runtime'):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                merged[key] = value
+        return merged
+    return payload
+
+
 def {fn}(payload: dict | None = None) -> dict:
-    return execute(payload if isinstance(payload, dict) else {{}})
+    return execute(_normalize_runtime_payload(payload))
 """
 
     def _contract_driven_test_source(self, *, operation_contracts: list[dict[str, Any]], record_contract: dict[str, Any], connection_schema: dict[str, Any]) -> str:

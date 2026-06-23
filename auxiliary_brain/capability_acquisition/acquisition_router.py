@@ -147,21 +147,47 @@ class RuntimeCapabilityGapImplementer:
         template_source = "runtime_blueprint_planner"
         planner_record: dict[str, Any] | None = None
 
-        # v16: template-less acquisition is the default. The small/runtime model
-        # creates a neutral blueprint, then ai_core materializes and verifies it.
-        # Existing runtime templates may be used only when explicitly enabled for
-        # compatibility by AI_CORE_ALLOW_TEMPLATE_FALLBACK=true.
-        mark("TemplateResolver", "skipped", reason="template_less_blueprint_generation_is_default")
-        # Capability acquisition has its own lifecycle and must keep the
-        # original acquisition pipeline semantics.  It is not a scheduled/task
-        # execution path, so it must not be wrapped in a secondary worker that
-        # can detach the blueprint planner/materializer from the acquisition
-        # state machine.  Long-running protection is handled by the outer
-        # capability-acquisition job policy, not by splitting this stage again.
-        planner_record = self._plan_capability_with_runtime_planner(
-            user_input=user_input, identity_contract=identity_contract, evidence=evidence, event_contract=event_contract, state_run_id=run_id
-        )
-        mark("BlueprintPlanner", str(planner_record.get("status") or "planner_failed"), planner=planner_record)
+        # Capability TaskGraph mainflow is the default acquisition path.
+        # Long acquisition requests are first converted into a neutral runtime
+        # contract by ai_core, then artifact generation consumes that contract in
+        # small graph stages. This avoids the legacy single BlueprintPlanner
+        # path and keeps concrete capability behavior out of code_generator.py.
+        if self._capability_taskgraph_mainflow_enabled():
+            mark("TemplateResolver", "skipped", reason="capability_taskgraph_mainflow_is_default")
+            raw_blueprint = self._build_contract_driven_blueprint_from_user_request(
+                user_input=user_input,
+                identity_contract=identity_contract,
+                event_contract=event_contract,
+            )
+            raw_blueprint = self._merge_identity_contract_into_template(raw_blueprint, identity_contract)
+            mark("CapabilityTaskGraphCompiler", "started", blueprint_summary={
+                "template_id": raw_blueprint.get("template_id"),
+                "input_fields": sorted(list((raw_blueprint.get("input_schema") or {}).get("properties", {}).keys())) if isinstance(raw_blueprint.get("input_schema"), dict) else [],
+                "connection_fields": sorted(list((raw_blueprint.get("connection_schema") or {}).get("properties", {}).keys())) if isinstance(raw_blueprint.get("connection_schema"), dict) else [],
+            })
+            materialized_template = self.blueprint_artifact_generator.materialize(
+                raw_blueprint,
+                identity_contract=identity_contract,
+                run_id=run_id,
+            )
+            planner_record = {
+                "status": "planned" if materialized_template.get("artifact_kind") == "real_runtime_implementation" else "code_generation_failed",
+                "reason": str((materialized_template.get("code_generation") or {}).get("error") or (materialized_template.get("code_generation") or {}).get("status") or ""),
+                "confidence_score": 1.0,
+                "needs_external_evidence": False,
+                "template": materialized_template,
+                "blueprint": raw_blueprint,
+                "planner_origin": "ai_core_capability_taskgraph_contract_compiler",
+                "policy_backed_basic": True,
+            }
+            mark("CapabilityTaskGraphCompiler", str(planner_record.get("status") or "planner_failed"), planner=planner_record)
+        else:
+            # Legacy planner path is kept only behind an explicit compatibility flag.
+            mark("TemplateResolver", "skipped", reason="template_less_blueprint_generation_is_default")
+            planner_record = self._plan_capability_with_runtime_planner(
+                user_input=user_input, identity_contract=identity_contract, evidence=evidence, event_contract=event_contract, state_run_id=run_id
+            )
+            mark("BlueprintPlanner", str(planner_record.get("status") or "planner_failed"), planner=planner_record)
 
         if planner_record.get("status") == "planned" and isinstance(planner_record.get("template"), dict):
             template = self._merge_identity_contract_into_template(dict(planner_record["template"]), identity_contract)
@@ -251,7 +277,10 @@ class RuntimeCapabilityGapImplementer:
         # This is contract-driven and generic: it does not infer any concrete
         # service behavior; it only prevents planner/model loss of user-declared
         # schemas, identity, approval policy, and match requirements.
-        template = self._augment_blueprint_from_user_request(dict(template), user_input=user_input)
+        if str((planner_record or {}).get("planner_origin") or "") != "ai_core_capability_taskgraph_contract_compiler":
+            template = self._augment_blueprint_from_user_request(dict(template), user_input=user_input)
+        else:
+            template = dict(template)
         template = self._merge_identity_contract_into_template(template, identity_contract)
 
         dependency_resolution = self._resolve_dependencies(template)
@@ -523,6 +552,283 @@ class RuntimeCapabilityGapImplementer:
             contract["forbidden_tool_ids"] = list(dict.fromkeys([*existing, *[str(x) for x in forbidden_ids if str(x)]]))
         merged["capability_match_contract"] = contract
         return merged
+
+    def _capability_taskgraph_mainflow_enabled(self) -> bool:
+        return str(os.environ.get("AI_CORE_CAPABILITY_TASKGRAPH_MAINFLOW", "1")).strip().casefold() not in {"0", "false", "no", "off"}
+
+    def _build_contract_driven_blueprint_from_user_request(
+        self,
+        *,
+        user_input: str,
+        identity_contract: dict[str, Any],
+        event_contract: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Compile an acquisition request into a neutral runtime blueprint.
+
+        This method is intentionally capability-neutral. It extracts only the
+        contracts explicitly declared by the user: identity, schemas, operation
+        names, defaults, approval policy, and verification markers. Concrete
+        behavior is generated later from the TaskGraph and those contracts.
+        """
+        text = str(user_input or "")
+        tool_id = self._safe_name(str(identity_contract.get("requested_capability_id") or "generated_capability"))
+        name_match = re.search(r"capability\s+name\s+must\s+be\s*[:：]?\s*([^\n*]+)", text, flags=re.IGNORECASE)
+        capability_name = name_match.group(1).strip() if name_match else tool_id.replace("_", " ").title()
+        input_schema = self._extract_runtime_input_schema_from_request(text)
+        connection_schema = self._extract_runtime_connection_schema_from_request(text)
+        secret_schema = self._extract_runtime_secret_schema_from_request(text)
+        output_schema = self._extract_runtime_output_schema_from_request(text)
+        approval_policy = self._extract_declared_approval_policy(text) or {"supported_modes": ["always", "once", "never"], "default_mode": "always"}
+        verification_input = self._build_runtime_verification_input(input_schema=input_schema, connection_schema=connection_schema, secret_schema=secret_schema)
+        required_markers = self._extract_declared_match_markers(text)
+        contract = {
+            "expected_tool_id": tool_id,
+            "expected_template_id": tool_id,
+            "required_artifact_dir_name": tool_id,
+            "required_markers": required_markers,
+            "forbidden_markers": [],
+        }
+        return {
+            "template_id": tool_id,
+            "capability_id": tool_id,
+            "capability_name": capability_name,
+            "description": text[:12000],
+            "entrypoint": {"module": "tool.py", "function": "run"},
+            "files": [],
+            "input_schema": input_schema,
+            "output_schema": output_schema,
+            "connection_schema": connection_schema,
+            "secret_schema": secret_schema,
+            "approval_policy": approval_policy,
+            "runtime_execution_policy": {"approval_policy": approval_policy},
+            "verification_input": verification_input,
+            "verification_expectations": {"status": "completed", "structured_output": True},
+            "capability_match_contract": contract,
+            "dependencies": [],
+            "acquisition_policy": {
+                "allow_policy_backed_basic_acquisition_without_external_evidence": True,
+                "allow_llm_code_generation": True,
+                "taskgraph_mainflow": True,
+            },
+        }
+
+    def _extract_runtime_input_schema_from_request(self, text: str) -> dict[str, Any]:
+        props: dict[str, Any] = {}
+        required: list[str] = []
+        for name in self._extract_bullet_values_after_headers(text, [r"Input\s+schema\s+must\s+include(?:\s+only)?", r"Input\s+parameters?"]):
+            field = self._safe_name(str(name).split()[0])
+            if field and field not in props:
+                props[field] = {"type": "string"}
+        operations = self._extract_declared_operations(text)
+        if operations:
+            props["operation"] = {"type": "string", "enum": operations}
+            if "operation" not in required:
+                required.insert(0, "operation")
+        record_fields = self._extract_declared_record_fields(text)
+        if record_fields:
+            record_input_key = self._select_record_input_key(props)
+            props[record_input_key] = {
+                "type": "object",
+                "properties": record_fields["properties"],
+                "required": record_fields["required"],
+                "additionalProperties": True,
+            }
+        for key in ("filters", "update_fields"):
+            if key in props:
+                props[key] = {"type": "object", "additionalProperties": True}
+        if "limit" in props:
+            props["limit"] = {"type": "integer", "default": 50}
+        if "offset" in props:
+            props["offset"] = {"type": "integer", "default": 0}
+        return {"type": "object", "required": required, "properties": props, "additionalProperties": False, "title": "input"}
+
+    def _extract_runtime_connection_schema_from_request(self, text: str) -> dict[str, Any]:
+        props: dict[str, Any] = {}
+        for name in self._extract_bullet_values_after_headers(text, [r"Connection\s+schema\s+must\s+include(?:\s+only)?", r"Connection\s+parameters?"]):
+            field = self._safe_name(str(name).split()[0])
+            if field and field.casefold() not in {"none", "null"}:
+                props[field] = {"type": "string"}
+        defaults = self._extract_declared_defaults_section(text, header_patterns=[r"Connection\s+schema\s+defaults?"])
+        for key, value in defaults.items():
+            spec = dict(props.get(key) if isinstance(props.get(key), dict) else {"type": "string"})
+            spec["default"] = value
+            if isinstance(value, int):
+                spec["type"] = "integer"
+            elif isinstance(value, float):
+                spec["type"] = "number"
+            props[key] = spec
+        return {"type": "object", "required": [], "properties": props, "additionalProperties": False, "title": "connection"}
+
+    def _extract_runtime_secret_schema_from_request(self, text: str) -> dict[str, Any]:
+        fields = []
+        for name in self._extract_bullet_values_after_headers(text, [r"Secret\s+schema\s+must\s+include(?:\s+only)?", r"Secret\s+parameters?"]):
+            field = self._safe_name(str(name).split()[0])
+            if field and field.casefold() not in {"none", "null", "nothing", "no_secret", "no_secrets"}:
+                fields.append(field)
+        return {"type": "object", "required": [], "properties": {field: {"type": "string"} for field in fields}, "additionalProperties": False, "title": "secrets", "x-empty-schema-allowed": True}
+
+    def _extract_runtime_output_schema_from_request(self, text: str) -> dict[str, Any]:
+        fields = self._extract_declared_field_names(text, header_patterns=[r"Output\s+schema\s+must\s+include(?:\s+only)?", r"Output\s+fields?"])
+        if not fields:
+            fields = ["operation", "success", "result", "error"]
+        props: dict[str, Any] = {}
+        for field in fields:
+            lowered = field.casefold()
+            if lowered in {"success"}:
+                props[field] = {"type": "boolean"}
+            elif lowered in {"affected_count", "count", "limit", "offset"}:
+                props[field] = {"type": "integer"}
+            elif lowered in {"result", "error", "metadata", "data"}:
+                props[field] = {}
+            else:
+                props[field] = {"type": "string"}
+        return {"type": "object", "required": [], "properties": props, "additionalProperties": True, "title": "output"}
+
+    def _extract_declared_operations(self, text: str) -> list[str]:
+        ops = self._extract_bullet_values_after_headers(text, [r"Supported\s+operations?", r"operation\s*:\s*required\s+string\s*,\s*enum"])
+        result: list[str] = []
+        for value in ops:
+            name = self._safe_name(value.split()[0])
+            if name and name not in result and name.casefold() not in {"operation", "required", "optional"}:
+                result.append(name)
+        return result
+
+    def _extract_declared_record_fields(self, text: str) -> dict[str, Any]:
+        names = self._extract_bullet_values_after_headers(text, [r"record\s+structure", r"item\s+must\s+include"])
+        props: dict[str, Any] = {}
+        for raw in names:
+            name = self._safe_name(raw.split()[0])
+            if not name or name in props:
+                continue
+            props[name] = self._schema_type_from_field_detail(name=name, detail=self._field_detail(text, name))
+        required = self._extract_required_record_fields(text, list(props.keys()))
+        return {"properties": props, "required": required} if props else {}
+
+    def _extract_required_record_fields(self, text: str, fields: list[str]) -> list[str]:
+        required: list[str] = []
+        for field in fields:
+            detail = self._field_detail(text, field).casefold()
+            if "required" in detail and "optional" not in detail and field not in required:
+                required.append(field)
+        return required
+
+    def _field_detail(self, text: str, field: str) -> str:
+        pattern = re.compile(rf"^\s*[-*]\s*{re.escape(field)}\s*[:：-]?\s*(.*)$", flags=re.IGNORECASE | re.MULTILINE)
+        match = pattern.search(text)
+        return match.group(1).strip() if match else ""
+
+    def _schema_type_from_field_detail(self, *, name: str, detail: str) -> dict[str, Any]:
+        lowered = (str(name) + " " + str(detail)).casefold()
+        if "list" in lowered or "array" in lowered or "participants" in lowered or "tags" in lowered:
+            return {"type": "array", "items": {"type": "string"}}
+        if "object" in lowered or "metadata" in lowered or "recurrence" in lowered or "reminder" in lowered:
+            return {"type": "object", "additionalProperties": True}
+        if "integer" in lowered or "number" in lowered or "seconds" in lowered or "count" in lowered:
+            return {"type": "integer"}
+        return {"type": "string"}
+
+    def _select_record_input_key(self, props: dict[str, Any]) -> str:
+        reserved = {"operation", "query", "filters", "update_fields", "limit", "offset"}
+        for key, spec in props.items():
+            if key in reserved:
+                continue
+            if isinstance(spec, dict) and str(spec.get("type") or "") == "object":
+                return key
+        for key in props.keys():
+            lowered = str(key).casefold()
+            if key not in reserved and not (lowered == "id" or lowered.endswith("_id")):
+                return key
+        return "record"
+
+    def _extract_declared_defaults_section(self, text: str, *, header_patterns: list[str]) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        active = False
+        for raw in str(text or "").splitlines():
+            line = raw.strip()
+            section_line = re.sub(r"^[-*]\s*", "", line).strip()
+            if any(re.search(pattern, section_line, flags=re.IGNORECASE) for pattern in header_patterns):
+                active = True
+                continue
+            if active and re.match(r"^[A-Z][A-Za-z ]+\s*[:：]?$", section_line):
+                break
+            if not active:
+                continue
+            match = re.match(r"^[-*]\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*[:：]\s*(.+?)\s*$", line)
+            if match:
+                raw_value = match.group(2).strip().strip("`'\"")
+                if re.fullmatch(r"[-+]?\d+", raw_value):
+                    value: Any = int(raw_value)
+                else:
+                    value = raw_value
+                values[self._safe_name(match.group(1))] = value
+        return values
+
+    def _extract_bullet_values_after_headers(self, text: str, header_patterns: list[str]) -> list[str]:
+        values: list[str] = []
+        active = False
+        for raw in str(text or "").splitlines():
+            line = raw.rstrip()
+            section_line = re.sub(r"^[-*]\s*", "", line.strip()).strip()
+            if any(re.search(pattern, section_line, flags=re.IGNORECASE) for pattern in header_patterns):
+                active = True
+                continue
+            if active and re.match(r"^[A-Z][A-Za-z ]+\s*[:：]?$", section_line):
+                break
+            if not active:
+                continue
+            match = re.match(r"^\s*[-*]\s*(.+?)\s*$", line)
+            if match:
+                values.append(match.group(1).strip())
+        return values
+
+    def _build_runtime_verification_input(self, *, input_schema: dict[str, Any], connection_schema: dict[str, Any], secret_schema: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "input": self._sample_from_schema(input_schema),
+            "connection": self._defaults_from_schema(connection_schema),
+            "secrets": self._defaults_from_schema(secret_schema),
+            "_runtime": {"dry_run": True},
+        }
+
+    def _defaults_from_schema(self, schema: dict[str, Any]) -> dict[str, Any]:
+        props = schema.get("properties") if isinstance(schema, dict) else {}
+        result: dict[str, Any] = {}
+        if isinstance(props, dict):
+            for key, spec in props.items():
+                if isinstance(spec, dict) and "default" in spec:
+                    result[key] = spec.get("default")
+        return result
+
+    def _sample_from_schema(self, schema: dict[str, Any]) -> dict[str, Any]:
+        props = schema.get("properties") if isinstance(schema, dict) else {}
+        sample: dict[str, Any] = {}
+        if not isinstance(props, dict):
+            return sample
+        for key, spec in props.items():
+            if not isinstance(spec, dict):
+                continue
+            if key == "operation" and isinstance(spec.get("enum"), list) and spec.get("enum"):
+                sample[key] = spec.get("enum")[0]
+            elif spec.get("type") == "object":
+                nested = spec.get("properties") if isinstance(spec.get("properties"), dict) else {}
+                sample[key] = {n: self._sample_scalar(ns) for n, ns in nested.items() if isinstance(ns, dict)} if nested else {}
+            elif spec.get("type") == "array":
+                sample[key] = []
+            else:
+                sample[key] = self._sample_scalar(spec)
+        return sample
+
+    def _sample_scalar(self, spec: dict[str, Any]) -> Any:
+        if "default" in spec:
+            return spec.get("default")
+        typ = spec.get("type")
+        if typ == "integer":
+            return 1
+        if typ == "number":
+            return 1
+        if typ == "boolean":
+            return False
+        return "test"
+
 
 
 

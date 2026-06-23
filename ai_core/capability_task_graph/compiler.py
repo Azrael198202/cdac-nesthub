@@ -167,6 +167,8 @@ class CapabilityTaskGraphCompiler:
         props = self._schema_properties(input_schema)
         op_schema = props.get("operation") if isinstance(props.get("operation"), dict) else {}
         enum_values = op_schema.get("enum") if isinstance(op_schema, dict) else []
+        if not isinstance(enum_values, list):
+            enum_values = []
         ops = [str(v).strip() for v in enum_values if str(v).strip()]
         if not ops:
             for key in ("supported_operations", "operations", "operation_contracts"):
