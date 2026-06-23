@@ -38,6 +38,7 @@ from ai_core.runtime.lifecycle_settings import RuntimeLifecycleSettingsStore
 from ai_core.runtime.task_runtime_policy import TaskRuntimePolicyResolver
 from ai_core.runtime.state import runtime_state_manager, capability_scoped_state_store
 from apps.api.result_formatting import format_async_job_result
+from presentation_brain.runtime_response_renderer import render_runtime_response
 
 import traceback
 import os
@@ -1587,23 +1588,16 @@ def _direct_registered_tool_request(message: str, provided_inputs: dict[str, Any
     }
 
 
-def _tool_execution_public_answer(payload: dict[str, Any]) -> str:
-    """Render a registered tool execution payload into a visible answer."""
+def _tool_execution_public_answer(payload: dict[str, Any], *, presentation_profile: str = "user") -> str:
+    """Render a registered tool execution payload through Presentation Brain."""
     if not isinstance(payload, dict):
         return str(payload)
     status = str(payload.get("status") or "").strip()
-    tool_id = str(payload.get("tool_id") or "").strip()
-    if payload.get("ok") is True:
-        body = payload.get("result") if isinstance(payload.get("result"), dict) else payload
-        # Prefer generated tool result fields, but include the full structured
-        # result so create/list/update/delete are all visible without custom UI.
-        return "Registered tool execution completed.\n\n" + json.dumps(body, ensure_ascii=False, indent=2)
     if status == "requires_configuration":
-        return "Runtime capability configuration is required before execution.\n\n" + json.dumps(payload.get("configuration_status") or payload, ensure_ascii=False, indent=2)
+        return render_runtime_response({"ok": False, "status": status, "message": "Runtime capability configuration is required before execution.", "result": payload.get("configuration_status") or payload}, profile=presentation_profile)
     if status == "requires_human_confirmation":
-        return "Runtime capability execution requires confirmation.\n\n" + json.dumps(payload.get("preview") or payload, ensure_ascii=False, indent=2)
-    err = payload.get("human_readable_error") or payload.get("message") or "Runtime capability execution failed."
-    return str(err) + "\n\n" + json.dumps(payload, ensure_ascii=False, indent=2)
+        return render_runtime_response({"ok": False, "status": status, "message": "Runtime capability execution requires confirmation.", "result": payload.get("preview") or payload}, profile=presentation_profile)
+    return render_runtime_response(payload, profile=presentation_profile)
 
 
 async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any]:
@@ -1686,7 +1680,7 @@ async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any
             approval_confirmed=bool(direct_tool_request.get("approval_confirmed")),
             remember_approval=bool(direct_tool_request.get("remember_approval")),
         )
-        final_answer = _tool_execution_public_answer(execution_payload)
+        final_answer = _tool_execution_public_answer(execution_payload, presentation_profile=req.presentation_profile or "user")
         payload = {
             "ok": bool(execution_payload.get("ok")),
             "status": execution_payload.get("status") or ("completed" if execution_payload.get("ok") else "failed"),
