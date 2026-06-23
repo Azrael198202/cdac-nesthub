@@ -3251,13 +3251,15 @@ def test_runtime_contract_smoke():
         os.replace(tmp, path)
 
     def _build_live_verification_interaction_request(self, *, registration: dict[str, Any], run_id: str = "", session_id: str = "") -> dict[str, Any] | None:
-        """Ask Agent Studio for real runtime values after sandbox registration.
+        """Optionally ask Agent Studio for real runtime values after registration.
 
-        This is intentionally schema-driven.  The acquisition layer does not know
-        the meaning of any capability field; it only exposes declared input,
-        connection, and secret schemas so the user can perform a live verification
-        run after the safe sandbox/mock checks have passed.
+        Registration verification is pass-through only: import/compile/schema/smoke
+        validation is enough to register a generated capability. Real runtime
+        execution failures are handled later by runtime self-repair. Therefore
+        live verification is opt-in and must not block capability registration.
         """
+        if str(os.getenv("AI_RUNTIME_REQUEST_LIVE_VERIFICATION_AFTER_REGISTRATION") or "0").strip().lower() not in {"1", "true", "yes", "on"}:
+            return None
         tool_record = registration.get("tool_record") if isinstance(registration.get("tool_record"), dict) else {}
         tool_id = str(tool_record.get("tool_id") or "").strip()
         if not tool_id:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import re
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from ai_core.connections.connection_profile_store import ConnectionProfileStore
 from auxiliary_brain.runtime_tools.generic_tool_runner import GenericToolRunner
 from ai_core.runtime.approval_policy_store import RuntimeApprovalPolicyStore
 from auxiliary_brain.runtime.self_repair.repair_orchestrator import FeedbackRepairOrchestrator
+from auxiliary_brain.runtime_tools.runtime_generated_tool_auto_repairer import RuntimeGeneratedToolAutoRepairer
 
 _NO_DEFAULT = object()
 
@@ -34,6 +36,7 @@ class RuntimeRegisteredToolService:
         self.connection_store = connection_store or ConnectionProfileStore()
         self.approval_policy_store = approval_policy_store or RuntimeApprovalPolicyStore()
         self.repair_orchestrator = FeedbackRepairOrchestrator()
+        self.generated_tool_auto_repairer = RuntimeGeneratedToolAutoRepairer()
 
     def list_tools(self) -> list[dict[str, Any]]:
         registry = self._load_registry()
@@ -313,10 +316,38 @@ class RuntimeRegisteredToolService:
                 )
                 out["repair"] = repair
                 out["human_readable_error"] = repair.get("user_message")
+                if self._auto_runtime_tool_repair_enabled() and repair.get("capability_repair_available") and not bool(execution_controls.get("_repair_retry")):
+                    patch = self.generated_tool_auto_repairer.attempt_repair(
+                        run_id=run_id,
+                        tool_id=tool_id,
+                        tool_spec=spec,
+                        invocation_payload=invocation_payload,
+                        failure_result=result,
+                    )
+                    out["auto_repair"] = patch
+                    if str(patch.get("status") or "") == "repair_patch_applied":
+                        retry_payload = dict(runtime_input)
+                        retry_payload["_repair_retry"] = True
+                        retry_result = self.execute_tool(
+                            tool_id=tool_id,
+                            input_data=retry_payload,
+                            run_id=f"{run_id}_after_repair",
+                            profile_id=profile_id,
+                            approval_confirmed=True,
+                            remember_approval=remember_approval,
+                        )
+                        retry_result.setdefault("auto_repair", patch)
+                        retry_result["status_before_repair"] = out.get("status")
+                        self._persist_tool_result(retry_result)
+                        return retry_result
             except Exception as exc:
                 out["repair"] = {"status": "repair_proposal_failed", "error": str(exc)}
         self._persist_tool_result(out)
         return out
+
+
+    def _auto_runtime_tool_repair_enabled(self) -> bool:
+        return str(os.getenv("AI_RUNTIME_AUTO_REPAIR_GENERATED_TOOL_ON_EXECUTION_FAILURE") or "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
     def _repair_structural_placeholder_echo(self, *, result: dict[str, Any], runtime_input: dict[str, Any]) -> dict[str, Any]:

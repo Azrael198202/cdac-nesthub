@@ -100,6 +100,29 @@ class ConnectionProfileStore:
         items.sort(key=lambda item: (str(item.get("tool_id") or ""), str(item.get("profile_id") or "")))
         return items
 
+
+    def schema_defaults(self, schema: dict[str, Any] | None) -> dict[str, Any]:
+        """Return schema-declared default values without capability-specific logic.
+
+        Runtime-generated capabilities may declare connection defaults in their
+        JSON schema. These defaults are safe runtime configuration values, not
+        secrets. They should make registration-time pass-through verification
+        and first execution work without forcing a user interaction.
+        """
+        if not isinstance(schema, dict):
+            return {}
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        defaults: dict[str, Any] = {}
+        for field, spec in props.items():
+            if isinstance(spec, dict) and "default" in spec:
+                defaults[str(field)] = spec.get("default")
+        return defaults
+
+    def _value_present_or_defaulted(self, *, field: str, config: dict[str, Any], schema: dict[str, Any]) -> bool:
+        if field in config and config.get(field) not in {None, ""}:
+            return True
+        return field in self.schema_defaults(schema)
+
     def missing_requirements(self, *, tool_spec: dict[str, Any], profile_id: str = "default") -> dict[str, Any]:
         tool_id = str(tool_spec.get("tool_id") or tool_spec.get("name") or "")
         connection_schema = tool_spec.get("connection_schema") if isinstance(tool_spec.get("connection_schema"), dict) else {}
@@ -109,13 +132,11 @@ class ConnectionProfileStore:
         profile = self.get_profile(tool_id=tool_id, profile_id=profile_id, include_secrets=False)
         missing_config: list[str] = []
         if connection_required:
-            if not profile:
-                missing_config = self._schema_required_fields(connection_schema) or self._schema_fields(connection_schema)
-            else:
-                config = profile.get("config") if isinstance(profile.get("config"), dict) else {}
-                for field in self._schema_required_fields(connection_schema):
-                    if field not in config or config.get(field) in {None, ""}:
-                        missing_config.append(field)
+            config = profile.get("config") if isinstance(profile, dict) and isinstance(profile.get("config"), dict) else {}
+            required_fields = self._schema_required_fields(connection_schema) or self._schema_fields(connection_schema)
+            for field in required_fields:
+                if not self._value_present_or_defaulted(field=field, config=config, schema=connection_schema):
+                    missing_config.append(field)
         missing_secrets: list[str] = []
         if secret_fields:
             full = self.get_profile(tool_id=tool_id, profile_id=profile_id, include_secrets=True)
@@ -136,9 +157,13 @@ class ConnectionProfileStore:
     def runtime_context_for(self, *, tool_spec: dict[str, Any], profile_id: str = "default") -> dict[str, Any]:
         tool_id = str(tool_spec.get("tool_id") or tool_spec.get("name") or "")
         profile = self.get_profile(tool_id=tool_id, profile_id=profile_id, include_secrets=True) or {}
+        connection_schema = tool_spec.get("connection_schema") if isinstance(tool_spec.get("connection_schema"), dict) else {}
+        connection = self.schema_defaults(connection_schema)
+        if isinstance(profile.get("config"), dict):
+            connection.update({k: v for k, v in profile.get("config", {}).items() if v not in {None, ""}})
         return {
             "profile_id": profile_id,
-            "connection": profile.get("config") if isinstance(profile.get("config"), dict) else {},
+            "connection": connection,
             "secrets": profile.get("secrets") if isinstance(profile.get("secrets"), dict) else {},
             "secret_refs": profile.get("secret_refs") if isinstance(profile.get("secret_refs"), dict) else {},
         }
