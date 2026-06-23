@@ -331,7 +331,7 @@ class RuntimeRegisteredToolService:
                         retry_result = self.execute_tool(
                             tool_id=tool_id,
                             input_data=retry_payload,
-                            run_id=f"{run_id}_after_repair",
+                            run_id=self._next_repair_run_id(run_id),
                             profile_id=profile_id,
                             approval_confirmed=True,
                             remember_approval=remember_approval,
@@ -344,6 +344,20 @@ class RuntimeRegisteredToolService:
                 out["repair"] = {"status": "repair_proposal_failed", "error": str(exc)}
         self._persist_tool_result(out)
         return out
+
+
+    def _next_repair_run_id(self, run_id: str | None) -> str:
+        """Return a bounded retry id so repeated repair loops never create too-long trace filenames."""
+        import re as _re
+        base = str(run_id or "run")
+        base = _re.sub(r"_after_repair(?:_\d+)?", "", base)
+        base = base[:64].rstrip("_") or "run"
+        count = getattr(self, "_repair_retry_counter", 0) + 1
+        try:
+            setattr(self, "_repair_retry_counter", count)
+        except Exception:
+            pass
+        return f"{base}_repair_{count:02d}"
 
 
     def _auto_runtime_tool_repair_enabled(self) -> bool:

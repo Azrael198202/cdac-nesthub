@@ -1655,6 +1655,38 @@ class RuntimeCapabilityGapImplementer:
                 candidates.append(value)
         return candidates
 
+
+    def _run_py_compile_direct(self, *, py_files: list[str], cwd: Path, timeout: int = 30) -> dict[str, Any]:
+        """Compile generated Python files with the active interpreter.
+
+        This avoids false-positive validation caused by debugger/isolated
+        interpreter wrappers. A missing py_compile module or syntax error is
+        treated as validation failure, not success.
+        """
+        script = "import py_compile,sys; [py_compile.compile(p, doraise=True) for p in sys.argv[1:]]"
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", script, *py_files],
+                cwd=str(cwd),
+                env=self._clean_subprocess_env(pythonpath=None),
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+            )
+            attempt = {
+                "executable": sys.executable,
+                "returncode": proc.returncode,
+                "stdout": proc.stdout[-2000:],
+                "stderr": proc.stderr[-2000:],
+            }
+            return {**attempt, "attempts": [attempt]}
+        except Exception as exc:
+            attempt = {"executable": sys.executable, "returncode": -1, "stdout": "", "stderr": f"{exc.__class__.__name__}: {exc}"}
+            return {**attempt, "attempts": [attempt]}
+
     def _run_isolated_python(self, args: list[str], *, cwd: Path, timeout: int = 30, pythonpath: str | None = None) -> dict[str, Any]:
         """Run a generated-artifact validation command with debugger isolation.
 
@@ -2176,7 +2208,7 @@ def test_runtime_contract_smoke():
         checks: list[dict[str, Any]] = []
         py_files = [str(p) for p in tool_dir.rglob("*.py")]
         if py_files:
-            proc = self._run_isolated_python(["-m", "py_compile", *py_files], cwd=tool_dir, timeout=30)
+            proc = self._run_py_compile_direct(py_files=py_files, cwd=tool_dir, timeout=30)
             checks.append({
                 "name": "python_compile",
                 "returncode": proc.get("returncode"),

@@ -116,7 +116,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-CONTRACT = {json.dumps(contract, ensure_ascii=False, indent=2)}
+CONTRACT = {repr(contract)}
 
 
 def run(payload: dict[str, Any]) -> dict[str, Any]:
