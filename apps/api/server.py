@@ -37,6 +37,7 @@ from ai_core.runtime.async_jobs import RuntimeAsyncJobStore
 from ai_core.runtime.lifecycle_settings import RuntimeLifecycleSettingsStore
 from ai_core.runtime.task_runtime_policy import TaskRuntimePolicyResolver
 from ai_core.runtime.state import runtime_state_manager, capability_scoped_state_store
+from apps.api.result_formatting import format_async_job_result
 
 import traceback
 import os
@@ -1597,14 +1598,27 @@ async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any
             "confidence": perception_package.get("confidence"),
             "warnings": perception_package.get("warnings") or [],
         })
-        # Transport status is not a user answer.  If the runtime returned a rich
-        # payload with nested synthesis/agent/tool output, surface that material
-        # as final_answer before the async wrapper stores the result.
+        # Transport status is not a user answer. If the runtime returned a
+        # delivery path or a rich nested payload, normalize it before storing the
+        # session turn or finishing Runtime State. This keeps the UI from showing
+        # only "completed" or "runtime/deliveries/*.json".
+        try:
+            normalized_payload = format_async_job_result(payload, runtime_root=Path("runtime"), run_id=state_run_id)
+            if isinstance(normalized_payload, dict):
+                normalized_text = str(normalized_payload.get("final_answer") or normalized_payload.get("message") or "").strip()
+                if normalized_text and normalized_text.lower() not in {"completed", "success", "ok"} and not normalized_text.replace("\\", "/").startswith("runtime/deliveries/"):
+                    payload["normalized_result"] = normalized_payload
+                    payload["final_answer"] = normalized_text
+                    payload["message"] = normalized_text
+                    if "result" in normalized_payload:
+                        payload.setdefault("result", normalized_payload.get("result"))
+        except Exception:
+            pass
         if not str(payload.get("final_answer") or "").strip():
             nested_answer = _extract_payload_public_answer(payload)
-            if nested_answer:
+            if nested_answer and not nested_answer.replace("\\", "/").startswith("runtime/deliveries/"):
                 payload["final_answer"] = nested_answer
-        final_answer = str(payload.get("final_answer") or payload.get("message") or payload.get("status") or "")
+        final_answer = str(payload.get("final_answer") or payload.get("message") or "")
         if final_answer.strip():
             session_store.append_turn(
                 session_id=active_session_id,
@@ -1622,7 +1636,7 @@ async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any
         state_run_id,
         status=terminal_status,
         summary=str((payload or {}).get("final_answer") or (payload or {}).get("message") or final_status)[:1000] if isinstance(payload, dict) else "completed",
-        output={"status": final_status, "terminal_status": terminal_status} if isinstance(payload, dict) else {"result_type": type(payload).__name__},
+        output=(payload.get("normalized_result") or payload) if isinstance(payload, dict) else {"result_type": type(payload).__name__, "result": payload},
     )
     return payload if isinstance(payload, dict) else {"ok": True, "status": "completed", "runtime_state": {"run_id": state_run_id, "state_url": f"/runtime-state?run_id={state_run_id}"}, "result": payload}
 
@@ -1820,6 +1834,25 @@ async def runtime_job_state(job_id: str):
     job = async_job_store.public(job_id)
     if not job:
         return JSONResponse({"ok": False, "status": "not_found", "job_id": job_id}, status_code=404)
+    normalized = None
+    try:
+        normalized = format_async_job_result(job.get("result") if isinstance(job, dict) else None, runtime_root=Path("runtime"), run_id=job_id)
+    except Exception:
+        normalized = None
+    if isinstance(normalized, dict):
+        job = dict(job)
+        job["normalized_result"] = normalized
+        # If the durable job contains only a transport status such as
+        # {status: completed}, expose a normalized user-visible result so the UI
+        # can render without a manual refresh.
+        result = job.get("result")
+        if isinstance(result, dict):
+            has_visible = bool(str(result.get("final_answer") or result.get("message") or "").strip())
+            bare_completed = set(result.keys()) <= {"status", "action", "run_id"}
+            if (not has_visible) or bare_completed:
+                job["result"] = normalized
+        else:
+            job["result"] = normalized
     return JSONResponse({"ok": True, "job": job})
 
 

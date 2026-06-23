@@ -528,6 +528,55 @@ function hasRuntimeInteractionPayload(data){
   return keys.some(k => data[k] && typeof data[k] === 'object');
 }
 
+function isDeliveryPathText(value){
+  const text=String(value||'').trim().replaceAll('\\','/');
+  return text.endsWith('.json') && (text.includes('/deliveries/') || text.startsWith('runtime/deliveries/') || text.startsWith('deliveries/'));
+}
+
+function hasVisibleRuntimeResult(data){
+  if(!data || typeof data !== 'object'){ return false; }
+  const blocked=new Set(['','completed','success','ok','conversation_message','runtime_response']);
+  for(const key of ['final_answer','message','answer','text','summary']){
+    const value=String(data[key]||'').trim();
+    if(value && !blocked.has(value.toLowerCase()) && !isDeliveryPathText(value)){ return true; }
+  }
+  if(data.normalized_result && typeof data.normalized_result==='object'){ return hasVisibleRuntimeResult(data.normalized_result); }
+  if(data.result && typeof data.result==='object'){ return hasVisibleRuntimeResult(data.result); }
+  if(data.output && typeof data.output==='object'){ return hasVisibleRuntimeResult(data.output); }
+  if(data.tool_result && typeof data.tool_result==='object'){ return true; }
+  return false;
+}
+
+function preferNormalizedJobResult(job){
+  if(!job || typeof job !== 'object'){ return {}; }
+  const normalized=job.normalized_result && typeof job.normalized_result==='object' ? job.normalized_result : null;
+  const result=job.result && typeof job.result==='object' ? job.result : {};
+  if(normalized && (!hasVisibleRuntimeResult(result) || hasVisibleRuntimeResult(normalized))){
+    return normalized;
+  }
+  return result;
+}
+
+async function reloadTerminalJobResult(jobId, currentData){
+  let data=currentData || {};
+  // Fast local capabilities can finish and write delivery after the terminal
+  // status is observed. Poll a few short times and prefer normalized_result.
+  for(let attempt=0; attempt<5; attempt++){
+    try{
+      const jobData=await fetchJsonWithRetry('/api/runtime/jobs/'+encodeURIComponent(jobId),{cache:'no-store'},2,500);
+      const job=jobData.job||{};
+      const candidate=preferNormalizedJobResult(job);
+      if(candidate && (hasVisibleRuntimeResult(candidate) || attempt===4)){
+        return candidate;
+      }
+    }catch(e){
+      addProgressMessage('terminal result reload retry: '+String(e.message||e));
+    }
+    await new Promise(resolve=>setTimeout(resolve, 350));
+  }
+  return data;
+}
+
 async function recoverAsyncJobResult(jobId){
   try{
     const jobData=await fetchJsonWithRetry('/api/runtime/jobs/'+encodeURIComponent(jobId),{cache:'no-store'},2,700);
@@ -583,7 +632,8 @@ async function waitForRuntimeJobResult(jobId, options){
     addProgressMessage('job status: '+(job.status||'unknown'));
     await refreshState();
     if(['completed','paused','failed','cancelled','interrupted'].includes(String(job.status||''))){
-      data=(job.result||{});
+      data=preferNormalizedJobResult(job);
+      data=await reloadTerminalJobResult(jobId, data);
       const jobStatus=String(job.status||'');
       const genericPausedRecovery = jobStatus==='paused' && data && data.durable_recovered && !hasRuntimeInteractionPayload(data);
       if((jobStatus==='interrupted' && (!data || !data.final_answer)) || genericPausedRecovery){
@@ -665,7 +715,8 @@ async function sendMessage(){
       addProgressMessage('job status: '+(job.status||'unknown'));
       await refreshState();
       if(['completed','paused','failed','cancelled','interrupted'].includes(String(job.status||''))){
-        data=(job.result||{});
+        data=preferNormalizedJobResult(job);
+        data=await reloadTerminalJobResult(accepted.job_id, data);
         if(String(job.status||'')==='interrupted' && (!data || !data.final_answer)){ data = await recoverAsyncJobResult(accepted.job_id) || data; }
         if(job.error && !data.error){ data={ok:false,status:'failed',error:job.error,message:job.error.message}; }
         setStudioStatus('job completed; rendering result', false);
