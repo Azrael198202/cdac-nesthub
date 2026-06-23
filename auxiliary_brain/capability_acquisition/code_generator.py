@@ -530,6 +530,112 @@ class RuntimeBlueprintArtifactGenerator:
 
 
 
+
+    def _capability_replay_dir(self, *, run_id: str | None, tool_id: str) -> Path:
+        """Return the durable replay folder for one capability acquisition run.
+
+        Replay is observability only. It records prompts, raw responses, the
+        compiled task graph, extraction results, and validation summaries so a
+        user can diagnose local-model behavior from Runtime State Console
+        without opening backend trace files.
+        """
+        try:
+            from ai_core.config.paths import RUNTIME_TRACES
+            base = Path(RUNTIME_TRACES) / "capability_acquisition_replay"
+        except Exception:
+            base = Path("runtime") / "traces" / "capability_acquisition_replay"
+        safe_run = self._safe_name(str(run_id or "runtime"))
+        safe_tool = self._safe_name(str(tool_id or "generated_capability"))
+        path = base / safe_run / safe_tool
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _write_replay_file(
+        self,
+        *,
+        run_id: str | None,
+        tool_id: str,
+        filename: str,
+        content: Any,
+        title: str = "Capability acquisition replay",
+        status: str = "completed",
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        replay_dir = self._capability_replay_dir(run_id=run_id, tool_id=tool_id)
+        safe_name = str(filename or "artifact.txt").replace("\\", "/").rsplit("/", 1)[-1]
+        path = replay_dir / safe_name
+        if isinstance(content, (dict, list)):
+            text = json.dumps(content, ensure_ascii=False, indent=2, default=str)
+        else:
+            text = str(content if content is not None else "")
+        path.write_text(text, encoding="utf-8")
+        self._emit_replay_event(
+            run_id=run_id,
+            tool_id=tool_id,
+            status=status,
+            title=title,
+            message=f"Replay file written: {safe_name}",
+            output={
+                "replay_file": safe_name,
+                "replay_path": str(path),
+                "preview": text[:1800],
+            },
+            metadata=metadata or {},
+        )
+        return str(path)
+
+    def _emit_replay_event(
+        self,
+        *,
+        run_id: str | None,
+        tool_id: str,
+        status: str,
+        title: str,
+        message: str,
+        output: Any | None = None,
+        error: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if runtime_state_manager is None or not run_id:
+            return
+        try:
+            runtime_state_manager.emit(
+                run_id=str(run_id),
+                step_id="capability_acquisition.replay",
+                level="developer",
+                kind="capability_replay",
+                status=status,
+                title=title,
+                message=message,
+                output=output,
+                error=error,
+                method="capability_acquisition_replay",
+                tool=str(tool_id or ""),
+                progress=None,
+                metadata=metadata or {},
+            )
+        except Exception:
+            pass
+
+    def _stage_replay_name(self, stage_index: int, suffix: str) -> str:
+        try:
+            n = max(1, int(stage_index))
+        except Exception:
+            n = 1
+        return f"stage_{n:03d}_{suffix}.txt"
+
+    def _original_request_replay_text(self, *, blueprint: dict[str, Any], identity_contract: dict[str, Any], tool_id: str) -> str:
+        candidates = []
+        for source in (identity_contract, blueprint):
+            if isinstance(source, dict):
+                for key in ("original_request", "user_request", "request", "instruction", "raw_instruction", "description", "goal"):
+                    value = source.get(key)
+                    if isinstance(value, str) and value.strip():
+                        candidates.append(value.strip())
+        if candidates:
+            return candidates[0]
+        return json.dumps({"tool_id": tool_id, "identity_contract": identity_contract, "blueprint": blueprint}, ensure_ascii=False, indent=2, default=str)
+
     def _generate_progressive_artifact_with_llm(
         self,
         *,
@@ -568,6 +674,22 @@ class RuntimeBlueprintArtifactGenerator:
             secret_schema=secret_schema,
             verification_input=verification_input,
             specification_contract=specification_contract,
+        )
+        self._write_replay_file(
+            run_id=run_id,
+            tool_id=tool_id,
+            filename="original_request.txt",
+            content=self._original_request_replay_text(blueprint=blueprint, identity_contract=identity_contract, tool_id=tool_id),
+            title="Capability acquisition replay created",
+            metadata={"replay_kind": "original_request"},
+        )
+        self._write_replay_file(
+            run_id=run_id,
+            tool_id=tool_id,
+            filename="task_graph.json",
+            content=task_graph,
+            title="Capability task graph captured",
+            metadata={"replay_kind": "task_graph"},
         )
         graph_nodes = [node for node in task_graph.get("nodes", []) if isinstance(node, dict) and node.get("target_file")]
         if not graph_nodes:
@@ -610,7 +732,7 @@ class RuntimeBlueprintArtifactGenerator:
                 )
                 continue
             files: list[dict[str, str]] = []
-            for node in graph_nodes:
+            for stage_index, node in enumerate(graph_nodes, start=1):
                 path = str(node.get("target_file") or "").strip()
                 if not path:
                     continue
@@ -619,6 +741,7 @@ class RuntimeBlueprintArtifactGenerator:
                     run_id=run_id,
                     attempt=attempt,
                     path=path,
+                    stage_index=stage_index,
                     stage=str(node.get("stage") or node.get("node_id") or path),
                     stage_contract=node.get("contract") if isinstance(node.get("contract"), dict) else {},
                     task_graph=task_graph,
@@ -656,6 +779,21 @@ class RuntimeBlueprintArtifactGenerator:
             }
             artifact = self._normalize_llm_artifact_payload(artifact, tool_id=tool_id)
             if self._valid_generated_artifact(artifact):
+                self._write_replay_file(
+                    run_id=run_id,
+                    tool_id=tool_id,
+                    filename="validation_report.json",
+                    content={
+                        "status": "completed",
+                        "tool_id": tool_id,
+                        "artifact_file_count": len(files),
+                        "files": [f.get("path") for f in files],
+                        "generation_route": {"mode": "progressive_file_generation", "attempt": attempt},
+                        "attempts": progressive_attempts,
+                    },
+                    title="Capability replay validation report",
+                    metadata={"replay_kind": "validation_report"},
+                )
                 self._emit_generation_progress(
                     run_id=run_id,
                     tool_id=tool_id,
@@ -664,6 +802,20 @@ class RuntimeBlueprintArtifactGenerator:
                     attempt=attempt,
                 )
                 return artifact
+        self._write_replay_file(
+            run_id=run_id,
+            tool_id=tool_id,
+            filename="validation_report.json",
+            content={
+                "status": "failed",
+                "tool_id": tool_id,
+                "error": "No progressive model route produced executable artifact files.",
+                "attempts": progressive_attempts,
+            },
+            title="Capability replay validation report",
+            status="failed",
+            metadata={"replay_kind": "validation_report"},
+        )
         self._emit_generation_progress(
             run_id=run_id,
             tool_id=tool_id,
@@ -875,7 +1027,8 @@ class RuntimeBlueprintArtifactGenerator:
         run_id: str | None,
         attempt: dict[str, Any],
         path: str,
-        stage: str,
+        stage_index: int = 1,
+        stage: str = "",
         stage_contract: dict[str, Any],
         task_graph: dict[str, Any],
         entrypoint: dict[str, Any],
@@ -922,6 +1075,15 @@ class RuntimeBlueprintArtifactGenerator:
             {"role": "user", "content": json.dumps(contract, ensure_ascii=False, separators=(",", ":"), default=str)},
         ]
         file_attempt = {**attempt, "progressive_file": path, "force_json": True, "compact": True}
+        prompt_text = "\n\n".join([f"[{m.get('role', 'user')}]\n{m.get('content', '')}" for m in messages if isinstance(m, dict)])
+        self._write_replay_file(
+            run_id=run_id,
+            tool_id=tool_id,
+            filename=self._stage_replay_name(stage_index, "prompt"),
+            content=prompt_text,
+            title="Capability stage prompt captured",
+            metadata={"replay_kind": "stage_prompt", "stage_index": stage_index, "target_file": path, "stage": stage},
+        )
         self._emit_generation_progress(
             run_id=run_id,
             tool_id=tool_id,
@@ -947,6 +1109,15 @@ class RuntimeBlueprintArtifactGenerator:
             response_format={"type": "json_object"},
         )
         route = result.route if isinstance(result.route, dict) else {}
+        self._write_replay_file(
+            run_id=run_id,
+            tool_id=tool_id,
+            filename=self._stage_replay_name(stage_index, "response"),
+            content=str(result.content or "") if result.status == "completed" else {"status": result.status, "error": result.error, "route": route, "content": str(result.content or "")},
+            title="Capability stage response captured",
+            status="completed" if result.status == "completed" else "failed",
+            metadata={"replay_kind": "stage_response", "stage_index": stage_index, "target_file": path, "stage": stage, "model_route": route},
+        )
         if result.status != "completed":
             self._emit_generation_progress(
                 run_id=run_id,
@@ -970,6 +1141,15 @@ class RuntimeBlueprintArtifactGenerator:
             content = parsed.get("code") if isinstance(parsed.get("code"), str) else None
         if not isinstance(content, str) or not content.strip():
             error = "progressive file generation did not return source content"
+            self._write_replay_file(
+                run_id=run_id,
+                tool_id=tool_id,
+                filename=self._stage_replay_name(stage_index, "extraction_result"),
+                content={"status": "invalid_output", "error": error, "parsed_keys": list(parsed.keys()) if isinstance(parsed, dict) else [], "target_file": path},
+                title="Capability stage extraction failed",
+                status="failed",
+                metadata={"replay_kind": "stage_extraction", "stage_index": stage_index, "target_file": path, "stage": stage},
+            )
             self._emit_generation_progress(
                 run_id=run_id,
                 tool_id=tool_id,
@@ -981,6 +1161,14 @@ class RuntimeBlueprintArtifactGenerator:
                 error=error,
             )
             return {"status": "invalid_output", "error": error, "route": route, "attempt_record": {"status": "invalid_output", "error": error, "route": route, "attempt": file_attempt, "path": path}}
+        self._write_replay_file(
+            run_id=run_id,
+            tool_id=tool_id,
+            filename=self._stage_replay_name(stage_index, "extraction_result"),
+            content={"status": "completed", "target_file": path, "content_length": len(content), "route": route},
+            title="Capability stage extraction completed",
+            metadata={"replay_kind": "stage_extraction", "stage_index": stage_index, "target_file": path, "stage": stage},
+        )
         return {"status": "completed", "content": content, "route": route, "attempt_record": {"status": "completed", "route": route, "attempt": file_attempt, "path": path}}
 
     def _codegen_attempt_available(self, attempt: dict[str, Any], *, run_id: str | None = None, tool_id: str | None = None) -> tuple[bool, str]:

@@ -23,7 +23,7 @@ from ai_core.runtime.bootstrap import RuntimeBootstrapService
 from ai_core.runtime.modeling.user_model_selection import UserModelSelectionStore
 from ai_core.context.session_memory_store import SessionMemoryStore
 from ai_core.knowledge.knowledge_service import KnowledgeService
-from ai_core.config.paths import RUNTIME_DOWNLOADS
+from ai_core.config.paths import RUNTIME_DOWNLOADS, RUNTIME_TRACES
 from auxiliary_brain.runtime_tools.runtime_registered_tool_service import RuntimeRegisteredToolService
 from ai_core.runtime.approval_policy_store import RuntimeApprovalPolicyStore
 from auxiliary_brain.research.source_retrieval_settings import SourceRetrievalSettingsStore
@@ -60,6 +60,26 @@ async_job_store = RuntimeAsyncJobStore()
 runtime_lifecycle_settings_store = RuntimeLifecycleSettingsStore()
 task_runtime_policy_resolver = TaskRuntimePolicyResolver(runtime_lifecycle_settings_store)
 model_prompt_registry = ModelPromptRegistry()
+
+
+def _safe_runtime_name(value: str) -> str:
+    text = str(value or "").strip()
+    return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in text)[:160]
+
+
+def _capability_replay_root() -> Path:
+    root = Path(RUNTIME_TRACES) / "capability_acquisition_replay"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _capability_replay_dir(run_id: str, tool_id: str | None = None) -> Path:
+    run = _safe_runtime_name(run_id)
+    root = _capability_replay_root() / run
+    if tool_id:
+        return root / _safe_runtime_name(tool_id)
+    return root
+
 
 @app.on_event("startup")
 async def _runtime_state_restart_cleanup():
@@ -687,6 +707,44 @@ async def runtime_state_run(run_id: str):
 @app.get("/api/runtime-state/runs/{run_id}/events")
 async def runtime_state_events(run_id: str, after_sequence: int = 0, limit: int = 300, min_level: str | None = None):
     return JSONResponse({"ok": True, "run_id": run_id, "events": runtime_state_manager.list_events(run_id, after_sequence=after_sequence, limit=limit, min_level=min_level)})
+
+
+
+
+@app.get("/api/runtime-state/runs/{run_id}/capability-replay")
+async def runtime_state_capability_replay(run_id: str):
+    root = _capability_replay_dir(run_id)
+    if not root.exists():
+        return JSONResponse({"ok": True, "run_id": run_id, "replays": []})
+    replays = []
+    for tool_dir in sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.name):
+        files = []
+        for file in sorted([p for p in tool_dir.iterdir() if p.is_file()], key=lambda p: p.name):
+            try:
+                text = file.read_text(encoding="utf-8")
+            except Exception:
+                text = ""
+            files.append({
+                "name": file.name,
+                "size": file.stat().st_size if file.exists() else 0,
+                "preview": text[:6000],
+                "download_url": f"/api/runtime-state/runs/{run_id}/capability-replay/{tool_dir.name}/{file.name}",
+            })
+        replays.append({"tool_id": tool_dir.name, "files": files})
+    return JSONResponse({"ok": True, "run_id": run_id, "replays": replays})
+
+
+@app.get("/api/runtime-state/runs/{run_id}/capability-replay/{tool_id}/{filename}")
+async def runtime_state_capability_replay_file(run_id: str, tool_id: str, filename: str):
+    base = _capability_replay_dir(run_id, tool_id).resolve()
+    path = (base / _safe_runtime_name(filename)).resolve()
+    if not str(path).startswith(str(base)) or not path.exists() or not path.is_file():
+        return JSONResponse({"ok": False, "status": "not_found"}, status_code=404)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        text = ""
+    return JSONResponse({"ok": True, "run_id": run_id, "tool_id": tool_id, "filename": filename, "content": text})
 
 
 @app.get("/api/runtime-state/runs/{run_id}/stream")
