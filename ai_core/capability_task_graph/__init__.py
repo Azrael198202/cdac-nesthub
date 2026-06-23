@@ -1,3 +1,2 @@
-from .capability_task_graph_compiler import CapabilityTaskGraphCompiler
-
+from .compiler import CapabilityTaskGraphCompiler
 __all__ = ["CapabilityTaskGraphCompiler"]

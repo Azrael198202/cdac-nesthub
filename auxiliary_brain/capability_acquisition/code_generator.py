@@ -27,14 +27,10 @@ except Exception:  # pragma: no cover - optional runtime integration
     RuntimeModelDownloader = None
 
 from ai_core.model_orchestration import LiteLLMBrainClient
+from ai_core.capability_task_graph import CapabilityTaskGraphCompiler
 from auxiliary_brain.capability_acquisition.specification_contract_compiler import CapabilitySpecificationContractCompiler
 from auxiliary_brain.capability_acquisition.schema_boundary import CapabilitySchemaBoundary
 from auxiliary_brain.capability_acquisition.prompt_engineer import build_generation_prompt_messages
-
-try:
-    from ai_core.capability_task_graph import CapabilityTaskGraphCompiler
-except Exception:  # pragma: no cover - optional staged generation integration
-    CapabilityTaskGraphCompiler = None
 
 
 class RuntimeBlueprintArtifactGenerator:
@@ -54,7 +50,7 @@ class RuntimeBlueprintArtifactGenerator:
         self.llm_client = llm_client or LiteLLMBrainClient()
         self.contract_compiler = CapabilitySpecificationContractCompiler()
         self.schema_boundary = CapabilitySchemaBoundary()
-        self.capability_task_graph_compiler = CapabilityTaskGraphCompiler() if CapabilityTaskGraphCompiler is not None else None
+        self.task_graph_compiler = CapabilityTaskGraphCompiler()
 
     def materialize(self, blueprint: dict[str, Any], *, identity_contract: dict[str, Any] | None = None, run_id: str | None = None) -> dict[str, Any]:
         if not isinstance(blueprint, dict):
@@ -277,13 +273,138 @@ class RuntimeBlueprintArtifactGenerator:
             "artifact_kind": artifact_kind,
             "blueprint_source": blueprint.get("blueprint_source") or "runtime_blueprint_planner",
             "code_generation": {
-                "mode": "llm_or_supplied_files_only",
+                "mode": "capability_taskgraph_mainflow",
                 "status": generation_status,
                 "route": generation_route,
                 "error": generation_error,
             },
             "generated_at": self._now_iso(),
         }
+
+
+    def _capability_taskgraph_mainflow_enabled(self) -> bool:
+        return str(os.getenv("AI_RUNTIME_CAPABILITY_TASKGRAPH_MAINFLOW", "1")).strip().lower() not in {"0", "false", "no", "off"}
+
+    def _capability_replay_dir(self, *, run_id: str | None, tool_id: str) -> Path:
+        try:
+            from ai_core.config.paths import RUNTIME_TRACES
+            base = Path(RUNTIME_TRACES) / "capability_acquisition_replay"
+        except Exception:
+            base = Path("runtime") / "traces" / "capability_acquisition_replay"
+        safe_run = self._safe_name(str(run_id or "runtime"))
+        safe_tool = self._safe_name(str(tool_id or "generated_capability"))
+        path = base / safe_run / safe_tool
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _emit_replay_event(
+        self,
+        *,
+        run_id: str | None,
+        tool_id: str,
+        status: str,
+        title: str,
+        message: str,
+        output: Any | None = None,
+        error: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if runtime_state_manager is None or not run_id:
+            return
+        try:
+            runtime_state_manager.emit(
+                run_id=str(run_id),
+                step_id="capability_acquisition.replay",
+                level="developer",
+                kind="capability_replay",
+                status=status,
+                title=title,
+                message=message,
+                output=output,
+                error=error,
+                method="capability_acquisition_replay",
+                tool=str(tool_id or ""),
+                progress=None,
+                metadata=metadata or {},
+            )
+        except Exception:
+            pass
+
+    def _write_replay_file(
+        self,
+        *,
+        run_id: str | None,
+        tool_id: str,
+        filename: str,
+        content: Any,
+        title: str = "Capability acquisition replay",
+        status: str = "completed",
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        replay_dir = self._capability_replay_dir(run_id=run_id, tool_id=tool_id)
+        safe_name = str(filename or "artifact.txt").replace("\\", "/").rsplit("/", 1)[-1]
+        path = replay_dir / safe_name
+        if isinstance(content, (dict, list)):
+            text = json.dumps(content, ensure_ascii=False, indent=2, default=str)
+        else:
+            text = str(content if content is not None else "")
+        path.write_text(text, encoding="utf-8")
+        self._emit_replay_event(
+            run_id=run_id,
+            tool_id=tool_id,
+            status=status,
+            title=title,
+            message=f"Replay file written: {safe_name}",
+            output={"replay_file": safe_name, "replay_path": str(path), "preview": text[:3000]},
+            metadata=metadata or {},
+        )
+        return str(path)
+
+    def _stage_replay_name(self, stage_index: int, suffix: str) -> str:
+        try:
+            n = max(1, int(stage_index))
+        except Exception:
+            n = 1
+        return f"stage_{n:03d}_{suffix}.txt"
+
+    def _original_request_replay_text(self, *, blueprint: dict[str, Any], identity_contract: dict[str, Any], tool_id: str) -> str:
+        candidates: list[str] = []
+        for source in (identity_contract, blueprint):
+            if isinstance(source, dict):
+                for key in ("original_request", "user_request", "request", "instruction", "raw_instruction", "description", "goal"):
+                    value = source.get(key)
+                    if isinstance(value, str) and value.strip():
+                        candidates.append(value.strip())
+        if candidates:
+            return candidates[0]
+        return json.dumps({"tool_id": tool_id, "identity_contract": identity_contract, "blueprint": blueprint}, ensure_ascii=False, indent=2, default=str)
+
+    def _compile_capability_task_graph(
+        self,
+        *,
+        tool_id: str,
+        entrypoint: dict[str, Any],
+        blueprint: dict[str, Any],
+        identity_contract: dict[str, Any],
+        input_schema: dict[str, Any],
+        output_schema: dict[str, Any],
+        connection_schema: dict[str, Any],
+        secret_schema: dict[str, Any],
+        verification_input: dict[str, Any],
+        specification_contract: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self.task_graph_compiler.compile(
+            tool_id=tool_id,
+            entrypoint=entrypoint,
+            blueprint=blueprint,
+            identity_contract=identity_contract,
+            input_schema=input_schema,
+            output_schema=output_schema,
+            connection_schema=connection_schema,
+            secret_schema=secret_schema,
+            verification_input=verification_input,
+            specification_contract=specification_contract,
+        )
 
     def _generate_with_llm(
         self,
@@ -300,6 +421,36 @@ class RuntimeBlueprintArtifactGenerator:
         verification_input: dict[str, Any],
         specification_contract: dict[str, Any],
     ) -> dict[str, Any]:
+        if self._capability_taskgraph_mainflow_enabled():
+            progressive = self._generate_progressive_artifact_with_llm(
+                tool_id=tool_id,
+                run_id=run_id,
+                entrypoint=entrypoint,
+                blueprint=blueprint,
+                identity_contract=identity_contract,
+                input_schema=input_schema,
+                output_schema=output_schema,
+                connection_schema=connection_schema,
+                secret_schema=secret_schema,
+                verification_input=verification_input,
+                specification_contract=specification_contract,
+                previous_attempts=[],
+                route_floor=0,
+            )
+            if self._valid_generated_artifact(progressive):
+                contract_violations = self._generated_artifact_contract_violations(
+                    progressive,
+                    input_schema=input_schema,
+                    connection_schema=connection_schema,
+                    secret_schema=secret_schema,
+                )
+                if not contract_violations:
+                    progressive["generation_status"] = "completed"
+                    progressive["generation_route"] = progressive.get("generation_route") if isinstance(progressive.get("generation_route"), dict) else {"mode": "capability_taskgraph_progressive_generation"}
+                    return progressive
+                progressive["generation_error"] = "; ".join(contract_violations[:8])
+            return progressive if isinstance(progressive, dict) else {"generation_status": "capability_taskgraph_generation_failed", "generation_error": "Capability TaskGraph mainflow did not produce an artifact."}
+
         base_complexity = self._generation_complexity(blueprint=blueprint, identity_contract=identity_contract)
         attempts: list[dict[str, Any]] = []
         for attempt in self._generation_attempts(base_complexity):
@@ -530,112 +681,6 @@ class RuntimeBlueprintArtifactGenerator:
 
 
 
-
-    def _capability_replay_dir(self, *, run_id: str | None, tool_id: str) -> Path:
-        """Return the durable replay folder for one capability acquisition run.
-
-        Replay is observability only. It records prompts, raw responses, the
-        compiled task graph, extraction results, and validation summaries so a
-        user can diagnose local-model behavior from Runtime State Console
-        without opening backend trace files.
-        """
-        try:
-            from ai_core.config.paths import RUNTIME_TRACES
-            base = Path(RUNTIME_TRACES) / "capability_acquisition_replay"
-        except Exception:
-            base = Path("runtime") / "traces" / "capability_acquisition_replay"
-        safe_run = self._safe_name(str(run_id or "runtime"))
-        safe_tool = self._safe_name(str(tool_id or "generated_capability"))
-        path = base / safe_run / safe_tool
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    def _write_replay_file(
-        self,
-        *,
-        run_id: str | None,
-        tool_id: str,
-        filename: str,
-        content: Any,
-        title: str = "Capability acquisition replay",
-        status: str = "completed",
-        metadata: dict[str, Any] | None = None,
-    ) -> str:
-        replay_dir = self._capability_replay_dir(run_id=run_id, tool_id=tool_id)
-        safe_name = str(filename or "artifact.txt").replace("\\", "/").rsplit("/", 1)[-1]
-        path = replay_dir / safe_name
-        if isinstance(content, (dict, list)):
-            text = json.dumps(content, ensure_ascii=False, indent=2, default=str)
-        else:
-            text = str(content if content is not None else "")
-        path.write_text(text, encoding="utf-8")
-        self._emit_replay_event(
-            run_id=run_id,
-            tool_id=tool_id,
-            status=status,
-            title=title,
-            message=f"Replay file written: {safe_name}",
-            output={
-                "replay_file": safe_name,
-                "replay_path": str(path),
-                "preview": text[:1800],
-            },
-            metadata=metadata or {},
-        )
-        return str(path)
-
-    def _emit_replay_event(
-        self,
-        *,
-        run_id: str | None,
-        tool_id: str,
-        status: str,
-        title: str,
-        message: str,
-        output: Any | None = None,
-        error: dict[str, Any] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        if runtime_state_manager is None or not run_id:
-            return
-        try:
-            runtime_state_manager.emit(
-                run_id=str(run_id),
-                step_id="capability_acquisition.replay",
-                level="developer",
-                kind="capability_replay",
-                status=status,
-                title=title,
-                message=message,
-                output=output,
-                error=error,
-                method="capability_acquisition_replay",
-                tool=str(tool_id or ""),
-                progress=None,
-                metadata=metadata or {},
-            )
-        except Exception:
-            pass
-
-    def _stage_replay_name(self, stage_index: int, suffix: str) -> str:
-        try:
-            n = max(1, int(stage_index))
-        except Exception:
-            n = 1
-        return f"stage_{n:03d}_{suffix}.txt"
-
-    def _original_request_replay_text(self, *, blueprint: dict[str, Any], identity_contract: dict[str, Any], tool_id: str) -> str:
-        candidates = []
-        for source in (identity_contract, blueprint):
-            if isinstance(source, dict):
-                for key in ("original_request", "user_request", "request", "instruction", "raw_instruction", "description", "goal"):
-                    value = source.get(key)
-                    if isinstance(value, str) and value.strip():
-                        candidates.append(value.strip())
-        if candidates:
-            return candidates[0]
-        return json.dumps({"tool_id": tool_id, "identity_contract": identity_contract, "blueprint": blueprint}, ensure_ascii=False, indent=2, default=str)
-
     def _generate_progressive_artifact_with_llm(
         self,
         *,
@@ -663,6 +708,14 @@ class RuntimeBlueprintArtifactGenerator:
         """
         attempts = previous_attempts if isinstance(previous_attempts, list) else []
         progressive_attempts: list[dict[str, Any]] = []
+        routes = [attempt for attempt in self._generation_attempts("basic") if isinstance(attempt, dict)]
+        # Progressive generation is already split into smaller file-level calls.
+        # Keep the policy-defined escalation order so a usable mid-sized model
+        # can finish before falling through to the largest local model.  The
+        # route_floor skips models already proven unsuitable in full-artifact
+        # generation without relying on capability names or business words.
+        if route_floor > 0:
+            routes = routes[min(route_floor, len(routes)):] or routes[-1:]
         task_graph = self._compile_capability_task_graph(
             tool_id=tool_id,
             entrypoint=entrypoint,
@@ -674,6 +727,13 @@ class RuntimeBlueprintArtifactGenerator:
             secret_schema=secret_schema,
             verification_input=verification_input,
             specification_contract=specification_contract,
+        )
+        self._emit_generation_progress(
+            run_id=run_id,
+            tool_id=tool_id,
+            status="running",
+            phase="capability_taskgraph_generation_started",
+            previous_attempt_count=len(attempts),
         )
         self._write_replay_file(
             run_id=run_id,
@@ -691,26 +751,32 @@ class RuntimeBlueprintArtifactGenerator:
             title="Capability task graph captured",
             metadata={"replay_kind": "task_graph"},
         )
+        self._write_replay_file(
+            run_id=run_id,
+            tool_id=tool_id,
+            filename="replay_manifest.json",
+            content={"run_id": run_id, "tool_id": tool_id, "replay_dir": str(self._capability_replay_dir(run_id=run_id, tool_id=tool_id)), "files": ["original_request.txt", "task_graph.json", "replay_manifest.json"]},
+            title="Capability replay manifest captured",
+            metadata={"replay_kind": "replay_manifest"},
+        )
         graph_nodes = [node for node in task_graph.get("nodes", []) if isinstance(node, dict) and node.get("target_file")]
         if not graph_nodes:
-            graph_nodes = [
-                {"node_id": "entrypoint_contract", "stage": "entrypoint_contract", "target_file": str(entrypoint.get("module") or "tool.py"), "depends_on": [], "contract": {}},
-                {"node_id": "validation_contract", "stage": "validation_contract", "target_file": "test_tool.py", "depends_on": ["entrypoint_contract"], "contract": {}},
-            ]
-        routes = [attempt for attempt in self._generation_attempts("basic") if isinstance(attempt, dict)]
-        # Progressive generation is graph-driven and capability-neutral.  The
-        # graph comes from ai_core, while this auxiliary component only executes
-        # nodes and records traces.  Do not introduce capability-name branches or
-        # domain implementation templates here.
-        if route_floor > 0:
-            routes = routes[min(route_floor, len(routes)):] or routes[-1:]
+            self._write_replay_file(
+                run_id=run_id,
+                tool_id=tool_id,
+                filename="validation_report.json",
+                content={"status": "failed", "error": "Capability TaskGraph did not contain executable generation nodes.", "task_graph": task_graph},
+                title="Capability replay validation report",
+                status="failed",
+                metadata={"replay_kind": "validation_report"},
+            )
+            return {"generation_status": "capability_taskgraph_generation_failed", "generation_error": "Capability TaskGraph did not contain executable generation nodes.", "generation_attempts": progressive_attempts}
         self._emit_generation_progress(
             run_id=run_id,
             tool_id=tool_id,
             status="running",
-            phase="progressive_artifact_generation_started",
-            previous_attempt_count=len(attempts),
-            task_graph=task_graph,
+            phase="capability_taskgraph_generation_completed",
+            node_count=len(graph_nodes),
         )
         for attempt in routes:
             available, availability_reason = self._codegen_attempt_available(attempt, run_id=run_id, tool_id=tool_id)
@@ -734,8 +800,6 @@ class RuntimeBlueprintArtifactGenerator:
             files: list[dict[str, str]] = []
             for stage_index, node in enumerate(graph_nodes, start=1):
                 path = str(node.get("target_file") or "").strip()
-                if not path:
-                    continue
                 file_result = self._generate_progressive_file_with_llm(
                     tool_id=tool_id,
                     run_id=run_id,
@@ -743,8 +807,7 @@ class RuntimeBlueprintArtifactGenerator:
                     path=path,
                     stage_index=stage_index,
                     stage=str(node.get("stage") or node.get("node_id") or path),
-                    stage_contract=node.get("contract") if isinstance(node.get("contract"), dict) else {},
-                    task_graph=task_graph,
+                    stage_contract=node,
                     entrypoint=entrypoint,
                     blueprint=blueprint,
                     identity_contract=identity_contract,
@@ -774,7 +837,7 @@ class RuntimeBlueprintArtifactGenerator:
                 "verification_input": verification_input,
                 "verification_expectations": blueprint.get("verification_expectations") if isinstance(blueprint.get("verification_expectations"), dict) else {"status": "completed"},
                 "capability_match_contract": self._capability_contract(tool_id=tool_id, blueprint=blueprint),
-                "generation_route": {"mode": "progressive_file_generation", "attempt": attempt},
+                "generation_route": {"mode": "capability_taskgraph_progressive_generation", "attempt": attempt},
                 "generation_attempts": progressive_attempts,
             }
             artifact = self._normalize_llm_artifact_payload(artifact, tool_id=tool_id)
@@ -788,7 +851,7 @@ class RuntimeBlueprintArtifactGenerator:
                         "tool_id": tool_id,
                         "artifact_file_count": len(files),
                         "files": [f.get("path") for f in files],
-                        "generation_route": {"mode": "progressive_file_generation", "attempt": attempt},
+                        "generation_route": {"mode": "capability_taskgraph_progressive_generation", "attempt": attempt},
                         "attempts": progressive_attempts,
                     },
                     title="Capability replay validation report",
@@ -923,103 +986,6 @@ class RuntimeBlueprintArtifactGenerator:
         )
         return any(marker in text for marker in markers)
 
-    def _compile_capability_task_graph(
-        self,
-        *,
-        tool_id: str,
-        entrypoint: dict[str, Any],
-        blueprint: dict[str, Any],
-        identity_contract: dict[str, Any],
-        input_schema: dict[str, Any],
-        output_schema: dict[str, Any],
-        connection_schema: dict[str, Any],
-        secret_schema: dict[str, Any],
-        verification_input: dict[str, Any],
-        specification_contract: dict[str, Any],
-    ) -> dict[str, Any]:
-        if self.capability_task_graph_compiler is None:
-            return {
-                "graph_type": "capability_artifact_generation",
-                "tool_id": tool_id,
-                "policy": {"capability_neutral": True, "fallback": True},
-                "nodes": [
-                    {"node_id": "entrypoint_contract", "stage": "entrypoint_contract", "target_file": str(entrypoint.get("module") or "tool.py"), "depends_on": [], "contract": {}},
-                    {"node_id": "validation_contract", "stage": "validation_contract", "target_file": "test_tool.py", "depends_on": ["entrypoint_contract"], "contract": {}},
-                ],
-                "edges": [{"from": "entrypoint_contract", "to": "validation_contract"}],
-            }
-        try:
-            return self.capability_task_graph_compiler.compile(
-                tool_id=tool_id,
-                entrypoint=entrypoint,
-                blueprint=blueprint,
-                identity_contract=identity_contract,
-                input_schema=input_schema,
-                output_schema=output_schema,
-                connection_schema=connection_schema,
-                secret_schema=secret_schema,
-                verification_input=verification_input,
-                specification_contract=specification_contract,
-            )
-        except Exception as exc:
-            self._emit_generation_progress(
-                run_id=None,
-                tool_id=tool_id,
-                status="running",
-                phase="capability_task_graph_compile_failed_fallback",
-                error=str(exc)[:500],
-            )
-            return {
-                "graph_type": "capability_artifact_generation",
-                "tool_id": tool_id,
-                "policy": {"capability_neutral": True, "fallback": True},
-                "nodes": [
-                    {"node_id": "entrypoint_contract", "stage": "entrypoint_contract", "target_file": str(entrypoint.get("module") or "tool.py"), "depends_on": [], "contract": {}},
-                    {"node_id": "validation_contract", "stage": "validation_contract", "target_file": "test_tool.py", "depends_on": ["entrypoint_contract"], "contract": {}},
-                ],
-                "edges": [{"from": "entrypoint_contract", "to": "validation_contract"}],
-            }
-
-    def _progressive_file_instruction(self, *, path: str, stage: str, entrypoint: dict[str, Any]) -> str:
-        normalized_path = str(path or "").replace("\\", "/").rsplit("/", 1)[-1]
-        entry_module = str(entrypoint.get("module") or "tool.py").replace("\\", "/").rsplit("/", 1)[-1]
-        entry_function = str(entrypoint.get("function") or "run")
-        common = (
-            "Generate only one complete Python source file for the requested target_file. "
-            "Use only the supplied contracts and schemas. Do not branch on capability names or domain words. "
-            "Do not embed business data, credentials, fixed dates, or environment-specific absolute paths. "
-            "Use Python standard library when possible. Return code that is deterministic, importable, and JSON-serializable. "
-        )
-        if normalized_path == entry_module or normalized_path == "tool.py":
-            return common + (
-                f"This is the runtime entrypoint file. Define {entry_function}(payload: dict | None = None) -> dict. "
-                "Read input, connection, secrets, and runtime flags from payload only. "
-                "Delegate to generated helper modules when available. "
-                "When payload['_runtime']['dry_run'] is true, avoid live external side effects and return a mock-safe structured result."
-            )
-        if normalized_path == "test_tool.py" or stage == "validation_contract":
-            return common + (
-                "This is the sandbox validation file. Import the runtime entrypoint from the same directory, "
-                "construct a dry-run or local-only payload from the schemas, call the entrypoint, and assert that a dict is returned. "
-                "Avoid live network calls, real secrets, and external services."
-            )
-        if normalized_path == "schemas.py" or stage == "schema_contract":
-            return common + (
-                "This file should expose schema constants and lightweight validation helpers derived only from the supplied JSON schemas. "
-                "Do not add fields that are not present in the contracts."
-            )
-        if normalized_path == "state_adapter.py" or "adapter" in normalized_path:
-            return common + (
-                "This file should expose generic state or connection helper functions derived only from the supplied connection contract. "
-                "It must not create domain-specific tables, fields, or behavior unless such structure is present in the runtime contracts."
-            )
-        if normalized_path == "operations.py" or stage == "operation_contract":
-            return common + (
-                "This file should implement operation dispatch and operation handlers derived from the behavior contract and input schema. "
-                "Do not hard-code a business scenario; operation names and required fields must come from the contracts."
-            )
-        return common + "Implement only the stage_contract for this file and keep it capability-neutral."
-
     def _generate_progressive_file_with_llm(
         self,
         *,
@@ -1029,8 +995,7 @@ class RuntimeBlueprintArtifactGenerator:
         path: str,
         stage_index: int = 1,
         stage: str = "",
-        stage_contract: dict[str, Any],
-        task_graph: dict[str, Any],
+        stage_contract: dict[str, Any] | None = None,
         entrypoint: dict[str, Any],
         blueprint: dict[str, Any],
         identity_contract: dict[str, Any],
@@ -1045,10 +1010,8 @@ class RuntimeBlueprintArtifactGenerator:
         contract = {
             "tool_id": tool_id,
             "target_file": path,
-            "stage": stage,
+            "stage": stage or path,
             "stage_contract": stage_contract if isinstance(stage_contract, dict) else {},
-            "task_graph_policy": task_graph.get("policy") if isinstance(task_graph, dict) else {},
-            "task_graph_edges": task_graph.get("edges") if isinstance(task_graph, dict) else [],
             "entrypoint": self._compact_entrypoint(entrypoint),
             "identity": self._compact_identity_contract(identity_contract, blueprint=blueprint, tool_id=tool_id),
             "behavior_contract": self._compact_behavior_contract(blueprint, tool_id=tool_id),
@@ -1062,7 +1025,21 @@ class RuntimeBlueprintArtifactGenerator:
             "specification": self._compact_specification_contract(specification_contract),
             "existing_files": [{"path": item.get("path"), "content_excerpt": str(item.get("content") or "")[:1800]} for item in existing_files if isinstance(item, dict)],
         }
-        file_instruction = self._progressive_file_instruction(path=path, stage=stage, entrypoint=entrypoint)
+        if str(path).endswith("test_tool.py"):
+            file_instruction = (
+                "Generate only Python source for a local validation test file. It must import the runtime entrypoint from the same directory, "
+                "call the entrypoint with dry_run/mock/local payload, assert a JSON-serializable dict is returned, and avoid live external network or secrets."
+            )
+        elif str(path) == str(entrypoint.get("module") or "tool.py"):
+            file_instruction = (
+                "Generate only executable Python source for the runtime entrypoint file. Define run(payload: dict | None = None) -> dict unless the contract requests another function. "
+                "Implement behavior_contract from payload input/connection/secrets/_runtime. No placeholders. "
+                "Use standard library when possible. Do not perform external side effects when payload['_runtime']['dry_run'] is true."
+            )
+        else:
+            file_instruction = (
+                "Generate only Python source for this support file. It must be generic, importable, standard-library-first, and derived only from the supplied contract."
+            )
         messages = [
             {
                 "role": "system",
@@ -1082,7 +1059,7 @@ class RuntimeBlueprintArtifactGenerator:
             filename=self._stage_replay_name(stage_index, "prompt"),
             content=prompt_text,
             title="Capability stage prompt captured",
-            metadata={"replay_kind": "stage_prompt", "stage_index": stage_index, "target_file": path, "stage": stage},
+            metadata={"replay_kind": "stage_prompt", "stage_index": stage_index, "target_file": path, "stage": stage or path},
         )
         self._emit_generation_progress(
             run_id=run_id,
@@ -1116,7 +1093,7 @@ class RuntimeBlueprintArtifactGenerator:
             content=str(result.content or "") if result.status == "completed" else {"status": result.status, "error": result.error, "route": route, "content": str(result.content or "")},
             title="Capability stage response captured",
             status="completed" if result.status == "completed" else "failed",
-            metadata={"replay_kind": "stage_response", "stage_index": stage_index, "target_file": path, "stage": stage, "model_route": route},
+            metadata={"replay_kind": "stage_response", "stage_index": stage_index, "target_file": path, "stage": stage or path, "model_route": route},
         )
         if result.status != "completed":
             self._emit_generation_progress(
@@ -1148,7 +1125,7 @@ class RuntimeBlueprintArtifactGenerator:
                 content={"status": "invalid_output", "error": error, "parsed_keys": list(parsed.keys()) if isinstance(parsed, dict) else [], "target_file": path},
                 title="Capability stage extraction failed",
                 status="failed",
-                metadata={"replay_kind": "stage_extraction", "stage_index": stage_index, "target_file": path, "stage": stage},
+                metadata={"replay_kind": "stage_extraction", "stage_index": stage_index, "target_file": path, "stage": stage or path},
             )
             self._emit_generation_progress(
                 run_id=run_id,
@@ -1167,7 +1144,7 @@ class RuntimeBlueprintArtifactGenerator:
             filename=self._stage_replay_name(stage_index, "extraction_result"),
             content={"status": "completed", "target_file": path, "content_length": len(content), "route": route},
             title="Capability stage extraction completed",
-            metadata={"replay_kind": "stage_extraction", "stage_index": stage_index, "target_file": path, "stage": stage},
+            metadata={"replay_kind": "stage_extraction", "stage_index": stage_index, "target_file": path, "stage": stage or path},
         )
         return {"status": "completed", "content": content, "route": route, "attempt_record": {"status": "completed", "route": route, "attempt": file_attempt, "path": path}}
 

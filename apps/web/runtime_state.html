@@ -56,7 +56,7 @@
   </section>
 </main>
 <script>
-let runs=[], selectedRunId='', source=null, cursor=0, autoScroll=true, mode='timeline', currentRun=null, eventCache=[], replayCache=null;
+let runs=[], selectedRunId='', source=null, cursor=0, autoScroll=true, mode='timeline', currentRun=null, eventCache=[];
 
 function setStableHTML(id, html, opts={}){
   const el=document.getElementById(id);
@@ -82,8 +82,8 @@ function progressText(v,s){const n=normalizedProgress(s,v); return `<span class=
 function shortTime(v){if(!v)return ''; try{return new Date(v).toLocaleTimeString()}catch(e){return String(v).slice(11,19)}}
 async function loadRuns(){const res=await fetch('/api/runtime-state/runs?limit=100',{cache:'no-store'}); const data=await res.json(); runs=data.runs||[]; const ids=new Set(runs.map(r=>r.run_id)); if(selectedRunId && !ids.has(selectedRunId)){selectedRunId=''; currentRun=null;} renderRuns(); if(!selectedRunId){const url=new URL(location.href); const rid=url.searchParams.get('run_id'); if(rid && ids.has(rid)) selectRun(rid); else if(runs[0]) selectRun(runs[0].run_id); else document.getElementById('summary').textContent='No runtime state runs yet.'}}
 function renderRuns(){const f=(document.getElementById('runFilter').value||'').toLowerCase(); setStableHTML('runs', runs.filter(r=>!f||JSON.stringify(r).toLowerCase().includes(f)).map(r=>`<div class="run ${r.run_id===selectedRunId?'active':''}" onclick="selectRun('${r.run_id}')"><div>${statusHtml(r.status)} <span class="id">${r.run_id}</span></div><div class="meta">${escapeHtml(r.title||'')}</div><div class="meta">progress=${normalizedProgress(r.status,r.progress||0)}% · events=${r.event_count||0} · ${shortTime(r.updated_at)}</div></div>`).join('') || '<div class="run"><span class="small">No runs yet</span></div>')}
-async function selectRun(id){selectedRunId=id; cursor=0; eventCache=[]; replayCache=null; renderRuns(); document.getElementById('events').innerHTML=''; await loadRun(); restartStream(); history.replaceState(null,'',`/runtime-state?run_id=${encodeURIComponent(id)}`)}
-async function loadRun(){if(!selectedRunId)return; const res=await fetch(`/api/runtime-state/runs/${encodeURIComponent(selectedRunId)}`,{cache:'no-store'}); const data=await res.json(); if(!data.ok){currentRun=null; const missing=selectedRunId; selectedRunId=''; if(source){source.close(); source=null;} document.getElementById('summary').textContent=`Run ${missing} is no longer available. Select another run from the list.`; document.getElementById('flow').innerHTML=''; document.getElementById('events').innerHTML=''; renderRuns(); return;} currentRun=data.run; renderSummary(); renderFlow(); if(mode==='timeline') renderTimeline(); else if(mode==='replay') loadReplay();}
+async function selectRun(id){selectedRunId=id; cursor=0; eventCache=[]; renderRuns(); document.getElementById('events').innerHTML=''; await loadRun(); restartStream(); history.replaceState(null,'',`/runtime-state?run_id=${encodeURIComponent(id)}`)}
+async function loadRun(){if(!selectedRunId)return; const res=await fetch(`/api/runtime-state/runs/${encodeURIComponent(selectedRunId)}`,{cache:'no-store'}); const data=await res.json(); if(!data.ok){currentRun=null; const missing=selectedRunId; selectedRunId=''; if(source){source.close(); source=null;} document.getElementById('summary').textContent=`Run ${missing} is no longer available. Select another run from the list.`; document.getElementById('flow').innerHTML=''; document.getElementById('events').innerHTML=''; renderRuns(); return;} currentRun=data.run; renderSummary(); renderFlow(); if(mode==='timeline') renderTimeline();}
 function currentPhaseName(r){const steps=r.steps||[]; const runDone=['completed','failed','cancelled','interrupted'].includes(displayStatus(r.status)); const active=!runDone?steps.find(x=>x.step_id===r.active_step_id):null; if(active)return (active.name||active.step_id)+' / '+displayStatus(active.status); const last=steps.slice().reverse().find(x=>x.status&&x.status!=='created'&&x.status!=='pending'); return last?((last.name||last.step_id)+' / '+displayStatus(last.status)):'waiting for first event'}
 function elapsedText(r){try{const a=new Date(r.started_at||r.created_at).getTime(); const b=new Date(r.ended_at||r.updated_at||Date.now()).getTime(); if(!a||!b)return ''; return Math.max(0,Math.round((b-a)/1000))+'s';}catch(e){return ''}}
 function renderSummary(){const r=currentRun; setStableHTML('summary', `<div class="row"><b>${escapeHtml(r.title||r.run_id)}</b>${statusIcon(r.status)}${statusHtml(r.status)}${progressText(r.progress||0,r.status)}<span>run_id=${r.run_id}</span><span>current=${escapeHtml(currentPhaseName(r))}</span><span>events=${r.event_count||0}</span><span>elapsed=${elapsedText(r)}</span></div><div class="bar"><span style="width:${normalizedProgress(r.status,r.progress||0)}%"></span></div><div class="small">${escapeHtml(r.summary||'')}</div>`, {keepScroll:false})}
@@ -129,6 +129,9 @@ function displayEvents(){
 }
 function renderTimeline(){setStableHTML('events', displayEvents().slice(-200).map(e=>`<div class="event"><div class="ts">#${e.sequence}<br>${shortTime(e.ts)}</div><div class="lvl ${e.level}">${e.level}<br>${statusIcon(e.status)}${statusHtml(e.status)}${progressText(e.progress||0,e.status)}</div><div class="kind">${e.kind}<br><span class="small">${e.flow_id||guessFlow(e)}</span></div><div class="msg"><b>${escapeHtml(e.title||'')}</b><br>${escapeHtml(e.message||'')}<div class="small">step=${escapeHtml(e.step_id||'')} · method=${escapeHtml(e.method||'-')} · tool=${escapeHtml(e.tool||'-')}</div>${detailHtml(e)}</div></div>`).join(''), {stickBottom:true})}
 function renderCli(){const box=document.getElementById('events'); box.innerHTML=''; displayEvents().slice(-300).forEach(e=>appendCliEvent(e)); if(autoScroll) box.scrollTop=box.scrollHeight}
+function replayEvents(){return eventCache.filter(e=>String(e.kind||'')==='capability_replay'||String(e.step_id||'').includes('capability_acquisition.replay')||String(e.method||'').includes('capability_acquisition_replay'))}
+function renderReplay(){const items=replayEvents(); if(!items.length){setStableHTML('events', `<div class="event"><div class="ts"></div><div class="lvl developer">info</div><div class="kind">replay</div><div class="msg"><b>No capability replay files yet.</b><br>Replay files appear after capability acquisition enters TaskGraph generation.</div></div>`); return;} setStableHTML('events', items.slice(-300).map(e=>`<div class="event"><div class="ts">#${e.sequence}<br>${shortTime(e.ts)}</div><div class="lvl ${e.level}">${e.level}<br>${statusIcon(e.status)}${statusHtml(e.status)}</div><div class="kind">${escapeHtml((e.output&&e.output.replay_file)||e.kind||'replay')}</div><div class="msg"><b>${escapeHtml(e.title||'')}</b><br>${escapeHtml(e.message||'')}${detailHtml(e)}</div></div>`).join(''), {stickBottom:true})}
+
 function appendCliEvent(e){const detail=detailHtml(e); const row=document.createElement('div'); row.className='event'; row.innerHTML=`<div class="ts">#${e.sequence}<br>${shortTime(e.ts)}</div><div class="lvl ${e.level}">${e.level}<br>${statusIcon(e.status)}${statusHtml(e.status)}${progressText(e.progress||0,e.status)}</div><div class="kind">${e.kind}<br><span class="small">${e.step_id||''}</span></div><div class="msg"><b>${escapeHtml(e.title||'')}</b><br>${escapeHtml(e.message||'')}${detail}</div>`; const box=document.getElementById('events'); box.appendChild(row); if(box.children.length>1000) box.removeChild(box.firstChild); if(autoScroll) box.scrollTop=box.scrollHeight}
 let flowRenderQueued=false;
 function scheduleFlowRender(){
@@ -138,43 +141,9 @@ function scheduleFlowRender(){
 }
 function detailHtml(e){const extra={input:e.input,output:e.output,error:e.error,trace:e.trace,evidence:e.evidence,next_action:e.next_action,metadata:e.metadata}; const compact=Object.fromEntries(Object.entries(extra).filter(([k,v])=>v!==null&&v!==''&&!(Array.isArray(v)&&!v.length)&&!(typeof v==='object'&&v&&!Array.isArray(v)&&!Object.keys(v).length))); return Object.keys(compact).length?`<div class="json">${escapeHtml(JSON.stringify(compact,null,2))}</div>`:''}
 function restartStream(){if(source){source.close(); source=null} cursor=0; eventCache=[]; document.getElementById('events').innerHTML=''; startStream();}
-function startStream(){if(!selectedRunId)return; const min=document.getElementById('level').value; source=new EventSource(`/api/runtime-state/runs/${encodeURIComponent(selectedRunId)}/stream?after_sequence=${cursor}&min_level=${encodeURIComponent(min)}`); document.getElementById('streamState').textContent='stream: connected'; source.onmessage=(ev)=>{try{const e=JSON.parse(ev.data); cursor=Math.max(cursor,Number(e.sequence||0)); eventCache.push(e); if(eventCache.length>1000) eventCache=eventCache.slice(-1000); if(mode==='cli') renderCli(); else if(mode==='timeline') renderTimeline(); else if(mode==='replay' && (e.kind==='capability_replay'||(e.step_id||'').includes('capability_acquisition.replay'))) loadReplay(); scheduleFlowRender(); if(cursor%6===0) loadRun();}catch(err){console.error(err)}}; source.onerror=()=>{document.getElementById('streamState').textContent='stream: reconnecting'}}
-function setMode(m){mode=m; document.getElementById('tabTimeline').classList.toggle('active',m==='timeline'); document.getElementById('tabCli').classList.toggle('active',m==='cli'); const replayTab=document.getElementById('tabReplay'); if(replayTab) replayTab.classList.toggle('active',m==='replay'); document.getElementById('events').innerHTML=''; if(m==='timeline') renderTimeline(); else if(m==='cli') renderCli(); else loadReplay()}
-function clearEvents(){document.getElementById('events').innerHTML=''; if(mode==='timeline') eventCache=[]; if(mode==='replay') replayCache=null}
-
-async function loadReplay(){
-  const box=document.getElementById('events');
-  if(!selectedRunId){box.innerHTML='<div class="small">No selected run.</div>';return;}
-  box.innerHTML='<div class="small">Loading capability acquisition replay...</div>';
-  try{
-    const res=await fetch(`/api/runtime-state/runs/${encodeURIComponent(selectedRunId)}/capability-replay`,{cache:'no-store'});
-    const data=await res.json(); replayCache=data;
-    renderReplay(data);
-  }catch(err){box.innerHTML='<div class="event"><div></div><div class="lvl diagnostic">error</div><div class="kind">replay</div><div class="msg">Failed to load capability replay: '+escapeHtml(String(err))+'</div></div>'}
-}
-function renderReplay(data){
-  const box=document.getElementById('events');
-  const replays=(data&&data.replays)||[];
-  if(!replays.length){box.innerHTML='<div class="event"><div></div><div class="lvl developer">info</div><div class="kind">replay</div><div class="msg"><b>No capability replay files yet.</b><br>Replay files will appear after capability acquisition reaches staged code generation.</div></div>';return;}
-  const html=replays.map(r=>`<div class="card" style="margin:8px 0"><div class="card-head"><div><div class="title">${escapeHtml(r.tool_id||'capability')}</div><div class="small">Capability Acquisition Replay</div></div>${statusHtml('completed')}</div>${(r.files||[]).map(f=>replayFileHtml(r.tool_id,f)).join('')}</div>`).join('');
-  box.innerHTML=html;
-  if(autoScroll) box.scrollTop=0;
-}
-function replayFileHtml(toolId,f){
-  const isJson=String(f.name||'').endsWith('.json');
-  const label=escapeHtml(f.name||'file');
-  const preview=escapeHtml(f.preview||'');
-  return `<div class="action"><div class="line1"><span class="kind">${label}</span><span class="small">${Number(f.size||0)} bytes</span><button class="tab" onclick="copyReplay('${escapeJs(toolId)}','${escapeJs(f.name)}')">Copy</button></div><div class="json" style="max-height:420px">${preview}</div></div>`;
-}
-async function copyReplay(toolId, filename){
-  try{
-    const res=await fetch(`/api/runtime-state/runs/${encodeURIComponent(selectedRunId)}/capability-replay/${encodeURIComponent(toolId)}/${encodeURIComponent(filename)}`,{cache:'no-store'});
-    const data=await res.json();
-    await navigator.clipboard.writeText(data.content||'');
-  }catch(e){console.error(e)}
-}
-function escapeJs(s){return String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,'\\n')}
-
+function startStream(){if(!selectedRunId)return; const min=document.getElementById('level').value; source=new EventSource(`/api/runtime-state/runs/${encodeURIComponent(selectedRunId)}/stream?after_sequence=${cursor}&min_level=${encodeURIComponent(min)}`); document.getElementById('streamState').textContent='stream: connected'; source.onmessage=(ev)=>{try{const e=JSON.parse(ev.data); cursor=Math.max(cursor,Number(e.sequence||0)); eventCache.push(e); if(eventCache.length>1000) eventCache=eventCache.slice(-1000); if(mode==='cli') renderCli(); else if(mode==='replay') renderReplay(); else renderTimeline(); scheduleFlowRender(); if(cursor%6===0) loadRun();}catch(err){console.error(err)}}; source.onerror=()=>{document.getElementById('streamState').textContent='stream: reconnecting'}}
+function setMode(m){mode=m; document.getElementById('tabTimeline').classList.toggle('active',m==='timeline'); document.getElementById('tabCli').classList.toggle('active',m==='cli'); const tr=document.getElementById('tabReplay'); if(tr)tr.classList.toggle('active',m==='replay'); document.getElementById('events').innerHTML=''; if(m==='timeline') renderTimeline(); else if(m==='replay') renderReplay(); else renderCli()}
+function clearEvents(){document.getElementById('events').innerHTML=''; if(mode==='timeline') eventCache=[]}
 function toggleAuto(){autoScroll=!autoScroll; document.getElementById('autoBtn').textContent='Auto-scroll: '+(autoScroll?'ON':'OFF')}
 function summarize(v){if(v===null||v===undefined||v==='')return ''; if(typeof v==='string')return v.slice(0,360); try{return JSON.stringify(v).slice(0,360)}catch(e){return String(v).slice(0,360)}}
 function guessFlow(e){const s=String(e.step_id||e.method||e.kind||'').toLowerCase(); if(s.includes('normalize'))return 'perception_brain'; if(s.includes('input_parsing'))return 'ai_core.input_parsing'; if(s.includes('intent')||s.includes('interaction'))return 'ai_core.intent_interaction'; if(s.includes('parameter')||s.includes('memory')||s.includes('context'))return 'auxiliary_memory.parameters'; if(s.includes('workflow')||s.includes('graph')||s.includes('task.'))return 'ai_core.workflow_graph'; if(s.includes('pre_execution')||s.includes('validation'))return 'verification.pre_execution'; if(s.includes('result.verify')||s.includes('verification'))return 'verification.result'; if(s.includes('repair'))return 'repair_brain'; if(s.includes('final')||s.includes('presentation'))return 'presentation_brain'; if(s.includes('evidence')||s.includes('trace')||s.includes('provenance'))return 'evidence.trace'; if(s.includes('async')||s.includes('server'))return 'apps.api.server'; return 'runtime.execution'}
