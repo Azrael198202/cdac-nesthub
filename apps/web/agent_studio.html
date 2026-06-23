@@ -737,7 +737,7 @@ async function sendMessage(){
     renderStudioResponse(data, text);
     // Pending input and confirmation modals are owned by renderStudioResponse; do not open them twice here.
     // Final answers are rendered by renderStudioResponse; do not duplicate or show raw runtime JSON here.
-    await refreshState();
+    await refreshStateSettled();
   }catch(e){
     const msg=String((e&&e.message)||e||'request failed');
     addMessage('Error: '+msg+'\nThe request may have been interrupted by a local server reload. Check Runtime State Console for the durable run state.','item error');
@@ -1235,7 +1235,7 @@ async function resumePendingRun(runId, providedInputs){
       data=await waitForRuntimeJobResult(accepted.job_id, {maxPolls:720, intervalMs:1000});
     }
     renderStudioResponse(data || {}, lastPendingInstruction || lastSubmittedInstruction);
-    await refreshState();
+    await refreshStateSettled();
   }catch(e){ addMessage('Resume failed: '+e,'item error'); }
   finally{
     if(pollTimer) clearInterval(pollTimer);
@@ -1623,7 +1623,15 @@ function renderRightPanes(data){
   selectRightTab(activeRightTab);
 }
 
-async function refreshState(){ try{ const res=await fetch('/api/agent-studio/state'); const data=await res.json(); renderState(data); }catch(e){ console.error(e); }}
+async function refreshState(){ try{ const res=await fetch('/api/agent-studio/state',{cache:'no-store'}); const data=await res.json(); renderState(data); return data; }catch(e){ console.error(e); return null; }}
+async function refreshStateSettled(attempts=4, delayMs=350){
+  let latest=null;
+  for(let i=0;i<attempts;i++){
+    latest=await refreshState();
+    if(i<attempts-1){ await new Promise(resolve=>setTimeout(resolve, delayMs)); }
+  }
+  return latest;
+}
 function renderState(data){
   const graphCountEl=document.getElementById('graphCount');
   if(graphCountEl){ graphCountEl.textContent=(data.task_graphs||[]).length + (data.conversation_runs||[]).length + ' / agents ' + (data.participants||[]).length; }
@@ -1886,7 +1894,7 @@ async function executeRuntimeTool(tool){
       const data=await apiFetchRuntimeToolJson('/api/agent-studio/runtime-tools/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:toolId,input_data:inputData,profile_id:profileId,approval_confirmed:approvalConfirmed})});
       addMessage('assistant', data.ok ? ('Runtime tool executed:\n'+renderJson(data.result)) : ((data.human_readable_error||'Runtime tool execution requires action or failed')+'\n'+renderJson(data)), data.ok?'final':'error');
       if(!data.ok){ await maybeApplyRepairProposal(data, toolId, profileId); }
-      refreshState();
+      await refreshStateSettled();
     }
   );
 }

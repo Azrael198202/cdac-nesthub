@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from ai_core.safe_collections import safe_string_set, safe_dedupe
 from typing import Any, Callable
 
 from ai_core.config.paths import PROJECT_ROOT, RUNTIME_GENERATED, RUNTIME_REGISTRY
@@ -713,17 +714,70 @@ class RuntimeCapabilityGapImplementer:
         return required
 
     def _field_detail(self, text: str, field: str) -> str:
-        pattern = re.compile(rf"^\s*[-*]\s*{re.escape(field)}\s*[:：-]?\s*(.*)$", flags=re.IGNORECASE | re.MULTILINE)
-        match = pattern.search(text)
-        return match.group(1).strip() if match else ""
+        """Return the inline requirement detail for a field without crossing lines.
+
+        Important: use only spaces/tabs around separators.  `\\s*` would consume
+        the following newline and accidentally treat the next bullet as this
+        field's detail, e.g. `location` becoming `participants`, which then
+        corrupts generated schema types.  Prefer lines that explicitly contain
+        a separator/detail over bare record-structure bullets.
+        """
+        pattern = re.compile(rf"^[ \t]*[-*][ \t]*{re.escape(field)}[ \t]*[:：-]?[ \t]*(.*)$", flags=re.IGNORECASE | re.MULTILINE)
+        matches = [m.group(1).strip() for m in pattern.finditer(text)]
+        if not matches:
+            return ""
+        for detail in matches:
+            if detail:
+                return detail
+        return ""
 
     def _schema_type_from_field_detail(self, *, name: str, detail: str) -> dict[str, Any]:
-        lowered = (str(name) + " " + str(detail)).casefold()
-        if "list" in lowered or "array" in lowered or "participants" in lowered or "tags" in lowered:
+        """Infer a JSON-schema type from an explicit field requirement line.
+
+        Contract rule: explicit user-declared types always win over name-based
+        heuristics.  This prevents generated schemas from turning fields such as
+        `location: string` or `status: string enum ...` into arrays only because
+        nearby text mentions list/filter sections.  Name-based hints are used
+        only when the user did not declare a type.
+        """
+        name_text = str(name or "")
+        detail_text = str(detail or "")
+        lowered_detail = detail_text.casefold()
+        lowered_all = (name_text + " " + detail_text).casefold()
+        is_optional = "optional" in lowered_detail or "nullable" in lowered_detail or "may be null" in lowered_detail or "can be null" in lowered_detail
+
+        def with_null(schema: dict[str, Any]) -> dict[str, Any]:
+            if is_optional and schema.get("type") in {"object", "array"}:
+                schema = dict(schema)
+                schema["type"] = [schema["type"], "null"]
+            return schema
+
+        # Explicit type declarations from the user request have highest priority.
+        if re.search(r"\bstring\b", lowered_detail):
+            schema: dict[str, Any] = {"type": "string"}
+            enum_match = re.search(r"enum\s*[:：]?\s*(.+)$", detail_text, flags=re.IGNORECASE)
+            if enum_match:
+                enum_values = [v.strip().strip("`\'\" ,") for v in re.split(r"[,/|]", enum_match.group(1)) if v.strip()]
+                if enum_values:
+                    schema["enum"] = enum_values
+            return schema
+        if re.search(r"\b(boolean|bool)\b", lowered_detail):
+            return {"type": "boolean"}
+        if re.search(r"\binteger\b", lowered_detail):
+            return {"type": "integer"}
+        if re.search(r"\bnumber\b", lowered_detail):
+            return {"type": "number"}
+        if re.search(r"\b(array|list)\b", lowered_detail):
+            return with_null({"type": "array", "items": {"type": "string"}})
+        if re.search(r"\bobject\b", lowered_detail):
+            return with_null({"type": "object", "additionalProperties": True})
+
+        # Fallback name hints only when no explicit type was declared.
+        if "participants" in lowered_all or "tags" in lowered_all or lowered_all.endswith(" list"):
             return {"type": "array", "items": {"type": "string"}}
-        if "object" in lowered or "metadata" in lowered or "recurrence" in lowered or "reminder" in lowered:
-            return {"type": "object", "additionalProperties": True}
-        if "integer" in lowered or "number" in lowered or "seconds" in lowered or "count" in lowered:
+        if "metadata" in lowered_all or "recurrence" in lowered_all or "reminder" in lowered_all:
+            return with_null({"type": "object", "additionalProperties": True})
+        if "seconds" in lowered_all or "count" in lowered_all or "limit" in lowered_all or "offset" in lowered_all:
             return {"type": "integer"}
         return {"type": "string"}
 
@@ -2106,8 +2160,8 @@ def test_runtime_contract_smoke():
             if not actual_policy:
                 runtime_policy = manifest.get("runtime_execution_policy") if isinstance(manifest.get("runtime_execution_policy"), dict) else {}
                 actual_policy = runtime_policy.get("approval_policy") if isinstance(runtime_policy.get("approval_policy"), dict) else {}
-            exp_modes = set(expected_policy.get("supported_modes") if isinstance(expected_policy.get("supported_modes"), list) else [])
-            act_modes = set(actual_policy.get("supported_modes") if isinstance(actual_policy.get("supported_modes"), list) else actual_policy.get("modes") if isinstance(actual_policy.get("modes"), list) else [])
+            exp_modes = safe_string_set(expected_policy.get("supported_modes") if isinstance(expected_policy.get("supported_modes"), list) else [])
+            act_modes = safe_string_set(actual_policy.get("supported_modes") if isinstance(actual_policy.get("supported_modes"), list) else actual_policy.get("modes") if isinstance(actual_policy.get("modes"), list) else [])
             exp_default = str(expected_policy.get("default_mode") or "").casefold()
             act_default = str(actual_policy.get("default_mode") or actual_policy.get("default") or "").casefold()
             ok = (not exp_modes or exp_modes.issubset(act_modes)) and (not exp_default or exp_default == act_default)

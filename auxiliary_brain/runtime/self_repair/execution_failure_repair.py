@@ -37,6 +37,17 @@ class ExecutionFailureRepairClassifier:
         text = " ".join([code, message, str(error.get("errors") or "")]).casefold()
         evidence = {"error_code": code, "message": message[-1000:], "status": result.get("status")}
 
+        if self._generated_schema_mismatch_signal(code, result, tool_spec):
+            return ExecutionFailureDiagnosis(
+                category="tool_implementation_problem",
+                user_title="Generated runtime schema needs repair",
+                user_message="The runtime input appears structurally complete, but the registered generated schema rejected it with type-shape mismatches. The generated capability schema or binding should be repaired and revalidated instead of asking the user to change otherwise valid input.",
+                repairable=True,
+                suggested_action="Create a generated capability schema repair request. The auxiliary layer should compare the original capability contract, the registered schema, and the rejected input, then patch and revalidate the generated capability.",
+                technical_reason=message,
+                confidence=0.82,
+                evidence={**evidence, "schema_repair_reason": "type_shape_mismatch_against_generated_schema"},
+            )
         if self._schema_or_parameter_signal(code, text):
             return ExecutionFailureDiagnosis(
                 category="parameter_problem",
@@ -102,6 +113,35 @@ class ExecutionFailureRepairClassifier:
             confidence=0.3,
             evidence=evidence,
         )
+
+
+    def _generated_schema_mismatch_signal(self, code: str, result: dict[str, Any], tool_spec: dict[str, Any]) -> bool:
+        """Detect failures likely caused by an incorrect generated schema.
+
+        This stays capability-neutral.  It does not inspect domain field names.
+        It only distinguishes structural type-shape mismatches from ordinary
+        missing required values.  When a generated tool schema says one type but
+        a complete structured input provides another common JSON shape, this is
+        safer to route to generated capability repair than to force the user to
+        distort their input to match a bad generated schema.
+        """
+        if "input_schema" not in str(code) and "schema_validation" not in str(code):
+            return False
+        error = self._error_object(result)
+        errors = error.get("errors")
+        if not isinstance(errors, list) or not errors:
+            return False
+        error_text = " ".join(str(e) for e in errors).casefold()
+        if "required property is missing" in error_text or "additional property" in error_text or "value is not in enum" in error_text:
+            return False
+        type_mismatch_markers = ["expected array, got str", "expected object, got nonetype", "expected array, got dict", "expected object, got str", "expected string, got list", "expected string, got dict"]
+        if not any(marker in error_text for marker in type_mismatch_markers):
+            return False
+        # Prefer system-owned repair for generated runtime tools.  Registered
+        # static/manual tools can still fall through to parameter repair.
+        implementation = tool_spec.get("implementation") if isinstance(tool_spec.get("implementation"), dict) else {}
+        source = str(tool_spec.get("source") or implementation.get("source") or implementation.get("generator") or "").casefold()
+        return bool(implementation or "generated" in source or "runtime" in source)
 
     def _error_object(self, result: dict[str, Any]) -> dict[str, Any]:
         if isinstance(result.get("error"), dict):

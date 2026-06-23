@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from ai_core.safe_collections import safe_dedupe, safe_hashable, safe_json_key, safe_string_list
+
 
 class CapabilityTaskGraphCompiler:
     """Compile a capability acquisition contract into generic generation stages.
@@ -163,28 +165,56 @@ class CapabilityTaskGraphCompiler:
         props = schema.get("properties") if isinstance(schema, dict) else {}
         return props if isinstance(props, dict) else {}
 
+
+    def _safe_scalar_text(self, value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (int, float, bool)) or value is None:
+            return str(value or '').strip()
+        if isinstance(value, dict):
+            for key in ('operation', 'name', 'id', 'value'):
+                text = self._safe_scalar_text(value.get(key))
+                if text:
+                    return text
+            return ''
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                text = self._safe_scalar_text(item)
+                if text:
+                    return text
+            return ''
+        return str(value or '').strip()
+
+    def _safe_unique_texts(self, values: Any) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        iterable = values if isinstance(values, list) else [values]
+        for item in iterable:
+            text = self._safe_scalar_text(item)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+        return result
+
     def _operation_contracts(self, *, input_schema: dict[str, Any], specification_contract: dict[str, Any]) -> list[dict[str, Any]]:
         props = self._schema_properties(input_schema)
         op_schema = props.get("operation") if isinstance(props.get("operation"), dict) else {}
         enum_values = op_schema.get("enum") if isinstance(op_schema, dict) else []
         if not isinstance(enum_values, list):
             enum_values = []
-        ops = [str(v).strip() for v in enum_values if str(v).strip()]
+        ops = self._safe_unique_texts(enum_values)
         if not ops:
+            candidates: list[Any] = []
             for key in ("supported_operations", "operations", "operation_contracts"):
                 value = specification_contract.get(key) if isinstance(specification_contract, dict) else None
                 if isinstance(value, list):
-                    for item in value:
-                        if isinstance(item, str) and item.strip():
-                            ops.append(item.strip())
-                        elif isinstance(item, dict) and str(item.get("operation") or item.get("name") or "").strip():
-                            ops.append(str(item.get("operation") or item.get("name")).strip())
-        seen: set[str] = set()
+                    candidates.extend(value)
+                elif value is not None:
+                    candidates.append(value)
+            ops = self._safe_unique_texts(candidates)
         contracts: list[dict[str, Any]] = []
         for name in ops:
-            if name in seen:
-                continue
-            seen.add(name)
             contracts.append({"operation": name, "semantic_kind": self._semantic_kind(name), "source": "input_schema.operation.enum"})
         return contracts
 

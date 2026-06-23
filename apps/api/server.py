@@ -41,6 +41,7 @@ from apps.api.result_formatting import format_async_job_result
 
 import traceback
 import os
+import re
 approval_learning = ApprovalLearningService()
 app = FastAPI()
 runtime = WorkflowRuntime()
@@ -1496,6 +1497,115 @@ def _extract_payload_public_answer(payload: Any) -> str:
     return visit(payload)
 
 
+def _extract_first_json_object(text: str, start_at: int = 0) -> dict[str, Any] | None:
+    """Extract the first JSON object from free-form command text.
+
+    This is command-grammar parsing, not capability/business logic.  It lets a
+    user submit a registered-tool invocation as text while keeping execution on
+    the generic registered tool runner.
+    """
+    raw = str(text or "")
+    start = raw.find("{", max(0, int(start_at or 0)))
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                chunk = raw[start:i + 1]
+                try:
+                    parsed = json.loads(chunk)
+                    return parsed if isinstance(parsed, dict) else None
+                except Exception:
+                    return None
+    return None
+
+
+def _direct_registered_tool_request(message: str, provided_inputs: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Recognize an explicit generic registered capability execution command.
+
+    Supported text grammar:
+      Execute capability: <tool_id>
+      Parameters: { ... }
+
+    Also supports structured provided_inputs for UI or generated callers:
+      {"_direct_registered_tool": true, "tool_id": "...", "input_data": {...}}
+    """
+    provided = provided_inputs if isinstance(provided_inputs, dict) else {}
+    explicit = provided.get("_direct_registered_tool") or provided.get("_registered_tool_execution")
+    provided_tool_id = str(provided.get("tool_id") or provided.get("capability_id") or "").strip()
+    if explicit and provided_tool_id:
+        return {
+            "tool_id": provided_tool_id,
+            "input_data": provided.get("input_data") if provided.get("input_data") is not None else provided.get("parameters", {}),
+            "profile_id": str(provided.get("profile_id") or "default").strip() or "default",
+            "approval_confirmed": bool(provided.get("approval_confirmed") or provided.get("confirm") or provided.get("confirmed")),
+            "source": "provided_inputs",
+        }
+
+    text = str(message or "")
+    # Keep the command grammar generic; do not inspect the capability name or
+    # operation.  The runtime registry owns all capability-specific behavior.
+    m = re.search(r"(?im)^\s*execute\s+(?:runtime\s+)?capability\s*:\s*([A-Za-z0-9_.:-]+)\s*$", text)
+    if not m:
+        m = re.search(r"(?im)^\s*run\s+(?:registered\s+)?(?:runtime\s+)?tool\s*:\s*([A-Za-z0-9_.:-]+)\s*$", text)
+    if not m:
+        return None
+    tool_id = str(m.group(1) or "").strip()
+    if not tool_id:
+        return None
+    lower = text.casefold()
+    params_pos = lower.find("parameters")
+    parsed = _extract_first_json_object(text, params_pos if params_pos >= 0 else m.end())
+    return {
+        "tool_id": tool_id,
+        "input_data": parsed if isinstance(parsed, dict) else {},
+        "profile_id": "default",
+        # This text command is an explicit execution request with the full input
+        # payload.  The button-based registered-tool UI still performs a separate
+        # confirmation when desired; direct text execution should not be routed
+        # into an unrelated task graph just to collect another confirmation.
+        "approval_confirmed": True,
+        "source": "message_text",
+    }
+
+
+def _tool_execution_public_answer(payload: dict[str, Any]) -> str:
+    """Render a registered tool execution payload into a visible answer."""
+    if not isinstance(payload, dict):
+        return str(payload)
+    status = str(payload.get("status") or "").strip()
+    tool_id = str(payload.get("tool_id") or "").strip()
+    if payload.get("ok") is True:
+        body = payload.get("result") if isinstance(payload.get("result"), dict) else payload
+        # Prefer generated tool result fields, but include the full structured
+        # result so create/list/update/delete are all visible without custom UI.
+        return "Registered tool execution completed.\n\n" + json.dumps(body, ensure_ascii=False, indent=2)
+    if status == "requires_configuration":
+        return "Runtime capability configuration is required before execution.\n\n" + json.dumps(payload.get("configuration_status") or payload, ensure_ascii=False, indent=2)
+    if status == "requires_human_confirmation":
+        return "Runtime capability execution requires confirmation.\n\n" + json.dumps(payload.get("preview") or payload, ensure_ascii=False, indent=2)
+    err = payload.get("human_readable_error") or payload.get("message") or "Runtime capability execution failed."
+    return str(err) + "\n\n" + json.dumps(payload, ensure_ascii=False, indent=2)
+
+
 async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any]:
     provided_inputs = dict(req.provided_inputs or {})
     state_run_id = str(provided_inputs.get("_runtime_state_run_id") or provided_inputs.get("_state_run_id") or "").strip()
@@ -1551,6 +1661,79 @@ async def _handle_agent_studio_message(req: AgentStudioRequest) -> dict[str, Any
     )
     normalized_message = str(perception_package.get("normalized_text") or req.message or "")
     provided_inputs.setdefault("_perception_package", perception_package)
+
+    direct_tool_request = _direct_registered_tool_request(normalized_message, provided_inputs)
+    if isinstance(direct_tool_request, dict):
+        tool_id = str(direct_tool_request.get("tool_id") or "").strip()
+        runtime_state_manager.emit(
+            run_id=state_run_id,
+            step_id="registered_tool.dispatch",
+            level="developer",
+            kind="method",
+            status="running",
+            title="Registered tool execution",
+            message="Routing explicit capability execution to the registered tool runner.",
+            method="registered_tool_runner",
+            tool=tool_id,
+            input={"tool_id": tool_id, "profile_id": direct_tool_request.get("profile_id") or "default"},
+            progress=45,
+        )
+        execution_payload = registered_tool_service.execute_tool(
+            tool_id=tool_id,
+            input_data=direct_tool_request.get("input_data") if direct_tool_request.get("input_data") is not None else {},
+            run_id=state_run_id,
+            profile_id=str(direct_tool_request.get("profile_id") or "default"),
+            approval_confirmed=bool(direct_tool_request.get("approval_confirmed")),
+            remember_approval=bool(direct_tool_request.get("remember_approval")),
+        )
+        final_answer = _tool_execution_public_answer(execution_payload)
+        payload = {
+            "ok": bool(execution_payload.get("ok")),
+            "status": execution_payload.get("status") or ("completed" if execution_payload.get("ok") else "failed"),
+            "action": "registered_tool_execution",
+            "run_id": state_run_id,
+            "tool_id": tool_id,
+            "result": execution_payload,
+            "tool_result": execution_payload.get("result") if isinstance(execution_payload, dict) else execution_payload,
+            "final_answer": final_answer,
+            "message": final_answer,
+            "session_id": active_session_id,
+            "runtime_state": {"run_id": state_run_id, "state_url": f"/runtime-state?run_id={state_run_id}"},
+            "perception": {
+                "status": "completed",
+                "artifact_count": len(perception_package.get("artifacts") or []),
+                "confidence": perception_package.get("confidence"),
+                "warnings": perception_package.get("warnings") or [],
+            },
+        }
+        runtime_state_manager.emit(
+            run_id=state_run_id,
+            step_id="registered_tool.dispatch",
+            level="developer",
+            kind="output",
+            status=str(payload.get("status") or "completed"),
+            title="Registered tool execution result",
+            message="Registered tool runner returned a result.",
+            output=payload,
+            progress=100,
+        )
+        session_store.append_turn(
+            session_id=active_session_id,
+            run_id=state_run_id,
+            user_input=req.message,
+            final_answer=final_answer,
+            stage_results={"registered_tool_execution": execution_payload, "perception_package": perception_package},
+            metadata={"action": "registered_tool_execution", "tool_id": tool_id, "perception_enabled": True},
+        )
+        payload["session_boundary"] = session_store.boundary_status(active_session_id)
+        runtime_state_manager.finish_run(
+            state_run_id,
+            status="completed" if execution_payload.get("ok") else str(payload.get("status") or "failed"),
+            summary=final_answer[:1000],
+            output=payload,
+        )
+        return payload
+
     runtime_state_manager.emit(
         run_id=state_run_id,
         step_id="operation.dispatch",

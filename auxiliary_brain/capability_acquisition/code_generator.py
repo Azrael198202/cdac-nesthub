@@ -778,6 +778,31 @@ class RuntimeBlueprintArtifactGenerator:
             phase="capability_taskgraph_generation_completed",
             node_count=len(graph_nodes),
         )
+        # Generic deterministic generation is the primary path for structured
+        # capability contracts. It avoids local-model format instability and
+        # still derives every file from the runtime TaskGraph contract, not from
+        # business-specific hardcoding. LLM routes remain available as fallback.
+        deterministic_artifact_first = self._generate_contract_driven_artifact_from_task_graph(
+            tool_id=tool_id,
+            run_id=run_id,
+            entrypoint=entrypoint,
+            task_graph=task_graph,
+            blueprint=blueprint,
+            input_schema=input_schema,
+            output_schema=output_schema,
+            connection_schema=connection_schema,
+            secret_schema=secret_schema,
+            verification_input=verification_input,
+            specification_contract=specification_contract,
+            previous_attempts=progressive_attempts,
+        )
+        if self._valid_generated_artifact(deterministic_artifact_first):
+            return deterministic_artifact_first
+        progressive_attempts.append({
+            "status": "deterministic_contract_generation_failed",
+            "error": deterministic_artifact_first.get("generation_error") if isinstance(deterministic_artifact_first, dict) else "not_available",
+            "route": {"mode": "contract_driven_generation"},
+        })
         for attempt in routes:
             available, availability_reason = self._codegen_attempt_available(attempt, run_id=run_id, tool_id=tool_id)
             if not available:
@@ -1016,18 +1041,48 @@ class RuntimeBlueprintArtifactGenerator:
         )
         return artifact
 
+
+    def _safe_scalar_text(self, value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (int, float, bool)) or value is None:
+            return str(value or '').strip()
+        if isinstance(value, dict):
+            for key in ('operation', 'name', 'id', 'value'):
+                text = self._safe_scalar_text(value.get(key))
+                if text:
+                    return text
+            return ''
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                text = self._safe_scalar_text(item)
+                if text:
+                    return text
+            return ''
+        return str(value or '').strip()
+
+    def _safe_unique_texts(self, values: Any) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        iterable = values if isinstance(values, list) else [values]
+        for item in iterable:
+            text = self._safe_scalar_text(item)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+        return result
+
+    def _safe_route_key(self, *parts: Any) -> tuple[str, ...]:
+        return tuple(json.dumps(part, ensure_ascii=False, sort_keys=True, default=str) if isinstance(part, (dict, list, tuple, set)) else str(part or '') for part in parts)
+
     def _generic_operation_contracts(self, input_schema: dict[str, Any]) -> list[dict[str, Any]]:
         props = input_schema.get("properties") if isinstance(input_schema, dict) else {}
         props = props if isinstance(props, dict) else {}
         op_schema = props.get("operation") if isinstance(props.get("operation"), dict) else {}
         enum_values = op_schema.get("enum") if isinstance(op_schema, dict) else []
         contracts = []
-        seen = set()
-        for value in enum_values if isinstance(enum_values, list) else []:
-            op = str(value).strip()
-            if not op or op in seen:
-                continue
-            seen.add(op)
+        for op in self._safe_unique_texts(enum_values if isinstance(enum_values, list) else []):
             contracts.append({"operation": op, "semantic_kind": self._operation_semantic_kind(op)})
         return contracts
 
@@ -1545,8 +1600,8 @@ def test_all_declared_operations():
         text = "\n".join(str(item.get("content") or "") for item in files if isinstance(item, dict) and str(item.get("path") or "").endswith(".py"))
         violations: list[str] = []
         for item in operation_contracts:
-            op = str(item.get("operation") or "") if isinstance(item, dict) else ""
-            kind = str(item.get("semantic_kind") or "") if isinstance(item, dict) else ""
+            op = self._safe_scalar_text(item.get("operation") if isinstance(item, dict) else item)
+            kind = self._safe_scalar_text(item.get("semantic_kind") if isinstance(item, dict) else "")
             if op and op not in text:
                 violations.append(f"declared operation not materialized: {op}")
             if kind and kind != "custom" and kind not in text:
@@ -1605,7 +1660,7 @@ def test_all_declared_operations():
 
     def _missing_codegen_routes_from_attempts(self, attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         routes: list[dict[str, Any]] = []
-        seen: set[tuple[str, str, str]] = set()
+        seen: set[tuple[str, ...]] = set()
         for record in attempts:
             attempt = record.get("attempt") if isinstance(record, dict) else None
             override = attempt.get("route_override") if isinstance(attempt, dict) else {}
@@ -1615,7 +1670,7 @@ def test_all_declared_operations():
             base_url = str(override.get("base_url") or "").strip()
             if provider.casefold() == "ollama" and not base_url:
                 base_url = str(os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434").rstrip("/")
-            key = (provider, model, base_url)
+            key = self._safe_route_key(provider, model, base_url)
             if key in seen:
                 continue
             seen.add(key)

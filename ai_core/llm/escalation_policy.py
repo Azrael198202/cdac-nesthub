@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ai_core.safe_collections import safe_string_set
 from typing import Any
 
 
@@ -42,10 +43,10 @@ class ModelEscalationPolicy:
         if bool(policy.get("force_escalation")):
             return True
 
-        if node_id in set(policy.get("strong_model_nodes", [])):
+        if node_id in safe_string_set(policy.get("strong_model_nodes", [])):
             return True
 
-        signal_names = set(policy.get("escalation_signals", [
+        signal_names = safe_string_set(policy.get("escalation_signals", [
             "requires_capability_generation",
             "requires_tool_generation",
             "requires_code_generation",

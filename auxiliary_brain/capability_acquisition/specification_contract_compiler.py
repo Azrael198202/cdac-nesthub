@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from ai_core.safe_collections import safe_string_set
 from typing import Any
 
 
@@ -61,7 +62,7 @@ class CapabilitySpecificationContractCompiler:
 
     def _field_contracts(self, schema: dict[str, Any], *, root: str) -> list[dict[str, Any]]:
         contracts: list[dict[str, Any]] = []
-        self._walk_schema(schema if isinstance(schema, dict) else {}, root=root, path=root, required=set(schema.get("required", [])) if isinstance(schema, dict) and isinstance(schema.get("required"), list) else set(), out=contracts)
+        self._walk_schema(schema if isinstance(schema, dict) else {}, root=root, path=root, required=safe_string_set(schema.get("required", [])) if isinstance(schema, dict) and isinstance(schema.get("required"), list) else set(), out=contracts)
         return contracts
 
     def _walk_schema(self, schema: dict[str, Any], *, root: str, path: str, required: set[str], out: list[dict[str, Any]]) -> None:
@@ -86,7 +87,7 @@ class CapabilitySpecificationContractCompiler:
             if value_contract:
                 contract["value_contract"] = value_contract
             out.append(contract)
-            nested_required = set(prop.get("required", [])) if isinstance(prop.get("required"), list) else set()
+            nested_required = safe_string_set(prop.get("required", [])) if isinstance(prop.get("required"), list) else set()
             self._walk_schema(prop, root=root, path=child_path, required=nested_required, out=out)
 
     def _required_output_paths(self, output_schema: dict[str, Any]) -> list[str]:

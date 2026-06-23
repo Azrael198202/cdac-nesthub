@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+from ai_core.safe_collections import safe_string_set
 from typing import Any
 
 from ai_core.config.loader import ConfigLoader
@@ -249,8 +250,8 @@ class ModelStagePolicy:
                 virtual_provider["install_strategy"] = model_meta.get("install_strategy")
                 virtual_provider["allow_external"] = model_meta.get("allow_external", virtual_provider.get("allow_external"))
                 virtual_provider["modalities"] = model_meta.get("modalities", virtual_provider.get("modalities", {}))
-                tags = set(virtual_provider.get("model_tags") or []) | set(model_meta.get("capabilities") or [])
-                caps = set(virtual_provider.get("capabilities") or []) | set(model_meta.get("capabilities") or [])
+                tags = safe_string_set(virtual_provider.get("model_tags") or []) | safe_string_set(model_meta.get("capabilities") or [])
+                caps = safe_string_set(virtual_provider.get("capabilities") or []) | safe_string_set(model_meta.get("capabilities") or [])
                 virtual_provider["model_tags"] = sorted(tags)
                 virtual_provider["capabilities"] = sorted(caps)
                 if model_meta.get("context_window_hint") and not virtual_provider.get("context_window"):

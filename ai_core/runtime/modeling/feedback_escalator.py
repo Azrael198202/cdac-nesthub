@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from ai_core.safe_collections import safe_string_set
 from typing import Any
 
 from ai_core.config.paths import RUNTIME_GENERATED
@@ -37,7 +38,7 @@ class FeedbackEscalator:
     def should_escalate(self, *, node_id: str, adapter: dict[str, Any], complexity: dict[str, Any], topology: dict[str, Any]) -> bool:
         feedback = self.feedback_for(node_id=node_id, adapter=adapter)
         policy = topology.get("feedback_escalation") if isinstance(topology.get("feedback_escalation"), dict) else {}
-        if complexity.get("level") in set(policy.get("always_escalate_levels", ["critical"])):
+        if complexity.get("level") in safe_string_set(policy.get("always_escalate_levels", ["critical"])):
             return True
         failure_count = int(feedback.get("failure_count") or 0)
         dissatisfaction_count = int(feedback.get("dissatisfaction_count") or 0)
