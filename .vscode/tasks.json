@@ -4,10 +4,25 @@
     {
       "label": "Kill Port 8000 Listeners",
       "type": "shell",
-      "command": "python",
-      "args": [
-        "${workspaceFolder}/.vscode/kill_port_8000.py"
-      ],
+      "windows": {
+        "command": "py",
+        "args": [
+          "-3",
+          "${workspaceFolder}/.vscode/kill_port_8000.py"
+        ]
+      },
+      "osx": {
+        "command": "python3",
+        "args": [
+          "${workspaceFolder}/.vscode/kill_port_8000.py"
+        ]
+      },
+      "linux": {
+        "command": "python3",
+        "args": [
+          "${workspaceFolder}/.vscode/kill_port_8000.py"
+        ]
+      },
       "problemMatcher": []
     }
   ]
