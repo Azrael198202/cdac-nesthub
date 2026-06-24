@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib.util
 import json
 import os
@@ -2895,16 +2896,68 @@ def test_runtime_contract_smoke():
             return report
 
     def _load_function(self, path: Path, function_name: str) -> Callable[[dict[str, Any]], Any]:
-        module_name = f"runtime_generated_{path.stem}_{abs(hash(str(path)))}"
-        spec = importlib.util.spec_from_file_location(module_name, str(path))
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"Unable to load module spec: {path}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        fn = getattr(module, function_name, None)
-        if not callable(fn):
-            raise RuntimeError(f"Callable '{function_name}' not found in {path}")
-        return fn
+        module_name = self._unique_generated_module_name(path)
+        with self._generated_artifact_import_scope(path):
+            spec = importlib.util.spec_from_file_location(module_name, str(path))
+            if spec is None or spec.loader is None:
+                raise RuntimeError(f"Unable to load module spec: {path}")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            try:
+                spec.loader.exec_module(module)
+            except Exception:
+                sys.modules.pop(module_name, None)
+                raise
+            fn = getattr(module, function_name, None)
+            if not callable(fn):
+                raise RuntimeError(f"Callable '{function_name}' not found in {path}")
+
+        def _isolated_call(payload: dict[str, Any]) -> Any:
+            with self._generated_artifact_import_scope(path):
+                return fn(payload)
+
+        return _isolated_call
+
+    def _unique_generated_module_name(self, path: Path) -> str:
+        import hashlib
+        resolved = path.resolve()
+        parent = resolved.parent.name.replace('-', '_').replace('.', '_') or 'artifact'
+        stem = resolved.stem.replace('-', '_').replace('.', '_') or 'module'
+        suffix = hashlib.sha256(str(resolved).encode('utf-8', errors='replace')).hexdigest()[:16]
+        return f"runtime_generated_validation__{parent}__{stem}__{suffix}"
+
+    def _generated_artifact_local_module_names(self, path: Path) -> set[str]:
+        names = {'tool', 'schemas', 'schema', 'operations', 'operation', 'validators', 'validator', 'storage', 'client'}
+        try:
+            for item in path.resolve().parent.glob('*.py'):
+                if item.name.startswith('__'):
+                    continue
+                names.add(item.stem)
+        except Exception:
+            pass
+        return {str(name) for name in names if str(name).strip()}
+
+    @contextlib.contextmanager
+    def _generated_artifact_import_scope(self, path: Path):
+        tool_dir = str(path.resolve().parent)
+        local_names = self._generated_artifact_local_module_names(path)
+        previous_path = list(sys.path)
+        previous_modules = {name: sys.modules.get(name) for name in local_names if name in sys.modules}
+        had_module = {name: name in sys.modules for name in local_names}
+        try:
+            for name in local_names:
+                sys.modules.pop(name, None)
+            sys.path = [tool_dir] + [item for item in sys.path if item != tool_dir]
+            importlib.invalidate_caches()
+            yield
+        finally:
+            for name in local_names:
+                if had_module.get(name):
+                    sys.modules[name] = previous_modules.get(name)
+                else:
+                    sys.modules.pop(name, None)
+            sys.path = previous_path
+            importlib.invalidate_caches()
 
 
     def _parse_json_from_subprocess_stdout(self, stdout: str) -> Any:
