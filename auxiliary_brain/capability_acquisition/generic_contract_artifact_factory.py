@@ -76,7 +76,14 @@ class ContractDrivenArtifactFactory:
             operation_contracts = self._generic_operation_contracts(input_schema)
         runtime_language = self._runtime_language(blueprint=blueprint, specification_contract=specification_contract)
         if not operation_contracts:
-            if runtime_language == "python":
+            if runtime_language == "python" and self._single_action_is_deterministically_supported(
+                blueprint=blueprint,
+                input_schema=input_schema,
+                output_schema=output_schema,
+                connection_schema=connection_schema,
+                secret_schema=secret_schema,
+                specification_contract=specification_contract,
+            ):
                 return self._generate_single_action_artifact(
                     tool_id=tool_id,
                     run_id=run_id,
@@ -89,7 +96,22 @@ class ContractDrivenArtifactFactory:
                     verification_input=verification_input,
                     previous_attempts=previous_attempts,
                 )
-            return {"generation_status": "contract_driven_generation_failed", "generation_error": "No declared operations were found in the runtime input schema."}
+            return {
+                "generation_status": "contract_driven_generation_deferred",
+                "generation_error": (
+                    "No operation contract was declared and this single-action capability cannot be "
+                    "safely materialized by the deterministic runtime-native renderer. "
+                    "Behavior-specific code generation is required; a placeholder/echo/time adapter must not be registered."
+                ),
+                "generation_route": {
+                    "mode": "contract_driven_generation_deferred",
+                    "reason": "behavior_specific_implementation_required",
+                },
+                "generation_attempts": list(previous_attempts or []) + [{
+                    "status": "contract_driven_generation_deferred",
+                    "reason": "behavior_specific_implementation_required",
+                }],
+            }
         if runtime_language != "python":
             return {
                 "generation_status": "contract_driven_generation_failed",
@@ -170,6 +192,69 @@ class ContractDrivenArtifactFactory:
         return artifact
 
 
+
+    def _schema_properties(self, schema: dict[str, Any]) -> dict[str, Any]:
+        props = schema.get("properties") if isinstance(schema, dict) else {}
+        return props if isinstance(props, dict) else {}
+
+    def _single_action_is_deterministically_supported(
+        self,
+        *,
+        blueprint: dict[str, Any],
+        input_schema: dict[str, Any],
+        output_schema: dict[str, Any],
+        connection_schema: dict[str, Any],
+        secret_schema: dict[str, Any],
+        specification_contract: dict[str, Any],
+    ) -> bool:
+        """Allow deterministic single-action rendering only for runtime-native contracts.
+
+        The deterministic single-action renderer is intentionally narrow.  It may
+        synthesize values that are intrinsic to the Python runtime, such as the
+        current time, because that behavior is fully described by schema fields
+        and does not require an external protocol, persistence engine, account,
+        credential, network call, or domain-specific side effect.
+
+        For every other single-action capability, returning an input echo or a
+        generic placeholder would be unsafe.  Those capabilities must be handled
+        by the behavior-specific generation route and later checked by sandbox /
+        real-implementation gates before registration.
+        """
+        connection_props = self._schema_properties(connection_schema)
+        secret_props = self._schema_properties(secret_schema)
+        if connection_props or secret_props:
+            return False
+
+        input_props = self._schema_properties(input_schema)
+        output_props = self._schema_properties(output_schema)
+        if not output_props:
+            return False
+
+        text_parts = [
+            json.dumps(blueprint, ensure_ascii=False, sort_keys=True, default=str),
+            json.dumps(specification_contract, ensure_ascii=False, sort_keys=True, default=str),
+            " ".join(input_props.keys()),
+            " ".join(output_props.keys()),
+        ]
+        text = " ".join(text_parts).lower()
+
+        external_or_state_signals = (
+            "smtp", "http", "api", "oauth", "token", "password", "secret",
+            "send", "mail", "email", "upload", "download", "post", "publish",
+            "create", "update", "delete", "write", "save", "store", "database",
+            "sqlite", "file", "trigger", "schedule", "timer", "notify",
+            "webhook", "socket", "calendar", "message",
+        )
+        if any(signal in text for signal in external_or_state_signals):
+            return False
+
+        temporal_input_tokens = ("timezone", "time_zone", "tz", "format", "datetime_format")
+        temporal_output_tokens = ("time", "date", "timestamp", "now", "utc_offset", "iso")
+        if not all(any(token in str(name).lower() for token in temporal_output_tokens) for name in output_props):
+            return False
+        if not all(any(token in str(name).lower() for token in temporal_input_tokens) for name in input_props):
+            return False
+        return True
 
     def _generate_single_action_artifact(
         self,
