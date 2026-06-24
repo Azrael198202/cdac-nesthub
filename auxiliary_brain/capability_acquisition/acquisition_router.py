@@ -3011,8 +3011,23 @@ def test_runtime_contract_smoke():
         for name in required:
             if isinstance(name, str) and name not in fields:
                 fields.append(name)
+        # Verification expectations describe quality constraints, not output
+        # fields.  For example {"structured_output": True} means the output
+        # must be a structured JSON object; it must NOT require an output field
+        # literally named "structured_output".  Only explicit expectation keys
+        # that are known to be real output claims should be promoted here.
+        non_field_expectations = {
+            "status",
+            "structured_output",
+            "json_output",
+            "object_output",
+            "real_execution",
+            "no_hardcoded_output",
+            "no_mock_data",
+            "execution_time_generated",
+        }
         for name in expectations.keys():
-            if isinstance(name, str) and name != "status" and name not in fields:
+            if isinstance(name, str) and name not in non_field_expectations and name in ((output_schema.get("properties") if isinstance(output_schema.get("properties"), dict) else {}) or {}) and name not in fields:
                 fields.append(name)
         return fields
 
