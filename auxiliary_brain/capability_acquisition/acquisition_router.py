@@ -683,7 +683,10 @@ class RuntimeCapabilityGapImplementer:
             elif isinstance(value, float):
                 spec["type"] = "number"
             props[key] = spec
-        return {"type": "object", "required": [], "properties": props, "additionalProperties": False, "title": "connection"}
+        schema = {"type": "object", "required": [], "properties": props, "additionalProperties": False, "title": "connection"}
+        if not props:
+            schema["x-empty-schema-allowed"] = True
+        return schema
 
     def _extract_runtime_secret_schema_from_request(self, text: str) -> dict[str, Any]:
         fields = []
@@ -2758,7 +2761,11 @@ def test_runtime_contract_smoke():
 
         for schema_name in ["input_schema", "connection_schema", "secret_schema"]:
             schema = manifest.get(schema_name) if isinstance(manifest.get(schema_name), dict) else {}
-            schema_check = self._schema_is_specific(schema)
+            # connection_schema / secret_schema are optional by contract. A capability
+            # that does not need runtime connection values or secrets must be
+            # registerable with a closed empty object schema. input_schema remains
+            # strict unless the generator explicitly marks it empty-allowed.
+            schema_check = self._schema_is_specific(schema, allow_empty=(schema_name in {"connection_schema", "secret_schema"}))
             checks.append({"name": schema_name, **schema_check})
             if not schema_check.get("passed"):
                 return {"passed": False, "status": "not_registered", "reason": f"{schema_name}_is_empty_or_open", "checks": checks}
@@ -2808,12 +2815,12 @@ def test_runtime_contract_smoke():
             return {"passed": False, "reason": "entrypoint_must_accept_one_payload", "expected_function": function_name, "argument_count": len(args)}
         return {"passed": True, "expected_function": function_name, "argument": args[0].arg}
 
-    def _schema_is_specific(self, schema: dict[str, Any]) -> dict[str, Any]:
+    def _schema_is_specific(self, schema: dict[str, Any], *, allow_empty: bool = False) -> dict[str, Any]:
         if not isinstance(schema, dict) or schema.get("type") != "object":
             return {"passed": False, "reason": "schema_is_not_object"}
         properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
         if not properties:
-            if schema.get("additionalProperties") is False and bool(schema.get("x-empty-schema-allowed")):
+            if schema.get("additionalProperties") is False and (allow_empty or bool(schema.get("x-empty-schema-allowed"))):
                 return {"passed": True, "property_count": 0, "required": schema.get("required", []), "empty_schema_allowed": True}
             return {"passed": False, "reason": "schema_has_no_properties"}
         if schema.get("additionalProperties") is True and len(properties) == 0:
@@ -3000,8 +3007,12 @@ def test_runtime_contract_smoke():
 
         Therefore this method is contract-driven:
         - require only fields listed in the schema's top-level ``required``;
-        - require explicit verification expectation keys;
-        - do not promote optional properties into mandatory smoke-test fields.
+        - never turn quality expectations into output fields;
+        - promote only explicit expectation keys that are also declared schema
+          properties, because those are output claims rather than verification
+          directives;
+        - do not promote optional schema properties into mandatory smoke-test
+          fields.
 
         Nested field requirements remain handled by the specification contract
         checks when the corresponding parent object is required or present.
@@ -3011,11 +3022,8 @@ def test_runtime_contract_smoke():
         for name in required:
             if isinstance(name, str) and name not in fields:
                 fields.append(name)
-        # Verification expectations describe quality constraints, not output
-        # fields.  For example {"structured_output": True} means the output
-        # must be a structured JSON object; it must NOT require an output field
-        # literally named "structured_output".  Only explicit expectation keys
-        # that are known to be real output claims should be promoted here.
+
+        properties = output_schema.get("properties") if isinstance(output_schema.get("properties"), dict) else {}
         non_field_expectations = {
             "status",
             "structured_output",
@@ -3027,7 +3035,12 @@ def test_runtime_contract_smoke():
             "execution_time_generated",
         }
         for name in expectations.keys():
-            if isinstance(name, str) and name not in non_field_expectations and name in ((output_schema.get("properties") if isinstance(output_schema.get("properties"), dict) else {}) or {}) and name not in fields:
+            if (
+                isinstance(name, str)
+                and name not in non_field_expectations
+                and name in properties
+                and name not in fields
+            ):
                 fields.append(name)
         return fields
 
@@ -3172,6 +3185,22 @@ def test_runtime_contract_smoke():
         if not isinstance(output, dict):
             return False
         for key, expected in expectations.items():
+            key_text = str(key or "")
+            # Quality expectations are not output fields. They describe the
+            # shape/provenance of the returned object and must be evaluated
+            # as predicates.  This prevents contracts such as
+            # {"structured_output": true} from incorrectly requiring a
+            # literal output field named "structured_output".
+            if key_text in {"structured_output", "json_output", "object_output"}:
+                if bool(expected) and not isinstance(output, dict):
+                    return False
+                continue
+            if key_text in {"real_execution", "no_hardcoded_output", "no_mock_data", "execution_time_generated"}:
+                # These are validated by runtime_output_contract_checks,
+                # capability match checks, and provenance checks.  They are
+                # never top-level output field requirements.
+                continue
+
             actual = output.get(key)
             if key == "status":
                 expected_status = str(expected or "").strip().lower()

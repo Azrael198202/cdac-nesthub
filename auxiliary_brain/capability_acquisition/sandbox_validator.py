@@ -27,7 +27,10 @@ class RuntimeCapabilitySandboxValidator:
         if str(manifest.get("artifact_kind") or "") == "blueprint_only_not_registerable":
             return {"passed": False, "status": "not_registered", "reason": "blueprint_artifact_is_not_registerable", "checks": checks}
         for name in ["input_schema", "connection_schema", "secret_schema"]:
-            check = self._schema_is_specific(manifest.get(name) if isinstance(manifest.get(name), dict) else {})
+            check = self._schema_is_specific(
+                manifest.get(name) if isinstance(manifest.get(name), dict) else {},
+                allow_empty=(name in {"connection_schema", "secret_schema"}),
+            )
             checks.append({"name": name, **check})
             if not check.get("passed"):
                 return {"passed": False, "status": "not_registered", "reason": f"{name}_is_empty_or_open", "checks": checks}
@@ -47,12 +50,12 @@ class RuntimeCapabilitySandboxValidator:
             return {"passed": False, "status": "not_registered", "reason": "sandbox_mode_missing_for_effectful_runtime", "checks": checks}
         return {"passed": True, "status": "registerable", "checks": checks}
 
-    def _schema_is_specific(self, schema: dict[str, Any]) -> dict[str, Any]:
+    def _schema_is_specific(self, schema: dict[str, Any], *, allow_empty: bool = False) -> dict[str, Any]:
         if not isinstance(schema, dict) or schema.get("type") != "object":
             return {"passed": False, "reason": "schema_is_not_object"}
         properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
         if not properties:
-            if schema.get("additionalProperties") is False and bool(schema.get("x-empty-schema-allowed")):
+            if schema.get("additionalProperties") is False and (allow_empty or bool(schema.get("x-empty-schema-allowed"))):
                 return {"passed": True, "property_count": 0, "required": schema.get("required", []), "empty_schema_allowed": True}
             return {"passed": False, "reason": "schema_has_no_properties"}
         if schema.get("additionalProperties") is True and not schema.get("required"):
