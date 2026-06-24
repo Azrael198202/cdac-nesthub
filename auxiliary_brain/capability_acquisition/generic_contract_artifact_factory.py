@@ -246,8 +246,14 @@ SECRET_SCHEMA = __SECRET_SCHEMA__
         source = '''from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+
+_TOOL_DIR = Path(__file__).resolve().parent
+if str(_TOOL_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOL_DIR))
 
 from schemas import INPUT_SCHEMA, OUTPUT_SCHEMA
 
@@ -554,9 +560,15 @@ def row_to_dict(row) -> dict:
         return """from __future__ import annotations
 
 import json
+import sys
 import uuid
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
+
+_TOOL_DIR = Path(__file__).resolve().parent
+if str(_TOOL_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOL_DIR))
 
 from schemas import CONNECTION_SCHEMA, OPERATION_CONTRACTS, PERSISTENCE_CONTRACT, RECORD_CONTRACT, schema_defaults
 from storage import connect, encode_value, ensure_table, row_to_dict
@@ -839,6 +851,13 @@ def execute(payload: dict | None = None) -> dict:
         if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", fn):
             fn = "run"
         return f"""from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_TOOL_DIR = Path(__file__).resolve().parent
+if str(_TOOL_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOL_DIR))
 
 from operations import execute
 
