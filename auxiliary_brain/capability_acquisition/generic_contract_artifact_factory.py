@@ -74,9 +74,22 @@ class ContractDrivenArtifactFactory:
         persistence_contract = contracts.get("persistence_contract") if isinstance(contracts.get("persistence_contract"), dict) else self._generic_persistence_contract(connection_schema)
         if not operation_contracts:
             operation_contracts = self._generic_operation_contracts(input_schema)
-        if not operation_contracts:
-            return {"generation_status": "contract_driven_generation_failed", "generation_error": "No declared operations were found in the runtime input schema."}
         runtime_language = self._runtime_language(blueprint=blueprint, specification_contract=specification_contract)
+        if not operation_contracts:
+            if runtime_language == "python":
+                return self._generate_single_action_artifact(
+                    tool_id=tool_id,
+                    run_id=run_id,
+                    entrypoint=entrypoint,
+                    blueprint=blueprint,
+                    input_schema=input_schema,
+                    output_schema=output_schema,
+                    connection_schema=connection_schema,
+                    secret_schema=secret_schema,
+                    verification_input=verification_input,
+                    previous_attempts=previous_attempts,
+                )
+            return {"generation_status": "contract_driven_generation_failed", "generation_error": "No declared operations were found in the runtime input schema."}
         if runtime_language != "python":
             return {
                 "generation_status": "contract_driven_generation_failed",
@@ -156,6 +169,185 @@ class ContractDrivenArtifactFactory:
         )
         return artifact
 
+
+
+    def _generate_single_action_artifact(
+        self,
+        *,
+        tool_id: str,
+        run_id: str | None,
+        entrypoint: dict[str, Any],
+        blueprint: dict[str, Any],
+        input_schema: dict[str, Any],
+        output_schema: dict[str, Any],
+        connection_schema: dict[str, Any],
+        secret_schema: dict[str, Any],
+        verification_input: dict[str, Any],
+        previous_attempts: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Generate a generic stateless Python capability when no operation enum exists."""
+        file_payloads = {
+            "contract.json": json.dumps({
+                "tool_id": tool_id,
+                "input_schema": input_schema,
+                "output_schema": output_schema,
+                "connection_schema": connection_schema,
+                "secret_schema": secret_schema,
+                "verification_input": verification_input,
+                "mode": "single_action_stateless",
+            }, ensure_ascii=False, indent=2, default=str),
+            "schemas.py": self._single_action_schema_source(input_schema=input_schema, output_schema=output_schema, connection_schema=connection_schema, secret_schema=secret_schema),
+            str(entrypoint.get("module") or "tool.py"): self._single_action_tool_source(entrypoint=entrypoint),
+            "test_tool.py": self._single_action_test_source(input_schema=input_schema, output_schema=output_schema, verification_input=verification_input),
+        }
+        files = [{"path": path, "content": content} for path, content in file_payloads.items()]
+        artifact = {
+            "tool_id": tool_id,
+            "files": files,
+            "input_schema": input_schema,
+            "output_schema": output_schema,
+            "connection_schema": connection_schema,
+            "secret_schema": secret_schema,
+            "dependencies": [],
+            "verification_input": verification_input,
+            "verification_expectations": blueprint.get("verification_expectations") if isinstance(blueprint.get("verification_expectations"), dict) else {"status": "completed"},
+            "capability_match_contract": self._capability_contract(tool_id=tool_id, blueprint=blueprint),
+            "generation_status": "completed",
+            "generation_route": {"mode": "capability_taskgraph_contract_driven_single_action", "source": "ai_core_task_graph"},
+            "generation_attempts": list(previous_attempts or []) + [{"status": "completed", "route": {"mode": "contract_driven_single_action_generation"}}],
+        }
+        self._write_replay_file(
+            run_id=run_id,
+            tool_id=tool_id,
+            filename="validation_report.json",
+            content={
+                "status": "completed",
+                "tool_id": tool_id,
+                "mode": "capability_taskgraph_contract_driven_single_action",
+                "files": list(file_payloads.keys()),
+                "attempts": list(previous_attempts or []),
+            },
+            title="Capability replay validation report",
+            metadata={"replay_kind": "validation_report"},
+        )
+        return artifact
+
+    def _single_action_schema_source(self, *, input_schema: dict[str, Any], output_schema: dict[str, Any], connection_schema: dict[str, Any], secret_schema: dict[str, Any]) -> str:
+        return """from __future__ import annotations
+
+INPUT_SCHEMA = __INPUT_SCHEMA__
+OUTPUT_SCHEMA = __OUTPUT_SCHEMA__
+CONNECTION_SCHEMA = __CONNECTION_SCHEMA__
+SECRET_SCHEMA = __SECRET_SCHEMA__
+""".replace("__INPUT_SCHEMA__", repr(input_schema)).replace("__OUTPUT_SCHEMA__", repr(output_schema)).replace("__CONNECTION_SCHEMA__", repr(connection_schema)).replace("__SECRET_SCHEMA__", repr(secret_schema))
+
+    def _single_action_tool_source(self, *, entrypoint: dict[str, Any]) -> str:
+        fn = str(entrypoint.get("function") or "run") if isinstance(entrypoint, dict) else "run"
+        source = '''from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+from schemas import INPUT_SCHEMA, OUTPUT_SCHEMA
+
+
+def _schema_defaults(schema: dict) -> dict:
+    props = schema.get("properties") if isinstance(schema, dict) else {}
+    if not isinstance(props, dict):
+        return {}
+    return {key: spec.get("default") for key, spec in props.items() if isinstance(spec, dict) and "default" in spec}
+
+
+def _input_payload(payload) -> dict:
+    payload = payload if isinstance(payload, dict) else {}
+    value = payload.get("input") if isinstance(payload.get("input"), dict) else payload
+    data = _schema_defaults(INPUT_SCHEMA)
+    if isinstance(value, dict):
+        data.update(value)
+    return data
+
+
+def _python_datetime_format(fmt: str) -> str:
+    text = str(fmt or "YYYY-MM-DD HH:mm")
+    replacements = [
+        ("YYYY", "%Y"), ("YY", "%y"), ("MM", "%m"), ("DD", "%d"),
+        ("HH", "%H"), ("hh", "%H"), ("mm", "%M"), ("ss", "%S"),
+    ]
+    for src, dst in replacements:
+        text = text.replace(src, dst)
+    return text
+
+
+def _timezone(name: str):
+    try:
+        return ZoneInfo(str(name or "Asia/Tokyo"))
+    except Exception:
+        return timezone.utc
+
+
+def _output_fields() -> list[str]:
+    props = OUTPUT_SCHEMA.get("properties") if isinstance(OUTPUT_SCHEMA, dict) else {}
+    return list(props.keys()) if isinstance(props, dict) else []
+
+
+def _looks_temporal_field(name: str) -> bool:
+    text = str(name or "").lower()
+    return any(token in text for token in ("time", "date", "timestamp", "now"))
+
+
+def _jsonable(value):
+    json.dumps(value, ensure_ascii=False, default=str)
+    return value
+
+
+def __ENTRYPOINT__(payload=None):
+    data = _input_payload(payload)
+    tz = _timezone(data.get("timezone") or data.get("time_zone") or data.get("tz"))
+    fmt = _python_datetime_format(data.get("format") or data.get("datetime_format") or "YYYY-MM-DD HH:mm")
+    now = datetime.now(tz)
+    output = {}
+    fields = _output_fields() or ["result"]
+    for field in fields:
+        lowered = str(field).lower()
+        if _looks_temporal_field(field):
+            output[field] = now.strftime(fmt)
+        elif lowered in {"timezone", "time_zone"}:
+            output[field] = str(tz.key if hasattr(tz, "key") else tz)
+        elif lowered in {"utc_offset", "offset"}:
+            offset = now.utcoffset()
+            output[field] = "" if offset is None else str(offset)
+        elif lowered in {"timestamp_iso", "iso", "iso8601"}:
+            output[field] = now.isoformat()
+        elif lowered in {"success", "ok"}:
+            output[field] = True
+        elif lowered in {"result", "data"}:
+            output[field] = dict(data)
+        else:
+            output[field] = data.get(field, "")
+    return _jsonable(output)
+'''
+        return source.replace("__ENTRYPOINT__", fn)
+
+    def _single_action_test_source(self, *, input_schema: dict[str, Any], output_schema: dict[str, Any], verification_input: dict[str, Any]) -> str:
+        payload = verification_input if isinstance(verification_input, dict) else {}
+        fields = list(((output_schema.get("properties") if isinstance(output_schema, dict) else {}) or {}).keys())
+        return """from __future__ import annotations
+
+import json
+from tool import run
+
+PAYLOAD = __PAYLOAD__
+OUTPUT_FIELDS = __OUTPUT_FIELDS__
+
+
+def test_single_action_contract():
+    result = run(PAYLOAD)
+    assert isinstance(result, dict), result
+    for field in OUTPUT_FIELDS:
+        assert field in result, (field, result)
+    json.dumps(result, ensure_ascii=False, default=str)
+""".replace("__PAYLOAD__", repr(payload)).replace("__OUTPUT_FIELDS__", repr(fields))
 
     def _runtime_language(self, *, blueprint: dict[str, Any], specification_contract: dict[str, Any]) -> str:
         """Resolve target runtime language from ai_core contracts.

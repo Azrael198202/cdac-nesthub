@@ -27,6 +27,7 @@ from auxiliary_brain.runtime.observability.stage_observer import RuntimeStageObs
 from auxiliary_brain.capability_acquisition.code_generator import RuntimeBlueprintArtifactGenerator
 from auxiliary_brain.capability_acquisition.classification import CapabilityClassifier
 from auxiliary_brain.capability_acquisition.trace_logger import CapabilityAcquisitionTraceLogger
+from auxiliary_brain.dependency_manager import CapabilityDependencyManager, CapabilityDependencyPolicy
 
 
 @dataclass(frozen=True)
@@ -641,7 +642,31 @@ class RuntimeCapabilityGapImplementer:
             props["limit"] = {"type": "integer", "default": 50}
         if "offset" in props:
             props["offset"] = {"type": "integer", "default": 0}
+        self._apply_declared_field_defaults(text, props)
         return {"type": "object", "required": required, "properties": props, "additionalProperties": False, "title": "input"}
+
+    def _apply_declared_field_defaults(self, text: str, props: dict[str, Any]) -> None:
+        """Apply explicit default values from user-declared field lines.
+
+        This is contract extraction, not capability logic.  It reads only
+        statements such as ``timezone: optional string, default Asia/Tokyo`` and
+        stores the default in the JSON schema so verification inputs are valid.
+        """
+        if not isinstance(props, dict):
+            return
+        lines = str(text or "").splitlines()
+        for name, spec in list(props.items()):
+            if not isinstance(spec, dict):
+                continue
+            pattern = re.compile(rf"^\s*[-*]?\s*{re.escape(str(name))}\b[^\n]*?default\s+([^,;\n]+)", re.IGNORECASE)
+            for line in lines:
+                match = pattern.search(line.strip())
+                if not match:
+                    continue
+                value = match.group(1).strip().strip("`'\"")
+                if value:
+                    spec["default"] = value
+                break
 
     def _extract_runtime_connection_schema_from_request(self, text: str) -> dict[str, Any]:
         props: dict[str, Any] = {}
@@ -1276,14 +1301,21 @@ class RuntimeCapabilityGapImplementer:
             match = re.match(r"^[-*]\s*([a-zA-Z_][a-zA-Z0-9_]*)\b", line)
             if match:
                 value = self._safe_name(match.group(1))
-                if value and value not in names:
+                if value and value not in self._non_field_name_tokens() and value not in names:
                     names.append(value)
             elif line and not line.startswith(("-", "*")) and ":" in line:
                 head = line.split(":", 1)[0].strip()
                 value = self._safe_name(head)
-                if value and value not in names:
+                if value and value not in self._non_field_name_tokens() and value not in names:
                     names.append(value)
         return names
+
+    def _non_field_name_tokens(self) -> set[str]:
+        return {
+            "the", "this", "that", "these", "those", "do", "does", "use", "uses",
+            "verify", "register", "generate", "implementation", "runtime", "capability",
+            "returned", "return", "the_returned", "the_implementation",
+        }
 
     def _allow_template_fallback(self) -> bool:
         return str(os.environ.get("AI_CORE_ALLOW_TEMPLATE_FALLBACK", "")).strip().casefold() in {"1", "true", "yes", "on"}
@@ -1437,41 +1469,42 @@ class RuntimeCapabilityGapImplementer:
                 best = candidate
         return best
 
+    def _capability_dependency_policy(self, template: dict[str, Any]) -> CapabilityDependencyPolicy:
+        text = " ".join([
+            str(template.get("description") or ""),
+            json.dumps(template.get("acquisition_policy") if isinstance(template.get("acquisition_policy"), dict) else {}, ensure_ascii=False, default=str),
+            json.dumps(template.get("specification_contract") if isinstance(template.get("specification_contract"), dict) else {}, ensure_ascii=False, default=str),
+            str(template.get("runtime_language") or template.get("language") or ""),
+        ]).casefold()
+        runtime_language = str(template.get("runtime_language") or template.get("language") or "python").strip().lower() or "python"
+        standard_library_only = any(marker in text for marker in [
+            "standard library only",
+            "standard-library only",
+            "use python standard library only",
+            "do not require external package installation",
+            "no external package",
+        ])
+        install_disabled = standard_library_only or any(marker in text for marker in [
+            "do not install",
+            "no pip install",
+            "without pip",
+        ])
+        return CapabilityDependencyPolicy(
+            runtime_language=runtime_language,
+            standard_library_only=standard_library_only,
+            allow_install=not install_disabled,
+            allow_ensurepip=not install_disabled,
+            timeout_seconds=int(os.getenv("AI_RUNTIME_DEPENDENCY_INSTALL_TIMEOUT_SECONDS") or "600"),
+        )
+
     def _resolve_dependencies(self, template: dict[str, Any]) -> dict[str, Any]:
-        dependencies = template.get("dependencies") if isinstance(template.get("dependencies"), list) else []
-        checks: list[dict[str, Any]] = []
-        if not dependencies:
-            return {"passed": True, "status": "not_required", "checks": checks}
-        for item in dependencies:
-            if not isinstance(item, dict):
-                continue
-            import_name = str(item.get("import_name") or item.get("module") or "").strip()
-            package_name = str(item.get("package") or item.get("name") or import_name).strip()
-            auto_install = bool(item.get("auto_install", True))
-            check = {"package": package_name, "import_name": import_name, "auto_install": auto_install}
-            if import_name and self._module_available(import_name):
-                check.update({"status": "available", "installed": False})
-                checks.append(check)
-                continue
-            if not package_name or not auto_install:
-                check.update({"status": "missing", "installed": False})
-                checks.append(check)
-                return {"passed": False, "status": "missing_dependency", "checks": checks}
-            pip_proc = self._pip_install(package_name)
-            check.update({
-                "status": "installed" if pip_proc.get("returncode") == 0 else "install_failed",
-                "installed": pip_proc.get("returncode") == 0,
-                "pip": pip_proc,
-            })
-            if pip_proc.get("returncode") != 0:
-                checks.append(check)
-                return {"passed": False, "status": "dependency_installation_failed", "checks": checks}
-            if import_name and not self._module_available(import_name):
-                check["status"] = "install_completed_but_import_failed"
-                checks.append(check)
-                return {"passed": False, "status": "dependency_import_verification_failed", "checks": checks}
-            checks.append(check)
-        return {"passed": True, "status": "completed", "checks": checks}
+        dependencies = self._normalized_dependencies(template.get("dependencies"))
+        policy = self._capability_dependency_policy(template)
+        result = CapabilityDependencyManager(run_id=str(template.get("template_id") or "capability")).resolve(dependencies, policy=policy)
+        # Preserve the historical contract used by the acquisition pipeline.
+        result.setdefault("checks", [])
+        result.setdefault("dependencies", dependencies)
+        return result
 
     def _resolve_artifact_dependencies(
         self,
