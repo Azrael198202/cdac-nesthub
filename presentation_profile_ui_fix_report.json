@@ -1,0 +1,18 @@
+{
+  "status": "completed",
+  "fixes": [
+    "Agent Studio now syncs presentation_profile from /api/agent-studio/model-selection instead of stale localStorage only.",
+    "Runtime tool execution button sends presentation_profile to the backend.",
+    "Runtime tool execute API returns final_answer/message rendered through presentation_brain profile.",
+    "User profile hides developer structured details in the chat bubble.",
+    "Markdown/details rendering preserves <details>/<summary>/<pre> instead of escaping them as plain text.",
+    "Header height reduced and ready badge moved closer to the title."
+  ],
+  "generic_scope": "UI and presentation routing fix; applies to all registered capabilities, agents, and tasks using the same presentation profile path.",
+  "verification": {
+    "html_contains_profile_sync": true,
+    "execute_runtime_tool_sends_presentation_profile": true,
+    "backend_execute_endpoint_renders_final_answer": true,
+    "no_capability_specific_branching": true
+  }
+}

@@ -7,10 +7,10 @@
   <style>
     :root { color-scheme: dark; --bg:#0f172a; --panel:#111827; --card:#1f2937; --line:#334155; --text:#e5e7eb; --muted:#93c5fd; --accent:#0ea5e9; --danger:#991b1b; }
     *{box-sizing:border-box} html,body{height:100%;overflow:hidden} body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif;font-size:14px}
-    header{min-height:74px;height:auto;display:grid;grid-template-columns:minmax(260px,1fr) minmax(110px,auto) minmax(360px,.85fr);align-items:center;padding:10px 16px 10px 292px;border-bottom:1px solid var(--line);gap:12px;overflow:visible;transition:padding-left .18s ease}
+    header{min-height:58px;height:58px;display:grid;grid-template-columns:minmax(260px,max-content) minmax(110px,140px) minmax(360px,1fr);align-items:center;padding:8px 16px 8px 292px;border-bottom:1px solid var(--line);gap:16px;overflow:visible;transition:padding-left .18s ease}
     body.sessionCollapsed header{padding-left:72px}
-    h1{font-size:18px;margin:0 0 4px}.sub{color:#a5b4fc;font-size:12px}.status{justify-self:center;align-self:center;color:#bae6fd;display:flex;align-items:center;justify-content:center;gap:8px;min-width:110px;padding:6px 12px;border:1px solid var(--line);border-radius:999px;background:#0b1220}.status.running::before{content:'';width:10px;height:10px;border:2px solid #38bdf8;border-top-color:transparent;border-radius:50%;display:inline-block;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.btn{border:0;border-radius:10px;background:#334155;color:white;padding:10px 14px;font-weight:700;cursor:pointer}.btn.primary{background:#0369a1}.btn.danger{background:var(--danger)}.btn:disabled{opacity:.6;cursor:not-allowed}
-    main{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:10px;height:calc(100vh - 74px);padding:10px 10px 10px 292px;overflow:hidden;min-width:0;transition:grid-template-columns .18s ease,padding-left .18s ease}body.sessionCollapsed main{padding-left:72px}main.rightCollapsed{grid-template-columns:minmax(0,1fr) 44px}.panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);min-height:0;min-width:0;display:flex;flex-direction:column;overflow:hidden}.panel.collapsed .scroll{display:none}.panel.collapsed h2{writing-mode:vertical-rl;transform:rotate(180deg);align-items:center;height:100%;justify-content:flex-start;gap:8px;padding:12px 8px}.panel.collapsed h2 .small{display:none}.panel h2{font-size:14px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}.scroll{padding:12px;overflow:auto;min-height:0;flex:1}.item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}.pill{display:inline-block;margin:3px 4px 0 0;padding:3px 7px;border-radius:999px;background:#0f766e;color:#ccfbf1;font-size:12px}.path{color:#93c5fd;font-size:12px;word-break:break-all}.console{border-top:1px solid var(--line);padding:10px 12px;background:#0b1220;flex:0 0 auto;max-height:420px;overflow:auto}.consoleActions{position:sticky;bottom:0;background:#0b1220;padding-top:8px;padding-bottom:2px;margin-top:8px;z-index:2}.studioSettingsSummary{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:8px}.settingsChip{border:1px solid var(--line);border-radius:999px;padding:5px 9px;background:#0b1220;color:#bfdbfe;font-size:12px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hiddenModelControls{display:none!important}.input{width:100%;height:72px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px;resize:none}.row{display:flex;gap:8px;margin-top:10px}.message{white-space:pre-wrap;line-height:1.55}.answerText{display:flex;flex-direction:column;gap:6px;line-height:1.5}.imageThumbLink{display:inline-block;max-width:260px;margin:6px 0}.answerVideoPreview,.answerGifPreview{display:block;max-width:280px;max-height:180px;border-radius:12px;border:1px solid #334155;margin:8px 0;background:#020617;}
+    h1{font-size:18px;margin:0 0 4px}.sub{color:#a5b4fc;font-size:12px}.status{justify-self:start;align-self:center;color:#bae6fd;display:flex;align-items:center;justify-content:center;gap:8px;min-width:110px;padding:6px 12px;border:1px solid var(--line);border-radius:999px;background:#0b1220}.status.running::before{content:'';width:10px;height:10px;border:2px solid #38bdf8;border-top-color:transparent;border-radius:50%;display:inline-block;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.btn{border:0;border-radius:10px;background:#334155;color:white;padding:10px 14px;font-weight:700;cursor:pointer}.btn.primary{background:#0369a1}.btn.danger{background:var(--danger)}.btn:disabled{opacity:.6;cursor:not-allowed}
+    main{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:10px;height:calc(100vh - 58px);padding:10px 10px 10px 292px;overflow:hidden;min-width:0;transition:grid-template-columns .18s ease,padding-left .18s ease}body.sessionCollapsed main{padding-left:72px}main.rightCollapsed{grid-template-columns:minmax(0,1fr) 44px}.panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);min-height:0;min-width:0;display:flex;flex-direction:column;overflow:hidden}.panel.collapsed .scroll{display:none}.panel.collapsed h2{writing-mode:vertical-rl;transform:rotate(180deg);align-items:center;height:100%;justify-content:flex-start;gap:8px;padding:12px 8px}.panel.collapsed h2 .small{display:none}.panel h2{font-size:14px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}.scroll{padding:12px;overflow:auto;min-height:0;flex:1}.item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}.pill{display:inline-block;margin:3px 4px 0 0;padding:3px 7px;border-radius:999px;background:#0f766e;color:#ccfbf1;font-size:12px}.path{color:#93c5fd;font-size:12px;word-break:break-all}.console{border-top:1px solid var(--line);padding:10px 12px;background:#0b1220;flex:0 0 auto;max-height:420px;overflow:auto}.consoleActions{position:sticky;bottom:0;background:#0b1220;padding-top:8px;padding-bottom:2px;margin-top:8px;z-index:2}.studioSettingsSummary{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:8px}.settingsChip{border:1px solid var(--line);border-radius:999px;padding:5px 9px;background:#0b1220;color:#bfdbfe;font-size:12px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hiddenModelControls{display:none!important}.input{width:100%;height:72px;border:1px solid var(--line);border-radius:10px;background:#020617;color:var(--text);padding:10px;resize:none}.row{display:flex;gap:8px;margin-top:10px}.message{white-space:pre-wrap;line-height:1.55}.answerText{display:flex;flex-direction:column;gap:6px;line-height:1.5}.imageThumbLink{display:inline-block;max-width:260px;margin:6px 0}.answerVideoPreview,.answerGifPreview{display:block;max-width:280px;max-height:180px;border-radius:12px;border:1px solid #334155;margin:8px 0;background:#020617;}
 .answerGifPreview{object-fit:cover;}
 .answerImageThumb{display:block;max-width:260px;max-height:180px;object-fit:cover;border-radius:12px;border:1px solid var(--line);box-shadow:0 8px 24px rgba(0,0,0,.28)}.answerImageThumb:hover{border-color:#38bdf8}.answerBlock{border-left:3px solid #38bdf8;padding-left:10px;margin:6px 0}.answerLine{display:block}.internalNote{color:#93c5fd;font-size:12px}.hiddenRaw{display:none}.detailsBox{margin-top:8px}.detailsBox summary{cursor:pointer;color:#bfdbfe;font-weight:700}.pre.compact{max-height:120px;font-size:12px}.user{border-color:#0ea5e9}.error{border-color:#f59e0b}.final{border-color:#22c55e}.pre{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;background:#020617;border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;max-height:220px;max-width:100%}.small{font-size:12px;color:#bfdbfe}.sectionTitle{color:#bfdbfe;font-weight:700;margin:12px 0 8px}.empty{color:#94a3b8;font-size:13px}.cardHeader{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.copyBtn{border:1px solid var(--line);border-radius:8px;background:#0b1220;color:#bfdbfe;padding:4px 8px;cursor:pointer;font-size:12px}.copyBtn:hover{border-color:#38bdf8;color:#e0f2fe}.toast{position:fixed;right:20px;bottom:20px;background:#064e3b;border:1px solid #22c55e;color:#dcfce7;padding:10px 14px;border-radius:10px;z-index:50}.progressLine{display:flex;align-items:center;gap:8px;margin:6px 0;color:#bfdbfe}.progressDot{width:8px;height:8px;border-radius:999px;background:#38bdf8;animation:pulse 1.2s ease-in-out infinite}.progressDot.done{background:#22c55e;animation:none}.progressDot.wait{background:#f59e0b;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.15)}}
 .execDashboard{border-bottom:1px solid var(--line);background:#0b1220;padding:12px;display:flex;flex-direction:column;gap:10px}.execDashboard.idle{padding:10px 12px}.execIdleTitle{font-weight:800;color:#e0f2fe}.execIdleMeta{font-size:12px;color:#94a3b8;margin-top:3px}.execTop{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.execTitle{font-weight:800;color:#e0f2fe}.execMeta{font-size:12px;color:#93c5fd;margin-top:3px}.execPercent{font-size:24px;font-weight:900;color:#7dd3fc;line-height:1}.progressBar{height:8px;background:#020617;border:1px solid #1e293b;border-radius:999px;overflow:hidden}.progressFill{height:100%;width:0%;background:linear-gradient(90deg,#0ea5e9,#8b5cf6);transition:width .25s ease}.stageGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.stageChip{border:1px solid #1e293b;border-radius:9px;padding:7px 8px;background:#020617;color:#94a3b8;min-width:0}.stageChip b{display:block;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.stageChip span{font-size:10px}.stageChip.completed{border-color:#166534;color:#bbf7d0}.stageChip.running{border-color:#38bdf8;color:#e0f2fe;box-shadow:0 0 0 1px rgba(56,189,248,.15) inset}.stageChip.failed{border-color:#f59e0b;color:#fde68a}.stageChip.pending{border-color:#334155;color:#94a3b8}.rightTabs{display:flex;gap:6px;padding:8px 10px;border-bottom:1px solid var(--line);background:#0b1220}.tabBtn{border:1px solid var(--line);background:#020617;color:#bfdbfe;border-radius:999px;padding:6px 10px;cursor:pointer;font-weight:700}.tabBtn.active{background:#075985;border-color:#38bdf8;color:white}.tabPane{display:none}.tabPane.active{display:block}.tabPane.execDashboard{border-bottom:0;border-radius:12px;margin:0 0 12px 0}.tabPane.execDashboard.idle{background:#0b1220;border:1px solid var(--line)}.modelModeSelect{min-width:105px;max-width:130px}.compactModelSelect{min-width:220px;max-width:300px}
@@ -73,7 +73,36 @@ function renderJson(obj){ return JSON.stringify(obj, null, 2); }
 function toggleUploadBox(){ const box=document.getElementById('uploadBox'); if(box){ box.classList.toggle('show'); } }
 function looksLikeJsonText(text){ const t=String(text||'').trim(); return (t.startsWith('{')&&t.endsWith('}')) || (t.startsWith('[')&&t.endsWith(']')); }
 function formatMaybeJson(text){ const raw=String(text||'').trim(); if(!raw)return ''; try{ if(looksLikeJsonText(raw)){ return '<pre class="formattedJson">'+escapeHtml(JSON.stringify(JSON.parse(raw), null, 2))+'</pre>'; } }catch(e){} return ''; }
-function renderMarkdownLike(text){ let raw=String(text||'').trim(); const jsonBlock=formatMaybeJson(raw); if(jsonBlock)return jsonBlock; raw=raw.replace(/```json\n([\s\S]*?)```/g,function(_,body){ try{return '<pre class="formattedJson">'+escapeHtml(JSON.stringify(JSON.parse(body),null,2))+'</pre>';}catch(e){return '<pre class="formattedJson">'+escapeHtml(body)+'</pre>';}}); raw=raw.replace(/```([\s\S]*?)```/g,function(_,body){return '<pre>'+escapeHtml(body)+'</pre>';}); raw=raw.replace(/<details>/g,'<details>').replace(/<\/details>/g,'</details>').replace(/<summary>/g,'<summary>').replace(/<\/summary>/g,'</summary>'); return raw.split(/\n+/).map(line=>'<span class="answerLine">'+linkifyAnswerLine(line)+'</span>').join(''); }
+function currentPresentationProfile(){
+  try{return String(getPresentationProfile ? getPresentationProfile() : (localStorage.getItem('agentStudio.presentationProfile')||'advanced')).toLowerCase();}catch(e){return 'advanced';}
+}
+function normalizeFencedJsonBlocks(raw){
+  let text=String(raw||'');
+  text=text.replace(/```json\s*([\s\S]*?)```/gi,function(_,body){
+    const b=String(body||'').trim();
+    try{return '<pre class="formattedJson">'+escapeHtml(JSON.stringify(JSON.parse(b),null,2))+'</pre>';}
+    catch(e){return '<pre class="formattedJson">'+escapeHtml(b)+'</pre>';}
+  });
+  text=text.replace(/```\s*([\s\S]*?)```/g,function(_,body){return '<pre>'+escapeHtml(String(body||'').trim())+'</pre>';});
+  return text;
+}
+function stripDeveloperDetailsForUser(raw){
+  let text=String(raw||'');
+  text=text.replace(/<details[\s\S]*?<\/details>/gi,'');
+  text=text.replace(/Structured result[\s\S]*$/i,'');
+  return text.trim();
+}
+function renderMarkdownLike(text){
+  let raw=String(text||'').trim();
+  if(!raw)return '';
+  if(currentPresentationProfile()==='user'){ raw=stripDeveloperDetailsForUser(raw); }
+  const jsonBlock=formatMaybeJson(raw); if(jsonBlock)return jsonBlock;
+  raw=normalizeFencedJsonBlocks(raw);
+  if(/<details[\s\S]*?<\/details>/i.test(raw)){
+    return raw;
+  }
+  return raw.split(/\n+/).map(line=>'<span class="answerLine">'+linkifyAnswerLine(line)+'</span>').join('');
+}
 function isGifDownloadUrl(url){
   const clean=String(url||'').split('?')[0].toLowerCase();
   return clean.endsWith('.gif') || clean.includes('generated_video.gif') || clean.includes('text_animation_');
@@ -247,20 +276,31 @@ function renderStudioResponse(data, originalText){
 }
 function escapeHtml(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
+function normalizePresentationProfile(value){
+  const v=String(value||'advanced').toLowerCase();
+  return ['user','advanced','developer','diagnostic'].includes(v) ? v : 'advanced';
+}
+function setPresentationProfileValue(value, persistLocal=true){
+  const profile=normalizePresentationProfile(value);
+  const el=document.getElementById('presentationProfileSelect');
+  if(el){ el.value=profile; }
+  if(persistLocal){ localStorage.setItem('agentStudio.presentationProfile', profile); }
+  const viewHint=document.getElementById('presentationProfileHint');
+  if(viewHint){ viewHint.textContent='View: '+profile; }
+  return profile;
+}
 function getPresentationProfile(){
   const el=document.getElementById('presentationProfileSelect');
-  return (el && el.value) ? el.value : (localStorage.getItem('agentStudio.presentationProfile') || 'advanced');
+  return normalizePresentationProfile((el && el.value) || localStorage.getItem('agentStudio.presentationProfile') || 'advanced');
 }
-function savePresentationProfile(){
-  const value=getPresentationProfile();
-  localStorage.setItem('agentStudio.presentationProfile', value);
-  const viewHint=document.getElementById('presentationProfileHint');
-  if(viewHint){ viewHint.textContent='View: '+value; }
+async function savePresentationProfile(){
+  const value=setPresentationProfileValue(getPresentationProfile(), true);
+  // Keep the Agent Studio header and Settings page backed by the same model
+  // selection profile instead of a stale local-only value.
+  try{ await saveModelSelection(); }catch(e){}
+  return value;
 }
-function initPresentationProfile(){
-  const el=document.getElementById('presentationProfileSelect');
-  if(el){ el.value=localStorage.getItem('agentStudio.presentationProfile') || 'advanced'; }
-}
+function initPresentationProfile(){ setPresentationProfileValue(localStorage.getItem('agentStudio.presentationProfile') || 'advanced', false); }
 
 function setStudioStatus(text, running=false){ const el=document.getElementById('status'); el.textContent=text; el.classList.toggle('running', !!running); }
 function addProgressMessage(text){ setStudioStatus(text, true); }
@@ -1343,6 +1383,8 @@ function renderModelSelection(data){
   const models=(data&&data.available_models)||{};
   const mode=selection.mode||'hybrid';
   suppressModelSave=true;
+  const profile=normalizePresentationProfile(selection.presentation_profile || data.presentation_profile || localStorage.getItem('agentStudio.presentationProfile') || 'advanced');
+  setPresentationProfileValue(profile, true);
   const modeSelect=document.getElementById('modelModeSelect');
   if(modeSelect){ modeSelect.value=mode; }
   const items=modelListForMode(mode, models);
@@ -1354,7 +1396,7 @@ function renderModelSelection(data){
   const selected=selectedOptionMeta();
   if(hint){ hint.textContent = `Model: ${mode} · ${selected.model_id || selection.initial_model_id || ''} · ${selected.provider || selection.initial_provider || ''}`; }
   const viewHint=document.getElementById('presentationProfileHint');
-  if(viewHint){ viewHint.textContent='View: '+((document.getElementById('presentationProfileSelect')||{}).value || 'advanced'); }
+  if(viewHint){ viewHint.textContent='View: '+getPresentationProfile(); }
   suppressModelSave=false;
 }
 function currentModelMode(){
@@ -1388,7 +1430,8 @@ async function saveModelSelection(){
     selected_api_model_id: selectedApi,
     initial_model_id: meta.model_id || '',
     allow_escalation: true,
-    ask_for_missing_keys_at_start: true
+    ask_for_missing_keys_at_start: true,
+    presentation_profile: getPresentationProfile()
   };
   if(mode==='local_only'){ payload.selected_local_model_id=payload.initial_model_id || selectedLocal; }
   if(mode==='api_only'){ payload.selected_api_model_id=payload.initial_model_id || selectedApi; }
@@ -1917,8 +1960,8 @@ async function executeRuntimeTool(tool){
         approvalConfirmed=confirm('Approval required before external runtime execution. Continue?\n\n'+renderJson(inputData));
         if(!approvalConfirmed){ return; }
       }
-      const data=await apiFetchRuntimeToolJson('/api/agent-studio/runtime-tools/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:toolId,input_data:inputData,profile_id:profileId,approval_confirmed:approvalConfirmed})});
-      addMessage('assistant', data.ok ? ('Runtime tool executed:\n'+renderJson(data.result)) : ((data.human_readable_error||'Runtime tool execution requires action or failed')+'\n'+renderJson(data)), data.ok?'final':'error');
+      const data=await apiFetchRuntimeToolJson('/api/agent-studio/runtime-tools/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_id:toolId,input_data:inputData,profile_id:profileId,approval_confirmed:approvalConfirmed,presentation_profile:getPresentationProfile()})});
+      renderStudioResponse(data, 'Run registered runtime capability: '+toolId);
       if(!data.ok){ await maybeApplyRepairProposal(data, toolId, profileId); }
       await refreshStateSettled();
     }

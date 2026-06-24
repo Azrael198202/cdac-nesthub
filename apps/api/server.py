@@ -395,6 +395,7 @@ class RegisteredToolExecuteRequest(BaseModel):
     profile_id: str | None = None
     approval_confirmed: bool = False
     remember_approval: bool = False
+    presentation_profile: str | None = None
 
 
 
@@ -1307,6 +1308,11 @@ async def agent_studio_execute_runtime_tool(req: RegisteredToolExecuteRequest):
             remember_approval=bool(req.remember_approval),
         )
         status = _runtime_tool_execute_http_status(payload)
+        final_answer = _tool_execution_public_answer(payload, presentation_profile=req.presentation_profile or "user")
+        if isinstance(payload, dict):
+            payload.setdefault("action", "registered_tool_execution")
+            payload["final_answer"] = final_answer
+            payload["message"] = final_answer
         if status >= 400 or payload.get("ok") is not True:
             _write_api_failure_log(
                 area="agent_studio_execute_runtime_tool",
