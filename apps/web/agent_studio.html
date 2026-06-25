@@ -192,7 +192,7 @@ function renderStudioResponse(data, originalText){
   if(data && data.run_id){ lastCompletedRunId = String(data.run_id||''); }
   if(data && data.session_boundary){ renderSessionBoundary(data.session_boundary); }
   if(data && data.action==='artifact_edit_proposal'){
-    if(data.status==='pending_review' && data.proposal){
+    if((data.status==='pending_review' || data.proposal) && data.proposal){
       showArtifactProposal({proposal:data.proposal, preview:data.preview||''});
       document.getElementById('artifactEditModal').classList.add('show');
       addMessage(data.message || 'A modified draft file was generated for review.', 'item final');
@@ -590,6 +590,10 @@ async function uploadArtifacts(){
 
 function hasRuntimeInteractionPayload(data){
   if(!data || typeof data !== 'object'){ return false; }
+  const action=String(data.action||'');
+  const status=String(data.status||'');
+  if(action==='artifact_edit_proposal' || action==='artifact_edit_request'){ return true; }
+  if(status==='pending_review' && data.proposal && typeof data.proposal==='object'){ return true; }
   const keys=['pending_action','interaction_request','pending_interaction','approval_request'];
   return keys.some(k => data[k] && typeof data[k] === 'object');
 }
@@ -617,6 +621,12 @@ function preferNormalizedJobResult(job){
   if(!job || typeof job !== 'object'){ return {}; }
   const normalized=job.normalized_result && typeof job.normalized_result==='object' ? job.normalized_result : null;
   const result=job.result && typeof job.result==='object' ? job.result : {};
+  // Interactive results such as artifact edit review, missing input, approval,
+  // and runtime confirmations must preserve their action/interactions.  A
+  // normalized final-answer-only wrapper would hide the modal and make the UI
+  // look completed even though a review action is pending.
+  if(hasRuntimeInteractionPayload(result)){ return result; }
+  if(normalized && hasRuntimeInteractionPayload(normalized)){ return normalized; }
   if(normalized && (!hasVisibleRuntimeResult(result) || hasVisibleRuntimeResult(normalized))){
     return normalized;
   }
