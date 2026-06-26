@@ -18,6 +18,22 @@ class TaskGraphCompileGate:
         errors: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = []
         steps = compiled.get("steps") if isinstance(compiled.get("steps"), list) else []
+        source_task_graph = compiled.get("source_task_graph") if isinstance(compiled.get("source_task_graph"), dict) else {}
+        workflow_planning = source_task_graph.get("workflow_planning") if isinstance(source_task_graph.get("workflow_planning"), dict) else {}
+        graph_verification = workflow_planning.get("semantic_graph_verification") if isinstance(workflow_planning.get("semantic_graph_verification"), dict) else {}
+        expected_structural_count = graph_verification.get("structural_step_count")
+        if isinstance(expected_structural_count, int) and expected_structural_count > len(steps):
+            errors.append({
+                "code": "compiled_graph_lost_verified_structural_steps",
+                "expected_min_step_count": expected_structural_count,
+                "actual_step_count": len(steps),
+                "verification_status": graph_verification.get("status"),
+            })
+        if graph_verification.get("status") == "failed":
+            errors.append({
+                "code": "semantic_graph_verification_failed_before_compile",
+                "issues": graph_verification.get("issues") or [],
+            })
         step_ids = {str(step.get("step_id")) for step in steps if isinstance(step, dict)}
         for step in steps:
             if not isinstance(step, dict):

@@ -29,6 +29,7 @@ from ai_core.execution.parameter_resolution import ParameterResolutionPipeline, 
 from auxiliary_brain.studio.instruction_workflow_planner import InstructionWorkflowPlanner
 from auxiliary_brain.studio.structural_step_planner import StructuralStepPlanner
 from auxiliary_brain.studio.runtime_semantic_planner import RuntimeSemanticPlanner
+from auxiliary_brain.studio.semantic_graph_verifier import SemanticTaskGraphVerifier
 from auxiliary_brain.runtime.capability.registered_tool_agent_binder import RegisteredToolAgentBinder
 from auxiliary_brain.runtime.capability.python_file_capability_importer import PythonFileCapabilityImporter
 from verification_brain import RuntimeVerificationFoundation
@@ -59,6 +60,7 @@ class AgentStudioService:
         self.parameter_resolution_pipeline = ParameterResolutionPipeline()
         self.instruction_workflow_planner = InstructionWorkflowPlanner()
         self.runtime_semantic_planner = RuntimeSemanticPlanner()
+        self.semantic_graph_verifier = SemanticTaskGraphVerifier()
         self.registered_tool_service = RuntimeRegisteredToolService()
         self.registered_tool_agent_binder = RegisteredToolAgentBinder()
         self.python_file_capability_importer = PythonFileCapabilityImporter()
@@ -1508,6 +1510,12 @@ class AgentStudioService:
                 participants=participants,
                 run_id=graph_id,
             )
+        graph_verification = self.semantic_graph_verifier.verify_and_repair(
+            instruction=instruction,
+            participants=participants,
+            semantic_plan=semantic_plan,
+        )
+        semantic_plan = graph_verification.repaired_plan
         workflow_plan = self.instruction_workflow_planner.plan(
             instruction=instruction,
             participants=participants,
@@ -1667,6 +1675,7 @@ class AgentStudioService:
                 "mode": workflow_plan.coverage.get("planning_mode"),
                 "semantic_step_count": workflow_plan.coverage.get("semantic_step_count"),
                 "semantic_plan_status": (semantic_plan.get("coverage_notes") or []),
+                "semantic_graph_verification": graph_verification.as_dict(),
                 "generated_participant_ids": [p.get("participant_id") for p in workflow_plan.generated_participants],
                 "step_count": len(workflow_tasks),
                 "coverage_status": workflow_plan.coverage.get("status"),
