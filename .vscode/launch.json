@@ -8,11 +8,11 @@
       "preLaunchTask": "Kill Port 8000 Listeners",
       "module": "uvicorn",
       "args": [
-        "apps.api.server:app",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "8000"
+          "apps.api.server:app",
+          "--host",
+          "0.0.0.0",
+          "--port",
+          "8000"
       ],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
