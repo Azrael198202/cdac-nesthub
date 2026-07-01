@@ -10,6 +10,7 @@ import re
 from ai_core.config.paths import RUNTIME_TRACES, RUNTIME_GENERATED
 from ai_core.context.session_memory_store import SessionMemoryStore
 from ai_core.context.vector_memory_store import VectorMemoryStore
+from ai_core.context.source_planner import SourcePlanner
 from ai_core.knowledge.knowledge_service import KnowledgeService
 from ai_core.llm.provider_router import ProviderRouter
 from auxiliary_brain.research.web_research_tool import GenericWebResearchTool
@@ -40,6 +41,7 @@ class ConversationCoreRuntime:
         self.model_selection = UserModelSelectionStore()
         self.sessions = SessionMemoryStore()
         self.vector_memory = VectorMemoryStore()
+        self.source_planner = SourcePlanner()
         self.web_research = GenericWebResearchTool()
         self.web_evidence_optimizer = WebEvidenceOptimizer()
         self.capability_implementer = RuntimeCapabilityGapImplementer()
@@ -610,14 +612,36 @@ class ConversationCoreRuntime:
         return result
 
     def _context_awareness(self, text: str, intent: dict[str, Any], context_window: dict[str, Any] | None = None, knowledge_evaluation: dict[str, Any] | None = None, *, session_id: str | None = None) -> dict[str, Any]:
-        kb = self.knowledge.answer_from_knowledge(text)
         raw_vector_hits = self.vector_memory.search(text, limit=12, usage_scope="retrieval_context")
         vector_hits = self._filter_retrieved_context_for_session(raw_vector_hits, session_id=session_id, limit=5)
         knowledge_eval = knowledge_evaluation if isinstance(knowledge_evaluation, dict) else {}
+        knowledge_status = self.knowledge.status()
+        source_plan = self.source_planner.plan(
+            text,
+            intent=intent,
+            knowledge_evaluation=knowledge_eval,
+            knowledge_status=knowledge_status,
+            local_probe=lambda: self._local_knowledge_probe(text, intent=intent, knowledge_evaluation=knowledge_eval),
+        )
+        local_decision = source_plan.get("local_knowledge") if isinstance(source_plan.get("local_knowledge"), dict) else {}
+        local_rag = local_decision.get("evidence") if bool(local_decision.get("selected")) and isinstance(local_decision.get("evidence"), dict) else {"status": "not_requested", "reason": local_decision.get("reason") or "source_planner_did_not_select_local_knowledge"}
+        kb = self.knowledge.answer_from_knowledge(text) if bool(local_decision.get("selected")) else None
+        knowledge_available = bool(kb) or (bool(local_decision.get("selected")) and str(local_rag.get("status") or "") == "evidence_found")
+        knowledge_answer = kb if kb else None
+        if knowledge_answer is None and bool(local_decision.get("selected")) and str(local_rag.get("status") or "") == "evidence_found":
+            knowledge_answer = {
+                "answer": str(local_rag.get("answer") or local_rag.get("answer_material") or "").strip(),
+                "source": "runtime_local_knowledge",
+                "score": self._local_knowledge_top_score(local_rag),
+                "memory_type": "user_provided_document_fact",
+                "citations": local_rag.get("citations") if isinstance(local_rag.get("citations"), list) else [],
+            }
         return {
-            "knowledge_available": bool(kb),
-            "knowledge_answer": kb if kb else None,
-            "knowledge_status": self.knowledge.status(),
+            "knowledge_available": knowledge_available,
+            "knowledge_answer": knowledge_answer,
+            "local_knowledge": local_rag,
+            "source_plan": source_plan,
+            "knowledge_status": knowledge_status,
             "knowledge_evaluation": knowledge_eval,
             "session_context": context_window or {},
             "retrieved_context": [
@@ -629,9 +653,47 @@ class ConversationCoreRuntime:
                 "session_id": str(session_id or ""),
                 "discarded_cross_session_count": max(0, len(raw_vector_hits) - len(vector_hits)),
             },
-            "upstream_refs": ["input_parsing", "intent_recognition", "knowledge_evaluation"],
+            "upstream_refs": ["input_parsing", "intent_recognition", "knowledge_evaluation", "source_plan"],
             "intent_type": intent.get("intent_type"),
         }
+
+    def _local_knowledge_probe(self, text: str, *, intent: dict[str, Any] | None = None, knowledge_evaluation: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Probe local runtime knowledge without using it as hidden prompt context.
+
+        The Knowledge Base UI can retrieve document chunks independently from
+        legacy answer memories. Agent Studio must use the same local document
+        evidence path before falling back to a plain model response. This probe
+        is generic: it never contains domain or company-specific terms, and it
+        does not decide final wording.
+        """
+        value = str(text or "").strip()
+        if not value:
+            return {"status": "not_requested", "reason": "empty_input"}
+        intent = intent if isinstance(intent, dict) else {}
+        if intent.get("capability_gap_detected"):
+            return {"status": "not_requested", "reason": "capability_gap_uses_acquisition_pipeline"}
+        knowledge_evaluation = knowledge_evaluation if isinstance(knowledge_evaluation, dict) else {}
+        if bool(knowledge_evaluation.get("needs_web_search") or knowledge_evaluation.get("requires_external_information")):
+            return {"status": "not_requested", "reason": "external_source_policy_selected"}
+        try:
+            status = self.knowledge.status()
+            if int(status.get("chunk_count") or 0) <= 0 and int(status.get("embedding_count") or 0) <= 0:
+                return {"status": "not_available", "reason": "no_local_document_chunks", "knowledge_status": status}
+            payload = self.knowledge.rag_query(value, limit=5)
+            payload["knowledge_status"] = status
+            payload["used_by_agent_runtime"] = str(payload.get("status") or "") == "evidence_found"
+            return payload
+        except Exception as exc:
+            return {"status": "error", "reason": "local_knowledge_probe_failed", "error": str(exc)[:300]}
+
+    def _local_knowledge_top_score(self, payload: dict[str, Any]) -> float:
+        try:
+            results = payload.get("results") if isinstance(payload.get("results"), list) else []
+            if not results:
+                return 0.0
+            return float((results[0] or {}).get("score") or 0.0)
+        except Exception:
+            return 0.0
 
     def _filter_retrieved_context_for_session(self, hits: list[dict[str, Any]], *, session_id: str | None, limit: int = 5) -> list[dict[str, Any]]:
         """Keep retrieval context isolated to the active session.
@@ -860,6 +922,7 @@ class ConversationCoreRuntime:
             "context_summary": {
                 "knowledge_available": context.get("knowledge_available"),
                 "knowledge_status": context.get("knowledge_status"),
+                "source_plan": context.get("source_plan") if isinstance(context.get("source_plan"), dict) else {},
                 "session_context": context.get("session_context", {}),
                 "retrieved_context": context.get("retrieved_context", []),
             },
@@ -1278,6 +1341,33 @@ class ConversationCoreRuntime:
                 "evidence": evidence,
                 "knowledge_used": False,
             }
+        source_plan = context.get("source_plan") if isinstance(context.get("source_plan"), dict) else {}
+        local_source = source_plan.get("local_knowledge") if isinstance(source_plan.get("local_knowledge"), dict) else {}
+        local_knowledge = context.get("local_knowledge") if isinstance(context.get("local_knowledge"), dict) else {}
+        if bool(local_source.get("selected")) and str(local_knowledge.get("status") or "") == "evidence_found":
+            grounded = await self._local_knowledge_answer_material(
+                text=text,
+                local_knowledge=local_knowledge,
+                plan=plan,
+            )
+            return {
+                "status": "completed",
+                "execution_mode": "local_knowledge",
+                "capability": "runtime_local_knowledge_retrieval",
+                "answer_material": str(grounded.get("answer") or grounded.get("answer_material") or "").strip(),
+                "knowledge_used": True,
+                "source": "runtime_knowledge",
+                "evidence": {
+                    "type": "local_knowledge",
+                    "status": grounded.get("status") or local_knowledge.get("status"),
+                    "synthesis_status": grounded.get("synthesis_status"),
+                    "citations": grounded.get("citations") if isinstance(grounded.get("citations"), list) else local_knowledge.get("citations"),
+                    "results": grounded.get("results") if isinstance(grounded.get("results"), list) else local_knowledge.get("results"),
+                    "used_refs": grounded.get("used_refs") if isinstance(grounded.get("used_refs"), list) else [],
+                    "confidence": grounded.get("confidence"),
+                    "source_count": len(grounded.get("citations") if isinstance(grounded.get("citations"), list) else (local_knowledge.get("citations") if isinstance(local_knowledge.get("citations"), list) else [])),
+                },
+            }
         kb = context.get("knowledge_answer") if isinstance(context.get("knowledge_answer"), dict) else None
         if kb and kb.get("answer"):
             return {
@@ -1286,6 +1376,11 @@ class ConversationCoreRuntime:
                 "answer_material": str(kb.get("answer") or ""),
                 "knowledge_used": True,
                 "source": "runtime_knowledge",
+                "evidence": {
+                    "type": "legacy_runtime_knowledge",
+                    "citations": kb.get("citations") if isinstance(kb.get("citations"), list) else [],
+                    "source_count": len(kb.get("citations") if isinstance(kb.get("citations"), list) else []),
+                },
             }
         answer = await self._direct_answer(text, parsed, intent, context, plan, run_id)
         return {
@@ -1294,6 +1389,43 @@ class ConversationCoreRuntime:
             "answer_material": answer,
             "knowledge_used": False,
         }
+
+    async def _local_knowledge_answer_material(self, *, text: str, local_knowledge: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+        """Return a grounded answer from local document evidence.
+
+        This uses the same retrieval/synthesis path as the Runtime Knowledge Base
+        page. If a synthesis model is unavailable, the evidence material itself
+        is returned instead of falling through to an unconstrained model answer.
+        """
+        profile = {}
+        if isinstance(plan, dict) and isinstance(plan.get("final_response_contract"), dict):
+            contract = plan.get("final_response_contract") or {}
+            profile = {
+                "language": contract.get("language"),
+                "format": "answer_with_evidence",
+                "citation_style": "local_ref",
+                "source_policy": "local_knowledge_only",
+            }
+        try:
+            grounded = await self.knowledge.rag_answer(
+                str(text or ""),
+                limit=5,
+                synthesize=True,
+                response_profile=profile,
+            )
+            if isinstance(grounded, dict) and str(grounded.get("status") or "") == "evidence_found":
+                if str(grounded.get("answer") or "").strip() or str(grounded.get("answer_material") or "").strip():
+                    return grounded
+        except Exception as exc:
+            fallback = dict(local_knowledge or {})
+            fallback["synthesis_status"] = "model_unavailable"
+            fallback["synthesis_error"] = str(exc)[:300]
+            fallback["answer"] = str(fallback.get("answer") or fallback.get("answer_material") or "").strip()
+            return fallback
+        fallback = dict(local_knowledge or {})
+        fallback["answer"] = str(fallback.get("answer") or fallback.get("answer_material") or "").strip()
+        fallback.setdefault("synthesis_status", "fallback_to_retrieved_evidence")
+        return fallback
 
     async def _output(
         self,
@@ -1314,6 +1446,15 @@ class ConversationCoreRuntime:
         # misleading missing-configuration block. Runtime values are collected by
         # Agent Studio schema forms after registration.
         if bool(execution.get("capability_gap_resolution")):
+            return {
+                "status": "completed",
+                "final_answer": material,
+                "message": material,
+                "user_facing": True,
+            }
+        if str(execution.get("execution_mode") or "") in {"local_knowledge", "knowledge_augmented_response"}:
+            # Local knowledge answers are already grounded by the retrieval layer
+            # and must not be rewritten into an unsupported generic response.
             return {
                 "status": "completed",
                 "final_answer": material,
@@ -1576,6 +1717,26 @@ class ConversationCoreRuntime:
         selected = self._selected_step(plan)
         expects_web = str(selected.get("execution_method") or "") == "web_search" or str(selected.get("capability") or "") == "web_retrieval"
         evidence = execution.get("evidence") if isinstance(execution.get("evidence"), dict) else {}
+        if str(execution.get("execution_mode") or "") in {"local_knowledge", "knowledge_augmented_response"}:
+            citations = evidence.get("citations") if isinstance(evidence.get("citations"), list) else []
+            passed = bool(execution.get("answer_material")) and (str(execution.get("execution_mode") or "") == "knowledge_augmented_response" or bool(citations))
+            return {
+                "status": "completed" if passed else "failed",
+                "passed": passed,
+                "expected_execution_method": selected.get("execution_method") or "local_knowledge",
+                "actual_execution_mode": execution.get("execution_mode"),
+                "expected_capability": selected.get("capability") or "runtime_local_knowledge_retrieval",
+                "actual_capability": execution.get("capability") or execution.get("execution_mode"),
+                "evidence_required": True,
+                "evidence_present": bool(citations) or str(execution.get("execution_mode") or "") == "knowledge_augmented_response",
+                "source_count": len(citations),
+                "source_urls": [],
+                "capability_gap_resolution": False,
+                "runtime_implementation_status": "not_applicable",
+                "runtime_capability_registered": False,
+                "safe_implementation_policy": "not_applicable",
+                "source_output_contract_check": {"required": True, "passed": passed, "reason": "local_knowledge_evidence_satisfied" if passed else "local_knowledge_evidence_missing"},
+            }
         urls = evidence.get("urls") if isinstance(evidence.get("urls"), list) else []
         runtime_impl = None
         capability_impl = execution.get("capability_implementation") if isinstance(execution.get("capability_implementation"), dict) else {}
